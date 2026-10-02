@@ -54,6 +54,24 @@ fn styled(rich: &Rich<'_>, text: &str, style: Style, size: f32) -> RichText {
     text
 }
 
+thread_local! {
+    /// Parsed text, kept while it stays on screen: parsing every message
+    /// on every frame was most of the cost of drawing a long history. The
+    /// interface draws on one thread, so one cache per thread is one cache.
+    static PARSED: std::cell::RefCell<mrkdwn::ParseCache> =
+        std::cell::RefCell::new(mrkdwn::ParseCache::default());
+}
+
+/// The blocks of `text`, parsed on this frame or an earlier one.
+fn parsed(text: &str) -> std::sync::Arc<[Block]> {
+    PARSED.with(|cache| cache.borrow_mut().get(text))
+}
+
+/// Forgets the parsed text not drawn since the last call; once a frame.
+pub fn end_frame() {
+    PARSED.with(|cache| cache.borrow_mut().sweep());
+}
+
 /// Draws `text`; `edited` adds Slack's quiet "(edited)".
 pub fn show(
     ui: &mut egui::Ui,
@@ -77,7 +95,7 @@ fn show_blocks(
     edited: bool,
     actions: &mut Vec<Action>,
 ) {
-    let blocks = mrkdwn::parse(text);
+    let blocks = parsed(text);
     let size = if mrkdwn::only_emoji(&blocks) {
         30.0
     } else {

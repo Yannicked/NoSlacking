@@ -35,6 +35,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
     overlays::show(app, ui.ctx());
+    rich::end_frame();
 }
 
 /// A rounded square picture, or coloured initials until there is one.
