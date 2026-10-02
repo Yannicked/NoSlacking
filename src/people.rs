@@ -1,5 +1,5 @@
-//! People around you: who is active or away, who is typing, and your own
-//! status.
+//! People around you: who is active or away, who is typing, who is in a
+//! huddle, and your own status.
 //!
 //! The app works out which people are on screen (your direct messages,
 //! the profile card, a channel's member list) and asks the worker to
@@ -243,6 +243,25 @@ pub enum Event {
     },
     /// You set yourself away or active, maybe in another client.
     ManualPresence { away: bool },
+    /// Huddles started, changed or ended, by conversation: `None` ended.
+    Huddles {
+        changes: Vec<(String, Option<Huddle>)>,
+    },
+}
+
+/// A huddle going on in a conversation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Huddle {
+    /// Slack's id for the call (`R…`).
+    pub room: String,
+    /// Who is in it now.
+    pub participants: Vec<String>,
+}
+
+/// Where to join a huddle: Slack's own page, which opens it in the browser
+/// or hands it to Slack's app. NoSlacking cannot carry the call itself.
+pub fn huddle_url(team: &str, channel: &str) -> String {
+    format!("https://app.slack.com/huddle/{team}/{channel}")
 }
 
 /// Someone typing, until a moment.
@@ -261,6 +280,8 @@ pub struct TeamPeople {
     pub presence: HashMap<String, Presence>,
     /// Who is typing where; old entries are dropped as new ones come.
     pub typing: Vec<Typing>,
+    /// The huddles going on, by conversation.
+    pub huddles: HashMap<String, Huddle>,
 }
 
 impl TeamPeople {
@@ -519,6 +540,14 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                     .typing(user, channel, thread, Instant::now());
             }
         }
+        Event::Huddles { changes } => {
+            for (channel, huddle) in changes {
+                match huddle {
+                    Some(huddle) => workspace.people.huddles.insert(channel, huddle),
+                    None => workspace.people.huddles.remove(&channel),
+                };
+            }
+        }
         Event::ManualPresence { away } => {
             workspace.people.presence.insert(me, presence_of(away));
         }
@@ -738,6 +767,11 @@ mod tests {
                 preset.emoji
             );
         }
+    }
+
+    #[test]
+    fn huddles_open_on_slacks_page() {
+        assert_eq!(huddle_url("T1", "C2"), "https://app.slack.com/huddle/T1/C2");
     }
 
     #[test]

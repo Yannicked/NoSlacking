@@ -707,6 +707,7 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
         },
     });
     sink.send(Event::Socket(Socket::Connected));
+    sink.send(crate::backend::people::demo_huddle(TEAM));
     // Ana keeps typing in her direct message, as Slack repeats it.
     let typing = sink.clone();
     tokio::spawn(async move {

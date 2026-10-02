@@ -479,6 +479,8 @@ impl DemoSetup {
             // Your own message in #engineering, opened for editing.
             Some("edit") => self.edit = Some(Ts::new(format!("{}.000100", 1_790_172_000 - 2000))),
             Some("dm") => app.actions.push(Action::OpenConversation("D01".into())),
+            // #design, with a huddle going on.
+            Some("huddle") => app.actions.push(Action::OpenConversation("C03".into())),
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             Some("general") => app.actions.push(Action::OpenConversation("C01".into())),
             // Search results, with a second page to scroll to.

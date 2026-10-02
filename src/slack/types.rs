@@ -505,6 +505,9 @@ pub struct Message {
     pub hidden: bool,
     /// The conversations it is pinned in.
     pub pinned_to: Vec<String>,
+    /// The huddle a `huddle_thread` message stands for: who is in it, and
+    /// whether it has ended.
+    pub room: Option<Value>,
 }
 
 impl Message {

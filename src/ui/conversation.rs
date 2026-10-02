@@ -204,6 +204,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                             actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Members));
                         }
                     }
+                    super::people::huddle_button(ui, &palette, workspace, &conversation.id, actions);
                 });
             });
         });

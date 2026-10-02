@@ -1449,6 +1449,13 @@ impl Worker {
             log::debug!("event for a workspace not signed in here");
             return;
         };
+        // A huddle's message, besides the message itself.
+        if let Some(event) = super::people::huddle_in_message(event) {
+            self.sink.send(Event::People {
+                team: team.to_owned(),
+                event,
+            });
+        }
         for translated in translate(team, &me, event) {
             match translated {
                 Translated::Event(event) => self.sink.send(event),
@@ -2269,6 +2276,16 @@ async fn history(
         .await
     {
         Ok(page) => {
+            // A huddle still going on shows on its conversation. Only the
+            // newest page can hold one.
+            if !older
+                && let Some(event) = super::people::huddle_in_history(&channel, &page.messages)
+            {
+                sink.send(Event::People {
+                    team: team.clone(),
+                    event,
+                });
+            }
             let mut messages: Vec<Message> = page
                 .messages
                 .into_iter()
