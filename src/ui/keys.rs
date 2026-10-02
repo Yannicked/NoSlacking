@@ -95,6 +95,16 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// How a hint spells the command key with `key`: "⌘K" on macOS, where
+/// `Modifiers::COMMAND` is Cmd, and "Ctrl+K" elsewhere.
+pub fn command(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("⌘{key}")
+    } else {
+        format!("Ctrl+{key}")
+    }
+}
+
 /// Whether the focused field is a composer on screen with nothing typed.
 fn in_empty_composer(app: &App, ctx: &egui::Context) -> bool {
     let Some(focused) = ctx.memory(|m| m.focused()) else {

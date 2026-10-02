@@ -137,7 +137,8 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                     );
                 }
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    if theme::icon_button(ui, &palette, Icon::Search, 17.0, &t("Jump to… (Ctrl+K)")).clicked() {
+                    let tip = tf("Jump to… ({shortcut})", &[("shortcut", &super::keys::command("K"))]);
+                    if theme::icon_button(ui, &palette, Icon::Search, 17.0, &tip).clicked() {
                         actions.push(Action::OpenSwitcher);
                     }
                     match socket {
