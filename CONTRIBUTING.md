@@ -46,6 +46,17 @@ the app id `cloud.yannick.NoSlacking`.
 - `metainfo/cloud.yannick.NoSlacking.metainfo.xml` goes to
   `share/metainfo/` for software centers.
 
+- Noto Color Emoji (about 10 MB) is compiled in by the default
+  `bundled-emoji` feature, since some desktops (Fedora) ship it only as
+  a COLRv1 font the app cannot draw. A package can build with
+  `--no-default-features --features highlight` and install
+  `assets/fonts/NotoColorEmoji.ttf` (with its license) as
+  `share/noslacking/NotoColorEmoji.ttf` instead, or rely on a colour bitmap
+  emoji font in the system's font directories. macOS bundles no emoji font
+  and Windows only the flags Segoe UI Emoji lacks
+  (`assets/fonts/NotoColorEmoji-Flags.ttf`, made with
+  `pyftsubset NotoColorEmoji.ttf --unicodes="U+1F1E6-1F1FF,U+1F3F4,U+E0020-E007F" --layout-features='*'`).
+
 ```
 desktop-file-validate packaging/applications/cloud.yannick.NoSlacking.desktop
 appstreamcli validate --no-net packaging/metainfo/cloud.yannick.NoSlacking.metainfo.xml

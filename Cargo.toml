@@ -98,7 +98,13 @@ fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2", f
 winresource = { version = "0.1", default-features = false }
 
 [features]
-default = ["highlight"]
+default = ["highlight", "bundled-emoji"]
+# Compiles all of Noto Color Emoji (about 10 MB) into Linux and other Unix
+# builds, for desktops whose emoji font is one fastframe-emoji cannot draw
+# (COLRv1 only, as on Fedora). Without it the app reads
+# share/noslacking/NotoColorEmoji.ttf at start-up if a package installed
+# one. macOS and Windows never carry the full font.
+bundled-emoji = []
 # Sample data and the screenshot flag; never part of a release build.
 demo = []
 # Colours code blocks that name their language (```` ```rust ````). Our own
