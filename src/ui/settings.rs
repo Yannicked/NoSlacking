@@ -31,21 +31,27 @@ fn group(ui: &mut egui::Ui, palette: &Palette, title: &str, add: impl FnOnce(&mu
         });
 }
 
+/// A setting: its name and explanation on the left, its control on the
+/// right. `add` gets the name's id, so a control without a label of its own
+/// can be `labelled_by` it for screen readers.
 fn row(
     ui: &mut egui::Ui,
     palette: &Palette,
     label: &str,
     detail: &str,
-    add: impl FnOnce(&mut egui::Ui),
+    add: impl FnOnce(&mut egui::Ui, egui::Id),
 ) {
     ui.horizontal(|ui| {
+        let mut name = egui::Id::NULL;
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
-            ui.label(
-                RichText::new(label)
-                    .font(theme::medium(14.0))
-                    .color(palette.text),
-            );
+            name = ui
+                .label(
+                    RichText::new(label)
+                        .font(theme::medium(14.0))
+                        .color(palette.text),
+                )
+                .id;
             if !detail.is_empty() {
                 ui.label(
                     RichText::new(detail)
@@ -54,7 +60,9 @@ fn row(
                 );
             }
         });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            add(ui, name);
+        });
     });
 }
 
@@ -98,7 +106,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     group(ui, palette, &t("Appearance"), |ui| {
         let current = app.settings.appearance.clone();
         let mut choice = current.clone();
-        row(ui, palette, &t("Theme"), "", |ui| {
+        row(ui, palette, &t("Theme"), "", |ui, name| {
             let label = match &current {
                 Appearance::System => t("Follow the system").into_owned(),
                 Appearance::Dark => t("Dark").into_owned(),
@@ -124,7 +132,9 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                         let name = fastframe_theme::display_name(&filename).to_owned();
                         ui.selectable_value(&mut choice, Appearance::Custom(filename), name);
                     }
-                });
+                })
+                .response
+                .labelled_by(name);
         });
         if choice != current {
             app.set_appearance(choice);
@@ -142,12 +152,13 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             }
         });
         let mut zoom = app.settings.zoom;
-        row(ui, palette, &t("Zoom"), "", |ui| {
+        row(ui, palette, &t("Zoom"), "", |ui, name| {
             ui.add(
                 egui::Slider::new(&mut zoom, 0.75..=1.75)
                     .step_by(0.05)
                     .fixed_decimals(2),
-            );
+            )
+            .labelled_by(name);
         });
         if (zoom - app.settings.zoom).abs() > f32::EPSILON {
             app.settings.zoom = zoom;
@@ -155,7 +166,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         }
         let current = crate::i18n::locale();
         let mut locale = current;
-        row(ui, palette, &t("Language"), "", |ui| {
+        row(ui, palette, &t("Language"), "", |ui, name| {
             egui::ComboBox::from_id_salt("language")
                 .selected_text(current.native_name())
                 .width(220.0)
@@ -163,7 +174,9 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                     for option in Locale::ALL {
                         ui.selectable_value(&mut locale, option, option.native_name());
                     }
-                });
+                })
+                .response
+                .labelled_by(name);
         });
         if locale != current {
             app.set_language(locale);
@@ -180,8 +193,8 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 "Off: {shortcut} sends and Enter starts a new line.",
                 &[("shortcut", &super::keys::command("Enter"))],
             ),
-            |ui| {
-                ui.checkbox(&mut enter, "");
+            |ui, name| {
+                ui.checkbox(&mut enter, "").labelled_by(name);
             },
         );
         if enter != app.settings.enter_sends {
@@ -194,7 +207,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             palette,
             &t("Sort channels"),
             &t("Within each sidebar section. Direct messages are always newest first."),
-            |ui| {
+            |ui, name| {
                 egui::ComboBox::from_id_salt("sidebar-sort")
                     .selected_text(match sort {
                         crate::sidebar::Sort::Name => t("By name"),
@@ -208,7 +221,9 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                             crate::sidebar::Sort::Recent,
                             t("By recent activity"),
                         );
-                    });
+                    })
+                    .response
+                    .labelled_by(name);
             },
         );
         if sort != app.settings.sidebar_sort {
@@ -231,7 +246,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             .collect();
         for (team, name, signed_out) in workspaces {
             let detail = signed_out.unwrap_or_default();
-            row(ui, palette, &name, &detail, |ui| {
+            row(ui, palette, &name, &detail, |ui, _| {
                 if theme::secondary_button(ui, palette, &t("Sign out")).clicked() {
                     app.actions.push(Action::SignOut(team.clone()));
                 }
@@ -250,7 +265,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             Socket::Disconnected(_) => t("Offline, reconnecting"),
             Socket::Rejected(_) => t("Slack refused the app-level token"),
         };
-        row(ui, palette, &t("Connection"), &status, |ui| {
+        row(ui, palette, &t("Connection"), &status, |ui, _| {
             if theme::secondary_button(ui, palette, &t("Reconnect")).clicked() {
                 app.actions.push(Action::Reconnect);
             }
@@ -260,7 +275,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             (t("Client secret"), &mut app.setup.client_secret, true),
             (t("App-level token"), &mut app.setup.app_token, true),
         ] {
-            ui.label(
+            let label = ui.label(
                 RichText::new(label)
                     .font(theme::semibold(13.0))
                     .color(palette.secondary),
@@ -270,7 +285,8 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                     .password(secret)
                     .desired_width(f32::INFINITY)
                     .margin(Margin::symmetric(8, 6)),
-            );
+            )
+            .labelled_by(label.id);
         }
         let form = AppCredentials {
             client_id: app.setup.client_id.trim().to_owned(),
@@ -292,7 +308,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             palette,
             &t("Sign-in redirect"),
             &t("Must be one of the app's redirect URLs under OAuth & Permissions."),
-            |ui| {
+            |ui, name| {
                 egui::ComboBox::from_id_salt("redirect")
                     .selected_text(match redirect {
                         Redirect::Scheme => crate::auth::SCHEME_REDIRECT.to_owned(),
@@ -312,7 +328,9 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                             Redirect::Loopback,
                             crate::auth::loopback_redirect(app.settings.loopback_port),
                         );
-                    });
+                    })
+                    .response
+                    .labelled_by(name);
             },
         );
         if redirect != app.settings.redirect {
@@ -321,8 +339,9 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         }
         if app.settings.redirect == Redirect::Loopback {
             let mut port = app.settings.loopback_port;
-            row(ui, palette, &t("Loopback port"), "", |ui| {
-                ui.add(egui::DragValue::new(&mut port).range(1024..=65535));
+            row(ui, palette, &t("Loopback port"), "", |ui, name| {
+                ui.add(egui::DragValue::new(&mut port).range(1024..=65535))
+                    .labelled_by(name);
             });
             if port != app.settings.loopback_port {
                 app.settings.loopback_port = port;
@@ -338,7 +357,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             (t("Cache"), app.dirs.cache.clone()),
         ];
         for (label, path) in folders {
-            row(ui, palette, &label, &path.display().to_string(), |ui| {
+            row(ui, palette, &label, &path.display().to_string(), |ui, _| {
                 if theme::secondary_button(ui, palette, &t("Open")).clicked() {
                     app.actions.push(Action::OpenFolder(path.clone()));
                 }
