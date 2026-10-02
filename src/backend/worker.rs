@@ -29,8 +29,25 @@ const POLL_EVERY: Duration = Duration::from_secs(6);
 const USER_PAGES: usize = 40;
 const MAX_UPLOAD: u64 = 1024 * 1024 * 1024;
 
+/// One workspace's saved sign-in, as read from the keyring at start-up.
+enum Stored {
+    Token(Token),
+    Missing,
+    /// The keyring failed while reading this one.
+    Failed(crate::credentials::Error),
+    /// Not read, because the keyring had already failed: asking again would
+    /// only repeat the failure, or the unlock prompt.
+    Skipped,
+}
+
 /// What tasks report back to the loop.
 enum Internal {
+    /// The keyring answered at start-up: the app, and each workspace's
+    /// sign-in, in the order of the settings.
+    Loaded {
+        app: Result<Option<AppCredentials>, crate::credentials::Error>,
+        workspaces: Vec<(WorkspaceMeta, Stored)>,
+    },
     Callback(String),
     SignedIn(Result<SignedIn, String>),
     TeamAdded {
@@ -94,6 +111,10 @@ pub struct Worker {
     bots_requested: HashSet<(String, String)>,
     internal: mpsc::UnboundedSender<Internal>,
     internal_rx: Option<mpsc::UnboundedReceiver<Internal>>,
+    /// Commands that arrived before the keyring answered at start-up. They
+    /// wait, so a command for a saved workspace is not refused only
+    /// because its token is still being read. `None` once started.
+    waiting: Option<Vec<Command>>,
 }
 
 impl Worker {
@@ -125,6 +146,7 @@ impl Worker {
             bots_requested: HashSet::new(),
             internal,
             internal_rx: Some(internal_rx),
+            waiting: Some(Vec::new()),
         }
     }
 
@@ -136,13 +158,16 @@ impl Worker {
         let Some(mut internal) = self.internal_rx.take() else {
             return;
         };
-        self.start(workspaces).await;
+        self.start(workspaces);
         let mut poll = tokio::time::interval(POLL_EVERY);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 command = commands.recv() => match command {
-                    Some(command) => self.command(command).await,
+                    Some(command) => match &mut self.waiting {
+                        Some(waiting) => waiting.push(command),
+                        None => self.command(command).await,
+                    },
                     None => break,
                 },
                 Some(message) = internal.recv() => self.internal(message).await,
@@ -157,8 +182,44 @@ impl Worker {
         }
     }
 
-    async fn start(&mut self, workspaces: Vec<WorkspaceMeta>) {
-        match self.credentials.load_app().await {
+    /// Reads the saved app and sign-ins in a task of its own: the keyring
+    /// can sit behind an unlock prompt for as long as the user leaves it.
+    fn start(&mut self, workspaces: Vec<WorkspaceMeta>) {
+        let credentials = self.credentials.clone();
+        let internal = self.internal.clone();
+        tokio::spawn(async move {
+            let app = credentials.load_app().await;
+            let mut failed = false;
+            let mut stored = Vec::with_capacity(workspaces.len());
+            for meta in workspaces {
+                let token = if failed {
+                    Stored::Skipped
+                } else {
+                    match credentials.load_token(&meta.team_id).await {
+                        Ok(Some(token)) => Stored::Token(token),
+                        Ok(None) => Stored::Missing,
+                        Err(error) => {
+                            failed = true;
+                            Stored::Failed(error)
+                        }
+                    }
+                };
+                stored.push((meta, token));
+            }
+            let _ = internal.send(Internal::Loaded {
+                app,
+                workspaces: stored,
+            });
+        });
+    }
+
+    /// Opens what the keyring held, then the commands that waited for it.
+    async fn loaded(
+        &mut self,
+        app: Result<Option<AppCredentials>, crate::credentials::Error>,
+        workspaces: Vec<(WorkspaceMeta, Stored)>,
+    ) {
+        match app {
             Ok(app) => {
                 self.app = app.clone();
                 self.sink.send(Event::AppLoaded(app));
@@ -168,9 +229,9 @@ impl Worker {
                 self.sink.send(Event::KeyringError(error.to_string()));
             }
         }
-        for meta in workspaces {
-            match self.credentials.load_token(&meta.team_id).await {
-                Ok(Some(token)) => {
+        for (meta, stored) in workspaces {
+            let reason = match stored {
+                Stored::Token(token) => {
                     let workspace = Workspace {
                         team_id: meta.team_id,
                         name: meta.name,
@@ -179,18 +240,27 @@ impl Worker {
                         user_id: meta.user_id,
                     };
                     self.add_team(workspace, token);
+                    continue;
                 }
-                Ok(None) => self.sink.send(Event::SignedOut {
-                    team: meta.team_id,
-                    reason: Some("No saved sign-in for this workspace.".into()),
-                }),
-                Err(error) => {
+                Stored::Missing => "No saved sign-in for this workspace.".to_owned(),
+                Stored::Failed(error) => {
                     self.sink.send(Event::KeyringError(error.to_string()));
-                    break;
+                    format!("Could not read this workspace's sign-in: {error}.")
                 }
-            }
+                Stored::Skipped => {
+                    "Could not read this workspace's sign-in: the keyring failed.".to_owned()
+                }
+            };
+            // Every workspace gets an answer, so none is left waiting.
+            self.sink.send(Event::SignedOut {
+                team: meta.team_id,
+                reason: Some(reason),
+            });
         }
         self.restart_socket();
+        for command in self.waiting.take().unwrap_or_default() {
+            self.command(command).await;
+        }
     }
 
     fn client(&self, team: &str) -> Option<Client> {
@@ -365,9 +435,15 @@ impl Worker {
     async fn command(&mut self, command: Command) {
         match command {
             Command::SaveApp(app) => {
-                if let Err(error) = self.credentials.save_app(&app).await {
-                    self.sink.send(Event::KeyringError(error.to_string()));
-                }
+                // Saved in the background; the new app is used at once.
+                let credentials = self.credentials.clone();
+                let sink = self.sink.clone();
+                let saved = app.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = credentials.save_app(&saved).await {
+                        sink.send(Event::KeyringError(error.to_string()));
+                    }
+                });
                 // Clients pick up the new client secret for refreshes. They
                 // keep their token and refresh lock, which every clone
                 // shares, so a refresh in flight cannot race a second one.
@@ -871,6 +947,7 @@ impl Worker {
 
     async fn internal(&mut self, message: Internal) {
         match message {
+            Internal::Loaded { app, workspaces } => self.loaded(app, workspaces).await,
             Internal::Callback(url) => self.callback(url),
             Internal::SignInListenerFailed(error) => {
                 self.sink.send(Event::SignIn(SignIn::Failed(format!(
@@ -1975,6 +2052,43 @@ mod tests {
             worker.socket.as_ref().map(|s| s.status.clone()),
             Some(Socket::Connected)
         );
+    }
+
+    #[tokio::test]
+    async fn a_keyring_failure_leaves_no_workspace_waiting() {
+        let (mut worker, events) = worker();
+        let meta = |id: &str| WorkspaceMeta {
+            team_id: id.into(),
+            name: id.into(),
+            domain: String::new(),
+            icon: None,
+            user_id: "U1".into(),
+        };
+        worker
+            .internal(Internal::Loaded {
+                app: Ok(None),
+                workspaces: vec![
+                    (meta("TA"), Stored::Missing),
+                    (
+                        meta("TB"),
+                        Stored::Failed(crate::credentials::Error::Locked),
+                    ),
+                    (meta("TC"), Stored::Skipped),
+                ],
+            })
+            .await;
+        assert!(worker.waiting.is_none());
+        let signed_out: Vec<String> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::SignedOut {
+                    team,
+                    reason: Some(_),
+                } => Some(team),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(signed_out, ["TA", "TB", "TC"]);
     }
 
     #[test]
