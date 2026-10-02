@@ -568,6 +568,27 @@ impl WorkspaceState {
         (arrived, fetch_conversation)
     }
 
+    /// A new copy of a message already sent: an edit, or a thread
+    /// parent's new reply details. It replaces the copies that are loaded
+    /// and nothing else: no counts change, and a message outside the
+    /// loaded history is not pulled in. Returns whom to fetch.
+    fn message_changed(&mut self, channel: &str, message: Message) -> Arrived {
+        let mut loaded = false;
+        for timeline in self.timelines_for_mut(channel) {
+            if timeline.find_mut(&message.ts).is_some() {
+                timeline.upsert(message.clone());
+                loaded = true;
+            }
+        }
+        if !loaded {
+            return Arrived::default();
+        }
+        Arrived {
+            users: self.unknown_users(message.user.as_deref().into_iter()),
+            bots: self.unknown_bots(std::iter::once(&message)),
+        }
+    }
+
     /// Slack answered a send: the optimistic copy `local` gives way to the
     /// real message, or is marked as failed.
     fn sent(&mut self, channel: &str, local: &Ts, result: &Result<Message, String>) {
@@ -1228,7 +1249,8 @@ impl App {
                 team,
                 channel,
                 message,
-            } => self.message(&team, &channel, message),
+                changed,
+            } => self.message(&team, &channel, message, changed),
             Event::Deleted { team, channel, ts } => self.remove_message(&team, &channel, &ts),
             Event::Reaction {
                 team,
@@ -1405,11 +1427,19 @@ impl App {
         }
     }
 
-    fn message(&mut self, team: &str, channel: &str, message: Message) {
+    fn message(&mut self, team: &str, channel: &str, message: Message, changed: bool) {
         let viewing = self.is_viewing(team, channel);
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
+        if changed {
+            let arrived = workspace.message_changed(channel, message);
+            self.fetch_arrived(team, arrived);
+            if viewing {
+                self.waker.wake();
+            }
+            return;
+        }
         let from_me = message.user.as_deref() == Some(workspace.info.user_id.as_str());
         let (arrived, fetch_conversation) = workspace.message_arrived(channel, message, viewing);
         if fetch_conversation {
@@ -2868,5 +2898,50 @@ mod tests {
             w.timelines_for("C1")
                 .all(|t| t.messages[0].reactions.is_empty())
         );
+    }
+
+    #[test]
+    fn edits_change_no_counts() {
+        let mut w = workspace_with_thread();
+        w.conversations.push(conversation("1.0", "5.0", 0, 0));
+        // An edited reply that now mentions you, while you look elsewhere.
+        let mut reply = message("2.0", Some("1.0"));
+        reply.user = Some("U2".into());
+        reply.text = "now for <@U1>".into();
+        reply.edited = true;
+        w.message_changed("C1", reply);
+        let thread = &w.threads[&("C1".to_owned(), Ts::new("1.0"))];
+        assert_eq!(thread.messages[1].text, "now for <@U1>");
+        assert_eq!(thread.messages[0].reply_count, 2);
+        assert_eq!(w.timelines["C1"].messages[0].reply_count, 2);
+        let c = w.conversation("C1").expect("C1");
+        assert_eq!((c.mentions, c.latest.clone()), (0, Some(Ts::new("5.0"))));
+        assert_eq!(w.timelines["C1"].messages.len(), 2);
+
+        // A parent's new thread details replace the loaded copies.
+        let mut parent = message("1.0", Some("1.0"));
+        parent.reply_count = 3;
+        parent.replies_known = true;
+        w.message_changed("C1", parent);
+        assert_eq!(w.timelines["C1"].messages[0].reply_count, 3);
+    }
+
+    #[test]
+    fn edits_outside_the_loaded_history_stay_out() {
+        let mut w = workspace_with_thread();
+        w.conversations.push(conversation("1.0", "5.0", 0, 0));
+        let mut old = message("0.5", None);
+        old.edited = true;
+        let arrived = w.message_changed("C1", old.clone());
+        assert_eq!(arrived, Arrived::default());
+        let order: Vec<&str> = w.timelines["C1"]
+            .messages
+            .iter()
+            .map(|m| m.ts.as_str())
+            .collect();
+        assert_eq!(order, ["1.0", "5.0"]);
+        // Nor in a conversation that is not loaded at all.
+        w.message_changed("C2", old);
+        assert!(!w.timelines.contains_key("C2"));
     }
 }

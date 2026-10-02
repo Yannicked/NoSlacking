@@ -389,10 +389,15 @@ pub enum Event {
         ts: Ts,
         messages: Vec<Message>,
     },
+    /// A message, live.
     Message {
         team: String,
         channel: String,
         message: Message,
+        /// A new copy of a message Slack already sent (an edit, or a
+        /// parent's thread details), not a new one: it changes no counts
+        /// and only replaces a loaded copy.
+        changed: bool,
     },
     Deleted {
         team: String,
