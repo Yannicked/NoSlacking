@@ -82,7 +82,7 @@ pub struct Selected {
 }
 
 /// An unsent message.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Draft {
     pub text: String,
     /// Mentions picked from the suggestions: the text inserted and the
@@ -96,6 +96,32 @@ pub struct Draft {
     /// Whether suggestions were showing when last drawn, so Esc closes
     /// them and not the thread.
     pub suggesting: bool,
+}
+
+/// A file on its way to Slack, shown under the composer it was sent from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Upload {
+    /// The worker's name for it, for progress and cancelling.
+    pub id: u64,
+    /// The composer's draft key ([`App::draft_key`]).
+    pub key: String,
+    pub name: String,
+    pub sent: u64,
+    /// Zero until the worker has opened the file.
+    pub total: u64,
+    /// A pasted image's temporary file, removed once the upload ends.
+    pasted: Option<PathBuf>,
+}
+
+/// A draft can say anything; its debug form says only how long it is.
+impl std::fmt::Debug for Draft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Draft")
+            .field("chars", &self.text.chars().count())
+            .field("mentions", &self.mentions.len())
+            .field("broadcast", &self.broadcast)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The "name this section" dialog.
@@ -942,6 +968,9 @@ pub struct App {
     pub selected: Option<Selected>,
     pub toasts: Vec<Toast>,
     pub actions: Vec<Action>,
+    /// Files being uploaded, oldest first.
+    pub transfers: Vec<Upload>,
+    next_upload: u64,
     pub switcher: Option<(String, usize)>,
     pub profile: Option<String>,
     pub picker: Option<PickerTarget>,
@@ -978,6 +1007,13 @@ pub struct App {
     /// When changed settings are next written, and the thread that writes them.
     settings_due: crate::settings::Debounce,
     saver: crate::settings::Saver,
+    /// Drafts are kept across restarts (not in the demo): when they are
+    /// next written, what they looked like when last checked, and the
+    /// thread that writes them.
+    keep_drafts: bool,
+    drafts_due: crate::settings::Debounce,
+    drafts_seen: u64,
+    drafts_writer: crate::drafts::Writer,
     quit: bool,
     /// Shows desktop notifications; `None` in the demo or without them.
     notifier: Option<crate::notify::Notifier>,
@@ -1038,6 +1074,27 @@ impl App {
         } else {
             Page::Main
         };
+        if !options.demo {
+            // Pasted images left by a run that ended mid-upload.
+            let _ = std::fs::remove_dir_all(dirs.pasted());
+        }
+        let drafts: HashMap<String, Draft> = if options.demo {
+            HashMap::new()
+        } else {
+            crate::drafts::load(&dirs.drafts_file())
+                .into_iter()
+                .map(|(key, saved)| {
+                    let draft = Draft {
+                        text: saved.text,
+                        mentions: saved.mentions,
+                        broadcast: saved.broadcast,
+                        ..Draft::default()
+                    };
+                    (key, draft)
+                })
+                .collect()
+        };
+        let drafts_seen = crate::drafts::fingerprint(draft_views(&drafts));
         let mut app = Self {
             dirs,
             settings,
@@ -1055,11 +1112,13 @@ impl App {
             setup: SetupForm::default(),
             socket: Socket::Off,
             thread: None,
-            drafts: HashMap::new(),
+            drafts,
             editing: None,
             selected: None,
             toasts: Vec::new(),
             actions: Vec::new(),
+            transfers: Vec::new(),
+            next_upload: 0,
             switcher: None,
             profile: None,
             picker: None,
@@ -1083,6 +1142,10 @@ impl App {
             window_focused: true,
             settings_due: crate::settings::Debounce::default(),
             saver: crate::settings::Saver::new(),
+            keep_drafts: !options.demo,
+            drafts_due: crate::settings::Debounce::default(),
+            drafts_seen,
+            drafts_writer: crate::drafts::Writer::new(),
             quit: false,
             notifier: desktop::notifier(waker, options.demo),
             desktop: desktop::Desktop::new(options.demo),
@@ -1207,6 +1270,27 @@ impl App {
         self.save_settings();
     }
 
+    /// Notices drafts that changed since the last frame and writes them
+    /// once typing pauses. The composers change drafts in place, so a
+    /// fingerprint is how the app hears of it.
+    fn watch_drafts(&mut self, now: Instant) {
+        if !self.keep_drafts {
+            return;
+        }
+        let seen = crate::drafts::fingerprint(draft_views(&self.drafts));
+        if seen != self.drafts_seen {
+            self.drafts_seen = seen;
+            self.drafts_due.poke(now);
+            self.waker.wake_after(crate::settings::SAVE_AFTER);
+        }
+        if self.drafts_due.take_due(now) {
+            let drafts = crate::drafts::snapshot(draft_views(&self.drafts));
+            self.drafts_writer.save(drafts, &self.dirs.drafts_file());
+        } else if self.drafts_due.pending() {
+            self.waker.wake_after(crate::settings::SAVE_AFTER);
+        }
+    }
+
     // ---- per-frame work -------------------------------------------------
 
     /// Everything that must happen whether or not a window is open.
@@ -1219,14 +1303,8 @@ impl App {
                 ctx.forget_all_images();
             }
         }
-        while let Ok(((team, channel, thread), path)) = self.uploads.1.try_recv() {
-            self.backend.send(Command::Upload {
-                team,
-                channel,
-                thread,
-                path,
-                comment: String::new(),
-            });
+        while let Ok((target, path)) = self.uploads.1.try_recv() {
+            self.start_upload(target, path, String::new());
         }
         if self.catalog.poll() {
             self.refresh_custom_theme();
@@ -1238,6 +1316,7 @@ impl App {
         self.desktop_frame();
         let now = Instant::now();
         self.toasts.retain(|t| t.until > now);
+        self.watch_drafts(now);
         if self.settings_due.take_due(now) {
             self.saver.save(&self.settings, &self.dirs.settings_file());
         } else if self.settings_due.pending() {
@@ -1333,6 +1412,14 @@ impl App {
             Event::SignedOut { team, reason } => self.signed_out(&team, reason),
             Event::Socket(socket) => self.socket_changed(socket),
             Event::Error(error) => self.toast(error, true),
+            Event::UploadProgress { id, sent, total } => {
+                if let Some(upload) = self.transfers.iter_mut().find(|u| u.id == id) {
+                    upload.sent = sent;
+                    upload.total = total;
+                }
+            }
+            Event::UploadDone { id } => self.upload_done(id),
+            Event::Slash { command, result } => self.slash_done(&command, result),
             Event::Notice(text) => self.toast(text, false),
             Event::Dnd { team, dnd } => self.dnd_arrived(&team, dnd),
             Event::SlackPrefs { team, prefs } => self.prefs_arrived(&team, prefs),
@@ -1559,6 +1646,9 @@ impl App {
                 }
             }
             None => {
+                // What you were writing there goes with the sign-in.
+                let prefix = format!("{team}/");
+                self.drafts.retain(|key, _| !key.starts_with(&prefix));
                 self.workspaces.retain(|w| w.info.team_id != team);
                 self.settings.remove_workspace(team);
                 self.save_settings();
@@ -1887,6 +1977,26 @@ impl App {
         };
         let key = Self::draft_key(&team, &channel, thread.as_ref());
         let draft = self.drafts.remove(&key).unwrap_or_default();
+        let mut text = text;
+        if let Some((command, args)) = crate::slash::parse(&text) {
+            match command.as_str() {
+                // Plain messages in the end, sent as any other.
+                "shrug" => text = crate::slash::shrug(args),
+                // chat.meMessage cannot reply in a thread; italics read
+                // the same there.
+                "me" if thread.is_some() && !args.is_empty() => text = format!("_{args}_"),
+                _ => {
+                    let text = to_wire(args, &draft.mentions);
+                    self.backend.send(Command::Slash {
+                        team,
+                        channel,
+                        command,
+                        text,
+                    });
+                    return;
+                }
+            }
+        }
         let wire = to_wire(&text, &draft.mentions);
         if wire.trim().is_empty() {
             return;
@@ -1896,6 +2006,8 @@ impl App {
             // does not show.
             self.show_newest(&team, &channel);
         }
+        let wire = crate::emoji::tone_shortcodes(&wire, self.settings.skin_tone);
+        self.used_emoji(&crate::emoji::used_in(&wire));
         let local = self.next_local();
         let Some(workspace) = self.workspace_mut(&team) else {
             return;
@@ -1939,6 +2051,9 @@ impl App {
         let add = self
             .workspace_mut(&team)
             .and_then(|w| w.toggle_my_reaction(channel, ts, name));
+        if add == Some(true) {
+            self.used_emoji(&[name.to_owned()]);
+        }
         if let Some(add) = add {
             self.backend.send(Command::React {
                 team,
@@ -1948,6 +2063,34 @@ impl App {
                 add,
             });
         }
+    }
+
+    /// Puts emoji just sent or reacted with at the front of the picker's
+    /// "Recently used".
+    fn used_emoji(&mut self, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        let before = self.settings.recent_emoji.clone();
+        crate::emoji::remember(&mut self.settings.recent_emoji, names);
+        if self.settings.recent_emoji != before {
+            self.save_settings();
+        }
+    }
+
+    /// The reactions offered first on a message's toolbar: your five most
+    /// recent emoji at your skin tone, or Slack's usual two before you
+    /// have used any.
+    pub fn quick_reactions(&self) -> Vec<String> {
+        let recent = &self.settings.recent_emoji;
+        if recent.is_empty() {
+            return vec!["white_check_mark".to_owned(), "eyes".to_owned()];
+        }
+        recent
+            .iter()
+            .take(5)
+            .map(|name| crate::emoji::toned(name, self.settings.skin_tone))
+            .collect()
     }
 
     fn edit(&mut self, channel: String, ts: Ts, text: String) {
@@ -1960,7 +2103,8 @@ impl App {
             .filter(|e| e.ts == ts && e.channel == channel)
             .map(|e| e.mentions)
             .unwrap_or_default();
-        let wire = to_wire(&text, &mentions);
+        let wire =
+            crate::emoji::tone_shortcodes(&to_wire(&text, &mentions), self.settings.skin_tone);
         let before = self
             .workspace_mut(&team)
             .and_then(|w| w.edit_locally(&channel, &ts, &wire));
@@ -2004,15 +2148,116 @@ impl App {
     }
 
     fn upload(&mut self, thread: Option<Ts>, path: PathBuf, comment: String) {
-        if let Some((team, channel, thread)) = self.upload_target(thread) {
-            self.backend.send(Command::Upload {
-                team,
-                channel,
-                thread,
-                path,
-                comment,
-            });
+        if let Some(target) = self.upload_target(thread) {
+            self.start_upload(target, path, comment);
         }
+    }
+
+    /// Sends a file to the worker and lists it under its composer.
+    fn start_upload(
+        &mut self,
+        (team, channel, thread): UploadTarget,
+        path: PathBuf,
+        comment: String,
+    ) {
+        self.next_upload += 1;
+        let id = self.next_upload;
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        let pasted = path.starts_with(self.dirs.pasted()).then(|| path.clone());
+        self.transfers.push(Upload {
+            id,
+            key: Self::draft_key(&team, &channel, thread.as_ref()),
+            name,
+            sent: 0,
+            total: 0,
+            pasted,
+        });
+        self.backend.send(Command::Upload {
+            id,
+            team,
+            channel,
+            thread,
+            path,
+            comment,
+        });
+    }
+
+    /// A slash command finished: Slack's reply if it gave one, a word
+    /// that it worked otherwise, or why not.
+    fn slash_done(&mut self, command: &str, result: Result<Option<String>, String>) {
+        let name = format!("/{command}");
+        match result {
+            Ok(Some(reply)) => {
+                let reply = mrkdwn::plain(&reply, |_| None);
+                self.toast(reply, false);
+            }
+            Ok(None) => {
+                let done = match command {
+                    // The message itself shows that it worked.
+                    "me" => return,
+                    "away" => t("You are now shown as away"),
+                    "active" => t("You are now shown as active"),
+                    "status" => t("Your status is updated"),
+                    "topic" => t("The topic is changed"),
+                    "invite" => t("Invited"),
+                    "leave" => t("You left the channel"),
+                    _ => t("Done"),
+                };
+                self.toast(done.into_owned(), false);
+            }
+            Err(error) if error == backend::SLASH_NEEDS_SESSION => self.toast(
+                tf(
+                    "{command} only works when you sign in with your browser",
+                    &[("command", &name)],
+                ),
+                true,
+            ),
+            Err(error) => self.toast(
+                tf(
+                    "{command} failed: {error}",
+                    &[("command", &name), ("error", &error)],
+                ),
+                true,
+            ),
+        }
+    }
+
+    /// An upload ended one way or another: it leaves the composer, and a
+    /// pasted image's temporary file goes.
+    fn upload_done(&mut self, id: u64) {
+        let Some(index) = self.transfers.iter().position(|u| u.id == id) else {
+            return;
+        };
+        let upload = self.transfers.remove(index);
+        if let Some(path) = upload.pasted
+            && let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            log::debug!("could not remove a pasted image: {error}");
+        }
+    }
+
+    /// Uploads the clipboard's image, if it holds one and no text: Ctrl+V
+    /// with text was already pasted into the field by egui. The clipboard
+    /// is read on a thread of its own, as some desktops answer slowly.
+    fn paste_image(&mut self, thread: Option<Ts>) {
+        let Some(target) = self.upload_target(thread) else {
+            return;
+        };
+        let sender = self.uploads.0.clone();
+        let waker = self.waker.clone();
+        let dir = self.dirs.pasted();
+        std::thread::spawn(move || match crate::paste::clipboard_image(&dir) {
+            Ok(Some(path)) => {
+                let _ = sender.send((target, path));
+                waker.wake();
+            }
+            Ok(None) => {}
+            Err(error) => log::warn!("could not paste the image: {error}"),
+        });
     }
 
     fn pick_upload(&mut self, thread: Option<Ts>) {
@@ -2090,6 +2335,12 @@ impl App {
                 comment,
             } => self.upload(thread, path, comment),
             Action::PickUpload { thread } => self.pick_upload(thread),
+            Action::PasteImage { thread } => self.paste_image(thread),
+            Action::CancelUpload(id) => {
+                self.backend.send(Command::CancelUpload { id });
+                self.upload_done(id);
+                self.toast(t("Upload cancelled").into_owned(), false);
+            }
             Action::Download { url, name } => {
                 if let Some(team) = self.active_team() {
                     self.backend.send(Command::Download { team, url, name });
@@ -2605,11 +2856,41 @@ impl App {
         self.settings_due.clear();
         self.saver
             .save_now(&self.settings, &self.dirs.settings_file());
+        if self.keep_drafts {
+            self.drafts_due.clear();
+            let drafts = crate::drafts::snapshot(draft_views(&self.drafts));
+            self.drafts_writer
+                .save_now(drafts, &self.dirs.drafts_file());
+        }
+    }
+
+    /// The conversations in `team` with a draft, in it or one of its
+    /// threads, for the sidebar's pencil.
+    pub fn channels_with_drafts(&self, team: &str) -> HashSet<String> {
+        let prefix = format!("{team}/");
+        self.drafts
+            .iter()
+            .filter(|(_, draft)| !draft.text.trim().is_empty())
+            .filter_map(|(key, _)| key.strip_prefix(&prefix))
+            .map(|rest| rest.split('/').next().unwrap_or(rest).to_owned())
+            .collect()
     }
 
     pub fn request_quit(&mut self) {
         self.quit = true;
     }
+}
+
+/// The drafts as [`crate::drafts`] reads them.
+fn draft_views(drafts: &HashMap<String, Draft>) -> impl Iterator<Item = crate::drafts::View<'_>> {
+    drafts.iter().map(|(key, draft)| {
+        (
+            key.as_str(),
+            draft.text.as_str(),
+            draft.mentions.as_slice(),
+            draft.broadcast,
+        )
+    })
 }
 
 /// Fills in what a fresher copy of a conversation lacks, and keeps the

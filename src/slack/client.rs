@@ -461,6 +461,8 @@ impl Client {
 
     /// Uploads a file with Slack's two-step external upload, streaming
     /// `length` bytes from `file` rather than reading it into memory.
+    /// `progress` hears how many bytes have been read for sending so far.
+    #[allow(clippy::too_many_arguments)]
     pub async fn upload(
         &self,
         channel: &str,
@@ -469,6 +471,7 @@ impl Client {
         file: tokio::fs::File,
         length: u64,
         comment: &str,
+        progress: impl Fn(u64) + Send + Sync + 'static,
     ) -> Result<(), SlackError> {
         let target: types::UploadUrl = self
             .act(
@@ -479,8 +482,9 @@ impl Client {
                 ],
             )
             .await?;
+        let body = reqwest::Body::wrap_stream(counted(file, progress));
         let part =
-            reqwest::multipart::Part::stream_with_length(file, length).file_name(name.to_owned());
+            reqwest::multipart::Part::stream_with_length(body, length).file_name(name.to_owned());
         let form = reqwest::multipart::Form::new().part("file", part);
         let response = transfers()
             .post(&target.upload_url)
@@ -501,6 +505,34 @@ impl Client {
         let _: serde_json::Value = self.act("files.completeUploadExternal", &params).await?;
         Ok(())
     }
+}
+
+/// The bytes of `file` as a stream for a request body, telling `progress`
+/// the running total after each chunk. A read error ends the stream after
+/// it is passed on, which fails the request.
+fn counted(
+    file: tokio::fs::File,
+    progress: impl Fn(u64) + Send + Sync + 'static,
+) -> impl futures_util::Stream<Item = Result<Vec<u8>, std::io::Error>> + Send + 'static {
+    use tokio::io::AsyncReadExt;
+    const CHUNK: usize = 64 * 1024;
+    futures_util::stream::unfold(
+        (Some(file), 0u64, progress),
+        |(file, sent, progress)| async move {
+            let mut file = file?;
+            let mut buffer = vec![0; CHUNK];
+            match file.read(&mut buffer).await {
+                Ok(0) => None,
+                Ok(read) => {
+                    buffer.truncate(read);
+                    let sent = sent + read as u64;
+                    progress(sent);
+                    Some((Ok(buffer), (Some(file), sent, progress)))
+                }
+                Err(error) => Some((Err(error), (None, sent, progress))),
+            }
+        },
+    )
 }
 
 /// Decodes a Web API answer, turning `ok: false` into [`SlackError::Api`].

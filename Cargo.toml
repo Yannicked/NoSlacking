@@ -69,6 +69,10 @@ open = "5"
 jiff = "0.2"
 # The native file picker for uploads.
 rfd = "0.17.2"
+# Images pasted into the composer. egui's clipboard only carries text;
+# egui-winit already links arboard with these features, so this adds no
+# crate to the build.
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 
 # Desktop notifications: D-Bus on Linux and the BSDs, the notification
 # center on macOS, toasts on Windows. Elsewhere there are none.
@@ -94,8 +98,12 @@ fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2", f
 winresource = { version = "0.1", default-features = false }
 
 [features]
+default = ["highlight"]
 # Sample data and the screenshot flag; never part of a release build.
 demo = []
+# Colours code blocks that name their language (```` ```rust ````). Our own
+# small lexer, a few kilobytes; turn it off for plain code blocks.
+highlight = []
 
 [lints.rust]
 unsafe_code = "forbid"

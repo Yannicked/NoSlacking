@@ -73,23 +73,133 @@ fn split_tone(name: &str) -> (&str, Option<u8>) {
 
 /// The Unicode for a standard shortcode.
 pub fn unicode(name: &str, tone: Option<u8>) -> Option<String> {
+    let emoji = standard(name)?;
+    Some(with_tone(emoji, tone.unwrap_or(0)).to_owned())
+}
+
+/// How many emoji the picker's "Recently used" row remembers.
+pub const RECENT_MAX: usize = 24;
+
+/// Slack's skin tones run from 2 (light) to 6 (dark); anything else is the
+/// default yellow.
+pub fn valid_tone(tone: u8) -> Option<u8> {
+    (2..=6).contains(&tone).then_some(tone)
+}
+
+/// The `emojis` crate's name for Slack's tone number.
+fn skin_tone(tone: u8) -> Option<emojis::SkinTone> {
+    Some(match tone {
+        2 => emojis::SkinTone::Light,
+        3 => emojis::SkinTone::MediumLight,
+        4 => emojis::SkinTone::Medium,
+        5 => emojis::SkinTone::MediumDark,
+        6 => emojis::SkinTone::Dark,
+        _ => return None,
+    })
+}
+
+/// The standard emoji a shortcode names, through Slack's own spellings.
+pub fn standard(name: &str) -> Option<&'static emojis::Emoji> {
     let name = SLACK_NAMES
         .iter()
         .find(|(slack, _)| *slack == name)
         .map_or(name, |(_, gemoji)| gemoji);
-    let emoji = emojis::get_by_shortcode(name)?;
-    let toned = tone.and_then(|tone| {
-        let tone = match tone {
-            2 => emojis::SkinTone::Light,
-            3 => emojis::SkinTone::MediumLight,
-            4 => emojis::SkinTone::Medium,
-            5 => emojis::SkinTone::MediumDark,
-            6 => emojis::SkinTone::Dark,
-            _ => return None,
-        };
-        emoji.with_skin_tone(tone)
-    });
-    Some(toned.unwrap_or(emoji).as_str().to_owned())
+    emojis::get_by_shortcode(name)
+}
+
+/// Whether the emoji comes in skin tones (`:+1:` does, `:tada:` not).
+pub fn has_tones(name: &str) -> bool {
+    standard(name).is_some_and(|e| e.skin_tones().is_some())
+}
+
+/// `name` at your skin tone, as Slack writes it (`+1::skin-tone-3`), when
+/// the emoji has tones and the name carries none yet.
+pub fn toned(name: &str, tone: u8) -> String {
+    match valid_tone(tone) {
+        Some(tone) if !name.contains("::skin-tone-") && has_tones(name) => {
+            format!("{name}::skin-tone-{tone}")
+        }
+        _ => name.to_owned(),
+    }
+}
+
+/// The emoji drawn for a standard emoji at a tone, for the picker.
+pub fn with_tone(emoji: &'static emojis::Emoji, tone: u8) -> &'static str {
+    skin_tone(tone)
+        .and_then(|tone| emoji.with_skin_tone(tone))
+        .unwrap_or(emoji)
+        .as_str()
+}
+
+/// Gives every `:shortcode:` in wire text that has tones your skin tone,
+/// except in code, where `:+1:` is just text.
+pub fn tone_shortcodes(wire: &str, tone: u8) -> String {
+    if valid_tone(tone).is_none() || !wire.contains(':') {
+        return wire.to_owned();
+    }
+    let mut out = String::with_capacity(wire.len());
+    let mut in_code = false;
+    let mut rest = wire;
+    while let Some(c) = rest.chars().next() {
+        if c == '`' {
+            in_code = !in_code;
+        }
+        if c == ':' && !in_code {
+            let after = &rest[1..];
+            let name_len = after
+                .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '\'')))
+                .unwrap_or(after.len());
+            let name = &after[..name_len];
+            let closed = after[name_len..].starts_with(':');
+            let before_ok = out
+                .chars()
+                .next_back()
+                .is_none_or(|p| !p.is_ascii_alphanumeric());
+            let already = after[name_len..].starts_with("::skin-tone-");
+            if closed && !name.is_empty() && before_ok && !already && has_tones(name) {
+                out.push(':');
+                out.push_str(&toned(name, tone));
+                out.push(':');
+                rest = &after[name_len + 1..];
+                continue;
+            }
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+/// The emoji in a message's wire text, by name without their tone, in
+/// order and once each, for "Recently used".
+pub fn used_in(wire: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for block in crate::mrkdwn::parse(wire) {
+        if let crate::mrkdwn::Block::Paragraph(inlines) | crate::mrkdwn::Block::Quote(inlines) =
+            block
+        {
+            for inline in inlines {
+                if let crate::mrkdwn::Inline::Emoji(name) = inline {
+                    let base = split_tone(&name).0.to_owned();
+                    if !found.contains(&base) {
+                        found.push(base);
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Puts `names` at the front of the recently used list, newest first,
+/// without repeats, keeping at most [`RECENT_MAX`].
+pub fn remember(recent: &mut Vec<String>, names: &[String]) {
+    for name in names.iter().rev() {
+        let base = split_tone(name).0;
+        recent.retain(|r| r != base);
+        recent.insert(0, base.to_owned());
+    }
+    recent.truncate(RECENT_MAX);
 }
 
 /// A standard emoji group's name in the interface language, for the
@@ -134,6 +244,39 @@ mod tests {
             Resolved::Unicode("✔️".into())
         );
         assert_eq!(set.resolve("no_such_thing"), Resolved::Unknown);
+    }
+
+    #[test]
+    fn your_tone_goes_on_emoji_that_have_tones() {
+        assert_eq!(toned("+1", 3), "+1::skin-tone-3");
+        assert_eq!(toned("wave", 6), "wave::skin-tone-6");
+        assert_eq!(toned("tada", 3), "tada");
+        assert_eq!(toned("+1", 0), "+1");
+        assert_eq!(toned("+1", 9), "+1");
+        assert_eq!(toned("+1::skin-tone-2", 5), "+1::skin-tone-2");
+        assert_eq!(
+            tone_shortcodes(":+1: ok :tada: `:+1:` :wave::skin-tone-2: a:+1:", 4),
+            ":+1::skin-tone-4: ok :tada: `:+1:` :wave::skin-tone-2: a:+1:"
+        );
+        assert_eq!(tone_shortcodes(":+1:", 1), ":+1:");
+    }
+
+    #[test]
+    fn recently_used_emoji_lead_without_repeats() {
+        assert_eq!(
+            used_in(":+1::skin-tone-3: and :tada: :+1: `:eyes:`"),
+            ["+1", "tada"]
+        );
+        let mut recent = vec!["eyes".to_owned(), "tada".to_owned()];
+        remember(
+            &mut recent,
+            &["tada".to_owned(), "+1::skin-tone-2".to_owned()],
+        );
+        assert_eq!(recent, ["tada", "+1", "eyes"]);
+        let many: Vec<String> = (0..30).map(|n| format!("e{n}")).collect();
+        remember(&mut recent, &many);
+        assert_eq!(recent.len(), RECENT_MAX);
+        assert_eq!(recent[0], "e0");
     }
 
     #[test]

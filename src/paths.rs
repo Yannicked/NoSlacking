@@ -67,6 +67,12 @@ impl AppDirs {
         self.state.join("read.json")
     }
 
+    /// Unsent messages, so they survive a restart. State, not config:
+    /// they are yours alone and nothing to back up or sync.
+    pub fn drafts_file(&self) -> PathBuf {
+        self.state.join("drafts.json")
+    }
+
     pub fn instance_file(&self) -> PathBuf {
         self.state.join("instance")
     }
@@ -77,6 +83,12 @@ impl AppDirs {
 
     pub fn panic_log(&self) -> PathBuf {
         self.state.join("panic.log")
+    }
+
+    /// Images pasted from the clipboard, written out for upload and
+    /// removed once sent.
+    pub fn pasted(&self) -> PathBuf {
+        self.cache.join("pasted")
     }
 
     pub fn images(&self) -> PathBuf {
@@ -111,12 +123,24 @@ fn sanitize(id: &str) -> String {
 /// flushed to disk before the rename, and the directory after it where the
 /// platform allows, so a power cut cannot leave an empty file in its place.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_file(path, bytes, false)
+}
+
+/// Like [`write_atomic`], for what only you should read (unsent drafts):
+/// on Unix the file is readable by its owner alone from the moment it is
+/// created. Elsewhere it keeps the folder's permissions, which on Windows
+/// and macOS already keep other users out of your profile.
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_file(path, bytes, true)
+}
+
+fn write_file(path: &Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
     std::fs::create_dir_all(parent)?;
-    let (tmp, mut file) = create_temp(parent, path)?;
+    let (tmp, mut file) = create_temp(parent, path, private)?;
     let written = std::io::Write::write_all(&mut file, bytes)
         .and_then(|()| file.sync_all())
         .and_then(|()| {
@@ -132,7 +156,11 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// A new, empty temporary file in `dir`, named after `path`.
-fn create_temp(dir: &Path, path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+fn create_temp(
+    dir: &Path,
+    path: &Path,
+    private: bool,
+) -> std::io::Result<(PathBuf, std::fs::File)> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let name = path
         .file_name()
@@ -143,11 +171,15 @@ fn create_temp(dir: &Path, path: &Path) -> std::io::Result<(PathBuf, std::fs::Fi
         let tmp = dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()));
         // `create_new` never reuses a file another writer (or a crashed run
         // that had the same process id) left behind.
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-        {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if private {
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        match options.open(&tmp) {
             Ok(file) => return Ok((tmp, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt < 16 => {
                 attempt += 1;

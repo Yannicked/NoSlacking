@@ -48,7 +48,7 @@ struct Cli {
     demo_hover: Option<String>,
 
     /// Open a view before the screenshot: thread, settings, sign-in,
-    /// switcher, picker or profile.
+    /// switcher, picker, profile, upload or drafts.
     #[cfg(feature = "demo")]
     #[arg(long, value_name = "VIEW")]
     demo_view: Option<String>,
@@ -494,6 +494,24 @@ impl DemoSetup {
                 channel: "C02".into(),
                 ts: Ts::new(format!("{}.000100", 1_790_172_000 - 2500)),
                 thread: Some(parent),
+            }),
+            // Half-written messages elsewhere, for the sidebar's pencils.
+            Some("drafts") => {
+                for channel in ["C03", "D01"] {
+                    app.drafts.insert(
+                        format!("{}/{channel}", noslacking::demo::TEAM),
+                        noslacking::app::Draft {
+                            text: "Half a thought…".into(),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+            // A file on its way, with its progress and Cancel.
+            Some("upload") => app.actions.push(Action::Upload {
+                thread: None,
+                path: "release-notes.pdf".into(),
+                comment: String::new(),
             }),
             _ => {}
         }

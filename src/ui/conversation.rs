@@ -31,6 +31,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 empty(ui, app, &text);
                 return;
             };
+            composer::drop_target(ui, &palette, None, true, &mut app.actions);
             header(app, ui, &channel);
             footer(app, ui, &team, &channel);
             messages(app, ui, &team, &channel);
@@ -192,6 +193,7 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         workspaces,
         settings,
         actions,
+        transfers,
         ..
     } = app;
     let Some(workspace) = crate::app::active_in(workspaces, settings) else {
@@ -236,6 +238,7 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
                 enter_sends: settings.enter_sends,
                 focus,
                 channel_name: None,
+                uploads: transfers,
             };
             composer::show(ui, &composer, &mut draft, actions);
         });

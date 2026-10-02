@@ -70,6 +70,113 @@ fn parsed(text: &str) -> std::sync::Arc<[Block]> {
 /// Forgets the parsed text not drawn since the last call; once a frame.
 pub fn end_frame() {
     PARSED.with(|cache| cache.borrow_mut().sweep());
+    #[cfg(feature = "highlight")]
+    HIGHLIGHTED.with(|cache| cache.borrow_mut().sweep());
+}
+
+#[cfg(feature = "highlight")]
+thread_local! {
+    /// Highlighted code, kept while it stays on screen, like [`PARSED`].
+    static HIGHLIGHTED: std::cell::RefCell<crate::highlight::HighlightCache> =
+        std::cell::RefCell::new(crate::highlight::HighlightCache::default());
+}
+
+/// The colour of a kind of code, from the palette so it reads in every
+/// theme: the palette's accent, warning and danger are all chosen to stand
+/// out on its surfaces.
+#[cfg(feature = "highlight")]
+fn code_color(palette: &Palette, base: Color32, kind: crate::highlight::Kind) -> Color32 {
+    use crate::highlight::Kind;
+    match kind {
+        Kind::Plain => base,
+        Kind::Keyword => palette.accent,
+        // Between the keywords' blue and the numbers' red: a violet that
+        // tells types from both.
+        Kind::Type => palette.accent.lerp_to_gamma(palette.danger, 0.5),
+        Kind::String | Kind::Added => palette.warning,
+        Kind::Number | Kind::Removed => palette.danger,
+        Kind::Comment => palette.dim,
+    }
+}
+
+/// A code block's text, coloured when its first line names a language.
+/// Also returns the code without that line, which is what Copy copies, and
+/// the language's name.
+fn code_job(
+    rich: &Rich<'_>,
+    code: &str,
+    font: egui::FontId,
+) -> (egui::text::LayoutJob, String, Option<&'static str>) {
+    #[cfg(feature = "highlight")]
+    {
+        let (language, body) = crate::highlight::split_language(code);
+        if let Some(language) = language {
+            let runs = HIGHLIGHTED.with(|cache| cache.borrow_mut().get(language, body));
+            let mut job = egui::text::LayoutJob::default();
+            for (range, kind) in runs.iter() {
+                let mut format = egui::TextFormat::simple(
+                    font.clone(),
+                    code_color(rich.palette, rich.color, *kind),
+                );
+                format.italics = *kind == crate::highlight::Kind::Comment;
+                job.append(&body[range.clone()], 0.0, format);
+            }
+            return (job, body.to_owned(), Some(language.name));
+        }
+    }
+    let job = egui::text::LayoutJob::single_section(
+        code.to_owned(),
+        egui::TextFormat::simple(font, rich.color),
+    );
+    (job, code.to_owned(), None)
+}
+
+/// A preformatted block: monospace on a surface, coloured when it names
+/// its language, with a Copy button while the pointer is over it.
+fn code_block(ui: &mut egui::Ui, rich: &Rich<'_>, code: &str, actions: &mut Vec<Action>) {
+    let palette = rich.palette;
+    let (job, body, language) = code_job(rich, code, theme::mono(rich.size - 1.5));
+    let response = egui::Frame::new()
+        .fill(palette.surface)
+        .stroke(Stroke::new(1.0, palette.outline))
+        .corner_radius(CornerRadius::same(theme::RADIUS_SMALL))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.add(egui::Label::new(job).wrap().selectable(true));
+        });
+    let rect = response.response.rect;
+    // The language's name sits in the corner, quietly; the button joins it
+    // on hover, so it never covers code you are reading without the mouse.
+    let mut right = rect.right() - 4.0;
+    if ui.rect_contains_pointer(rect) {
+        let button = egui::Rect::from_min_size(
+            egui::pos2(right - 26.0, rect.top() + 4.0),
+            Vec2::splat(26.0),
+        );
+        right = button.left() - 4.0;
+        ui.painter().rect(
+            button,
+            CornerRadius::same(theme::RADIUS_SMALL),
+            palette.overlay,
+            Stroke::new(1.0, palette.outline),
+            egui::StrokeKind::Inside,
+        );
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(button));
+        let tip = crate::i18n::t("Copy code");
+        if theme::icon_button(&mut child, palette, theme::Icon::Copy, 14.0, &tip).clicked() {
+            actions.push(Action::Copy(body));
+        }
+    }
+    if let Some(language) = language {
+        ui.painter().text(
+            egui::pos2(right - 4.0, rect.top() + 6.0),
+            egui::Align2::RIGHT_TOP,
+            language,
+            theme::regular(11.0),
+            palette.dim,
+        );
+    }
 }
 
 /// Draws `text`; `edited` adds Slack's quiet "(edited)".
@@ -125,23 +232,7 @@ fn show_blocks(
                 );
             }
             Block::Preformatted(code) => {
-                egui::Frame::new()
-                    .fill(rich.palette.surface)
-                    .stroke(Stroke::new(1.0, rich.palette.outline))
-                    .corner_radius(CornerRadius::same(theme::RADIUS_SMALL))
-                    .inner_margin(egui::Margin::same(8))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(code)
-                                    .font(theme::mono(rich.size - 1.5))
-                                    .color(rich.color),
-                            )
-                            .wrap()
-                            .selectable(true),
-                        );
-                    });
+                code_block(ui, rich, code, actions);
                 if edited && last {
                     ui.label(
                         RichText::new(crate::i18n::t("(edited)"))

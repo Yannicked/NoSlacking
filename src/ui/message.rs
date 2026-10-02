@@ -1097,11 +1097,17 @@ fn toolbar(
     actions: &mut Vec<Action>,
 ) {
     let palette = row.palette;
+    let quick: std::sync::Arc<Vec<String>> = ui
+        .data(|d| d.get_temp(super::quick_reactions_id()))
+        .unwrap_or_default();
     let mut buttons = 4 + usize::from(!row.in_thread);
     if me {
         buttons += 2;
     }
-    let width = buttons as f32 * 30.0 + 28.0 + 8.0;
+    // Two quick reactions fit the bar as it was first measured; each more
+    // takes a cell.
+    let extra = quick.len().saturating_sub(2) as f32 * 28.0;
+    let width = buttons as f32 * 30.0 + 28.0 + 8.0 + extra;
     let bar = egui::Rect::from_min_size(
         egui::pos2(rect.right() - width - 16.0, rect.top() + 2.0),
         Vec2::new(width, 32.0),
@@ -1124,7 +1130,7 @@ fn toolbar(
         .inner_margin(Margin::same(2));
     frame.show(&mut child, |ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        for name in ["white_check_mark", "eyes"] {
+        for name in quick.iter().map(String::as_str) {
             let rich = Rich::new(palette, row.workspace);
             let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
             if response.hovered() {
