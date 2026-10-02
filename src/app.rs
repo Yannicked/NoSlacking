@@ -2841,6 +2841,7 @@ impl App {
             || self.section_dialog.is_some()
             || self.search.open
             || self.convos.overlay_open()
+            || self.people.status.is_some()
     }
 
     /// Changes the sidebar at once, and in Slack, which then sends back the

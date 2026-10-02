@@ -142,6 +142,9 @@ pub fn rail(app: &mut App, ui: &mut egui::Ui) {
                         Action::ShowSettings
                     });
                 }
+                if let Some(workspace) = crate::app::active_in(&app.workspaces, &app.settings) {
+                    super::people::me_button(ui, &palette, workspace, &mut app.actions);
+                }
             });
         });
 }

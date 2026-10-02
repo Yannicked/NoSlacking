@@ -1475,10 +1475,12 @@ impl Worker {
 
     /// Runs a command about people (see [`crate::people`]).
     fn people_command(&mut self, team: String, command: crate::people::Command) {
-        if self.teams.contains_key(&team) {
+        let Some((client, sink)) = self.team(&team) else {
+            log::debug!("not acting on people in {team}: signed out");
+            return;
+        };
+        if let Some(command) = super::people::call(client, team.clone(), command, sink) {
             self.people.command(&team, command);
-        } else {
-            log::debug!("not watching people in {team}: signed out");
         }
     }
 
@@ -2363,16 +2365,16 @@ async fn run_slash(
             )
             .await
         }
-        "away" => act("users.setPresence", vec![("presence", "away".to_owned())]).await,
-        "active" => act("users.setPresence", vec![("presence", "auto".to_owned())]).await,
+        "away" | "active" => super::people::set_away(client, command == "away")
+            .await
+            .map(|()| None)
+            .map_err(|e| describe(&e)),
         "status" => {
             let (emoji, status) = crate::slash::status(&crate::mrkdwn::unescape(text));
-            let profile = serde_json::json!({
-                "status_text": status,
-                "status_emoji": emoji,
-                "status_expiration": 0,
-            });
-            act("users.profile.set", vec![("profile", profile.to_string())]).await
+            super::people::set_status(client, &emoji, &status, 0)
+                .await
+                .map(|()| None)
+                .map_err(|e| describe(&e))
         }
         "topic" => {
             act(

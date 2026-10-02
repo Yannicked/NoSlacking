@@ -1,4 +1,5 @@
-//! People around you: who is active or away, and who is typing.
+//! People around you: who is active or away, who is typing, and your own
+//! status.
 //!
 //! The app works out which people are on screen (your direct messages,
 //! the profile card, a channel's member list) and asks the worker to
@@ -48,12 +49,158 @@ impl Presence {
     }
 }
 
+/// When a status you set clears by itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Expiry {
+    #[default]
+    Never,
+    HalfHour,
+    Hour,
+    FourHours,
+    /// At midnight.
+    Today,
+    /// At the end of Sunday.
+    ThisWeek,
+}
+
+impl Expiry {
+    pub const ALL: [Expiry; 6] = [
+        Self::Never,
+        Self::HalfHour,
+        Self::Hour,
+        Self::FourHours,
+        Self::Today,
+        Self::ThisWeek,
+    ];
+
+    /// What the dialog calls it.
+    pub fn label(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Never => t("Don't clear"),
+            Self::HalfHour => t("30 minutes"),
+            Self::Hour => t("1 hour"),
+            Self::FourHours => t("4 hours"),
+            Self::Today => t("Today"),
+            Self::ThisWeek => t("This week"),
+        }
+    }
+
+    /// The moment, in Unix seconds, a status set at `now` clears; 0 for
+    /// never, as Slack takes it.
+    pub fn at(self, now: &jiff::Zoned) -> i64 {
+        let seconds = now.timestamp().as_second();
+        let midnight_after = |days: i64| {
+            now.date()
+                .checked_add(jiff::Span::new().days(days))
+                .and_then(|date| date.to_zoned(now.time_zone().clone()))
+                .map_or(seconds + days * 86_400, |z| z.timestamp().as_second())
+        };
+        match self {
+            Self::Never => 0,
+            Self::HalfHour => seconds + 30 * 60,
+            Self::Hour => seconds + 60 * 60,
+            Self::FourHours => seconds + 4 * 60 * 60,
+            Self::Today => midnight_after(1),
+            // Monday is 1 and Sunday 7: the next Monday is this many days on.
+            Self::ThisWeek => midnight_after(8 - i64::from(now.weekday().to_monday_one_offset())),
+        }
+    }
+}
+
+/// A status Slack's own client offers, ready to pick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Preset {
+    /// The shortcode, without colons.
+    pub emoji: &'static str,
+    /// The text, still to be translated.
+    pub text: &'static str,
+    pub expiry: Expiry,
+}
+
+/// Slack's suggested statuses.
+pub fn presets() -> [Preset; 5] {
+    [
+        Preset {
+            emoji: "calendar",
+            text: "In a meeting",
+            expiry: Expiry::Hour,
+        },
+        Preset {
+            emoji: "bus",
+            text: "Commuting",
+            expiry: Expiry::HalfHour,
+        },
+        Preset {
+            emoji: "face_with_thermometer",
+            text: "Out sick",
+            expiry: Expiry::Today,
+        },
+        Preset {
+            emoji: "palm_tree",
+            text: "Vacationing",
+            expiry: Expiry::Never,
+        },
+        Preset {
+            emoji: "house_with_garden",
+            text: "Working remotely",
+            expiry: Expiry::Today,
+        },
+    ]
+}
+
+/// A preset's text in your language.
+pub fn preset_text(preset: &Preset) -> std::borrow::Cow<'static, str> {
+    match preset.text {
+        "In a meeting" => t("In a meeting"),
+        "Commuting" => t("Commuting"),
+        "Out sick" => t("Out sick"),
+        "Vacationing" => t("Vacationing"),
+        "Working remotely" => t("Working remotely"),
+        other => std::borrow::Cow::Borrowed(other),
+    }
+}
+
+/// The emoji as Slack stores it, `:name:`, from what was typed: a
+/// shortcode with or without colons, or the emoji itself. Empty for none.
+pub fn status_emoji(typed: &str) -> String {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return String::new();
+    }
+    if let Some(emoji) = emojis::get(typed)
+        && let Some(code) = emoji.shortcode()
+    {
+        return format!(":{code}:");
+    }
+    format!(":{}:", typed.trim_matches(':'))
+}
+
+/// The "Set a status" dialog.
+#[derive(Clone, Debug, Default)]
+pub struct StatusDialog {
+    /// The emoji as typed: a shortcode or the emoji itself.
+    pub emoji: String,
+    pub text: String,
+    pub expiry: Expiry,
+}
+
 /// What the views ask for.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     /// You typed in the composer of a conversation in the open workspace,
     /// or of one of its threads.
     Typing { channel: String, thread: Option<Ts> },
+    /// Opens the "Set a status" dialog with your status in it.
+    EditStatus,
+    /// Sets your status in the open workspace; an empty emoji and text
+    /// clear it.
+    SetStatus {
+        emoji: String,
+        text: String,
+        expiry: Expiry,
+    },
+    /// Shows you as away, or as active again, in the open workspace.
+    SetAway(bool),
 }
 
 /// What the interface asks the worker to do for one workspace.
@@ -65,6 +212,15 @@ pub enum Command {
     /// Tell the others you are typing. Only a browser session's RTM socket
     /// can; otherwise nothing happens.
     Typing { channel: String, thread: Option<Ts> },
+    /// `users.profile.set` with this status; `expiration` is in Unix
+    /// seconds, 0 for never.
+    SetStatus {
+        emoji: String,
+        text: String,
+        expiration: i64,
+    },
+    /// `users.setPresence`: away, or back to automatic.
+    SetAway(bool),
 }
 
 /// What the worker answers.
@@ -78,6 +234,15 @@ pub enum Event {
         thread: Option<Ts>,
         user: String,
     },
+    /// Slack answered [`Command::SetStatus`].
+    StatusSet { result: Result<(), String> },
+    /// Slack answered [`Command::SetAway`].
+    AwaySet {
+        away: bool,
+        result: Result<(), String>,
+    },
+    /// You set yourself away or active, maybe in another client.
+    ManualPresence { away: bool },
 }
 
 /// Someone typing, until a moment.
@@ -165,6 +330,11 @@ pub struct State {
     /// When you were last said to be typing, by workspace, conversation
     /// and thread.
     typed: HashMap<(String, String, Option<Ts>), Instant>,
+    /// The "Set a status" dialog, while open.
+    pub status: Option<StatusDialog>,
+    /// Your status before the last change, by workspace, to put back if
+    /// Slack refuses it.
+    status_before: HashMap<String, (String, String)>,
 }
 
 impl State {
@@ -260,6 +430,50 @@ pub fn apply(app: &mut App, action: Action) {
         return;
     };
     match action {
+        Action::EditStatus => {
+            let me = app.active_workspace().and_then(|w| w.user(&w.info.user_id));
+            let emoji =
+                me.map_or_else(String::new, |u| u.status_emoji.trim_matches(':').to_owned());
+            let text = me.map_or_else(String::new, |u| u.status_text.clone());
+            app.people.status = Some(StatusDialog {
+                emoji,
+                text,
+                expiry: Expiry::Never,
+            });
+            app.focus_overlay = true;
+        }
+        Action::SetStatus {
+            emoji,
+            text,
+            expiry,
+        } => {
+            app.people.status = None;
+            let emoji = status_emoji(&emoji);
+            let text = text.trim().to_owned();
+            // Shown at once, and put back if Slack refuses.
+            if let Some(workspace) = app.active_workspace_mut() {
+                let me = workspace.info.user_id.clone();
+                if let Some(user) = workspace.users.get_mut(&me) {
+                    let before = (
+                        std::mem::replace(&mut user.status_emoji, emoji.clone()),
+                        std::mem::replace(&mut user.status_text, text.clone()),
+                    );
+                    app.people.status_before.insert(team.clone(), before);
+                }
+            }
+            app.backend.send(backend::Command::People {
+                team,
+                command: Command::SetStatus {
+                    emoji,
+                    text,
+                    expiration: expiry.at(&jiff::Zoned::now()),
+                },
+            });
+        }
+        Action::SetAway(away) => app.backend.send(backend::Command::People {
+            team,
+            command: Command::SetAway(away),
+        }),
         Action::Typing { channel, thread } => {
             let place = (team.clone(), channel.clone(), thread.clone());
             if app.people.may_say_typing(place, Instant::now()) {
@@ -280,9 +494,16 @@ pub fn is_typing(before: &str, after: &str) -> bool {
 
 /// Takes in one of the worker's answers for `team`.
 pub fn handle(app: &mut App, team: &str, event: Event) {
+    let before = match &event {
+        Event::StatusSet { .. } => app.people.status_before.remove(team),
+        _ => None,
+    };
     let Some(workspace) = app.workspaces.iter_mut().find(|w| w.info.team_id == team) else {
         return;
     };
+    let me = workspace.info.user_id.clone();
+    // Said once the workspace is no longer borrowed.
+    let mut toast: Option<(String, bool)> = None;
     match event {
         Event::Presence { users } => {
             workspace.people.presence.extend(users);
@@ -298,6 +519,53 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                     .typing(user, channel, thread, Instant::now());
             }
         }
+        Event::ManualPresence { away } => {
+            workspace.people.presence.insert(me, presence_of(away));
+        }
+        Event::AwaySet { away, result } => match result {
+            Ok(()) => {
+                workspace.people.presence.insert(me, presence_of(away));
+                let done = if away {
+                    t("You are now shown as away")
+                } else {
+                    t("You are now shown as active")
+                };
+                toast = Some((done.into_owned(), false));
+            }
+            Err(error) => {
+                toast = Some((
+                    tf(
+                        "Could not change your presence: {error}",
+                        &[("error", &error)],
+                    ),
+                    true,
+                ));
+            }
+        },
+        Event::StatusSet { result } => {
+            if let Err(error) = result {
+                if let (Some((emoji, text)), Some(user)) = (before, workspace.users.get_mut(&me)) {
+                    user.status_emoji = emoji;
+                    user.status_text = text;
+                }
+                toast = Some((
+                    tf("Could not set your status: {error}", &[("error", &error)]),
+                    true,
+                ));
+            }
+        }
+    }
+    if let Some((text, error)) = toast {
+        app.toast(text, error);
+    }
+}
+
+/// How you show after asking to be away, or active.
+fn presence_of(away: bool) -> Presence {
+    if away {
+        Presence::Away
+    } else {
+        Presence::Active
     }
 }
 
@@ -424,6 +692,52 @@ mod tests {
             typing_line(&names(&["Ana", "Bob", "Carla"])).as_deref(),
             Some("Several people are typing…")
         );
+    }
+
+    #[test]
+    fn statuses_clear_when_asked() {
+        // Friday 2 October 2026, 14:00 in Amsterdam.
+        let now = jiff::civil::date(2026, 10, 2)
+            .at(14, 0, 0, 0)
+            .in_tz("Europe/Amsterdam")
+            .expect("a time");
+        let seconds = now.timestamp().as_second();
+        assert_eq!(Expiry::Never.at(&now), 0);
+        assert_eq!(Expiry::HalfHour.at(&now), seconds + 1800);
+        assert_eq!(Expiry::FourHours.at(&now), seconds + 4 * 3600);
+        assert_eq!(Expiry::Today.at(&now), seconds + 10 * 3600);
+        let monday = jiff::civil::date(2026, 10, 5)
+            .at(0, 0, 0, 0)
+            .in_tz("Europe/Amsterdam")
+            .expect("a time");
+        assert_eq!(Expiry::ThisWeek.at(&now), monday.timestamp().as_second());
+        // On a Sunday, "this week" is over at midnight.
+        let sunday = jiff::civil::date(2026, 10, 4)
+            .at(9, 0, 0, 0)
+            .in_tz("Europe/Amsterdam")
+            .expect("a time");
+        assert_eq!(Expiry::ThisWeek.at(&sunday), monday.timestamp().as_second());
+    }
+
+    #[test]
+    fn status_emoji_take_any_spelling() {
+        assert_eq!(status_emoji("coffee"), ":coffee:");
+        assert_eq!(status_emoji(":coffee:"), ":coffee:");
+        assert_eq!(status_emoji(" ☕ "), ":coffee:");
+        assert_eq!(status_emoji("party-parrot"), ":party-parrot:");
+        assert_eq!(status_emoji("  "), "");
+    }
+
+    #[test]
+    fn presets_are_translated() {
+        for preset in presets() {
+            assert!(!preset_text(&preset).is_empty());
+            assert!(
+                crate::emoji::standard(preset.emoji).is_some(),
+                "{}",
+                preset.emoji
+            );
+        }
     }
 
     #[test]

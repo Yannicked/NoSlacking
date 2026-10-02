@@ -472,6 +472,10 @@ impl DemoSetup {
                 ts: parent,
             }),
             Some("profile") => app.actions.push(Action::OpenProfile("U01".into())),
+            // Your own status, being set.
+            Some("status") => app
+                .actions
+                .push(Action::People(noslacking::people::Action::EditStatus)),
             // Your own message in #engineering, opened for editing.
             Some("edit") => self.edit = Some(Ts::new(format!("{}.000100", 1_790_172_000 - 2000))),
             Some("dm") => app.actions.push(Action::OpenConversation("D01".into())),
