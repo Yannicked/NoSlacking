@@ -1217,3 +1217,29 @@ msgstr "Gevonden door op je naam te zoeken; reacties op je threads verschijnen z
 
 msgid "{name}, {count} new"
 msgstr "{name}, {count} nieuw"
+
+msgid "All unreads"
+msgstr "Alle ongelezen"
+
+msgid "You are all caught up."
+msgstr "Je bent helemaal bij."
+
+msgid "{count} conversation with unread messages"
+msgid_plural "{count} conversations with unread messages"
+msgstr[0] "{count} gesprek met ongelezen berichten"
+msgstr[1] "{count} gesprekken met ongelezen berichten"
+
+msgid "Mark all as read"
+msgstr "Alles als gelezen markeren"
+
+msgid "Could not load the messages: {error}"
+msgstr "De berichten konden niet worden geladen: {error}"
+
+msgid "Open the conversation for the rest"
+msgstr "Open het gesprek voor de rest"
+
+msgid "Open the conversation"
+msgstr "Gesprek openen"
+
+msgid "Mark as read"
+msgstr "Als gelezen markeren"

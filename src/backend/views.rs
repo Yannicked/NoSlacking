@@ -20,6 +20,10 @@ const FEED_LIMIT: usize = 50;
 const SEARCH_COUNT: usize = 50;
 /// The most messages fetched one by one to fill in a list of references.
 const FILL_LIMIT: usize = 40;
+/// How many unread messages of one conversation are read.
+const UNREAD_COUNT: usize = 50;
+/// How many messages are shown of a conversation with no read marker.
+const UNMARKED_COUNT: usize = 10;
 
 /// Runs one command and reports back. Every command is answered, so a view
 /// waiting on it never waits for ever.
@@ -32,6 +36,12 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
             };
             views::Event::Activity { result, searched }
         }
+        Command::Unread { channel, after } => views::Event::Unread {
+            result: unread(&client, &channel, after.as_ref())
+                .await
+                .map_err(|e| describe(&e)),
+            channel,
+        },
     };
     reply(&sink, &team, event);
 }
@@ -41,6 +51,40 @@ fn reply(sink: &Sink, team: &str, event: views::Event) {
         team: team.to_owned(),
         event,
     });
+}
+
+// ---- unreads ----------------------------------------------------------
+
+/// The messages of `channel` after `after`, oldest first, and whether there
+/// are more.
+async fn unread(
+    client: &Client,
+    channel: &str,
+    after: Option<&Ts>,
+) -> Result<(Vec<Message>, bool), SlackError> {
+    let mut params = vec![("channel", channel.to_owned())];
+    match after {
+        Some(after) => {
+            params.push(("oldest", after.0.clone()));
+            params.push(("limit", UNREAD_COUNT.to_string()));
+        }
+        None => params.push(("limit", UNMARKED_COUNT.to_string())),
+    }
+    let page: types::HistoryPage = client.call("conversations.history", &params).await?;
+    Ok(unread_page(page, after))
+}
+
+/// A page of history as the unreads list shows it: oldest first, without
+/// the message you last read.
+fn unread_page(page: types::HistoryPage, after: Option<&Ts>) -> (Vec<Message>, bool) {
+    let mut messages: Vec<Message> = page
+        .messages
+        .into_iter()
+        .filter_map(types::Message::into_model)
+        .filter(|m| after.is_none_or(|after| m.ts > *after))
+        .collect();
+    messages.sort_by(|a, b| a.ts.cmp(&b.ts));
+    (messages, page.has_more)
 }
 
 // ---- activity ---------------------------------------------------------
@@ -337,6 +381,22 @@ mod tests {
         assert_eq!(refs[2].channel, "C3");
         assert_eq!(refs[2].ts, Ts::new("2.000100"), "the newest reply");
         assert_eq!(refs[2].thread, Some(Ts::new("1.000100")));
+    }
+
+    #[test]
+    fn unread_messages_come_oldest_first_after_the_read_marker() {
+        let page: types::HistoryPage = serde_json::from_str(
+            r#"{"ok":true,"has_more":true,"messages":[
+              {"type":"message","ts":"3.000100","user":"U1","text":"c"},
+              {"type":"message","ts":"2.000100","user":"U1","text":"b"},
+              {"type":"message","ts":"1.000100","user":"U1","text":"a"}
+            ]}"#,
+        )
+        .expect("parses");
+        let (messages, more) = unread_page(page, Some(&Ts::new("1.000100")));
+        let texts: Vec<&str> = messages.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, ["b", "c"]);
+        assert!(more);
     }
 
     #[test]

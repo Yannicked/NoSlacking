@@ -529,11 +529,14 @@ impl DemoSetup {
                 }));
             }
             // The views at the top of the sidebar.
-            Some("activity") => app
-                .actions
-                .push(Action::Views(noslacking::views::Action::Open(
-                    noslacking::views::View::Activity,
-                ))),
+            Some(view @ ("activity" | "unreads")) => {
+                use noslacking::views::{Action as Views, View};
+                let view = match view {
+                    "unreads" => View::Unreads,
+                    _ => View::Activity,
+                };
+                app.actions.push(Action::Views(Views::Open(view)));
+            }
             Some("browse") => app
                 .actions
                 .push(Action::Convos(noslacking::convos::Action::Browse)),
