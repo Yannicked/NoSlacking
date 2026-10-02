@@ -1187,3 +1187,9 @@ msgstr "{time} uur achter op jou"
 
 msgid "{time} local time, {difference}"
 msgstr "{time} lokale tijd, {difference}"
+
+msgid "Active"
+msgstr "Actief"
+
+msgid "Away"
+msgstr "Afwezig"

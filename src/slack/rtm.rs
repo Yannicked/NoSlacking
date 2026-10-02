@@ -14,6 +14,12 @@
 //! open conversation instead. Failing to reach Slack at all (no network,
 //! a timeout, a rate limit) is not a refusal: it is retried for as long as
 //! it takes, with a capped backoff.
+//!
+//! The socket also carries a few frames the other way: presence
+//! subscriptions and "typing" notices. They are only sent once Slack has
+//! said hello; anything queued while the socket was down is dropped, since
+//! a stale "typing" is wrong and the worker subscribes again on every
+//! connect.
 
 use std::time::Duration;
 
@@ -98,10 +104,16 @@ fn next(ended: &Ended, refused: &mut u32) -> Next {
     }
 }
 
-/// Keeps the socket open until `stop` changes, reporting through `sink`.
+/// The frames the worker sends: bare objects such as
+/// `{"type":"typing","channel":"C1"}`, numbered here.
+pub type Outgoing = tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>;
+
+/// Keeps the socket open until `stop` changes, reporting through `sink`
+/// and sending what arrives on `outgoing`.
 pub async fn run(
     client: Client,
     sink: impl Fn(RtmEvent) + Send + Sync,
+    mut outgoing: Outgoing,
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut backoff = Duration::from_secs(1);
@@ -111,7 +123,7 @@ pub async fn run(
             return;
         }
         let ended = tokio::select! {
-            ended = connection(&client, &sink) => ended,
+            ended = connection(&client, &sink, &mut outgoing) => ended,
             _ = stop.changed() => return,
         };
         match next(&ended, &mut refused) {
@@ -147,8 +159,18 @@ pub async fn run(
     }
 }
 
-async fn connection(client: &Client, sink: &(impl Fn(RtmEvent) + Send + Sync)) -> Ended {
-    let connect: RtmConnect = match client.call("rtm.connect", &[]).await {
+async fn connection(
+    client: &Client,
+    sink: &(impl Fn(RtmEvent) + Send + Sync),
+    outgoing: &mut Outgoing,
+) -> Ended {
+    // Presence comes only for the people subscribed to, in batches: a big
+    // workspace would otherwise flood the socket with everyone's.
+    let params = [
+        ("batch_presence_aware", "1".to_owned()),
+        ("presence_sub", "true".to_owned()),
+    ];
+    let connect: RtmConnect = match client.call("rtm.connect", &params).await {
         Ok(connect) => connect,
         Err(error @ SlackError::Api(_)) => return Ended::Refused(error),
         Err(error) => return Ended::Unreachable(error),
@@ -187,9 +209,22 @@ async fn connection(client: &Client, sink: &(impl Fn(RtmEvent) + Send + Sync)) -
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.tick().await;
     let mut heard = tokio::time::Instant::now();
+    // What was queued while there was no socket is out of date.
+    while outgoing.try_recv().is_ok() {}
+    let mut sent: u64 = 0;
     loop {
         let frame = tokio::select! {
             frame = socket.next() => frame,
+            Some(out) = outgoing.recv(), if hello => {
+                sent += 1;
+                let Some(text) = numbered(out, sent) else {
+                    continue;
+                };
+                if let Err(error) = socket.send(Frame::Text(text.into())).await {
+                    return end(hello, false, SlackError::Network(error.to_string()));
+                }
+                continue;
+            }
             () = tokio::time::sleep_until(heard + SILENCE) => {
                 return end(hello, false, SlackError::Network("connection went silent".into()));
             }
@@ -245,9 +280,26 @@ async fn connection(client: &Client, sink: &(impl Fn(RtmEvent) + Send + Sync)) -
     }
 }
 
+/// An outgoing frame as text, with the `id` RTM wants on everything a
+/// client sends. Anything but an object is not a frame.
+fn numbered(mut frame: serde_json::Value, id: u64) -> Option<String> {
+    frame.as_object_mut()?.insert("id".to_owned(), id.into());
+    Some(frame.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outgoing_frames_are_numbered() {
+        let text =
+            numbered(serde_json::json!({"type": "typing", "channel": "C1"}), 7).expect("an object");
+        let back: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(back["id"], 7);
+        assert_eq!(back["channel"], "C1");
+        assert_eq!(numbered(serde_json::json!("typing"), 1), None);
+    }
 
     fn network() -> SlackError {
         SlackError::Network("no route to host".into())

@@ -11,6 +11,7 @@ mod keys;
 mod login;
 mod message;
 mod overlays;
+mod people;
 mod rich;
 mod rows;
 mod search;

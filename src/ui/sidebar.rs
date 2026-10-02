@@ -695,6 +695,18 @@ fn row(
                 &title,
                 conversation.user.as_deref().unwrap_or(&title),
             );
+            let behind = if selected {
+                palette.accent
+            } else if response.hovered() {
+                palette.surface_hover
+            } else {
+                palette.panel
+            };
+            let presence = conversation
+                .user
+                .as_deref()
+                .and_then(|id| workspace.people.presence(id));
+            super::people::dot(ui.painter(), palette, avatar_rect, presence, behind);
         }
     }
     let font = if unread {

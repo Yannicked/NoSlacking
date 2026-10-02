@@ -8,6 +8,7 @@
 mod around;
 pub mod convos;
 pub mod desktop;
+pub mod people;
 mod search;
 pub mod worker;
 
@@ -198,6 +199,11 @@ pub enum Command {
     Convos {
         team: String,
         command: crate::convos::Command,
+    },
+    /// Presence and the like for people (see [`crate::people`]).
+    People {
+        team: String,
+        command: crate::people::Command,
     },
 }
 
@@ -417,6 +423,11 @@ impl std::fmt::Debug for Command {
                 .field("team", team)
                 .field("command", command)
                 .finish(),
+            Self::People { team, command } => f
+                .debug_struct("People")
+                .field("team", team)
+                .field("command", command)
+                .finish(),
         }
     }
 }
@@ -631,6 +642,11 @@ pub enum Event {
     Convos {
         team: String,
         event: crate::convos::Event,
+    },
+    /// News about people: presence and the like (see [`crate::people`]).
+    People {
+        team: String,
+        event: crate::people::Event,
     },
 }
 

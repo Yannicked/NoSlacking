@@ -98,13 +98,18 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                     }
                     ConversationKind::Direct => {
                         let user = conversation.user.as_deref().and_then(|id| workspace.user(id));
-                        super::avatar(
+                        let avatar = super::avatar(
                             ui,
                             user.and_then(|u| u.avatar.as_deref()),
                             &title,
                             conversation.user.as_deref().unwrap_or(&title),
                             22.0,
                         );
+                        let presence = conversation.user.as_deref().and_then(|id| workspace.people.presence(id));
+                        super::people::dot(ui.painter(), &palette, avatar.rect, presence, palette.window);
+                        if let Some(presence) = presence {
+                            avatar.on_hover_text(super::people::word(presence));
+                        }
                     }
                     ConversationKind::Group => {
                         let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
