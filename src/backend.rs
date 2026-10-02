@@ -20,7 +20,7 @@ use crate::paths::AppDirs;
 use crate::settings::{Redirect, WorkspaceMeta};
 use crate::sidebar::SidebarCall;
 
-#[derive(Debug)]
+/// What the interface asks the worker to do.
 pub enum Command {
     /// Saves the Slack app's credentials and restarts Socket Mode with them.
     SaveApp(AppCredentials),
@@ -122,6 +122,152 @@ pub enum Command {
         channel: String,
     },
     Reconnect,
+}
+
+/// Prints every field except the secrets: a pasted token, the session
+/// cookie, and the sign-in redirect (its code finishes a sign-in).
+impl std::fmt::Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::redact::REDACTED;
+        match self {
+            Self::SaveApp(app) => f.debug_tuple("SaveApp").field(app).finish(),
+            Self::StartSignIn { redirect, port } => f
+                .debug_struct("StartSignIn")
+                .field("redirect", redirect)
+                .field("port", port)
+                .finish(),
+            Self::CancelSignIn => f.write_str("CancelSignIn"),
+            Self::Callback(_) => f.debug_tuple("Callback").field(&REDACTED).finish(),
+            Self::PasteToken(_) => f.debug_tuple("PasteToken").field(&REDACTED).finish(),
+            Self::SignInSession { workspace_url, .. } => f
+                .debug_struct("SignInSession")
+                .field("cookie", &REDACTED)
+                .field("workspace_url", workspace_url)
+                .finish(),
+            Self::SignOut(team) => f.debug_tuple("SignOut").field(team).finish(),
+            Self::Focus { team, channel } => f
+                .debug_struct("Focus")
+                .field("team", team)
+                .field("channel", channel)
+                .finish(),
+            Self::LoadHistory { team, channel } => f
+                .debug_struct("LoadHistory")
+                .field("team", team)
+                .field("channel", channel)
+                .finish(),
+            Self::LoadOlder {
+                team,
+                channel,
+                cursor,
+            } => f
+                .debug_struct("LoadOlder")
+                .field("team", team)
+                .field("channel", channel)
+                .field("cursor", cursor)
+                .finish(),
+            Self::LoadThread { team, channel, ts } => f
+                .debug_struct("LoadThread")
+                .field("team", team)
+                .field("channel", channel)
+                .field("ts", ts)
+                .finish(),
+            Self::Send {
+                team,
+                channel,
+                text,
+                thread,
+                broadcast,
+                local,
+            } => f
+                .debug_struct("Send")
+                .field("team", team)
+                .field("channel", channel)
+                .field("text", text)
+                .field("thread", thread)
+                .field("broadcast", broadcast)
+                .field("local", local)
+                .finish(),
+            Self::Edit {
+                team,
+                channel,
+                ts,
+                text,
+            } => f
+                .debug_struct("Edit")
+                .field("team", team)
+                .field("channel", channel)
+                .field("ts", ts)
+                .field("text", text)
+                .finish(),
+            Self::Delete { team, channel, ts } => f
+                .debug_struct("Delete")
+                .field("team", team)
+                .field("channel", channel)
+                .field("ts", ts)
+                .finish(),
+            Self::React {
+                team,
+                channel,
+                ts,
+                name,
+                add,
+            } => f
+                .debug_struct("React")
+                .field("team", team)
+                .field("channel", channel)
+                .field("ts", ts)
+                .field("name", name)
+                .field("add", add)
+                .finish(),
+            Self::Upload {
+                team,
+                channel,
+                thread,
+                path,
+                comment,
+            } => f
+                .debug_struct("Upload")
+                .field("team", team)
+                .field("channel", channel)
+                .field("thread", thread)
+                .field("path", path)
+                .field("comment", comment)
+                .finish(),
+            Self::Download { team, url, name } => f
+                .debug_struct("Download")
+                .field("team", team)
+                .field("url", url)
+                .field("name", name)
+                .finish(),
+            Self::Mark { team, channel, ts } => f
+                .debug_struct("Mark")
+                .field("team", team)
+                .field("channel", channel)
+                .field("ts", ts)
+                .finish(),
+            Self::FetchUsers { team, ids } => f
+                .debug_struct("FetchUsers")
+                .field("team", team)
+                .field("ids", ids)
+                .finish(),
+            Self::Sidebar { team, calls } => f
+                .debug_struct("Sidebar")
+                .field("team", team)
+                .field("calls", calls)
+                .finish(),
+            Self::FetchBots { team, ids } => f
+                .debug_struct("FetchBots")
+                .field("team", team)
+                .field("ids", ids)
+                .finish(),
+            Self::FetchConversation { team, channel } => f
+                .debug_struct("FetchConversation")
+                .field("team", team)
+                .field("channel", channel)
+                .finish(),
+            Self::Reconnect => f.write_str("Reconnect"),
+        }
+    }
 }
 
 /// Where a sign-in stands.
@@ -379,5 +525,36 @@ pub fn spawn(waker: &Waker, source: Source, cache_dir: PathBuf) -> Backend {
         commands,
         events,
         images,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commands_never_print_secrets() {
+        let printed = format!(
+            "{:?} {:?} {:?} {:?}",
+            Command::PasteToken("xoxp-secret".into()),
+            Command::SignInSession {
+                cookie: "xoxd-secret".into(),
+                workspace_url: "https://acme.slack.com".into(),
+            },
+            Command::Callback("noslacking://oauth/callback?code=c0de&state=s".into()),
+            Command::SaveApp(AppCredentials {
+                client_id: "1.2".into(),
+                client_secret: "hush".into(),
+                app_token: "xapp-secret".into(),
+            }),
+        );
+        for secret in ["xoxp-secret", "xoxd-secret", "c0de", "hush", "xapp-secret"] {
+            assert!(!printed.contains(secret), "{printed}");
+        }
+        assert!(printed.contains("acme.slack.com"), "{printed}");
+        assert_eq!(
+            format!("{:?}", Command::SignOut("T1".into())),
+            r#"SignOut("T1")"#
+        );
     }
 }
