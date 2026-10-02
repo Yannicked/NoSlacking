@@ -13,7 +13,7 @@
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rand::RngCore as _;
 
@@ -79,18 +79,20 @@ pub fn acquire(
     std::thread::Builder::new()
         .name("noslacking-instance".into())
         .spawn(move || {
-            for stream in listener.incoming().flatten() {
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                let mut reader = BufReader::new(stream);
-                let mut first = String::new();
-                let mut second = String::new();
-                if reader.read_line(&mut first).is_err() || first.trim_end() != secret {
+            for mut stream in listener.incoming().flatten() {
+                // Connections are served one at a time, so a slow or chatty
+                // client gets a short deadline and a small budget.
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let Some(first) = read_line(&mut stream, deadline) else {
+                    continue;
+                };
+                if first != secret {
                     continue;
                 }
-                if reader.read_line(&mut second).is_ok()
-                    && let Some(request) = decode(&second)
-                {
-                    let _ = reader.get_mut().write_all(b"ok\n");
+                if let Some(request) = read_line(&mut stream, deadline).and_then(|l| decode(&l)) {
+                    let _ = stream.write_all(b"ok\n");
                     handle(request);
                 }
             }
@@ -99,6 +101,31 @@ pub fn acquire(
     Ok(Outcome::Primary(Guard {
         file: file.to_path_buf(),
     }))
+}
+
+/// The longest line a later launch sends: the secret, or a sign-in link.
+const MAX_LINE: usize = 4096;
+
+/// One line from `stream` (a connection, read one byte at a time so
+/// nothing past the line is consumed), without its newline, or `None` when it is too
+/// long, not UTF-8, or does not arrive before `deadline`.
+fn read_line(stream: &mut impl std::io::Read, deadline: Instant) -> Option<String> {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    while Instant::now() < deadline && line.len() <= MAX_LINE {
+        match stream.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) if byte[0] == b'\n' => return String::from_utf8(line).ok(),
+            Ok(_) => line.push(byte[0]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 fn forward(file: &Path, request: &Request) -> std::io::Result<()> {
@@ -135,7 +162,15 @@ fn write_private(file: &Path, contents: &str) -> std::io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    options.open(file)?.write_all(contents.as_bytes())
+    let mut opened = options.open(file)?;
+    // `mode` applies only when the file is created; tighten a file left
+    // by an older version or another tool too.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        opened.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    opened.write_all(contents.as_bytes())
 }
 
 #[cfg(test)]
@@ -152,5 +187,22 @@ mod tests {
         }
         assert_eq!(decode("open a\n"), Some(Request::Open("a".into())));
         assert_eq!(decode("rm -rf"), None);
+    }
+
+    #[test]
+    fn lines_are_bounded() {
+        let mut wire = b"abc\n".to_vec();
+        wire.extend_from_slice(&[b'x'; MAX_LINE + 10]);
+        wire.extend_from_slice(b"\nnext\n");
+        let mut stream = std::io::Cursor::new(wire);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert_eq!(read_line(&mut stream, deadline).as_deref(), Some("abc"));
+        assert_eq!(read_line(&mut stream, deadline), None);
+        assert_eq!(
+            read_line(&mut std::io::Cursor::new(b"no newline"), deadline),
+            None
+        );
+        let past = Instant::now() - Duration::from_secs(1);
+        assert_eq!(read_line(&mut std::io::Cursor::new(b"late\n"), past), None);
     }
 }
