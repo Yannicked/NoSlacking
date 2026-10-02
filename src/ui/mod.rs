@@ -1,0 +1,206 @@
+//! The interface: a workspace rail, the conversation list, the open
+//! conversation and, when one is open, its thread.
+
+mod composer;
+mod conversation;
+mod keys;
+mod login;
+mod message;
+mod overlays;
+mod rich;
+mod settings;
+mod sidebar;
+mod thread;
+
+use egui::{Color32, CornerRadius, Rect, Sense, Vec2};
+
+use crate::app::{App, Page};
+use crate::theme::{self, Palette};
+
+pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    keys::global(app, ui.ctx());
+    match app.page {
+        Page::SignIn => login::show(app, ui),
+        Page::Settings => {
+            sidebar::rail(app, ui);
+            settings::show(app, ui);
+        }
+        Page::Main => {
+            sidebar::rail(app, ui);
+            sidebar::show(app, ui);
+            if app.thread.is_some() {
+                thread::show(app, ui);
+            }
+            conversation::show(app, ui);
+        }
+    }
+    overlays::show(app, ui.ctx());
+}
+
+/// A rounded square picture, or coloured initials until there is one.
+pub fn avatar(
+    ui: &mut egui::Ui,
+    url: Option<&str>,
+    name: &str,
+    seed: &str,
+    size: f32,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    paint_avatar(ui, rect, url, name, seed);
+    response
+}
+
+pub fn paint_avatar(ui: &egui::Ui, rect: Rect, url: Option<&str>, name: &str, seed: &str) {
+    let radius = CornerRadius::same((rect.width() * 0.22).round() as u8);
+    let placeholder = || {
+        ui.painter()
+            .rect_filled(rect, radius, theme::identity_color(seed));
+        let initial: String = name
+            .chars()
+            .find(|c| c.is_alphanumeric())
+            .map(|c| c.to_uppercase().collect())
+            .unwrap_or_else(|| "?".to_owned());
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            initial,
+            theme::semibold(rect.height() * 0.48),
+            Color32::WHITE,
+        );
+    };
+    match url {
+        Some(url) if !url.is_empty() => {
+            let image = egui::Image::new(url.to_owned()).corner_radius(radius);
+            match image.load_for_size(ui.ctx(), rect.size()) {
+                Ok(egui::load::TexturePoll::Ready { .. }) => image.paint_at(ui, rect),
+                _ => placeholder(),
+            }
+        }
+        _ => placeholder(),
+    }
+}
+
+/// A pill with a count, for unread mentions.
+pub fn badge(ui: &mut egui::Ui, palette: &Palette, count: u32) {
+    let text = if count > 99 {
+        "99+".to_owned()
+    } else {
+        count.to_string()
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text, theme::bold(11.0), Color32::WHITE);
+    let size = Vec2::new((galley.size().x + 12.0).max(20.0), 18.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(9), palette.badge);
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+}
+
+/// A quiet label above a group of rows or fields.
+pub fn section_label(ui: &mut egui::Ui, palette: &Palette, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .font(theme::semibold(12.0))
+            .color(palette.dim),
+    );
+}
+
+/// "14:03" today, "Yesterday 14:03" or a date otherwise.
+pub fn short_time(ts: &crate::model::Ts) -> String {
+    ts.zoned()
+        .map(|z| z.strftime("%H:%M").to_string())
+        .unwrap_or_default()
+}
+
+/// The heading of a day in a conversation.
+pub fn day_label(ts: &crate::model::Ts) -> String {
+    use crate::i18n::t;
+    let Some(zoned) = ts.zoned() else {
+        return String::new();
+    };
+    let today = jiff::Zoned::now().date();
+    let date = zoned.date();
+    if date == today {
+        t("Today").into_owned()
+    } else if today.yesterday().ok() == Some(date) {
+        t("Yesterday").into_owned()
+    } else if date.year() == today.year() {
+        zoned.strftime("%A, %B %-d").to_string()
+    } else {
+        zoned.strftime("%A, %B %-d, %Y").to_string()
+    }
+}
+
+/// "5 minutes ago" for thread summaries.
+pub fn relative(ts: &crate::model::Ts) -> String {
+    use crate::i18n::{t, tn};
+    let Some(seconds) = ts.seconds() else {
+        return String::new();
+    };
+    let now = jiff::Timestamp::now().as_second();
+    let ago = (now - seconds).max(0);
+    let minutes = (ago / 60) as u32;
+    let hours = (ago / 3600) as u32;
+    let days = (ago / 86_400) as u32;
+    if ago < 60 {
+        t("just now").into_owned()
+    } else if minutes < 60 {
+        tn("{count} minute ago", "{count} minutes ago", minutes)
+    } else if hours < 24 {
+        tn("{count} hour ago", "{count} hours ago", hours)
+    } else {
+        tn("{count} day ago", "{count} days ago", days)
+    }
+}
+
+/// A human file size.
+pub fn file_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+/// The URI an image of `team` loads by: public URLs as they are, files
+/// through the authenticated loader.
+pub fn image_uri(team: &str, url: &str) -> String {
+    if url.starts_with("bytes://") || !url.contains("files.slack.com") {
+        url.to_owned()
+    } else {
+        crate::images::authed(team, url)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_read_naturally() {
+        assert_eq!(file_size(512), "512 B");
+        assert_eq!(file_size(48_213), "47.1 KB");
+        assert_eq!(file_size(5 * 1024 * 1024), "5.0 MB");
+    }
+
+    #[test]
+    fn files_need_the_token_and_avatars_do_not() {
+        assert_eq!(
+            image_uri("T1", "https://files.slack.com/files-pri/a.png"),
+            "nsauth:T1:https://files.slack.com/files-pri/a.png"
+        );
+        assert_eq!(
+            image_uri("T1", "https://avatars.slack-edge.com/a.png"),
+            "https://avatars.slack-edge.com/a.png"
+        );
+    }
+}
