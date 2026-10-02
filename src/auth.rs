@@ -24,19 +24,24 @@ pub const SCHEME: &str = "noslacking";
 pub const SCHEME_REDIRECT: &str = "noslacking://oauth/callback";
 
 /// Everything NoSlacking reads and does, as you. Keep in step with
-/// `slack-app-manifest.yaml`.
+/// `slack-app-manifest.json`.
 pub const USER_SCOPES: &[&str] = &[
     "channels:history",
     "channels:read",
+    "channels:write",
     "groups:history",
     "groups:read",
+    "groups:write",
     "im:history",
     "im:read",
+    "im:write",
     "mpim:history",
     "mpim:read",
+    "mpim:write",
     "chat:write",
-    "reactions:read",
     "reactions:write",
+    "stars:read",
+    "stars:write",
     "users:read",
     "files:read",
     "files:write",
