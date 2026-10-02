@@ -2351,6 +2351,13 @@ impl App {
                     self.backend.send(Command::Download { team, url, name });
                 }
             }
+            Action::OpenFile { url, name } => {
+                if let Some(team) = self.active_team() {
+                    // Fetching a video can take a while; say it started.
+                    self.toast(tf("Opening {name}…", &[("name", &name)]), false);
+                    self.backend.send(Command::OpenFile { team, url, name });
+                }
+            }
             Action::Sidebar(edit) => self.edit_sidebar(edit),
             // What floats over the window.
             Action::PickReaction { channel, ts } => {

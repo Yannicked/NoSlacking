@@ -1211,3 +1211,18 @@ msgstr "Volgende afbeelding (→)"
 
 msgid "Could not show this image: {error}"
 msgstr "Kan deze afbeelding niet tonen: {error}"
+
+msgid "Play {name}"
+msgstr "{name} afspelen"
+
+msgid "Open {name}"
+msgstr "{name} openen"
+
+msgid "Play in your media player"
+msgstr "Afspelen in je mediaspeler"
+
+msgid "Play in the browser"
+msgstr "Afspelen in de browser"
+
+msgid "Opening {name}…"
+msgstr "{name} wordt geopend…"
