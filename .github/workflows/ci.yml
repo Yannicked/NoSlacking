@@ -16,21 +16,30 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Every action is pinned by commit SHA (the tag is in the comment), so a moved
+# tag can't change what runs here. The toolchain comes from
+# rust-toolchain.toml through the runner's own rustup, so each job installs
+# exactly one compiler: the pinned one.
 jobs:
   quality:
     name: quality
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - name: GUI build dependencies
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain
+        run: rustup toolchain install
+      - name: GUI build dependencies and packaging validators
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake
-      - uses: Swatinem/rust-cache@v2
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake desktop-file-utils appstream
+      - name: Desktop entry
+        run: desktop-file-validate packaging/applications/cloud.yannick.NoSlacking.desktop
+      # The project has no public homepage yet; drop the override once
+      # the metainfo has a <url type="homepage">.
+      - name: AppStream metainfo
+        run: appstreamcli validate --no-net --override=url-homepage-missing=info packaging/metainfo/cloud.yannick.NoSlacking.metainfo.xml
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Formatting
         run: cargo fmt --all --check
       - name: Clippy (default features)
@@ -51,15 +60,39 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain
+        run: rustup toolchain install
       - name: GUI build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Linux is linted in `quality`; the macOS and Windows `cfg` code
+      # (keyring stores, single instance, the URL scheme) only here.
+      - name: Clippy (default features)
+        if: runner.os != 'Linux'
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Clippy (all features)
+        if: runner.os != 'Linux'
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --locked --all-features
+      - name: Build (what ships)
+        run: cargo build --locked
       - name: Demo build
         run: cargo build --locked --features demo
+
+  # Advisories, licenses, duplicate crates and where dependencies come from;
+  # the policy is deny.toml.
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features

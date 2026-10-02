@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
+# Built from git dependencies, so never published to crates.io; cargo-deny
+# also reads this to accept them.
+publish = false
 description = "A native Slack client"
 keywords = ["slack", "chat", "egui", "client"]
 categories = ["gui"]
@@ -56,10 +59,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 # Slack names emoji by shortcode (`:thumbsup:`); this is the table that turns
 # those into Unicode, and the picker's list.
 emojis = "0.9"
-sha1 = "0.10"
-sha2 = "0.10"
+sha1 = "0.11"
+sha2 = "0.11"
 base64 = "0.22"
-rand = "0.9"
+rand = "0.10"
 urlencoding = "2"
 open = "5"
 jiff = "0.2"
@@ -77,6 +80,9 @@ zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-tokio-c
 
 [build-dependencies]
 fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2", features = ["build"] }
+# The .exe's icon and version info (build.rs; it does nothing for other
+# targets). Without the toml feature it pulls in no parser.
+winresource = { version = "0.1", default-features = false }
 
 [features]
 # Sample data and the screenshot flag; never part of a release build.

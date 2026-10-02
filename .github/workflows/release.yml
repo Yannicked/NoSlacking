@@ -1,0 +1,142 @@
+name: Release
+
+# Pushing a tag like v0.2.0 builds every platform and publishes a GitHub
+# release with the archives attached. The tag must match the version in
+# Cargo.toml.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Actions are pinned by commit SHA, the release tag in the comment. Release
+# builds start from a clean target directory: no rust-cache.
+jobs:
+  linux:
+    name: linux x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain
+        run: rustup toolchain install
+      - name: Version
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          crate=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "$version" != "$crate" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $crate" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build dependencies and packaging validators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake desktop-file-utils appstream
+      - name: Build
+        run: cargo build --locked --release
+      - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          name="noslacking-$VERSION-linux-x86_64"
+          root="dist/$name"
+          mkdir -p "$root/bin" "$root/share/applications" "$root/share/metainfo" "$root/share/icons"
+          cp target/release/noslacking "$root/bin/"
+          cp packaging/applications/cloud.yannick.NoSlacking.desktop "$root/share/applications/"
+          cp packaging/metainfo/cloud.yannick.NoSlacking.metainfo.xml "$root/share/metainfo/"
+          cp -R packaging/icons/hicolor "$root/share/icons/"
+          cp LICENSE README.md "$root/"
+          desktop-file-validate "$root/share/applications/cloud.yannick.NoSlacking.desktop"
+          appstreamcli validate --no-net --override=url-homepage-missing=info "$root/share/metainfo/cloud.yannick.NoSlacking.metainfo.xml"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  macos:
+    name: macos universal
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Build
+        run: |
+          cargo build --locked --release --target aarch64-apple-darwin
+          cargo build --locked --release --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/noslacking \
+            target/aarch64-apple-darwin/release/noslacking \
+            target/x86_64-apple-darwin/release/noslacking
+          lipo -info dist/noslacking
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="noslacking-$version-macos-universal"
+          mkdir -p "dist/$name"
+          packaging/macos/bundle.sh dist/noslacking "$version" "dist/$name"
+          cp LICENSE README.md "dist/$name/"
+          # ditto keeps the bundle's symlinks, permissions and signature.
+          ditto -c -k --keepParent "dist/$name" "dist/$name.zip"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos
+          path: dist/*.zip
+          if-no-files-found: error
+
+  windows:
+    name: windows x86_64
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain
+        run: rustup toolchain install
+      - name: Build
+        run: cargo build --locked --release
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $name = "noslacking-$version-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item target/release/noslacking.exe, LICENSE, README.md "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # Creating the release and uploading its assets.
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

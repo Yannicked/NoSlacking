@@ -70,4 +70,4 @@ risk.
 
 ## License
 
-MIT.
+MIT; see [`LICENSE`](LICENSE).
