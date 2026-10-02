@@ -338,6 +338,358 @@ impl WorkspaceState {
 /// Where a file goes: the team, the channel and the thread, if any.
 type UploadTarget = (String, String, Option<Ts>);
 
+/// What a change from the worker leaves for [`App`] to do: the people and
+/// apps it named that are not known yet.
+#[derive(Debug, Default, PartialEq)]
+struct Arrived {
+    users: Vec<String>,
+    bots: Vec<String>,
+}
+
+// What the worker's events and your own actions change in one workspace.
+// Kept apart from `App` and free of side effects (no commands, toasts or
+// scrolling), so they can be tested without a backend.
+impl WorkspaceState {
+    /// The full (or a cached) list of conversations. Returns the people
+    /// to fetch for DMs.
+    fn conversations_arrived(&mut self, list: Vec<Conversation>, complete: bool) -> Vec<String> {
+        let mut merged = Vec::with_capacity(list.len());
+        for mut conversation in list {
+            if let Some(existing) = self.conversation(&conversation.id) {
+                let mut kept = existing.clone();
+                merge_conversation(&mut kept, conversation);
+                conversation = kept;
+            }
+            merged.push(conversation);
+        }
+        if !complete {
+            // A cached list: keep anything already known that it lacks.
+            for existing in &self.conversations {
+                if !merged.iter().any(|c| c.id == existing.id) {
+                    merged.push(existing.clone());
+                }
+            }
+        }
+        self.conversations = merged;
+        self.loaded = self.loaded || complete;
+        let users = self.unknown_users(self.conversations.iter().filter_map(|c| c.user.as_deref()));
+        let needs_open = match &self.active {
+            Some(id) => self.conversation(id).is_none() && complete,
+            None => true,
+        };
+        if needs_open {
+            self.active = self
+                .conversations
+                .iter()
+                .filter(|c| !c.kind.is_dm())
+                .min_by_key(|c| (c.name != "general", c.name.clone()))
+                .or_else(|| self.conversations.first())
+                .map(|c| c.id.clone());
+        }
+        users
+    }
+
+    /// Fresh details of one conversation. Returns the person to fetch, for
+    /// a DM with someone not known yet.
+    fn conversation_arrived(&mut self, conversation: Conversation) -> Vec<String> {
+        let fetch = self.unknown_users(conversation.user.as_deref().into_iter());
+        match self.conversation_mut(&conversation.id) {
+            Some(existing) => merge_conversation(existing, conversation),
+            None => self.conversations.push(conversation),
+        }
+        fetch
+    }
+
+    /// You left a conversation, or it was archived or deleted.
+    fn conversation_gone(&mut self, channel: &str) {
+        self.conversations.retain(|c| c.id != channel);
+        self.timelines.remove(channel);
+        self.threads.retain(|(c, _), _| c != channel);
+        if self.active.as_deref() == Some(channel) {
+            self.active = None;
+        }
+    }
+
+    fn users_arrived(&mut self, users: Vec<User>) {
+        for user in users {
+            self.requested_users.remove(&user.id);
+            self.users.insert(user.id.clone(), user);
+        }
+    }
+
+    fn bots_arrived(&mut self, bots: Vec<Bot>) {
+        for bot in bots {
+            self.requested_bots.remove(&bot.id);
+            self.bots.insert(bot.id.clone(), bot);
+        }
+    }
+
+    /// A page of a conversation's history. Returns whom to fetch, and
+    /// whether this was the first page.
+    fn history_arrived(
+        &mut self,
+        channel: &str,
+        messages: Vec<Message>,
+        has_more: bool,
+        cursor: Option<String>,
+        older: bool,
+    ) -> (Arrived, bool) {
+        let arrived = Arrived {
+            users: self.unknown_users(messages.iter().flat_map(|m| {
+                m.user
+                    .as_deref()
+                    .into_iter()
+                    .chain(m.reply_users.iter().map(String::as_str))
+            })),
+            bots: self.unknown_bots(messages.iter()),
+        };
+        let newest = messages.iter().map(|m| m.ts.clone()).max();
+        let timeline = self.timelines.entry(channel.to_owned()).or_default();
+        let first = !timeline.loaded;
+        timeline.merge(messages);
+        timeline.loading = false;
+        if older || first {
+            timeline.has_more = has_more;
+            timeline.cursor = cursor;
+        }
+        timeline.loaded = true;
+        if let (Some(newest), Some(conversation)) = (newest, self.conversation_mut(channel))
+            && conversation.latest.as_ref().is_none_or(|l| *l < newest)
+        {
+            conversation.latest = Some(newest);
+        }
+        (arrived, first)
+    }
+
+    fn history_failed(&mut self, channel: &str) {
+        if let Some(timeline) = self.timelines.get_mut(channel) {
+            timeline.loading = false;
+        }
+    }
+
+    /// A whole thread, parent first.
+    fn thread_arrived(&mut self, channel: &str, ts: Ts, messages: Vec<Message>) -> Arrived {
+        let arrived = Arrived {
+            users: self.unknown_users(messages.iter().filter_map(|m| m.user.as_deref())),
+            bots: self.unknown_bots(messages.iter()),
+        };
+        let replies = messages.iter().filter(|m| m.ts != ts).count() as u32;
+        if let Some(parent) = self
+            .timelines
+            .get_mut(channel)
+            .and_then(|t| t.find_mut(&ts))
+        {
+            parent.reply_count = parent.reply_count.max(replies);
+        }
+        let timeline = self.threads.entry((channel.to_owned(), ts)).or_default();
+        timeline.loading = false;
+        timeline.loaded = true;
+        // Keep replies still being sent.
+        let local: Vec<Message> = timeline
+            .messages
+            .iter()
+            .filter(|m| m.ts.is_local())
+            .cloned()
+            .collect();
+        timeline.messages = messages;
+        for message in local {
+            timeline.upsert(message);
+        }
+        arrived
+    }
+
+    /// A new or changed message, live. `viewing` says whether you are
+    /// looking at its conversation, which then gains no unread mention.
+    /// Returns whom to fetch, and whether the conversation is unknown and
+    /// should be fetched first.
+    fn message_arrived(
+        &mut self,
+        channel: &str,
+        message: Message,
+        viewing: bool,
+    ) -> (Arrived, bool) {
+        let mut arrived = Arrived {
+            users: self.unknown_users(message.user.as_deref().into_iter()),
+            bots: self.unknown_bots(std::iter::once(&message)),
+        };
+        let known = self.conversation(channel).is_some();
+        let from_me = message.user.as_deref() == Some(self.info.user_id.as_str());
+        let mentions_me = self.mentions_me(&message);
+        if message.is_reply() {
+            let parent_ts = message.thread_ts.clone().unwrap_or_default();
+            let key = (channel.to_owned(), parent_ts);
+            let already = self
+                .threads
+                .get(&key)
+                .is_some_and(|t| t.messages.iter().any(|m| m.ts == message.ts));
+            if !already
+                && let Some(parent) = self
+                    .timelines
+                    .get_mut(channel)
+                    .and_then(|t| t.find_mut(&key.1))
+            {
+                parent.reply_count += 1;
+                parent.latest_reply = Some(message.ts.clone());
+                if let Some(user) = &message.user
+                    && !parent.reply_users.contains(user)
+                {
+                    parent.reply_users.push(user.clone());
+                }
+            }
+            if let Some(thread) = self.threads.get_mut(&key) {
+                remove_echoed_local(thread, &message, from_me);
+                thread.upsert(message.clone());
+            }
+        }
+        if message.in_channel() {
+            let timeline = self.timelines.entry(channel.to_owned()).or_default();
+            remove_echoed_local(timeline, &message, from_me);
+            let new = timeline.find_mut(&message.ts).is_none();
+            let ts = message.ts.clone();
+            timeline.upsert(message);
+            if new && let Some(conversation) = self.conversation_mut(channel) {
+                if conversation.latest.as_ref().is_none_or(|l| *l < ts) {
+                    conversation.latest = Some(ts.clone());
+                }
+                if from_me {
+                    conversation.last_read = Some(ts);
+                    conversation.mentions = 0;
+                } else if !viewing && (mentions_me || conversation.kind.is_dm()) {
+                    conversation.mentions += 1;
+                }
+            }
+        }
+        let fetch_conversation = !known && self.requested_conversations.insert(channel.to_owned());
+        if !known {
+            // The conversation's details name its people; wait for them.
+            arrived.users.clear();
+        }
+        (arrived, fetch_conversation)
+    }
+
+    /// Slack answered a send: the optimistic copy `local` gives way to the
+    /// real message, or is marked as failed.
+    fn sent(&mut self, channel: &str, local: &Ts, result: &Result<Message, String>) {
+        for timeline in self.timelines_for_mut(channel) {
+            let Some(position) = timeline.messages.iter().position(|m| &m.ts == local) else {
+                continue;
+            };
+            match result {
+                Ok(message) => {
+                    timeline.messages.remove(position);
+                    // The echo from Socket Mode may already be there.
+                    if timeline.find_mut(&message.ts).is_none() {
+                        timeline.upsert(message.clone());
+                    }
+                }
+                Err(error) => {
+                    timeline.messages[position].delivery = Delivery::Failed(error.clone());
+                }
+            }
+        }
+        if let Ok(message) = result
+            && message.in_channel()
+            && let Some(conversation) = self.conversation_mut(channel)
+        {
+            conversation.latest = max_ts(conversation.latest.take(), Some(message.ts.clone()));
+            conversation.last_read =
+                max_ts(conversation.last_read.take(), Some(message.ts.clone()));
+        }
+    }
+
+    /// Someone reacted, or took a reaction back.
+    fn reaction_changed(&mut self, channel: &str, ts: &Ts, name: &str, user: &str, added: bool) {
+        for timeline in self.timelines_for_mut(channel) {
+            if let Some(message) = timeline.find_mut(ts) {
+                message.toggle_reaction(name, user, added);
+            }
+        }
+    }
+
+    /// You read up to `ts`, maybe on another device.
+    fn read_elsewhere(&mut self, channel: &str, ts: Ts) {
+        if let Some(conversation) = self.conversation_mut(channel) {
+            read_up_to(conversation, ts);
+        }
+    }
+
+    /// Shows a message you are sending before Slack has it.
+    fn add_local(&mut self, channel: &str, message: Message) {
+        let timeline = match &message.thread_ts {
+            Some(parent) => self
+                .threads
+                .entry((channel.to_owned(), parent.clone()))
+                .or_default(),
+            None => self.timelines.entry(channel.to_owned()).or_default(),
+        };
+        timeline.upsert(message);
+    }
+
+    /// Shows your edit at once.
+    fn edit_locally(&mut self, channel: &str, ts: &Ts, wire: &str) {
+        for timeline in self.timelines_for_mut(channel) {
+            if let Some(message) = timeline.find_mut(ts) {
+                message.text = wire.to_owned();
+                message.edited = true;
+            }
+        }
+    }
+
+    /// Adds your reaction, or takes it back if it is there. Returns
+    /// whether it was added, or `None` if the message is not loaded.
+    fn toggle_my_reaction(&mut self, channel: &str, ts: &Ts, name: &str) -> Option<bool> {
+        let me = self.info.user_id.clone();
+        let mut add = None;
+        for timeline in self.timelines_for_mut(channel) {
+            if let Some(message) = timeline.find_mut(ts) {
+                let adding = *add.get_or_insert_with(|| {
+                    !message
+                        .reactions
+                        .iter()
+                        .any(|r| r.name == name && r.users.contains(&me))
+                });
+                message.toggle_reaction(name, &me, adding);
+            }
+        }
+        add
+    }
+
+    /// Marks a failed message as sending again. Returns its text, thread
+    /// and broadcast flag, to send once more.
+    fn retry_local(&mut self, channel: &str, local: &Ts) -> Option<(String, Option<Ts>, bool)> {
+        let mut found = None;
+        for timeline in self.timelines_for_mut(channel) {
+            if let Some(message) = timeline.find_mut(local) {
+                message.delivery = Delivery::Sending;
+                found = Some((
+                    message.text.clone(),
+                    message.thread_ts.clone(),
+                    message.broadcast,
+                ));
+            }
+        }
+        found
+    }
+
+    /// Your newest message in the open conversation that can be edited.
+    fn last_editable(&self) -> Option<(String, Ts)> {
+        let channel = self.active.clone()?;
+        let me = self.info.user_id.as_str();
+        let ts = self
+            .timelines
+            .get(&channel)?
+            .messages
+            .iter()
+            .rev()
+            .find(|m| {
+                m.user.as_deref() == Some(me) && m.delivery == Delivery::Sent && !m.is_system()
+            })?
+            .ts
+            .clone();
+        Some((channel, ts))
+    }
+}
+
 /// The workspace on screen: the one chosen in `settings`, else the first.
 /// Views that borrow [`App`]'s fields apart call this instead of
 /// [`App::active_workspace`].
@@ -732,85 +1084,39 @@ impl App {
 
     fn handle(&mut self, event: Event) {
         match event {
-            Event::AppLoaded(app) => {
-                if let Some(app) = &app {
-                    self.setup.client_id = app.client_id.clone();
-                    self.setup.client_secret = app.client_secret.clone();
-                    self.setup.app_token = app.app_token.clone();
-                }
-                self.app_credentials = app;
-                self.app_loaded = true;
-            }
+            // The account: the app, the keyring, sign-in and the socket.
+            Event::AppLoaded(app) => self.app_loaded(app),
             Event::KeyringError(error) => {
                 self.toast(format!("{}: {error}", t("Keyring")), true);
                 self.keyring_error = Some(error);
             }
-            Event::SignIn(state) => {
-                if let SignIn::Done(name) = &state {
-                    self.toast(format!("{} {name}", t("Signed in to")), false);
-                    self.page = Page::Main;
-                    self.setup.user_token.clear();
-                }
-                self.sign_in = Some(state);
-            }
+            Event::SignIn(state) => self.sign_in_changed(state),
             Event::WorkspaceReady(info) => self.workspace_ready(info),
-            Event::SignedOut { team, reason } => match reason {
-                Some(reason) => {
-                    if let Some(workspace) = self.workspace_mut(&team) {
-                        workspace.signed_out = Some(reason);
-                    }
-                }
-                None => {
-                    self.workspaces.retain(|w| w.info.team_id != team);
-                    self.settings.remove_workspace(&team);
-                    self.save_settings();
-                    if self.workspaces.is_empty() {
-                        self.page = Page::SignIn;
-                    }
-                }
-            },
+            Event::SignedOut { team, reason } => self.signed_out(&team, reason),
+            Event::Socket(socket) => self.socket_changed(socket),
+            Event::Error(error) => self.toast(error, true),
+            Event::Notice(text) => self.toast(text, false),
+            // A workspace's conversations, people, apps and sidebar.
             Event::Conversations {
                 team,
                 list,
                 complete,
             } => self.conversations(&team, list, complete),
             Event::Conversation { team, conversation } => {
-                let Some(workspace) = self.workspace_mut(&team) else {
-                    return;
-                };
-                let mut fetch = Vec::new();
-                if let Some(user) = &conversation.user
-                    && !workspace.users.contains_key(user)
-                {
-                    fetch.push(user.clone());
-                }
-                match workspace.conversation_mut(&conversation.id) {
-                    Some(existing) => merge_conversation(existing, conversation),
-                    None => workspace.conversations.push(conversation),
-                }
-                self.fetch_users(&team, fetch);
-            }
-            Event::ConversationGone { team, channel } => {
                 if let Some(workspace) = self.workspace_mut(&team) {
-                    workspace.conversations.retain(|c| c.id != channel);
-                    workspace.timelines.remove(&channel);
-                    workspace.threads.retain(|(c, _), _| *c != channel);
-                    if workspace.active.as_deref() == Some(channel.as_str()) {
-                        workspace.active = None;
-                    }
-                }
-                if self.active_team().as_deref() == Some(team.as_str())
-                    && self.thread.as_ref().is_some_and(|(c, _)| *c == channel)
-                {
-                    self.thread = None;
+                    let users = workspace.conversation_arrived(conversation);
+                    self.fetch_users(&team, users);
                 }
             }
+            Event::ConversationGone { team, channel } => self.conversation_gone(&team, &channel),
             Event::Users { team, users } => {
                 if let Some(workspace) = self.workspace_mut(&team) {
-                    for user in users {
-                        workspace.requested_users.remove(&user.id);
-                        workspace.users.insert(user.id.clone(), user);
-                    }
+                    workspace.users_arrived(users);
+                }
+            }
+            Event::Bots { team, bots } => {
+                if let Some(workspace) = self.workspace_mut(&team) {
+                    workspace.bots_arrived(bots);
                 }
             }
             Event::Sections { team, sections } => {
@@ -818,19 +1124,12 @@ impl App {
                     workspace.sections = Some(sections);
                 }
             }
-            Event::Bots { team, bots } => {
-                if let Some(workspace) = self.workspace_mut(&team) {
-                    for bot in bots {
-                        workspace.requested_bots.remove(&bot.id);
-                        workspace.bots.insert(bot.id.clone(), bot);
-                    }
-                }
-            }
             Event::Emoji { team, emoji } => {
                 if let Some(workspace) = self.workspace_mut(&team) {
                     workspace.emoji = EmojiSet::new(emoji);
                 }
             }
+            // Messages and read state.
             Event::History {
                 team,
                 channel,
@@ -844,11 +1143,8 @@ impl App {
                 channel,
                 error,
             } => {
-                if let Some(timeline) = self
-                    .workspace_mut(&team)
-                    .and_then(|w| w.timelines.get_mut(&channel))
-                {
-                    timeline.loading = false;
+                if let Some(workspace) = self.workspace_mut(&team) {
+                    workspace.history_failed(&channel);
                 }
                 self.toast(format!("{}: {error}", t("Could not load messages")), true);
             }
@@ -858,36 +1154,10 @@ impl App {
                 ts,
                 messages,
             } => {
-                let Some(workspace) = self.workspace_mut(&team) else {
-                    return;
-                };
-                let users =
-                    workspace.unknown_users(messages.iter().filter_map(|m| m.user.as_deref()));
-                let bots = workspace.unknown_bots(messages.iter());
-                let replies = messages.iter().filter(|m| m.ts != ts).count() as u32;
-                if let Some(parent) = workspace
-                    .timelines
-                    .get_mut(&channel)
-                    .and_then(|t| t.find_mut(&ts))
-                {
-                    parent.reply_count = parent.reply_count.max(replies);
+                if let Some(workspace) = self.workspace_mut(&team) {
+                    let arrived = workspace.thread_arrived(&channel, ts, messages);
+                    self.fetch_arrived(&team, arrived);
                 }
-                let timeline = workspace.threads.entry((channel, ts)).or_default();
-                timeline.loading = false;
-                timeline.loaded = true;
-                // Keep replies still being sent.
-                let local: Vec<Message> = timeline
-                    .messages
-                    .iter()
-                    .filter(|m| m.ts.is_local())
-                    .cloned()
-                    .collect();
-                timeline.messages = messages;
-                for message in local {
-                    timeline.upsert(message);
-                }
-                self.fetch_users(&team, users);
-                self.fetch_bots(&team, bots);
             }
             Event::Message {
                 team,
@@ -904,11 +1174,7 @@ impl App {
                 added,
             } => {
                 if let Some(workspace) = self.workspace_mut(&team) {
-                    for timeline in workspace.timelines_for_mut(&channel) {
-                        if let Some(message) = timeline.find_mut(&ts) {
-                            message.toggle_reaction(&name, &user, added);
-                        }
-                    }
+                    workspace.reaction_changed(&channel, &ts, &name, &user, added);
                 }
             }
             Event::Sent {
@@ -918,25 +1184,30 @@ impl App {
                 result,
             } => self.sent(&team, &channel, &local, result),
             Event::Read { team, channel, ts } => {
-                if let Some(conversation) = self
-                    .workspace_mut(&team)
-                    .and_then(|w| w.conversation_mut(&channel))
-                {
-                    read_up_to(conversation, ts);
+                if let Some(workspace) = self.workspace_mut(&team) {
+                    workspace.read_elsewhere(&channel, ts);
                 }
             }
-            Event::Socket(socket) => {
-                if let Socket::Rejected(reason) = &socket {
-                    self.toast(
-                        format!("{} ({reason})", t("Slack refused the app-level token")),
-                        true,
-                    );
-                }
-                self.socket = socket;
-            }
-            Event::Error(error) => self.toast(error, true),
-            Event::Notice(text) => self.toast(text, false),
         }
+    }
+
+    fn app_loaded(&mut self, app: Option<AppCredentials>) {
+        if let Some(app) = &app {
+            self.setup.client_id = app.client_id.clone();
+            self.setup.client_secret = app.client_secret.clone();
+            self.setup.app_token = app.app_token.clone();
+        }
+        self.app_credentials = app;
+        self.app_loaded = true;
+    }
+
+    fn sign_in_changed(&mut self, state: SignIn) {
+        if let SignIn::Done(name) = &state {
+            self.toast(format!("{} {name}", t("Signed in to")), false);
+            self.page = Page::Main;
+            self.setup.user_token.clear();
+        }
+        self.sign_in = Some(state);
     }
 
     fn workspace_ready(&mut self, info: Workspace) {
@@ -965,59 +1236,59 @@ impl App {
         self.save_settings();
     }
 
+    /// A workspace needs signing in again (`reason`), or was signed out.
+    fn signed_out(&mut self, team: &str, reason: Option<String>) {
+        match reason {
+            Some(reason) => {
+                if let Some(workspace) = self.workspace_mut(team) {
+                    workspace.signed_out = Some(reason);
+                }
+            }
+            None => {
+                self.workspaces.retain(|w| w.info.team_id != team);
+                self.settings.remove_workspace(team);
+                self.save_settings();
+                if self.workspaces.is_empty() {
+                    self.page = Page::SignIn;
+                }
+            }
+        }
+    }
+
+    fn socket_changed(&mut self, socket: Socket) {
+        if let Socket::Rejected(reason) = &socket {
+            self.toast(
+                format!("{} ({reason})", t("Slack refused the app-level token")),
+                true,
+            );
+        }
+        self.socket = socket;
+    }
+
     fn conversations(&mut self, team: &str, list: Vec<Conversation>, complete: bool) {
         let active_team = self.active_team();
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
-        let mut merged = Vec::with_capacity(list.len());
-        for mut conversation in list {
-            if let Some(existing) = workspace.conversation(&conversation.id) {
-                let mut kept = existing.clone();
-                merge_conversation(&mut kept, conversation);
-                conversation = kept;
-            }
-            merged.push(conversation);
-        }
-        if !complete {
-            // A cached list: keep anything already known that it lacks.
-            for existing in &workspace.conversations {
-                if !merged.iter().any(|c| c.id == existing.id) {
-                    merged.push(existing.clone());
-                }
-            }
-        }
-        workspace.conversations = merged;
-        workspace.loaded = workspace.loaded || complete;
-        let users = workspace.unknown_users(
-            workspace
-                .conversations
-                .iter()
-                .filter_map(|c| c.user.as_deref()),
-        );
-        let needs_open = match &workspace.active {
-            Some(id) => workspace.conversation(id).is_none() && complete,
-            None => true,
-        };
-        if needs_open {
-            let first = workspace
-                .conversations
-                .iter()
-                .filter(|c| !c.kind.is_dm())
-                .min_by_key(|c| (c.name != "general", c.name.clone()))
-                .or_else(|| workspace.conversations.first())
-                .map(|c| c.id.clone());
-            workspace.active = None;
-            if let Some(first) = first {
-                workspace.active = Some(first);
-            }
-        }
+        let users = workspace.conversations_arrived(list, complete);
         let open = workspace.active.clone();
         self.fetch_users(team, users);
         if active_team.as_deref() == Some(team)
             && let Some(open) = open
         {
             self.ensure_loaded(team, &open);
+        }
+    }
+
+    /// A conversation is gone, and with it any thread open from it.
+    fn conversation_gone(&mut self, team: &str, channel: &str) {
+        if let Some(workspace) = self.workspace_mut(team) {
+            workspace.conversation_gone(channel);
+        }
+        if self.active_team().as_deref() == Some(team)
+            && self.thread.as_ref().is_some_and(|(c, _)| c == channel)
+        {
+            self.thread = None;
         }
     }
 
@@ -1033,28 +1304,8 @@ impl App {
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
-        let users = workspace.unknown_users(messages.iter().flat_map(|m| {
-            m.user
-                .as_deref()
-                .into_iter()
-                .chain(m.reply_users.iter().map(String::as_str))
-        }));
-        let bots = workspace.unknown_bots(messages.iter());
-        let newest = messages.iter().map(|m| m.ts.clone()).max();
-        let timeline = workspace.timelines.entry(channel.to_owned()).or_default();
-        let first = !timeline.loaded;
-        timeline.merge(messages);
-        timeline.loading = false;
-        if older || first {
-            timeline.has_more = has_more;
-            timeline.cursor = cursor;
-        }
-        timeline.loaded = true;
-        if let (Some(newest), Some(conversation)) = (newest, workspace.conversation_mut(channel))
-            && conversation.latest.as_ref().is_none_or(|l| *l < newest)
-        {
-            conversation.latest = Some(newest);
-        }
+        let (arrived, first) =
+            workspace.history_arrived(channel, messages, has_more, cursor, older);
         if older {
             self.prepended = Some((format!("{team}/{channel}"), 0.0));
         }
@@ -1062,8 +1313,7 @@ impl App {
             self.scroll_to_bottom
                 .insert(Self::draft_key(team, channel, None));
         }
-        self.fetch_users(team, users);
-        self.fetch_bots(team, bots);
+        self.fetch_arrived(team, arrived);
         if !older {
             self.mark_if_viewing(team, channel);
         }
@@ -1074,67 +1324,15 @@ impl App {
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
-        let mut users = workspace.unknown_users(message.user.as_deref().into_iter());
-        let bots = workspace.unknown_bots(std::iter::once(&message));
-        let known = workspace.conversation(channel).is_some();
         let from_me = message.user.as_deref() == Some(workspace.info.user_id.as_str());
-        let mentions_me = workspace.mentions_me(&message);
-        let is_reply = message.is_reply();
-        if is_reply {
-            let parent_ts = message.thread_ts.clone().unwrap_or_default();
-            if let Some(parent) = workspace
-                .timelines
-                .get_mut(channel)
-                .and_then(|t| t.find_mut(&parent_ts))
-            {
-                let thread = workspace
-                    .threads
-                    .get(&(channel.to_owned(), parent_ts.clone()));
-                let already = thread.is_some_and(|t| t.messages.iter().any(|m| m.ts == message.ts));
-                if !already {
-                    parent.reply_count += 1;
-                    parent.latest_reply = Some(message.ts.clone());
-                    if let Some(user) = &message.user
-                        && !parent.reply_users.contains(user)
-                    {
-                        parent.reply_users.push(user.clone());
-                    }
-                }
-            }
-            if let Some(thread) = workspace.threads.get_mut(&(channel.to_owned(), parent_ts)) {
-                remove_echoed_local(thread, &message, from_me);
-                thread.upsert(message.clone());
-            }
+        let (arrived, fetch_conversation) = workspace.message_arrived(channel, message, viewing);
+        if fetch_conversation {
+            self.backend.send(Command::FetchConversation {
+                team: team.to_owned(),
+                channel: channel.to_owned(),
+            });
         }
-        if message.in_channel() {
-            let timeline = workspace.timelines.entry(channel.to_owned()).or_default();
-            remove_echoed_local(timeline, &message, from_me);
-            let new = timeline.find_mut(&message.ts).is_none();
-            timeline.upsert(message.clone());
-            if new && let Some(conversation) = workspace.conversation_mut(channel) {
-                if conversation.latest.as_ref().is_none_or(|l| *l < message.ts) {
-                    conversation.latest = Some(message.ts.clone());
-                }
-                if from_me {
-                    conversation.last_read = Some(message.ts.clone());
-                    conversation.mentions = 0;
-                } else if !viewing && (mentions_me || conversation.kind.is_dm()) {
-                    conversation.mentions += 1;
-                }
-            }
-        }
-        if !known {
-            if workspace.requested_conversations.insert(channel.to_owned()) {
-                self.backend.send(Command::FetchConversation {
-                    team: team.to_owned(),
-                    channel: channel.to_owned(),
-                });
-            }
-            users.clear();
-        }
-        let team_owned = team.to_owned();
-        self.fetch_users(&team_owned, users);
-        self.fetch_bots(&team_owned, bots);
+        self.fetch_arrived(team, arrived);
         if viewing && !from_me {
             self.mark_if_viewing(team, channel);
         }
@@ -1147,32 +1345,8 @@ impl App {
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
-        let error = result.as_ref().err().cloned();
-        for timeline in workspace.timelines_for_mut(channel) {
-            let Some(position) = timeline.messages.iter().position(|m| &m.ts == local) else {
-                continue;
-            };
-            match &result {
-                Ok(message) => {
-                    timeline.messages.remove(position);
-                    // The echo from Socket Mode may already be there.
-                    if timeline.find_mut(&message.ts).is_none() {
-                        timeline.upsert(message.clone());
-                    }
-                }
-                Err(error) => {
-                    timeline.messages[position].delivery = Delivery::Failed(error.clone());
-                }
-            }
-        }
-        if let Ok(message) = &result
-            && message.in_channel()
-            && let Some(conversation) = workspace.conversation_mut(channel)
-        {
-            conversation.latest = Some(message.ts.clone());
-            conversation.last_read = Some(message.ts.clone());
-        }
-        if let Some(error) = error {
+        workspace.sent(channel, local, &result);
+        if let Err(error) = result {
             self.toast(format!("{}: {error}", t("Message not sent")), true);
         }
     }
@@ -1190,6 +1364,11 @@ impl App {
         {
             self.thread = None;
         }
+    }
+
+    fn fetch_arrived(&mut self, team: &str, arrived: Arrived) {
+        self.fetch_users(team, arrived.users);
+        self.fetch_bots(team, arrived.bots);
     }
 
     fn fetch_users(&mut self, team: &str, ids: Vec<String>) {
@@ -1383,42 +1562,9 @@ impl App {
         let Some(workspace) = self.workspace_mut(&team) else {
             return;
         };
-        let message = Message {
-            ts: local.clone(),
-            user: Some(workspace.info.user_id.clone()),
-            username: None,
-            bot_icon: None,
-            bot_id: None,
-            text: wire.clone(),
-            thread_ts: thread.clone(),
-            reply_count: 0,
-            reply_users: Vec::new(),
-            latest_reply: None,
-            reactions: Vec::new(),
-            files: Vec::new(),
-            attachments: Vec::new(),
-            blocks: Vec::new(),
-            edited: false,
-            subtype: None,
-            delivery: Delivery::Sending,
-            broadcast,
-        };
-        match &thread {
-            Some(parent) => {
-                workspace
-                    .threads
-                    .entry((channel.clone(), parent.clone()))
-                    .or_default()
-                    .upsert(message);
-            }
-            None => workspace
-                .timelines
-                .entry(channel.clone())
-                .or_default()
-                .upsert(message),
-        }
-        self.scroll_to_bottom
-            .insert(Self::draft_key(&team, &channel, thread.as_ref()));
+        let message = local_message(&workspace.info.user_id, &local, &wire, &thread, broadcast);
+        workspace.add_local(&channel, message);
+        self.scroll_to_bottom.insert(key);
         self.backend.send(Command::Send {
             team,
             channel,
@@ -1433,20 +1579,9 @@ impl App {
         let Some(team) = self.active_team() else {
             return;
         };
-        let Some(workspace) = self.workspace_mut(&team) else {
-            return;
-        };
-        let mut found = None;
-        for timeline in workspace.timelines_for_mut(channel) {
-            if let Some(message) = timeline.find_mut(local) {
-                message.delivery = Delivery::Sending;
-                found = Some((
-                    message.text.clone(),
-                    message.thread_ts.clone(),
-                    message.broadcast,
-                ));
-            }
-        }
+        let found = self
+            .workspace_mut(&team)
+            .and_then(|w| w.retry_local(channel, local));
         if let Some((text, thread, broadcast)) = found {
             self.backend.send(Command::Send {
                 team,
@@ -1463,22 +1598,9 @@ impl App {
         let Some(team) = self.active_team() else {
             return;
         };
-        let Some(workspace) = self.workspace_mut(&team) else {
-            return;
-        };
-        let me = workspace.info.user_id.clone();
-        let mut add = None;
-        for timeline in workspace.timelines_for_mut(channel) {
-            if let Some(message) = timeline.find_mut(ts) {
-                let adding = *add.get_or_insert_with(|| {
-                    !message
-                        .reactions
-                        .iter()
-                        .any(|r| r.name == name && r.users.contains(&me))
-                });
-                message.toggle_reaction(name, &me, adding);
-            }
-        }
+        let add = self
+            .workspace_mut(&team)
+            .and_then(|w| w.toggle_my_reaction(channel, ts, name));
         if let Some(add) = add {
             self.backend.send(Command::React {
                 team,
@@ -1487,6 +1609,38 @@ impl App {
                 name: name.to_owned(),
                 add,
             });
+        }
+    }
+
+    fn edit(&mut self, channel: String, ts: Ts, text: String) {
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        let mentions = self
+            .editing
+            .take()
+            .filter(|e| e.ts == ts && e.channel == channel)
+            .map(|e| e.mentions)
+            .unwrap_or_default();
+        let wire = to_wire(&text, &mentions);
+        if let Some(workspace) = self.workspace_mut(&team) {
+            workspace.edit_locally(&channel, &ts, &wire);
+        }
+        self.backend.send(Command::Edit {
+            team,
+            channel,
+            ts,
+            text: wire,
+        });
+    }
+
+    fn delete(&mut self, channel: String, ts: Ts) {
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        self.remove_message(&team, &channel, &ts);
+        if !ts.is_local() {
+            self.backend.send(Command::Delete { team, channel, ts });
         }
     }
 
@@ -1513,210 +1667,30 @@ impl App {
         }
     }
 
+    fn pick_upload(&mut self, thread: Option<Ts>) {
+        // Decided now: the dialog may stay open while you switch to
+        // another conversation, and the file belongs to this one.
+        let Some(target) = self.upload_target(thread) else {
+            return;
+        };
+        let sender = self.uploads.0.clone();
+        let waker = self.waker.clone();
+        std::thread::spawn(move || {
+            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                let _ = sender.send((target, path));
+                waker.wake();
+            }
+        });
+    }
+
     fn apply(&mut self, action: Action, ctx: &egui::Context) {
         match action {
-            Action::SelectWorkspace(team) => {
-                self.settings.active_workspace = Some(team.clone());
-                self.save_settings();
-                self.thread = None;
-                self.page = Page::Main;
-                self.prepended = None;
-                if let Some(channel) = self.workspace_mut(&team).and_then(|w| w.active.clone()) {
-                    self.scroll_to_bottom
-                        .insert(Self::draft_key(&team, &channel, None));
-                    self.remember_read_line(&team, &channel);
-                    self.ensure_loaded(&team, &channel);
-                    self.mark_read(&team, &channel);
-                } else {
-                    self.backend.send(Command::Focus {
-                        team,
-                        channel: None,
-                    });
-                }
-            }
+            // Where you are.
+            Action::SelectWorkspace(team) => self.select_workspace(team),
             Action::OpenConversation(channel) => self.open_conversation(&channel),
-            Action::OpenThread { channel, ts } => {
-                let Some(team) = self.active_team() else {
-                    return;
-                };
-                self.thread = Some((channel.clone(), ts.clone()));
-                if let Some(workspace) = self.workspace_mut(&team) {
-                    workspace
-                        .threads
-                        .entry((channel.clone(), ts.clone()))
-                        .or_default()
-                        .loading = true;
-                }
-                self.backend.send(Command::LoadThread { team, channel, ts });
-            }
+            Action::OpenThread { channel, ts } => self.open_thread(channel, ts),
             Action::CloseThread => self.thread = None,
-            Action::LoadOlder => {
-                let Some(team) = self.active_team() else {
-                    return;
-                };
-                let Some(workspace) = self.workspace_mut(&team) else {
-                    return;
-                };
-                let Some(channel) = workspace.active.clone() else {
-                    return;
-                };
-                if let Some(timeline) = workspace.timelines.get_mut(&channel)
-                    && timeline.has_more
-                    && !timeline.loading
-                    && let Some(cursor) = timeline.cursor.clone()
-                {
-                    timeline.loading = true;
-                    self.backend.send(Command::LoadOlder {
-                        team,
-                        channel,
-                        cursor,
-                    });
-                }
-            }
-            Action::Send {
-                text,
-                thread,
-                broadcast,
-            } => self.send(text, thread, broadcast),
-            Action::Retry { channel, local } => self.retry(&channel, &local),
-            Action::Edit { channel, ts, text } => {
-                let Some(team) = self.active_team() else {
-                    return;
-                };
-                let mentions = self
-                    .editing
-                    .take()
-                    .filter(|e| e.ts == ts && e.channel == channel)
-                    .map(|e| e.mentions)
-                    .unwrap_or_default();
-                let wire = to_wire(&text, &mentions);
-                if let Some(workspace) = self.workspace_mut(&team) {
-                    for timeline in workspace.timelines_for_mut(&channel) {
-                        if let Some(message) = timeline.find_mut(&ts) {
-                            message.text = wire.clone();
-                            message.edited = true;
-                        }
-                    }
-                }
-                self.backend.send(Command::Edit {
-                    team,
-                    channel,
-                    ts,
-                    text: wire,
-                });
-            }
-            Action::Delete { channel, ts } => {
-                let Some(team) = self.active_team() else {
-                    return;
-                };
-                self.remove_message(&team, &channel, &ts);
-                if !ts.is_local() {
-                    self.backend.send(Command::Delete { team, channel, ts });
-                }
-            }
-            Action::React { channel, ts, name } => self.react(&channel, &ts, &name),
-            Action::PickReaction { channel, ts } => {
-                self.focus_overlay = true;
-                self.picker_query.clear();
-                self.picker = Some(PickerTarget::Reaction { channel, ts });
-            }
-            Action::PickEmoji { draft } => {
-                self.focus_overlay = true;
-                self.picker_query.clear();
-                self.picker = Some(PickerTarget::Draft(draft));
-            }
-            Action::StartEdit { channel, ts } => self.start_edit(channel, ts, false),
-            Action::StartEditInThread { channel, ts } => self.start_edit(channel, ts, true),
-            Action::CancelEdit => self.editing = None,
-            Action::EditLast => {
-                let found = self.active_workspace().and_then(|w| {
-                    let channel = w.active.clone()?;
-                    let me = w.info.user_id.as_str();
-                    let ts = w
-                        .timelines
-                        .get(&channel)?
-                        .messages
-                        .iter()
-                        .rev()
-                        .find(|m| {
-                            m.user.as_deref() == Some(me)
-                                && m.delivery == Delivery::Sent
-                                && !m.is_system()
-                        })?
-                        .ts
-                        .clone();
-                    Some((channel, ts))
-                });
-                if let Some((channel, ts)) = found {
-                    self.actions.push(Action::StartEdit { channel, ts });
-                }
-            }
-            Action::AskDelete { channel, ts } => self.confirm_delete = Some((channel, ts)),
-            Action::NameSection { rename, channel } => {
-                let name = rename
-                    .as_deref()
-                    .and_then(|id| {
-                        self.active_workspace()?
-                            .sections
-                            .as_ref()?
-                            .iter()
-                            .find(|s| s.id == id)
-                            .map(|s| s.name.clone())
-                    })
-                    .unwrap_or_default();
-                self.focus_overlay = true;
-                self.section_dialog = Some(SectionDialog {
-                    rename,
-                    channel,
-                    name,
-                });
-            }
-            Action::Sidebar(edit) => self.edit_sidebar(edit),
-            Action::Preview { uri, name } => self.preview = Some((uri, name)),
-            Action::OpenSwitcher => {
-                self.focus_overlay = true;
-                self.switcher = Some((String::new(), 0));
-            }
-            Action::Upload {
-                thread,
-                path,
-                comment,
-            } => self.upload(thread, path, comment),
-            Action::PickUpload { thread } => {
-                // Decided now: the dialog may stay open while you switch to
-                // another conversation, and the file belongs to this one.
-                let Some(target) = self.upload_target(thread) else {
-                    return;
-                };
-                let sender = self.uploads.0.clone();
-                let waker = self.waker.clone();
-                std::thread::spawn(move || {
-                    if let Some(path) = rfd::FileDialog::new().pick_file() {
-                        let _ = sender.send((target, path));
-                        waker.wake();
-                    }
-                });
-            }
-            Action::Download { url, name } => {
-                if let Some(team) = self.active_team() {
-                    self.backend.send(Command::Download { team, url, name });
-                }
-            }
-            Action::OpenUrl(url) => {
-                if let Some(channel) = slack_link_channel(&url, self.active_workspace()) {
-                    self.open_conversation(&channel);
-                } else if !mrkdwn::is_openable(&url) {
-                    // Attachments and blocks carry URLs a bot chose.
-                    self.toast(t("Only web and mail links can be opened"), true);
-                } else if let Err(error) = open::that_detached(&url) {
-                    self.toast(format!("{}: {error}", t("Could not open the link")), true);
-                }
-            }
-            Action::OpenProfile(user) => self.profile = Some(user),
-            Action::Copy(text) => {
-                ctx.copy_text(text);
-                self.toast(t("Copied").into_owned(), false);
-            }
+            Action::LoadOlder => self.load_older(),
             Action::ShowSettings => self.page = Page::Settings,
             Action::HideSettings => {
                 self.page = if self.workspaces.is_empty() {
@@ -1725,13 +1699,68 @@ impl App {
                     Page::Main
                 };
             }
+            // Messages.
+            Action::Send {
+                text,
+                thread,
+                broadcast,
+            } => self.send(text, thread, broadcast),
+            Action::Retry { channel, local } => self.retry(&channel, &local),
+            Action::Edit { channel, ts, text } => self.edit(channel, ts, text),
+            Action::Delete { channel, ts } => self.delete(channel, ts),
+            Action::React { channel, ts, name } => self.react(&channel, &ts, &name),
+            Action::StartEdit { channel, ts } => self.start_edit(channel, ts, false),
+            Action::StartEditInThread { channel, ts } => self.start_edit(channel, ts, true),
+            Action::CancelEdit => self.editing = None,
+            Action::EditLast => {
+                if let Some((channel, ts)) = self.active_workspace().and_then(|w| w.last_editable())
+                {
+                    self.actions.push(Action::StartEdit { channel, ts });
+                }
+            }
+            Action::Upload {
+                thread,
+                path,
+                comment,
+            } => self.upload(thread, path, comment),
+            Action::PickUpload { thread } => self.pick_upload(thread),
+            Action::Download { url, name } => {
+                if let Some(team) = self.active_team() {
+                    self.backend.send(Command::Download { team, url, name });
+                }
+            }
+            Action::Sidebar(edit) => self.edit_sidebar(edit),
+            // What floats over the window.
+            Action::PickReaction { channel, ts } => {
+                self.open_picker(PickerTarget::Reaction { channel, ts });
+            }
+            Action::PickEmoji { draft } => self.open_picker(PickerTarget::Draft(draft)),
+            Action::AskDelete { channel, ts } => self.confirm_delete = Some((channel, ts)),
+            Action::NameSection { rename, channel } => self.name_section(rename, channel),
+            Action::Preview { uri, name } => self.preview = Some((uri, name)),
+            Action::OpenSwitcher => {
+                self.focus_overlay = true;
+                self.switcher = Some((String::new(), 0));
+            }
+            Action::OpenProfile(user) => self.profile = Some(user),
+            Action::DismissError => self.toasts.clear(),
+            // Leaving the app: links, folders and the clipboard.
+            Action::OpenUrl(url) => self.open_url(&url),
+            Action::OpenFolder(path) => {
+                if let Err(error) = open::that_detached(&path) {
+                    self.toast(format!("{}: {error}", t("Could not open the folder")), true);
+                }
+            }
+            Action::Copy(text) => {
+                ctx.copy_text(text);
+                self.toast(t("Copied").into_owned(), false);
+            }
+            // Accounts and sign-in.
             Action::AddWorkspace => {
                 self.sign_in = None;
                 self.page = Page::SignIn;
             }
-            Action::SignOut(team) => {
-                self.backend.send(Command::SignOut(team));
-            }
+            Action::SignOut(team) => self.backend.send(Command::SignOut(team)),
             Action::Reconnect => self.backend.send(Command::Reconnect),
             Action::SignInSession => {
                 self.sign_in = None;
@@ -1744,17 +1773,7 @@ impl App {
                 let token = self.setup.user_token.trim().to_owned();
                 self.backend.send(Command::PasteToken(token));
             }
-            Action::SaveApp => {
-                let form = AppCredentials {
-                    client_id: self.setup.client_id.trim().to_owned(),
-                    client_secret: self.setup.client_secret.trim().to_owned(),
-                    app_token: self.setup.app_token.trim().to_owned(),
-                };
-                if form.can_sign_in() {
-                    self.backend.send(Command::SaveApp(form.clone()));
-                    self.app_credentials = Some(form);
-                }
-            }
+            Action::SaveApp => self.save_app(),
             Action::StartSignIn => {
                 self.sign_in = None;
                 self.backend.send(Command::StartSignIn {
@@ -1766,12 +1785,114 @@ impl App {
                 self.backend.send(Command::CancelSignIn);
                 self.sign_in = None;
             }
-            Action::OpenFolder(path) => {
-                if let Err(error) = open::that_detached(&path) {
-                    self.toast(format!("{}: {error}", t("Could not open the folder")), true);
-                }
-            }
-            Action::DismissError => self.toasts.clear(),
+        }
+    }
+
+    fn select_workspace(&mut self, team: String) {
+        self.settings.active_workspace = Some(team.clone());
+        self.save_settings();
+        self.thread = None;
+        self.page = Page::Main;
+        self.prepended = None;
+        if let Some(channel) = self.workspace_mut(&team).and_then(|w| w.active.clone()) {
+            self.scroll_to_bottom
+                .insert(Self::draft_key(&team, &channel, None));
+            self.remember_read_line(&team, &channel);
+            self.ensure_loaded(&team, &channel);
+            self.mark_read(&team, &channel);
+        } else {
+            self.backend.send(Command::Focus {
+                team,
+                channel: None,
+            });
+        }
+    }
+
+    fn open_thread(&mut self, channel: String, ts: Ts) {
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        self.thread = Some((channel.clone(), ts.clone()));
+        if let Some(workspace) = self.workspace_mut(&team) {
+            workspace
+                .threads
+                .entry((channel.clone(), ts.clone()))
+                .or_default()
+                .loading = true;
+        }
+        self.backend.send(Command::LoadThread { team, channel, ts });
+    }
+
+    fn load_older(&mut self) {
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        let Some(workspace) = self.workspace_mut(&team) else {
+            return;
+        };
+        let Some(channel) = workspace.active.clone() else {
+            return;
+        };
+        if let Some(timeline) = workspace.timelines.get_mut(&channel)
+            && timeline.has_more
+            && !timeline.loading
+            && let Some(cursor) = timeline.cursor.clone()
+        {
+            timeline.loading = true;
+            self.backend.send(Command::LoadOlder {
+                team,
+                channel,
+                cursor,
+            });
+        }
+    }
+
+    fn open_picker(&mut self, target: PickerTarget) {
+        self.focus_overlay = true;
+        self.picker_query.clear();
+        self.picker = Some(target);
+    }
+
+    fn name_section(&mut self, rename: Option<String>, channel: Option<String>) {
+        let name = rename
+            .as_deref()
+            .and_then(|id| {
+                self.active_workspace()?
+                    .sections
+                    .as_ref()?
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|s| s.name.clone())
+            })
+            .unwrap_or_default();
+        self.focus_overlay = true;
+        self.section_dialog = Some(SectionDialog {
+            rename,
+            channel,
+            name,
+        });
+    }
+
+    fn open_url(&mut self, url: &str) {
+        if let Some(channel) = slack_link_channel(url, self.active_workspace()) {
+            self.open_conversation(&channel);
+        } else if !mrkdwn::is_openable(url) {
+            // Attachments and blocks carry URLs a bot chose.
+            self.toast(t("Only web and mail links can be opened"), true);
+        } else if let Err(error) = open::that_detached(url) {
+            self.toast(format!("{}: {error}", t("Could not open the link")), true);
+        }
+    }
+
+    fn save_app(&mut self) {
+        let form = AppCredentials {
+            client_id: self.setup.client_id.trim().to_owned(),
+            client_secret: self.setup.client_secret.trim().to_owned(),
+            app_token: self.setup.app_token.trim().to_owned(),
+        };
+        if form.can_sign_in() {
+            self.backend.send(Command::SaveApp(form.clone()));
+            self.app_credentials = Some(form);
         }
     }
 
@@ -1885,6 +2006,36 @@ fn max_ts(a: Option<Ts>, b: Option<Ts>) -> Option<Ts> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
+    }
+}
+
+/// The copy of a message you are sending that shows until Slack answers.
+fn local_message(
+    me: &str,
+    local: &Ts,
+    wire: &str,
+    thread: &Option<Ts>,
+    broadcast: bool,
+) -> Message {
+    Message {
+        ts: local.clone(),
+        user: Some(me.to_owned()),
+        username: None,
+        bot_icon: None,
+        bot_id: None,
+        text: wire.to_owned(),
+        thread_ts: thread.clone(),
+        reply_count: 0,
+        reply_users: Vec::new(),
+        latest_reply: None,
+        reactions: Vec::new(),
+        files: Vec::new(),
+        attachments: Vec::new(),
+        blocks: Vec::new(),
+        edited: false,
+        subtype: None,
+        delivery: Delivery::Sending,
+        broadcast,
     }
 }
 
