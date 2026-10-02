@@ -637,6 +637,8 @@ pub enum Action {
     SignInSession,
     /// Signs in with the pasted `slack://` link from the browser sign-in.
     SignInLink,
+    /// Opens Slack's sign-in page in the browser.
+    StartBrowserSignIn,
     /// Signs in with the user token from the form.
     PasteToken,
     /// Saves the Slack app's credentials from the form.

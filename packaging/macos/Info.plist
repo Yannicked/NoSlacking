@@ -33,6 +33,7 @@
       <key>CFBundleURLSchemes</key>
       <array>
         <string>noslacking</string>
+        <string>slack</string>
       </array>
     </dict>
   </array>
