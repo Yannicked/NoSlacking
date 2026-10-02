@@ -148,6 +148,15 @@ pub enum Command {
     FetchDnd {
         team: String,
     },
+    /// Mutes or unmutes a conversation in your Slack preferences (browser
+    /// sessions). `all` is every muted conversation after the change, for
+    /// the older preference that lists them.
+    Mute {
+        team: String,
+        channel: String,
+        muted: bool,
+        all: Vec<String>,
+    },
 }
 
 /// Prints every field except the secrets: a pasted token, the session
@@ -308,6 +317,18 @@ impl std::fmt::Debug for Command {
                 .field("minutes", minutes)
                 .finish(),
             Self::FetchDnd { team } => f.debug_struct("FetchDnd").field("team", team).finish(),
+            Self::Mute {
+                team,
+                channel,
+                muted,
+                all,
+            } => f
+                .debug_struct("Mute")
+                .field("team", team)
+                .field("channel", channel)
+                .field("muted", muted)
+                .field("all", all)
+                .finish(),
         }
     }
 }
@@ -464,6 +485,11 @@ pub enum Event {
     Dnd {
         team: String,
         dnd: crate::dnd::Dnd,
+    },
+    /// Your notification preferences in a workspace (browser sessions).
+    SlackPrefs {
+        team: String,
+        prefs: crate::desktop::SlackPrefs,
     },
 }
 

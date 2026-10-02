@@ -395,6 +395,13 @@ impl Worker {
             workspace.team_id.clone(),
             self.sink_for(&workspace.team_id),
         ));
+        if session {
+            tokio::spawn(super::desktop::prefs(
+                client.clone(),
+                workspace.team_id.clone(),
+                self.sink_for(&workspace.team_id),
+            ));
+        }
         // Signing in again replaces the old sign-in and its tasks.
         if let Some(old) = replaced {
             old.shut();
@@ -608,6 +615,18 @@ impl Worker {
             Command::Snooze { team, minutes } => {
                 if let Some((client, sink)) = self.team(&team) {
                     tokio::spawn(super::desktop::snooze(client, team, minutes, sink));
+                }
+            }
+            Command::Mute {
+                team,
+                channel,
+                muted,
+                all,
+            } => {
+                if let Some((client, sink)) = self.team(&team) {
+                    tokio::spawn(super::desktop::mute(
+                        client, team, channel, muted, all, sink,
+                    ));
                 }
             }
             Command::FetchDnd { team } => {
@@ -1375,6 +1394,13 @@ impl Worker {
                 Translated::RefreshSections => {
                     if let Some((client, sink)) = self.team(team) {
                         tokio::spawn(sections(client, team.to_owned(), sink));
+                    }
+                }
+                Translated::RefreshPrefs => {
+                    if let Some((client, sink)) = self.team(team)
+                        && client.token().is_session()
+                    {
+                        tokio::spawn(super::desktop::prefs(client, team.to_owned(), sink));
                     }
                 }
             }
@@ -2412,6 +2438,8 @@ enum Translated {
     Refresh(String),
     /// The sidebar's sections changed in another Slack client.
     RefreshSections,
+    /// Your notification preferences changed in another Slack client.
+    RefreshPrefs,
 }
 
 fn str_of<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -2548,6 +2576,12 @@ fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> {
         | "channel_sections_channels_removed"
         | "star_added"
         | "star_removed" => out.push(Translated::RefreshSections),
+        // Mutes, notification levels or keywords changed in another client.
+        "pref_change" => {
+            if super::desktop::is_notification_pref(str_of(event, "name").unwrap_or("")) {
+                out.push(Translated::RefreshPrefs);
+            }
+        }
         // Your own Do Not Disturb changed, here or in another client.
         "dnd_updated" => {
             if let Some(dnd) = super::desktop::dnd_event(event) {

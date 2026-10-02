@@ -657,6 +657,11 @@ pub enum Action {
     /// Snoozes notifications in the open workspace, or with `None` ends
     /// the snooze.
     Snooze(Option<crate::dnd::Snooze>),
+    /// Mutes or unmutes a conversation in the open workspace.
+    Mute {
+        channel: String,
+        muted: bool,
+    },
 }
 
 #[cfg(test)]

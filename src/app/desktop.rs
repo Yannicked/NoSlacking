@@ -41,9 +41,11 @@ impl Desktop {
 /// What is waiting across `workspaces`, for the title and the badge.
 pub(super) fn unread(workspaces: &[WorkspaceState]) -> Unread {
     let mut total = Unread::default();
-    for conversation in workspaces.iter().flat_map(|w| &w.conversations) {
-        total.mentions = total.mentions.saturating_add(conversation.mentions);
-        total.unread |= conversation.has_unread();
+    for workspace in workspaces {
+        for conversation in &workspace.conversations {
+            total.mentions = total.mentions.saturating_add(conversation.mentions);
+            total.unread |= workspace.is_unread(conversation);
+        }
     }
     total
 }
@@ -118,7 +120,7 @@ impl App {
             return None;
         }
         let workspace = self.workspaces.iter().find(|w| w.info.team_id == team)?;
-        if workspace.desktop.dnd.quiet(now_seconds()) {
+        if workspace.desktop.dnd.quiet(now_seconds()) || workspace.desktop.is_muted(channel) {
             return None;
         }
         let conversation = workspace.conversation(channel);
@@ -133,13 +135,19 @@ impl App {
         let kind = conversation.map_or_else(|| kind_from_id(channel), |c| c.kind);
         let level = workspace.desktop.level(channel, kind);
         let plain = plain_text(workspace, message);
+        let keywords: Vec<String> = settings
+            .keywords
+            .iter()
+            .chain(workspace.desktop.slack_keywords())
+            .cloned()
+            .collect();
         notify::reason(
             kind,
             message,
             &plain,
             &workspace.info.user_id,
             level,
-            &settings.keywords,
+            &keywords,
         )?;
         let author = workspace.author(message);
         let place = match conversation {
@@ -281,6 +289,49 @@ impl App {
         }
     }
 
+    /// Your notification preferences from Slack, for a browser session.
+    pub(super) fn prefs_arrived(&mut self, team: &str, prefs: crate::desktop::SlackPrefs) {
+        if let Some(workspace) = self.workspace_mut(team) {
+            workspace.desktop.slack = Some(prefs);
+        }
+    }
+
+    /// Mutes or unmutes a conversation in the open workspace: in Slack for
+    /// a browser session, on this computer otherwise. It shows at once.
+    pub(super) fn mute(&mut self, channel: &str, muted: bool) {
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        let demo = self.demo;
+        let Some(workspace) = self.workspace_mut(&team) else {
+            return;
+        };
+        if let Some(slack) = &mut workspace.desktop.slack {
+            if muted {
+                slack.muted.insert(channel.to_owned());
+            } else {
+                slack.muted.remove(channel);
+            }
+            let mut all: Vec<String> = slack.muted.iter().cloned().collect();
+            all.sort();
+            if !demo {
+                self.backend.send(crate::backend::Command::Mute {
+                    team,
+                    channel: channel.to_owned(),
+                    muted,
+                    all,
+                });
+            }
+            return;
+        }
+        self.settings.desktop.set_muted(&team, channel, muted);
+        let local = self.settings.desktop.team_state(&team).local_muted;
+        if let Some(workspace) = self.workspace_mut(&team) {
+            workspace.desktop.local_muted = local;
+        }
+        self.save_settings();
+    }
+
     /// Sets how much of a conversation in the open workspace notifies.
     pub(super) fn set_notify_level(&mut self, channel: &str, level: Option<Level>) {
         let Some(team) = self.active_team() else {
@@ -344,6 +395,37 @@ mod tests {
                 unread: true
             }
         );
+    }
+
+    #[test]
+    fn muted_conversations_are_unread_only_for_mentions() {
+        let mut w = WorkspaceState::new(crate::model::Workspace {
+            team_id: "T1".into(),
+            name: "One".into(),
+            domain: String::new(),
+            icon: None,
+            user_id: "U1".into(),
+        });
+        let mut c = crate::model::Conversation {
+            id: "C1".into(),
+            name: "general".into(),
+            kind: ConversationKind::Channel,
+            user: None,
+            topic: String::new(),
+            purpose: String::new(),
+            members: None,
+            archived: false,
+            last_read: None,
+            latest: None,
+            unread: 3,
+            mentions: 0,
+        };
+        assert!(w.is_unread(&c));
+        w.desktop.local_muted.insert("C1".into());
+        assert!(!w.is_unread(&c));
+        assert_eq!(unread(std::slice::from_ref(&w)), Unread::default());
+        c.mentions = 1;
+        assert!(w.is_unread(&c));
     }
 
     #[test]
