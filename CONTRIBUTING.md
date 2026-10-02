@@ -75,6 +75,22 @@ loopback redirect even inside the bundle.
 with a warning and no icon. The `.exe` registers `noslacking://` for the
 current user on first sign-in, so it needs no installer.
 
+### Releases
+
+Bump `version` in `Cargo.toml`, then push a matching tag (`v0.2.0` for
+`0.2.0`). `.github/workflows/release.yml` builds the three platforms and
+publishes a GitHub release with:
+
+- `noslacking-<version>-linux-x86_64.tar.gz`: `bin/noslacking` and a
+  `share/` tree (desktop file, icons, metainfo); copy both into `~/.local`
+  or `/usr/local`. Built on Ubuntu 24.04, so it needs glibc 2.39 or newer.
+- `noslacking-<version>-macos-universal.zip`: `NoSlacking.app` for Apple
+  silicon and Intel.
+- `noslacking-<version>-windows-x86_64.zip`: `noslacking.exe`.
+- `SHA256SUMS` for all three.
+
+Each archive also carries `LICENSE` and `README.md`.
+
 ## Translations
 
 Interface strings go through `t("…")` / `tn(…)` (`src/i18n.rs`). Catalogs are
