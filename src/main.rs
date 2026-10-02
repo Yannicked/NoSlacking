@@ -216,7 +216,8 @@ fn native_options(cli: &Cli) -> eframe::NativeOptions {
 }
 
 fn app_icon() -> egui::IconData {
-    let bytes = include_bytes!("../packaging/icons/noslacking-256.png");
+    let bytes =
+        include_bytes!("../packaging/icons/hicolor/256x256/apps/cloud.yannick.NoSlacking.png");
     match image::load_from_memory(bytes) {
         Ok(image) => {
             let rgba = image.to_rgba8();

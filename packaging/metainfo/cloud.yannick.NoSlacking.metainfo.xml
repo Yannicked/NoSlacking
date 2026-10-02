@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata for software centers (GNOME Software, Discover,
+     Flathub). Installs to /usr/share/metainfo/. Check with
+     `appstreamcli validate packaging/metainfo/cloud.yannick.NoSlacking.metainfo.xml`. -->
+<component type="desktop-application">
+  <id>cloud.yannick.NoSlacking</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>NoSlacking</name>
+  <summary>A native Slack client</summary>
+  <developer id="cloud.yannick">
+    <name>Yannick de Jong</name>
+  </developer>
+
+  <description>
+    <p>
+      NoSlacking is a small, fast and quiet Slack client written in Rust: one
+      window with your channels and direct messages, threads, reactions, files
+      and emoji, without Electron.
+    </p>
+    <ul>
+      <li>Channels, private channels, direct messages and group DMs across several workspaces</li>
+      <li>Threads in a side panel, emoji reactions and your workspace's custom emoji</li>
+      <li>Inline image previews, file downloads and uploads</li>
+      <li>Light and dark themes, a quick switcher and keyboard navigation</li>
+    </ul>
+    <p>
+      Tokens are kept only in the system keyring. NoSlacking is an independent
+      client and is not affiliated with or endorsed by Slack Technologies.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">cloud.yannick.NoSlacking.desktop</launchable>
+  <provides>
+    <binary>noslacking</binary>
+  </provides>
+
+  <categories>
+    <category>Network</category>
+    <category>InstantMessaging</category>
+    <category>Chat</category>
+  </categories>
+  <keywords>
+    <keyword>slack</keyword>
+    <keyword>chat</keyword>
+    <keyword>messaging</keyword>
+  </keywords>
+
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <requires>
+    <internet>always</internet>
+  </requires>
+
+  <!-- Messages from other people, unmoderated by the app. -->
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+    <content_attribute id="social-info">mild</content_attribute>
+    <content_attribute id="social-audio">none</content_attribute>
+    <content_attribute id="social-contacts">intense</content_attribute>
+  </content_rating>
+</component>
