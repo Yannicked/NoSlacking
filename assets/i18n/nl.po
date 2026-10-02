@@ -665,3 +665,27 @@ msgstr "Log daar zoals gewoonlijk in; NoSlacking rondt het daarna zelf af. Als j
 
 msgid "Copy code"
 msgstr "Code kopiëren"
+
+msgid "Hide formatting"
+msgstr "Opmaak verbergen"
+
+msgid "Show formatting"
+msgstr "Opmaak tonen"
+
+msgid "Bold ({shortcut})"
+msgstr "Vet ({shortcut})"
+
+msgid "Italic ({shortcut})"
+msgstr "Cursief ({shortcut})"
+
+msgid "Strikethrough ({shortcut})"
+msgstr "Doorhalen ({shortcut})"
+
+msgid "Code ({shortcut})"
+msgstr "Code ({shortcut})"
+
+msgid "Code block"
+msgstr "Codeblok"
+
+msgid "Quote"
+msgstr "Citaat"

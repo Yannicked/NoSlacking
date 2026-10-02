@@ -4,6 +4,7 @@
 use egui::text::{CCursor, CCursorRange};
 use egui::{CornerRadius, Key, Margin, Modifiers, RichText, Sense, Stroke, Vec2};
 
+use super::format::{self, Format};
 use crate::app::{Draft, WorkspaceState};
 use crate::i18n::{t, tf};
 use crate::model::{Action, Ts};
@@ -254,8 +255,10 @@ pub fn show(
     // Keys the text field must not see.
     let mut accept = None;
     let mut send = false;
+    let mut format = None;
     if focused {
         ui.input_mut(|input| {
+            format = format_shortcut(input);
             // Esc closes the suggestions, so "@chan" can be sent as typed.
             if !found.is_empty() && input.consume_key(Modifiers::NONE, Key::Escape) {
                 draft.dismissed = word.clone();
@@ -287,6 +290,10 @@ pub fn show(
                 actions.push(Action::EditLast);
             }
         });
+    }
+
+    if let Some(format) = format {
+        apply_format(ui.ctx(), id, draft, format);
     }
 
     draft.suggesting = !found.is_empty();
@@ -335,8 +342,15 @@ pub fn show(
             top: 8,
             bottom: 6,
         });
+    // Whether the formatting bar is open: one choice for every composer,
+    // kept with the window's other remembered state.
+    let bar_id = egui::Id::new("composer-formatting-bar");
+    let mut bar_open = ui.data_mut(|d| *d.get_persisted_mut_or_default::<bool>(bar_id));
     frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
+        if bar_open && let Some(format) = formatting_bar(ui, palette) {
+            apply_format(ui.ctx(), id, draft, format);
+        }
         egui::ScrollArea::vertical()
             .id_salt(("composer-scroll", &composer.key))
             .max_height(220.0)
@@ -380,6 +394,25 @@ pub fn show(
                 }
                 draft.text.push('@');
                 ui.memory_mut(|m| m.request_focus(id));
+            }
+            let tip = if bar_open {
+                t("Hide formatting")
+            } else {
+                t("Show formatting")
+            };
+            let toggle = theme::icon_button(ui, palette, Icon::Type, 17.0, &tip);
+            if bar_open {
+                // Marks the bar as open, as a pressed toggle would be.
+                ui.painter().rect_stroke(
+                    toggle.rect,
+                    CornerRadius::same(theme::RADIUS_SMALL),
+                    Stroke::new(1.0, palette.outline),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            if toggle.clicked() {
+                bar_open = !bar_open;
+                ui.data_mut(|d| d.insert_persisted(bar_id, bar_open));
             }
             if let (Some(_), Some(channel)) = (&composer.thread, &composer.channel_name) {
                 ui.add_space(8.0);
@@ -438,6 +471,108 @@ pub fn show(
             broadcast: draft.broadcast,
         });
     }
+}
+
+/// The formatting shortcut pressed this frame, if any, taken so the text
+/// field does not also act on it.
+fn format_shortcut(input: &mut egui::InputState) -> Option<Format> {
+    if input.modifiers.command && input.modifiers.shift {
+        // egui-winit turns Ctrl+Shift+X and Ctrl+Shift+C into Cut and Copy
+        // rather than key presses. Left in, the cut would also delete the
+        // selection that is about to be struck through.
+        let mut found = None;
+        input.events.retain(|event| match event {
+            egui::Event::Cut => {
+                found = Some(Format::Strike);
+                false
+            }
+            egui::Event::Copy => {
+                found = Some(Format::Code);
+                false
+            }
+            _ => true,
+        });
+        if found.is_some() {
+            return found;
+        }
+    }
+    // Other backends may send them as keys after all.
+    if input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::X) {
+        Some(Format::Strike)
+    } else if input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::C) {
+        Some(Format::Code)
+    } else if input.consume_key(Modifiers::COMMAND, Key::B) {
+        Some(Format::Bold)
+    } else if input.consume_key(Modifiers::COMMAND, Key::I) {
+        Some(Format::Italic)
+    } else {
+        None
+    }
+}
+
+/// Formats the selection of the field `id` (or inserts markers at its
+/// cursor), keeps the formatted text selected and the field focused.
+fn apply_format(ctx: &egui::Context, id: egui::Id, draft: &mut Draft, format: Format) {
+    let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+    let end = draft.text.chars().count();
+    let selection = state.cursor.char_range().map_or(end..end, |range| {
+        let (a, b): (usize, usize) = (range.primary.index.into(), range.secondary.index.into());
+        a.min(b)..a.max(b)
+    });
+    let (text, selection) = format::apply(&draft.text, selection, format);
+    draft.text = text;
+    state.cursor.set_char_range(Some(CCursorRange::two(
+        CCursor::new(selection.start),
+        CCursor::new(selection.end),
+    )));
+    state.store(ctx, id);
+    ctx.memory_mut(|m| m.request_focus(id));
+}
+
+/// The formatting bar over the text field; returns the style clicked.
+fn formatting_bar(ui: &mut egui::Ui, palette: &Palette) -> Option<Format> {
+    let mut clicked = None;
+    let shortcut = super::keys::command;
+    let buttons = [
+        (
+            Format::Bold,
+            Icon::Bold,
+            tf("Bold ({shortcut})", &[("shortcut", &shortcut("B"))]),
+        ),
+        (
+            Format::Italic,
+            Icon::Italic,
+            tf("Italic ({shortcut})", &[("shortcut", &shortcut("I"))]),
+        ),
+        (
+            Format::Strike,
+            Icon::Strike,
+            tf(
+                "Strikethrough ({shortcut})",
+                &[("shortcut", &shortcut("Shift+X"))],
+            ),
+        ),
+        (
+            Format::Code,
+            Icon::Code,
+            tf("Code ({shortcut})", &[("shortcut", &shortcut("Shift+C"))]),
+        ),
+        (
+            Format::CodeBlock,
+            Icon::CodeBlock,
+            t("Code block").into_owned(),
+        ),
+        (Format::Quote, Icon::TextQuote, t("Quote").into_owned()),
+    ];
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for (format, icon, tip) in buttons {
+            if theme::icon_button(ui, palette, icon, 15.0, &tip).clicked() {
+                clicked = Some(format);
+            }
+        }
+    });
+    clicked
 }
 
 fn suggestion_list(
