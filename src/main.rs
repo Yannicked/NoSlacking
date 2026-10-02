@@ -490,6 +490,10 @@ impl DemoSetup {
                 ts: parent,
             }),
             Some("profile") => app.actions.push(Action::OpenProfile("U01".into())),
+            // Your own status, being set.
+            Some("status") => app
+                .actions
+                .push(Action::People(noslacking::people::Action::EditStatus)),
             // Your own message in #engineering, opened for editing.
             Some("edit") => self.edit = Some(Ts::new(format!("{}.000100", 1_790_172_000 - 2000))),
             // The image viewer, on the first of #engineering's pictures.
@@ -497,6 +501,8 @@ impl DemoSetup {
                 self.image = Some(Ts::new(format!("{}.000100", 1_790_172_000 - 2400)));
             }
             Some("dm") => app.actions.push(Action::OpenConversation("D01".into())),
+            // #design, with a huddle going on.
+            Some("huddle") => app.actions.push(Action::OpenConversation("C03".into())),
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             Some("general") => app.actions.push(Action::OpenConversation("C01".into())),
             // #engineering in IRC-style rows.

@@ -98,6 +98,11 @@ fn users() -> Vec<User> {
             is_bot: true,
             ..user("U05", "ci", "Deploy Bot", "")
         },
+        // Someone from a partner company, reached through Slack Connect.
+        User {
+            team: "TPARTNER".into(),
+            ..user("U06", "lee", "Lee Chen", "Partner engineer")
+        },
     ]
 }
 
@@ -121,6 +126,7 @@ fn conversation(
         latest: Some(ts(latest)),
         unread: 0,
         mentions: 0,
+        external: false,
     }
 }
 
@@ -179,6 +185,17 @@ fn conversations() -> Vec<Conversation> {
             NOW - 100,
             NOW - 100,
         ),
+        // Shared with a partner company through Slack Connect.
+        Conversation {
+            external: true,
+            ..conversation(
+                "C06",
+                "acme-partners",
+                ConversationKind::Channel,
+                NOW - 20_000,
+                NOW - 20_000,
+            )
+        },
     ];
     for (id, user, latest, read) in [
         ("D01", "U01", NOW - 200, NOW - 900),
@@ -811,6 +828,22 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
         },
     });
     sink.send(Event::Socket(Socket::Connected));
+    sink.send(crate::backend::people::demo_huddle(TEAM));
+    // Ana keeps typing in her direct message, as Slack repeats it.
+    let typing = sink.clone();
+    tokio::spawn(async move {
+        loop {
+            typing.send(Event::People {
+                team: TEAM.into(),
+                event: crate::people::Event::Typing {
+                    channel: "D01".into(),
+                    thread: None,
+                    user: "U01".into(),
+                },
+            });
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    });
     let mut sent = 0;
     let mut uploads: HashMap<u64, tokio::task::AbortHandle> = HashMap::new();
     while let Some(command) = commands.recv().await {
@@ -958,6 +991,11 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
             }
             Command::Convos { team, command } => {
                 for event in crate::backend::convos::demo(&team, command) {
+                    sink.send(event);
+                }
+            }
+            Command::People { team, command } => {
+                for event in crate::backend::people::demo(&team, command) {
                     sink.send(event);
                 }
             }

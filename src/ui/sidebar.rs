@@ -142,6 +142,9 @@ pub fn rail(app: &mut App, ui: &mut egui::Ui) {
                         Action::ShowSettings
                     });
                 }
+                if let Some(workspace) = crate::app::active_in(&app.workspaces, &app.settings) {
+                    super::people::me_button(ui, &palette, workspace, &mut app.actions);
+                }
             });
         });
 }
@@ -696,6 +699,18 @@ fn row(
                 &title,
                 conversation.user.as_deref().unwrap_or(&title),
             );
+            let behind = if selected {
+                palette.accent
+            } else if response.hovered() {
+                palette.surface_hover
+            } else {
+                palette.panel
+            };
+            let presence = conversation
+                .user
+                .as_deref()
+                .and_then(|id| workspace.people.presence(id));
+            super::people::dot(ui.painter(), palette, avatar_rect, presence, behind);
         }
     }
     let font = if unread {
@@ -716,7 +731,44 @@ fn row(
             })
             .is_some_and(|drafts| drafts.contains(&conversation.id));
     let draft_width = if drafted { 20.0 } else { 0.0 };
-    let max_text = rect.width() - 36.0 - 8.0 - badge_width - draft_width;
+    // Headphones while a huddle goes on here.
+    let huddle = workspace.people.huddles.contains_key(&conversation.id);
+    let huddle_width = if huddle { 20.0 } else { 0.0 };
+    // A globe for Slack Connect.
+    let external = crate::people::is_external_conversation(workspace, conversation);
+    let external_width = if external { 18.0 } else { 0.0 };
+    let max_text =
+        rect.width() - 36.0 - 8.0 - badge_width - draft_width - huddle_width - external_width;
+    if external {
+        let at = egui::Rect::from_center_size(
+            egui::pos2(
+                rect.right()
+                    - badge_width
+                    - draft_width
+                    - huddle_width
+                    - 4.0
+                    - external_width / 2.0,
+                rect.center().y,
+            ),
+            Vec2::splat(12.0),
+        );
+        Icon::Globe.image(palette.dim, 12.0).paint_at(ui, at);
+    }
+    if huddle {
+        let at = egui::Rect::from_center_size(
+            egui::pos2(
+                rect.right() - badge_width - draft_width - 4.0 - huddle_width / 2.0,
+                rect.center().y,
+            ),
+            Vec2::splat(14.0),
+        );
+        let tint = if selected {
+            palette.on_accent
+        } else {
+            super::people::ACTIVE
+        };
+        Icon::Headphones.image(tint, 14.0).paint_at(ui, at);
+    }
     // One line, cut with an ellipsis.
     theme::focus_ring(ui, &response, palette, theme::RADIUS_SMALL + 2);
     theme::describe_selected(

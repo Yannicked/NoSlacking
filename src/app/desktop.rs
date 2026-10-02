@@ -78,7 +78,7 @@ pub(crate) fn now_seconds() -> i64 {
 /// The kind of a conversation not loaded yet, from its id: Slack starts
 /// direct messages with `D`. Others may be channels or group messages;
 /// channel rules are the stricter guess.
-fn kind_from_id(channel: &str) -> ConversationKind {
+pub(super) fn kind_from_id(channel: &str) -> ConversationKind {
     if channel.starts_with('D') {
         ConversationKind::Direct
     } else {
@@ -87,7 +87,7 @@ fn kind_from_id(channel: &str) -> ConversationKind {
 }
 
 /// A message's text as plain words, with people and channels by name.
-fn plain_text(workspace: &WorkspaceState, message: &Message) -> String {
+pub(super) fn plain_text(workspace: &WorkspaceState, message: &Message) -> String {
     let text = crate::mrkdwn::plain(&message.text, |inline| match inline {
         crate::mrkdwn::Inline::User { id, .. } => Some(format!("@{}", workspace.user_label(id))),
         crate::mrkdwn::Inline::Channel { id, label } => Some(format!(
@@ -570,6 +570,7 @@ mod tests {
             latest: None,
             unread: 0,
             mentions: 0,
+            external: false,
         };
         one.conversations.push(crate::model::Conversation {
             mentions: 2,
@@ -612,6 +613,7 @@ mod tests {
             latest: None,
             unread: 3,
             mentions: 0,
+            external: false,
         };
         assert!(w.is_unread(&c));
         w.desktop.local_muted.insert("C1".into());

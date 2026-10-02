@@ -26,6 +26,8 @@ use crate::slack::{Client, SlackError, Token, types};
 const HISTORY_PAGE: u32 = 50;
 /// How often the open conversation is polled while Socket Mode is down.
 const POLL_EVERY: Duration = Duration::from_secs(6);
+/// How often presence polling looks for people to ask about.
+const PRESENCE_EVERY: Duration = Duration::from_secs(5);
 /// The most pages read from each listing. Each is far beyond what a
 /// workspace normally has; they only stop a cursor that never ends, and
 /// hitting one is logged.
@@ -172,6 +174,8 @@ pub struct Worker {
     /// Uploads still running, by the interface's id, so they can be
     /// cancelled.
     uploads: HashMap<u64, tokio::task::AbortHandle>,
+    /// Presence and the like for the people on screen.
+    people: super::people::Hub,
 }
 
 impl Worker {
@@ -206,6 +210,7 @@ impl Worker {
             internal_rx: Some(internal_rx),
             waiting: Some(Vec::new()),
             uploads: HashMap::new(),
+            people: super::people::Hub::default(),
         }
     }
 
@@ -220,6 +225,8 @@ impl Worker {
         self.start(workspaces);
         let mut poll = tokio::time::interval(POLL_EVERY);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut presence = tokio::time::interval(PRESENCE_EVERY);
+        presence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 command = commands.recv() => match command {
@@ -231,6 +238,7 @@ impl Worker {
                 },
                 Some(message) = internal.recv() => self.internal(message),
                 _ = poll.tick() => self.poll(),
+                _ = presence.tick() => self.poll_presence(),
             }
         }
         if let Some(live) = self.socket.take() {
@@ -433,6 +441,8 @@ impl Worker {
         );
         self.report_socket();
         let internal = self.internal.clone();
+        let (outgoing, frames) = mpsc::unbounded_channel();
+        self.people.rtm_started(team, outgoing);
         let team = team.to_owned();
         tokio::spawn(crate::slack::rtm::run(
             client,
@@ -443,6 +453,7 @@ impl Worker {
                     event,
                 });
             },
+            frames,
             stopped,
         ));
     }
@@ -682,6 +693,7 @@ impl Worker {
                     tokio::spawn(super::desktop::dnd_info(client, team, sink));
                 }
             }
+            Command::People { team, command } => self.people_command(team, command),
             Command::Convos { team, command } => match self.team(&team) {
                 Some((client, sink)) => {
                     tokio::spawn(super::convos::run(client, team, command, sink));
@@ -1296,6 +1308,7 @@ impl Worker {
         if let Some(live) = self.rtm.remove(team) {
             let _ = live.stop.send(true);
         }
+        self.people.forget(team);
         if let Some(removed) = self.teams.remove(team) {
             // Before SignedOut goes out: nothing from a task still running
             // for this workspace can follow it and bring the workspace back.
@@ -1416,12 +1429,19 @@ impl Worker {
     fn rtm_event(&mut self, team: &str, event: crate::slack::rtm::RtmEvent) {
         use crate::slack::rtm::RtmEvent;
         let status = match event {
-            RtmEvent::Connected => Socket::Connected,
-            RtmEvent::Disconnected(reason) => Socket::Disconnected(reason),
+            RtmEvent::Connected => {
+                self.people.rtm_live(team, true);
+                Socket::Connected
+            }
+            RtmEvent::Disconnected(reason) => {
+                self.people.rtm_live(team, false);
+                Socket::Disconnected(reason)
+            }
             RtmEvent::Unavailable(reason) => {
                 // Slack will not give this session a socket. Not an outage:
                 // poll the open conversation and say so calmly.
                 log::info!("RTM unavailable for {team}, polling instead: {reason}");
+                self.people.rtm_gone(team);
                 self.rtm.remove(team);
                 self.report_socket();
                 return;
@@ -1443,6 +1463,13 @@ impl Worker {
             log::debug!("event for a workspace not signed in here");
             return;
         };
+        // A huddle's message, besides the message itself.
+        if let Some(event) = super::people::huddle_in_message(event) {
+            self.sink.send(Event::People {
+                team: team.to_owned(),
+                event,
+            });
+        }
         for translated in translate(team, &me, event) {
             match translated {
                 Translated::Event(event) => self.sink.send(event),
@@ -1465,6 +1492,29 @@ impl Worker {
                 }
             }
         }
+    }
+
+    /// Runs a command about people (see [`crate::people`]).
+    fn people_command(&mut self, team: String, command: crate::people::Command) {
+        let Some((client, sink)) = self.team(&team) else {
+            log::debug!("not acting on people in {team}: signed out");
+            return;
+        };
+        if let Some(command) = super::people::call(client, team.clone(), command, sink) {
+            self.people.command(&team, command);
+        }
+    }
+
+    /// Asks about the presence of people on screen where nothing tells us
+    /// when it changes.
+    fn poll_presence(&mut self) {
+        let teams: HashMap<String, (Client, Sink)> = self
+            .teams
+            .iter()
+            .map(|(id, t)| (id.clone(), (t.client.clone(), t.sink.clone())))
+            .collect();
+        self.people
+            .poll(std::time::Instant::now(), |team| teams.get(team).cloned());
     }
 
     /// Without a live socket for its workspace, the open conversation is
@@ -2240,6 +2290,16 @@ async fn history(
         .await
     {
         Ok(page) => {
+            // A huddle still going on shows on its conversation. Only the
+            // newest page can hold one.
+            if !older
+                && let Some(event) = super::people::huddle_in_history(&channel, &page.messages)
+            {
+                sink.send(Event::People {
+                    team: team.clone(),
+                    event,
+                });
+            }
             let mut messages: Vec<Message> = page
                 .messages
                 .into_iter()
@@ -2336,16 +2396,16 @@ async fn run_slash(
             )
             .await
         }
-        "away" => act("users.setPresence", vec![("presence", "away".to_owned())]).await,
-        "active" => act("users.setPresence", vec![("presence", "auto".to_owned())]).await,
+        "away" | "active" => super::people::set_away(client, command == "away")
+            .await
+            .map(|()| None)
+            .map_err(|e| describe(&e)),
         "status" => {
             let (emoji, status) = crate::slash::status(&crate::mrkdwn::unescape(text));
-            let profile = serde_json::json!({
-                "status_text": status,
-                "status_emoji": emoji,
-                "status_expiration": 0,
-            });
-            act("users.profile.set", vec![("profile", profile.to_string())]).await
+            super::people::set_status(client, &emoji, &status, 0)
+                .await
+                .map(|()| None)
+                .map_err(|e| describe(&e))
         }
         "topic" => {
             act(
@@ -2886,7 +2946,10 @@ fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> {
                 }));
             }
         }
-        _ => log::debug!("unhandled event {kind}"),
+        _ => match super::people::translate(event) {
+            Some(event) => out.push(Translated::Event(Event::People { team, event })),
+            None => log::debug!("unhandled event {kind}"),
+        },
     }
     out
 }

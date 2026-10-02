@@ -365,6 +365,8 @@ fastframe_icons::icons! {
         Ellipsis => lucide "ellipsis",
         ExternalLink => lucide "external-link",
         FileText => "file-text",
+        Globe => "globe",
+        Headphones => "headphones",
         Hash => "hash",
         Image => "image",
         Info => lucide "info",

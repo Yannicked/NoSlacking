@@ -1250,3 +1250,137 @@ msgstr "Afbeelding tonen"
 
 msgid "Show the picture: {name}"
 msgstr "Afbeelding tonen: {name}"
+
+msgid "Active"
+msgstr "Actief"
+
+msgid "Away"
+msgstr "Afwezig"
+
+msgid "{name} is typing…"
+msgstr "{name} is aan het typen…"
+
+msgid "{first} and {second} are typing…"
+msgstr "{first} en {second} zijn aan het typen…"
+
+msgid "Several people are typing…"
+msgstr "Meerdere mensen zijn aan het typen…"
+
+msgid "Don't clear"
+msgstr "Niet wissen"
+
+msgid "30 minutes"
+msgstr "30 minuten"
+
+msgid "1 hour"
+msgstr "1 uur"
+
+msgid "4 hours"
+msgstr "4 uur"
+
+msgid "This week"
+msgstr "Deze week"
+
+msgid "In a meeting"
+msgstr "In een vergadering"
+
+msgid "Commuting"
+msgstr "Onderweg"
+
+msgid "Out sick"
+msgstr "Ziek"
+
+msgid "Vacationing"
+msgstr "Op vakantie"
+
+msgid "Working remotely"
+msgstr "Werkt op afstand"
+
+msgid "Could not change your presence: {error}"
+msgstr "Je aanwezigheid kon niet worden gewijzigd: {error}"
+
+msgid "Could not set your status: {error}"
+msgstr "Je status kon niet worden ingesteld: {error}"
+
+msgid "Edit status…"
+msgstr "Status bewerken…"
+
+msgid "Set a status…"
+msgstr "Status instellen…"
+
+msgid "Clear status"
+msgstr "Status wissen"
+
+msgid "Set yourself as active"
+msgstr "Jezelf als actief tonen"
+
+msgid "Set yourself as away"
+msgstr "Jezelf als afwezig tonen"
+
+msgid "View profile"
+msgstr "Profiel bekijken"
+
+msgid "Set a status"
+msgstr "Status instellen"
+
+msgid ":emoji:"
+msgstr ":emoji:"
+
+msgid "A shortcode such as :coffee:, or the emoji itself"
+msgstr "Een code zoals :coffee:, of de emoji zelf"
+
+msgid "What's your status?"
+msgstr "Wat is je status?"
+
+msgid "For example"
+msgstr "Bijvoorbeeld"
+
+msgid "Clear after"
+msgstr "Wissen na"
+
+msgid "Huddle · {count} person"
+msgid_plural "Huddle · {count} people"
+msgstr[0] "Huddle · {count} persoon"
+msgstr[1] "Huddle · {count} personen"
+
+msgid "Join the huddle in Slack: {names}"
+msgstr "Neem deel aan de huddle in Slack: {names}"
+
+msgid "From another organization"
+msgstr "Van een andere organisatie"
+
+msgid "Shared with another organization"
+msgstr "Gedeeld met een andere organisatie"
+
+msgid "External"
+msgstr "Extern"
+
+msgid "Scripting hooks"
+msgstr "Scripthooks"
+
+msgid "Run hooks"
+msgstr "Hooks uitvoeren"
+
+msgid "Runs your programs on new messages, with the message as JSON on their input. Each may run for {seconds} seconds."
+msgstr "Voert je programma's uit bij nieuwe berichten, met het bericht als JSON op hun invoer. Elk mag {seconds} seconden draaien."
+
+msgid "Add a hook"
+msgstr "Hook toevoegen"
+
+msgid "Programs run directly, not through a shell. Put quotes around a path with spaces."
+msgstr "Programma's draaien rechtstreeks, niet via een shell. Zet aanhalingstekens om een pad met spaties."
+
+msgid "Program"
+msgstr "Programma"
+
+msgid "/path/to/program --flag"
+msgstr "/pad/naar/programma --optie"
+
+msgid "Mentions of you"
+msgstr "Vermeldingen van jou"
+
+msgid "deploy, outage"
+msgstr "deploy, storing"
+
+msgid "Remove"
+msgstr "Verwijderen"

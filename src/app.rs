@@ -25,6 +25,7 @@ use crate::settings::{Appearance, Settings, WorkspaceMeta};
 use crate::theme::{self, Catalog, Palette};
 
 mod desktop;
+mod hooks;
 
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(5);
@@ -187,6 +188,8 @@ pub struct WorkspaceState {
     users_version: u64,
     /// Notification choices and the like for this workspace.
     pub desktop: crate::desktop::TeamState,
+    /// Who is around, and the like (see [`crate::people`]).
+    pub people: crate::people::TeamPeople,
 }
 
 impl WorkspaceState {
@@ -209,6 +212,7 @@ impl WorkspaceState {
             requested_conversations: HashSet::new(),
             users_version: 0,
             desktop: crate::desktop::TeamState::default(),
+            people: crate::people::TeamPeople::default(),
         }
     }
 
@@ -982,6 +986,8 @@ pub struct App {
     pub section_dialog: Option<SectionDialog>,
     /// The dialogs and panels for starting and finding conversations.
     pub convos: crate::convos::State,
+    /// Watching the people on screen (see [`crate::people`]).
+    pub people: crate::people::State,
     /// Where the "New" line goes: the read marker when the open
     /// conversation was opened, by `team/channel`.
     pub read_line: Option<(String, Option<Ts>)>,
@@ -1130,6 +1136,7 @@ impl App {
             confirm_delete: None,
             section_dialog: None,
             convos: crate::convos::State::default(),
+            people: crate::people::State::default(),
             read_line: None,
             sidebar_filter: String::new(),
             demo: options.demo,
@@ -1319,6 +1326,7 @@ impl App {
         self.flush_marks();
         self.desktop_frame();
         let now = Instant::now();
+        crate::people::frame(self, now);
         self.toasts.retain(|t| t.until > now);
         self.watch_drafts(now);
         if self.settings_due.take_due(now) {
@@ -1578,6 +1586,7 @@ impl App {
                 result,
             } => self.settled(&team, &channel, change, result),
             Event::Convos { team, event } => crate::convos::handle(self, &team, event),
+            Event::People { team, event } => crate::people::handle(self, &team, event),
         }
     }
 
@@ -1738,6 +1747,9 @@ impl App {
         } else {
             self.note_for(team, channel, &message, viewing)
         };
+        if !changed {
+            self.run_hooks(team, channel, &message);
+        }
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
@@ -1750,6 +1762,10 @@ impl App {
             return;
         }
         let from_me = message.user.as_deref() == Some(workspace.info.user_id.as_str());
+
+        if let Some(user) = &message.user {
+            workspace.people.stopped_typing(channel, user);
+        }
         let (arrived, fetch_conversation) = workspace.message_arrived(channel, message, viewing);
         if fetch_conversation {
             self.backend.send(Command::FetchConversation {
@@ -2475,6 +2491,7 @@ impl App {
                 self.sign_in = None;
             }
             Action::Convos(action) => crate::convos::apply(self, action),
+            Action::People(action) => crate::people::apply(self, action),
         }
     }
 
@@ -2882,6 +2899,7 @@ impl App {
             || self.section_dialog.is_some()
             || self.search.open
             || self.convos.overlay_open()
+            || self.people.status.is_some()
     }
 
     /// Changes the sidebar at once, and in Slack, which then sends back the
@@ -3373,6 +3391,7 @@ mod tests {
             latest: Some(Ts::new("9.0")),
             unread: 0,
             mentions: 2,
+            external: false,
         };
         let fresh = Conversation {
             name: "renamed".into(),
@@ -3402,6 +3421,7 @@ mod tests {
             latest: Some(Ts::new(latest)),
             unread,
             mentions,
+            external: false,
         }
     }
 

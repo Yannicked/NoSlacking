@@ -118,6 +118,8 @@ pub struct Settings {
     /// Whether pictures and link previews show in messages, or wait for
     /// a click.
     pub inline_media: bool,
+    /// Programs to run on new messages; off by default.
+    pub hooks: crate::hooks::Hooks,
 }
 
 impl Default for Settings {
@@ -142,6 +144,7 @@ impl Default for Settings {
             recent_emoji: Vec::new(),
             density: Density::Comfortable,
             inline_media: true,
+            hooks: crate::hooks::Hooks::default(),
         }
     }
 }
@@ -236,6 +239,7 @@ impl Settings {
             recent_emoji,
             density,
             inline_media,
+            hooks,
         );
         // One damaged workspace must not sign you out of the others, so
         // these are read entry by entry.

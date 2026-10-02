@@ -1004,6 +1004,7 @@ mod tests {
             latest: None,
             unread: 0,
             mentions: 0,
+            external: false,
         }
     }
 

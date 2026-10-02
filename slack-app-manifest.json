@@ -35,7 +35,9 @@
         "search:read",
         "pins:read",
         "pins:write",
-        "bookmarks:read"
+        "bookmarks:read",
+        "users.profile:write",
+        "users:write"
       ]
     }
   },

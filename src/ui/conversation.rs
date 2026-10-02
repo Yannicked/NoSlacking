@@ -98,13 +98,18 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                     }
                     ConversationKind::Direct => {
                         let user = conversation.user.as_deref().and_then(|id| workspace.user(id));
-                        super::avatar(
+                        let avatar = super::avatar(
                             ui,
                             user.and_then(|u| u.avatar.as_deref()),
                             &title,
                             conversation.user.as_deref().unwrap_or(&title),
                             22.0,
                         );
+                        let presence = conversation.user.as_deref().and_then(|id| workspace.people.presence(id));
+                        super::people::dot(ui.painter(), &palette, avatar.rect, presence, palette.window);
+                        if let Some(presence) = presence {
+                            avatar.on_hover_text(super::people::word(presence));
+                        }
                     }
                     ConversationKind::Group => {
                         let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
@@ -121,6 +126,9 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                         .sense(egui::Sense::click()),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if crate::people::is_external_conversation(workspace, conversation) {
+                    super::people::external_tag(ui, &palette, conversation.kind == ConversationKind::Direct);
+                }
                 if name.clicked()
                     && let Some(user) = &conversation.user
                 {
@@ -199,6 +207,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                             actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Members));
                         }
                     }
+                    super::people::huddle_button(ui, &palette, workspace, &conversation.id, actions);
                 });
             });
         });
@@ -242,7 +251,8 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
                     left: 20,
                     right: 20,
                     top: 4,
-                    bottom: 16,
+                    // The typing line fills the rest of the bottom space.
+                    bottom: 2,
                 }),
         )
         .show(ui, |ui| {
@@ -261,7 +271,15 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
                 channel_name: None,
                 uploads: transfers,
             };
+            let before = draft.text.clone();
             composer::show(ui, &composer, &mut draft, actions);
+            if crate::people::is_typing(&before, &draft.text) {
+                actions.push(Action::People(crate::people::Action::Typing {
+                    channel: channel.to_owned(),
+                    thread: None,
+                }));
+            }
+            super::people::typing(ui, &palette, workspace, channel, None);
         });
     app.drafts.insert(key, draft);
 }

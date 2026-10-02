@@ -142,6 +142,10 @@ pub struct Conversation {
     /// Unread mentions of you, counted from messages seen live.
     #[serde(default)]
     pub mentions: u32,
+    /// Shared with another organization through Slack Connect (or about
+    /// to be).
+    #[serde(default)]
+    pub external: bool,
 }
 
 impl Conversation {
@@ -176,6 +180,17 @@ pub struct User {
     pub status_emoji: String,
     #[serde(default)]
     pub tz: Option<String>,
+    /// The workspace the person belongs to; another one's for someone
+    /// reached through Slack Connect.
+    #[serde(default)]
+    pub team: String,
+    /// The Enterprise Grid organization of that workspace, if any.
+    #[serde(default)]
+    pub enterprise: String,
+    /// Slack says the person is outside your organization and has no
+    /// profile here beyond the basics.
+    #[serde(default)]
+    pub stranger: bool,
 }
 
 impl User {
@@ -764,6 +779,9 @@ pub enum Action {
     },
     /// Starts, finds or looks after a conversation (see [`crate::convos`]).
     Convos(crate::convos::Action),
+    /// Something about people: your typing, your status (see
+    /// [`crate::people`]).
+    People(crate::people::Action),
 }
 
 #[cfg(test)]
@@ -903,6 +921,7 @@ mod tests {
             latest: Some(Ts::new("4.0")),
             unread: 0,
             mentions: 0,
+            external: false,
         };
         assert!(!c.has_unread());
         c.latest = Some(Ts::new("6.0"));
