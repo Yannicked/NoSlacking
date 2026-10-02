@@ -1187,3 +1187,33 @@ msgstr "{time} uur achter op jou"
 
 msgid "{time} local time, {difference}"
 msgstr "{time} lokale tijd, {difference}"
+
+msgid "Activity"
+msgstr "Activiteit"
+
+msgid "Could not load this list: {error}"
+msgstr "Deze lijst kon niet worden geladen: {error}"
+
+msgid "Mentioned everyone in {place}"
+msgstr "Iedereen vermeld in {place}"
+
+msgid "Mentioned you in {place}"
+msgstr "Jou vermeld in {place}"
+
+msgid "Nothing new mentions you."
+msgstr "Niets nieuws vermeldt jou."
+
+msgid "Refresh"
+msgstr "Vernieuwen"
+
+msgid "Replied to your thread in {place}"
+msgstr "Gereageerd op je thread in {place}"
+
+msgid "a conversation"
+msgstr "een gesprek"
+
+msgid "Found by searching for your name; replies to your threads show as they arrive."
+msgstr "Gevonden door op je naam te zoeken; reacties op je threads verschijnen zodra ze binnenkomen."
+
+msgid "{name}, {count} new"
+msgstr "{name}, {count} nieuw"
