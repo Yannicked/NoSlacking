@@ -6,3 +6,75 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "{weekday}, {month} {day}, {year}"
+msgstr "{weekday} {day} {month} {year}"
+
+msgid "{weekday}, {month} {day}"
+msgstr "{weekday} {day} {month}"
+
+msgid "{date} at {time}"
+msgstr "{date} om {time}"
+
+msgid "Monday"
+msgstr "maandag"
+
+msgid "Tuesday"
+msgstr "dinsdag"
+
+msgid "Wednesday"
+msgstr "woensdag"
+
+msgid "Thursday"
+msgstr "donderdag"
+
+msgid "Friday"
+msgstr "vrijdag"
+
+msgid "Saturday"
+msgstr "zaterdag"
+
+msgid "Sunday"
+msgstr "zondag"
+
+msgid "January"
+msgstr "januari"
+
+msgid "February"
+msgstr "februari"
+
+msgid "March"
+msgstr "maart"
+
+msgid "April"
+msgstr "april"
+
+msgid "May"
+msgstr "mei"
+
+msgid "June"
+msgstr "juni"
+
+msgid "July"
+msgstr "juli"
+
+msgid "August"
+msgstr "augustus"
+
+msgid "September"
+msgstr "september"
+
+msgid "October"
+msgstr "oktober"
+
+msgid "November"
+msgstr "november"
+
+msgid "December"
+msgstr "december"
+
+msgid "Today"
+msgstr "Vandaag"
+
+msgid "Yesterday"
+msgstr "Gisteren"

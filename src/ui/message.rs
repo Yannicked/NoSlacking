@@ -207,8 +207,8 @@ fn header(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec
                 .font(theme::regular(12.0))
                 .color(palette.dim),
         );
-        if let Some(zoned) = message.ts.zoned() {
-            time.on_hover_text(zoned.strftime("%A, %B %-d, %Y at %H:%M:%S").to_string());
+        if let Some(full) = super::full_time(&message.ts) {
+            time.on_hover_text(full);
         }
     });
 }

@@ -127,11 +127,75 @@ pub fn day_label(ts: &crate::model::Ts) -> String {
         t("Today").into_owned()
     } else if today.yesterday().ok() == Some(date) {
         t("Yesterday").into_owned()
-    } else if date.year() == today.year() {
-        zoned.strftime("%A, %B %-d").to_string()
     } else {
-        zoned.strftime("%A, %B %-d, %Y").to_string()
+        long_date(&t, date, date.year() != today.year())
     }
+}
+
+/// The full moment of a message, for the tooltip over its time:
+/// "Monday, March 3, 2025 at 14:03:12".
+pub fn full_time(ts: &crate::model::Ts) -> Option<String> {
+    let zoned = ts.zoned()?;
+    let date = long_date(&crate::i18n::t, zoned.date(), true);
+    let time = zoned.strftime("%H:%M:%S").to_string();
+    Some(crate::i18n::tf(
+        "{date} at {time}",
+        &[("date", &date), ("time", &time)],
+    ))
+}
+
+/// A translator: [`crate::i18n::t`], or in tests a fixed language.
+type Translate<'a> = &'a dyn Fn(&'static str) -> std::borrow::Cow<'static, str>;
+
+/// "Monday, March 3", with ", 2025" when asked. The names and the order
+/// come from the catalog, since strftime only knows English.
+fn long_date(t: Translate<'_>, date: jiff::civil::Date, with_year: bool) -> String {
+    let pattern = if with_year {
+        t("{weekday}, {month} {day}, {year}")
+    } else {
+        t("{weekday}, {month} {day}")
+    };
+    crate::i18n::fill(
+        &pattern,
+        &[
+            ("weekday", &weekday_name(t, date.weekday())),
+            ("month", &month_name(t, date.month())),
+            ("day", &date.day().to_string()),
+            ("year", &date.year().to_string()),
+        ],
+    )
+}
+
+fn weekday_name(t: Translate<'_>, day: jiff::civil::Weekday) -> String {
+    use jiff::civil::Weekday;
+    match day {
+        Weekday::Monday => t("Monday"),
+        Weekday::Tuesday => t("Tuesday"),
+        Weekday::Wednesday => t("Wednesday"),
+        Weekday::Thursday => t("Thursday"),
+        Weekday::Friday => t("Friday"),
+        Weekday::Saturday => t("Saturday"),
+        Weekday::Sunday => t("Sunday"),
+    }
+    .into_owned()
+}
+
+fn month_name(t: Translate<'_>, month: i8) -> String {
+    match month {
+        1 => t("January"),
+        2 => t("February"),
+        3 => t("March"),
+        4 => t("April"),
+        5 => t("May"),
+        6 => t("June"),
+        7 => t("July"),
+        8 => t("August"),
+        9 => t("September"),
+        10 => t("October"),
+        11 => t("November"),
+        _ => t("December"),
+    }
+    .into_owned()
 }
 
 /// "5 minutes ago" for thread summaries.
@@ -185,6 +249,17 @@ pub fn image_uri(team: &str, url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dates_follow_the_language() {
+        let date = jiff::civil::date(2025, 3, 3);
+        let english = |s: &'static str| std::borrow::Cow::Borrowed(s);
+        assert_eq!(long_date(&english, date, false), "Monday, March 3");
+        assert_eq!(long_date(&english, date, true), "Monday, March 3, 2025");
+        let dutch = |s: &'static str| fastframe_i18n::gettext(crate::i18n::Locale::Dutch, s);
+        assert_eq!(long_date(&dutch, date, false), "maandag 3 maart");
+        assert_eq!(long_date(&dutch, date, true), "maandag 3 maart 2025");
+    }
 
     #[test]
     fn sizes_read_naturally() {
