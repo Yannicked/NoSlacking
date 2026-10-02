@@ -9,6 +9,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures_util::future::BoxFuture;
 use serde::de::DeserializeOwned;
 use tokio::sync::Semaphore;
 
@@ -159,17 +160,48 @@ impl std::fmt::Debug for OauthApp {
     }
 }
 
-type OnRefresh = Arc<dyn Fn(&Token) + Send + Sync>;
+type OnRefresh = Arc<dyn Fn(Result<Token, SlackError>) -> BoxFuture<'static, ()> + Send + Sync>;
+
+/// The shortest and longest pause after a refresh that failed for a
+/// passing reason (the network, Slack having a bad moment).
+const REFRESH_RETRY_FIRST: Duration = Duration::from_secs(30);
+const REFRESH_RETRY_MAX: Duration = Duration::from_secs(30 * 60);
+
+/// A refresh that failed, so the next calls do not all try again at once.
+#[derive(Clone, Debug)]
+struct RefreshFailure {
+    error: SlackError,
+    /// Failures in a row.
+    failures: u32,
+    retry_at: std::time::Instant,
+}
+
+/// How long to leave a rotating token alone after `failures` failed
+/// refreshes in a row.
+fn refresh_wait(failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(10);
+    (REFRESH_RETRY_FIRST * 2u32.pow(doublings)).min(REFRESH_RETRY_MAX)
+}
+
+/// What every clone of one workspace's client shares: one token, one
+/// refresh at a time, and one set of request slots. Clones handed to the
+/// image loader or to tasks see a renewed token or a new app at once.
+struct Shared {
+    token: Mutex<Token>,
+    /// Held for a whole refresh, including saving the new token, so
+    /// renewals happen and are stored strictly one after another.
+    refresh_lock: tokio::sync::Mutex<()>,
+    failure: Mutex<Option<RefreshFailure>>,
+    app: Mutex<Option<OauthApp>>,
+    on_refresh: Mutex<Option<OnRefresh>>,
+    limit: Semaphore,
+}
 
 /// One workspace's API access.
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
-    token: Arc<Mutex<Token>>,
-    refresh_lock: Arc<tokio::sync::Mutex<()>>,
-    app: Option<OauthApp>,
-    on_refresh: Option<OnRefresh>,
-    limit: Arc<Semaphore>,
+    shared: Arc<Shared>,
     base: String,
 }
 
@@ -200,24 +232,38 @@ impl Client {
     pub fn new(http: reqwest::Client, token: Token) -> Self {
         Self {
             http,
-            token: Arc::new(Mutex::new(token)),
-            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
-            app: None,
-            on_refresh: None,
-            limit: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            shared: Arc::new(Shared {
+                token: Mutex::new(token),
+                refresh_lock: tokio::sync::Mutex::new(()),
+                failure: Mutex::new(None),
+                app: Mutex::new(None),
+                on_refresh: Mutex::new(None),
+                limit: Semaphore::new(MAX_IN_FLIGHT),
+            }),
             base: API.to_owned(),
         }
     }
 
-    /// Renews a rotating token with `app`, reporting each new token.
-    pub fn with_refresh(
-        mut self,
-        app: Option<OauthApp>,
-        on_refresh: impl Fn(&Token) + Send + Sync + 'static,
-    ) -> Self {
-        self.app = app;
-        self.on_refresh = Some(Arc::new(on_refresh));
+    /// Renews a rotating token with `app`, reporting each outcome: the new
+    /// token, or why the refresh failed. The report is awaited before the
+    /// next refresh can start, so new tokens are stored in the order Slack
+    /// issued them.
+    pub fn with_refresh<F, Fut>(self, app: Option<OauthApp>, on_refresh: F) -> Self
+    where
+        F: Fn(Result<Token, SlackError>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.set_app(app);
+        let on_refresh: OnRefresh = Arc::new(move |result| Box::pin(on_refresh(result)));
+        *lock(&self.shared.on_refresh) = Some(on_refresh);
         self
+    }
+
+    /// Switches the app that renews the token, for this client and every
+    /// clone of it. A new app also gets a fresh chance to refresh.
+    pub fn set_app(&self, app: Option<OauthApp>) {
+        *lock(&self.shared.app) = app;
+        *lock(&self.shared.failure) = None;
     }
 
     pub fn http(&self) -> &reqwest::Client {
@@ -225,11 +271,11 @@ impl Client {
     }
 
     pub fn token(&self) -> Token {
-        lock(&self.token).clone()
+        lock(&self.shared.token).clone()
     }
 
     fn cookie(&self) -> Option<String> {
-        lock(&self.token).cookie.clone()
+        lock(&self.shared.token).cookie.clone()
     }
 
     async fn access_token(&self) -> Result<String, SlackError> {
@@ -237,22 +283,51 @@ impl Client {
         if !token.needs_refresh(now()) {
             return Ok(token.access);
         }
-        let _guard = self.refresh_lock.lock().await;
+        let _guard = self.shared.refresh_lock.lock().await;
         // Another call may have refreshed while this one waited.
         let token = self.token();
         if !token.needs_refresh(now()) {
             return Ok(token.access);
         }
-        let (Some(app), Some(refresh)) = (&self.app, &token.refresh) else {
+        let app = lock(&self.shared.app).clone();
+        let (Some(app), Some(refresh)) = (app, token.refresh.clone()) else {
             return Ok(token.access);
         };
-        let renewed = refresh_token(&self.http, &self.base, app, refresh).await?;
-        *lock(&self.token) = renewed.clone();
-        if let Some(on_refresh) = &self.on_refresh {
-            on_refresh(&renewed);
+        let failure = lock(&self.shared.failure).clone();
+        if let Some(failure) = failure {
+            // A refused refresh token stays refused, and a passing failure
+            // gets a pause: either way, not one more try per API call.
+            if failure.error.is_auth() || std::time::Instant::now() < failure.retry_at {
+                return fallback(&token, failure.error);
+            }
         }
-        log::info!("renewed a rotating Slack token");
-        Ok(renewed.access)
+        let on_refresh = lock(&self.shared.on_refresh).clone();
+        match refresh_token(&self.http, &self.base, &app, &refresh).await {
+            Ok(renewed) => {
+                *lock(&self.shared.token) = renewed.clone();
+                *lock(&self.shared.failure) = None;
+                log::info!("renewed a rotating Slack token");
+                if let Some(on_refresh) = on_refresh {
+                    on_refresh(Ok(renewed.clone())).await;
+                }
+                Ok(renewed.access)
+            }
+            Err(error) => {
+                let failures = lock(&self.shared.failure)
+                    .as_ref()
+                    .map_or(1, |f| f.failures.saturating_add(1));
+                log::warn!("could not renew a rotating Slack token: {error}");
+                *lock(&self.shared.failure) = Some(RefreshFailure {
+                    error: error.clone(),
+                    failures,
+                    retry_at: std::time::Instant::now() + refresh_wait(failures),
+                });
+                if let Some(on_refresh) = on_refresh {
+                    on_refresh(Err(error.clone())).await;
+                }
+                fallback(&token, error)
+            }
+        }
     }
 
     /// Calls a read method; network failures are retried.
@@ -288,6 +363,7 @@ impl Client {
             // a call sitting out a Retry-After must not hold a slot that a
             // send could use.
             let permit = self
+                .shared
                 .limit
                 .acquire()
                 .await
@@ -416,6 +492,18 @@ pub fn retry_after(status: u16, header: Option<&reqwest::header::HeaderValue>) -
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(5);
     Some(Duration::from_secs(seconds.clamp(1, 120)))
+}
+
+/// After a failed refresh: the old access token while it has not quite
+/// expired (refreshes start a few minutes early), the error after that or
+/// when the refresh token itself was refused.
+fn fallback(token: &Token, error: SlackError) -> Result<String, SlackError> {
+    let unexpired = token.expires_at.is_some_and(|at| now() < at);
+    if unexpired && !error.is_auth() {
+        Ok(token.access.clone())
+    } else {
+        Err(error)
+    }
 }
 
 fn backoff(attempt: u32) -> Duration {
@@ -630,6 +718,46 @@ mod tests {
         // A session token never refreshes.
         assert!(!Token::session("xoxc-1", "xoxd-1", "https://x.slack.com").needs_refresh(i64::MAX));
         assert!(!Token::plain("xoxp-1").needs_refresh(i64::MAX));
+    }
+
+    #[test]
+    fn failed_refreshes_back_off() {
+        assert_eq!(refresh_wait(1), Duration::from_secs(30));
+        assert_eq!(refresh_wait(2), Duration::from_secs(60));
+        assert_eq!(refresh_wait(4), Duration::from_secs(240));
+        assert_eq!(refresh_wait(50), REFRESH_RETRY_MAX);
+        assert_eq!(refresh_wait(u32::MAX), REFRESH_RETRY_MAX);
+    }
+
+    #[test]
+    fn a_failed_refresh_keeps_the_token_until_it_expires() {
+        let mut token = Token::plain("xoxe.xoxp-1");
+        token.expires_at = Some(now() + 120);
+        let outage = SlackError::Network("down".into());
+        assert_eq!(fallback(&token, outage.clone()), Ok("xoxe.xoxp-1".into()));
+        let refused = SlackError::Api("invalid_refresh_token".into());
+        assert_eq!(fallback(&token, refused.clone()), Err(refused));
+        token.expires_at = Some(now() - 1);
+        assert_eq!(fallback(&token, outage.clone()), Err(outage));
+    }
+
+    #[test]
+    fn clones_share_one_app_and_token() {
+        let client = Client::new(reqwest::Client::new(), Token::plain("xoxp-1"));
+        let clone = client.clone();
+        client.set_app(Some(OauthApp {
+            client_id: "1.2".into(),
+            client_secret: "s".into(),
+        }));
+        assert!(lock(&clone.shared.app).is_some());
+        assert!(Arc::ptr_eq(&client.shared, &clone.shared));
+    }
+
+    #[test]
+    fn backoff_doubles_and_stops_growing() {
+        assert_eq!(backoff(1), Duration::from_millis(1000));
+        assert_eq!(backoff(2), Duration::from_millis(2000));
+        assert_eq!(backoff(5), backoff(9));
     }
 
     #[test]
