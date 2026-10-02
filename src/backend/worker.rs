@@ -28,6 +28,8 @@ const POLL_EVERY: Duration = Duration::from_secs(6);
 /// The most users fetched with `users.list` (200 per page).
 const USER_PAGES: usize = 40;
 const MAX_UPLOAD: u64 = 1024 * 1024 * 1024;
+/// Why a command for a workspace the worker does not have cannot run.
+const NOT_SIGNED_IN: &str = "that workspace is not signed in";
 
 /// One workspace's saved sign-in, as read from the keyring at start-up.
 enum Stored {
@@ -512,6 +514,8 @@ impl Worker {
             Command::LoadHistory { team, channel } => {
                 if let Some(client) = self.client(&team) {
                     tokio::spawn(history(client, team, channel, None, self.sink.clone()));
+                } else {
+                    self.history_unavailable(team, channel);
                 }
             }
             Command::LoadOlder {
@@ -527,11 +531,15 @@ impl Worker {
                         Some(cursor),
                         self.sink.clone(),
                     ));
+                } else {
+                    self.history_unavailable(team, channel);
                 }
             }
             Command::LoadThread { team, channel, ts } => {
                 if let Some(client) = self.client(&team) {
                     tokio::spawn(thread(client, team, channel, ts, self.sink.clone()));
+                } else {
+                    self.not_signed_in("load the thread");
                 }
             }
             Command::Send {
@@ -573,6 +581,14 @@ impl Worker {
                             result,
                         });
                     });
+                } else {
+                    // Fail the optimistic message, or it stays pending.
+                    self.sink.send(Event::Sent {
+                        team,
+                        channel,
+                        local,
+                        result: Err(NOT_SIGNED_IN.to_owned()),
+                    });
                 }
             }
             Command::Edit {
@@ -600,6 +616,7 @@ impl Worker {
                 add,
             } => {
                 let Some(client) = self.client(&team) else {
+                    self.not_signed_in("change the reaction");
                     return;
                 };
                 let user = self
@@ -649,6 +666,7 @@ impl Worker {
                 comment,
             } => {
                 let Some(client) = self.client(&team) else {
+                    self.not_signed_in("upload the file");
                     return;
                 };
                 let sink = self.sink.clone();
@@ -708,6 +726,7 @@ impl Worker {
             }
             Command::Download { team, url, name } => {
                 let Some(client) = self.client(&team) else {
+                    self.not_signed_in(&format!("download {name}"));
                     return;
                 };
                 let sink = self.sink.clone();
@@ -718,17 +737,23 @@ impl Worker {
                     }
                 });
             }
-            Command::Mark { team, channel, ts } => self.act(
+            // Sent on its own as conversations are read; a workspace that
+            // is signed out has nothing to mark, and saying so on every
+            // click would only be noise.
+            Command::Mark { team, channel, ts } if self.teams.contains_key(&team) => self.act(
                 &team,
                 "conversations.mark",
                 vec![("channel", channel), ("ts", ts.0)],
                 &["not_in_channel", "channel_not_found"],
             ),
+            Command::Mark { team, .. } => log::debug!("not marking read in {team}: signed out"),
             Command::FetchUsers { team, ids } => self.fetch_users(team, ids),
             Command::FetchBots { team, ids } => self.fetch_bots(team, ids),
             Command::Sidebar { team, calls } => {
                 if let Some(client) = self.client(&team) {
                     tokio::spawn(edit_sidebar(client, team, calls, self.sink.clone()));
+                } else {
+                    self.not_signed_in("change the sidebar");
                 }
             }
             Command::FetchConversation { team, channel } => {
@@ -769,6 +794,8 @@ impl Worker {
         ignore: &'static [&'static str],
     ) {
         let Some(client) = self.client(team) else {
+            self.sink
+                .send(Event::Error(format!("{method} failed: {NOT_SIGNED_IN}")));
             return;
         };
         let sink = self.sink.clone();
@@ -781,6 +808,23 @@ impl Worker {
                     describe(&error)
                 ))),
             }
+        });
+    }
+
+    /// Says that `what` cannot be done because the workspace is not signed
+    /// in here, rather than dropping the command without a word.
+    fn not_signed_in(&self, what: &str) {
+        self.sink
+            .send(Event::Error(format!("Could not {what}: {NOT_SIGNED_IN}")));
+    }
+
+    /// Ends a history load for a workspace that is not signed in, so the
+    /// conversation does not show as loading for ever.
+    fn history_unavailable(&self, team: String, channel: String) {
+        self.sink.send(Event::HistoryFailed {
+            team,
+            channel,
+            error: NOT_SIGNED_IN.to_owned(),
         });
     }
 
@@ -2303,6 +2347,44 @@ mod tests {
         assert!(worker.users_requested.is_empty());
         assert!(worth_retrying(&SlackError::RateLimited));
         assert!(!worth_retrying(&SlackError::Api("user_not_found".into())));
+    }
+
+    #[tokio::test]
+    async fn commands_for_an_unknown_workspace_get_an_answer() {
+        let (mut worker, events) = worker();
+        worker.waiting = None;
+        worker
+            .command(Command::Send {
+                team: "TX".into(),
+                channel: "C1".into(),
+                text: "hi".into(),
+                thread: None,
+                broadcast: false,
+                local: Ts::new("local-1"),
+            })
+            .await;
+        worker
+            .command(Command::Delete {
+                team: "TX".into(),
+                channel: "C1".into(),
+                ts: Ts::new("1.0"),
+            })
+            .await;
+        worker
+            .command(Command::LoadHistory {
+                team: "TX".into(),
+                channel: "C1".into(),
+            })
+            .await;
+        let events: Vec<Event> = events.try_iter().collect();
+        assert!(
+            matches!(&events[..], [
+                Event::Sent { local, result: Err(_), .. },
+                Event::Error(_),
+                Event::HistoryFailed { .. },
+            ] if local.as_str() == "local-1"),
+            "{events:?}"
+        );
     }
 
     #[test]
