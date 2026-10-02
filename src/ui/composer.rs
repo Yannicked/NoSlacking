@@ -122,6 +122,11 @@ fn suggestions(workspace: &WorkspaceState, word: &str) -> Vec<Suggestion> {
     Vec::new()
 }
 
+/// The text field of the composer for the draft `key`.
+pub fn field_id(key: &str) -> egui::Id {
+    egui::Id::new(("composer", key))
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     composer: &Composer<'_>,
@@ -129,7 +134,7 @@ pub fn show(
     actions: &mut Vec<Action>,
 ) {
     let palette = composer.palette;
-    let id = egui::Id::new(("composer", &composer.key));
+    let id = field_id(&composer.key);
     let focused = ui.memory(|m| m.has_focus(id));
     let state = egui::TextEdit::load_state(ui.ctx(), id);
     let cursor = state

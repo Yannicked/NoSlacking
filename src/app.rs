@@ -358,6 +358,9 @@ pub struct App {
     pub scroll_to_bottom: HashSet<String>,
     /// Focus the composer next frame.
     pub focus_composer: bool,
+    /// Focus the field of the dialog or picker just opened, once: asking
+    /// every frame would keep Tab from reaching its buttons.
+    pub focus_overlay: bool,
     local_counter: u64,
     uploads: (mpsc::Sender<PickedFile>, mpsc::Receiver<PickedFile>),
     marks: HashMap<(String, String), (Ts, Instant)>,
@@ -452,6 +455,7 @@ impl App {
             prepended: None,
             scroll_to_bottom: HashSet::new(),
             focus_composer: true,
+            focus_overlay: false,
             local_counter: 0,
             uploads: mpsc::channel(),
             marks: HashMap::new(),
@@ -1612,10 +1616,12 @@ impl App {
             }
             Action::React { channel, ts, name } => self.react(&channel, &ts, &name),
             Action::PickReaction { channel, ts } => {
+                self.focus_overlay = true;
                 self.picker_query.clear();
                 self.picker = Some(PickerTarget::Reaction { channel, ts });
             }
             Action::PickEmoji { draft } => {
+                self.focus_overlay = true;
                 self.picker_query.clear();
                 self.picker = Some(PickerTarget::Draft(draft));
             }
@@ -1658,6 +1664,7 @@ impl App {
                             .map(|s| s.name.clone())
                     })
                     .unwrap_or_default();
+                self.focus_overlay = true;
                 self.section_dialog = Some(SectionDialog {
                     rename,
                     channel,
@@ -1666,7 +1673,10 @@ impl App {
             }
             Action::Sidebar(edit) => self.edit_sidebar(edit),
             Action::Preview { uri, name } => self.preview = Some((uri, name)),
-            Action::OpenSwitcher => self.switcher = Some((String::new(), 0)),
+            Action::OpenSwitcher => {
+                self.focus_overlay = true;
+                self.switcher = Some((String::new(), 0));
+            }
             Action::Upload {
                 thread,
                 path,

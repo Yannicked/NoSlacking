@@ -23,6 +23,7 @@ fn section_dialog(app: &mut App, ctx: &egui::Context) {
     let Some(mut dialog) = app.section_dialog.take() else {
         return;
     };
+    let focus = std::mem::take(&mut app.focus_overlay);
     let palette = app.palette;
     let mut answer: Option<bool> = None;
     let frame = modal_frame(app);
@@ -48,7 +49,9 @@ fn section_dialog(app: &mut App, ctx: &egui::Context) {
                     .desired_width(f32::INFINITY)
                     .margin(Margin::symmetric(8, 6)),
             );
-            field.request_focus();
+            if focus {
+                field.request_focus();
+            }
             if ui.input(|i| i.key_pressed(Key::Enter)) {
                 answer = Some(true);
             }
@@ -105,6 +108,7 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
     let Some((mut query, mut selected)) = app.switcher.take() else {
         return;
     };
+    let focus = std::mem::take(&mut app.focus_overlay);
     let palette = app.palette;
     let Some(workspace) = app.active_workspace() else {
         return;
@@ -163,7 +167,9 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
                     .desired_width(f32::INFINITY)
                     .margin(Margin::symmetric(10, 8)),
             );
-            field.request_focus();
+            if focus {
+                field.request_focus();
+            }
             ui.add_space(8.0);
             for (index, (id, title, kind, unread, _)) in matches.iter().enumerate() {
                 let (rect, response) =
@@ -246,6 +252,7 @@ fn picker(app: &mut App, ctx: &egui::Context) {
     };
     let palette = app.palette;
     let mut query = std::mem::take(&mut app.picker_query);
+    let focus = std::mem::take(&mut app.focus_overlay);
     let Some(workspace) = app.active_workspace() else {
         app.picker = None;
         return;
@@ -288,7 +295,9 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                     .desired_width(f32::INFINITY)
                     .margin(Margin::symmetric(8, 6)),
             );
-            field.request_focus();
+            if focus {
+                field.request_focus();
+            }
             // Enter picks the first match of what you searched for; with
             // nothing typed there is no match, only the whole list.
             if !needle.is_empty() && ui.input(|i| i.key_pressed(Key::Enter)) {
