@@ -662,3 +662,142 @@ msgstr "Inloglink"
 
 msgid "Sign in there as usual; NoSlacking finishes by itself. If your browser asks, let it open NoSlacking. If nothing happens, paste the slack:// link from the page here (open the page source with Ctrl+U and search for magic-login)."
 msgstr "Log daar zoals gewoonlijk in; NoSlacking rondt het daarna zelf af. Als je browser het vraagt, laat hem NoSlacking openen. Gebeurt er niets, plak dan hier de slack://-link van de pagina (open de paginabron met Ctrl+U en zoek naar magic-login)."
+
+# Desktop integration: notifications.
+msgid "All new messages"
+msgstr "Alle nieuwe berichten"
+
+msgid "Mentions and keywords"
+msgstr "Vermeldingen en trefwoorden"
+
+msgid "Nothing"
+msgstr "Niets"
+
+msgid "{author}: {text}"
+msgstr "{author}: {text}"
+
+msgid "{author} in {place}"
+msgstr "{author} in {place}"
+
+msgid "Shared {name}"
+msgstr "Deelde {name}"
+
+msgid "Notifications"
+msgstr "Meldingen"
+
+msgid "Desktop notifications"
+msgstr "Bureaubladmeldingen"
+
+msgid "For direct messages, mentions and your keywords, while you are not looking."
+msgstr "Voor directe berichten, vermeldingen en je trefwoorden, als je niet kijkt."
+
+msgid "Play a sound"
+msgstr "Geluid afspelen"
+
+msgid "Keywords"
+msgstr "Trefwoorden"
+
+msgid "deploy, outage, your nickname"
+msgstr "deploy, storing, je bijnaam"
+
+msgid "Separated by commas. Each notifies like a mention, in any conversation that is not set to Nothing."
+msgstr "Gescheiden door komma's. Elk trefwoord geeft een melding zoals een vermelding, in elk gesprek dat niet op Niets staat."
+
+msgid "Notify me about"
+msgstr "Meldingen voor"
+
+msgid "Default ({level})"
+msgstr "Standaard ({level})"
+
+# Desktop integration: do not disturb.
+msgid "For 20 minutes"
+msgstr "20 minuten"
+
+msgid "For 1 hour"
+msgstr "1 uur"
+
+msgid "For 2 hours"
+msgstr "2 uur"
+
+msgid "Until tomorrow"
+msgstr "Tot morgen"
+
+msgid "until {time}"
+msgstr "tot {time}"
+
+msgid "until tomorrow at {time}"
+msgstr "tot morgen {time}"
+
+msgid "until {date} at {time}"
+msgstr "tot {date} {time}"
+
+msgid "Notifications paused {until}"
+msgstr "Meldingen gepauzeerd {until}"
+
+msgid "Do not disturb {until}"
+msgstr "Niet storen {until}"
+
+msgid "Notifications on"
+msgstr "Meldingen aan"
+
+msgid "Pause notifications"
+msgstr "Meldingen pauzeren"
+
+msgid "Resume notifications"
+msgstr "Meldingen hervatten"
+
+# Desktop integration: muting.
+msgid "Mute conversation"
+msgstr "Gesprek dempen"
+
+msgid "Unmute conversation"
+msgstr "Gesprek niet meer dempen"
+
+# Desktop integration: tray.
+msgid "{count} mention or direct message"
+msgid_plural "{count} mentions or direct messages"
+msgstr[0] "{count} vermelding of direct bericht"
+msgstr[1] "{count} vermeldingen of directe berichten"
+
+msgid "Unread messages"
+msgstr "Ongelezen berichten"
+
+msgid "Nothing unread"
+msgstr "Niets ongelezen"
+
+msgid "Show NoSlacking"
+msgstr "NoSlacking tonen"
+
+msgid "Quit NoSlacking"
+msgstr "NoSlacking afsluiten"
+
+msgid "Window"
+msgstr "Venster"
+
+msgid "This desktop shows no tray item."
+msgstr "Deze desktop toont geen pictogram in het systeemvak."
+
+msgid "An icon in the system tray or menu bar that shows what is unread."
+msgstr "Een pictogram in het systeemvak of de menubalk dat laat zien wat ongelezen is."
+
+msgid "Show in the tray"
+msgstr "Tonen in het systeemvak"
+
+msgid "Keep running in the tray"
+msgstr "Blijven draaien in het systeemvak"
+
+msgid "Closing the window leaves NoSlacking connected, with notifications. Quit from the tray."
+msgstr "Als je het venster sluit, blijft NoSlacking verbonden, met meldingen. Sluit af via het systeemvak."
+
+# Desktop integration: starting at login.
+msgid "Could not change starting at login: {error}"
+msgstr "Starten bij inloggen kon niet worden gewijzigd: {error}"
+
+msgid "Starts in the tray, without a window."
+msgstr "Start in het systeemvak, zonder venster."
+
+msgid "Starts with its window open."
+msgstr "Start met het venster open."
+
+msgid "Start when you log in"
+msgstr "Starten wanneer je inlogt"

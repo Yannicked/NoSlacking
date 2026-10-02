@@ -3,6 +3,7 @@
 
 mod composer;
 mod conversation;
+mod desktop;
 mod keys;
 mod login;
 mod message;

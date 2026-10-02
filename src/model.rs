@@ -648,6 +648,20 @@ pub enum Action {
     CancelSignIn,
     /// Opens a folder in the system's file manager.
     OpenFolder(PathBuf),
+    /// Sets how much of a conversation in the open workspace notifies;
+    /// `None` goes back to Slack's choice or the default.
+    NotifyLevel {
+        channel: String,
+        level: Option<crate::notify::Level>,
+    },
+    /// Snoozes notifications in the open workspace, or with `None` ends
+    /// the snooze.
+    Snooze(Option<crate::dnd::Snooze>),
+    /// Mutes or unmutes a conversation in the open workspace.
+    Mute {
+        channel: String,
+        muted: bool,
+    },
 }
 
 #[cfg(test)]

@@ -18,6 +18,11 @@ struct Cli {
     /// A noslacking:// link; the desktop passes sign-in redirects this way.
     link: Option<String>,
 
+    /// Start in the tray without a window, as at login. Only with the tray
+    /// item and "Keep running in the tray" on; otherwise the window opens.
+    #[arg(long)]
+    hidden: bool,
+
     /// Log more (also NOSLACKING_LOG=debug).
     #[arg(long)]
     verbose: bool,
@@ -179,31 +184,34 @@ fn main() -> eframe::Result<()> {
     } else {
         settings
     };
-    let app = App::new(&waker, dirs, settings, app::AppOptions { demo });
+    let mut app = App::new(&waker, dirs, settings, app::AppOptions { demo });
+    // Later launches ask to show the window, with or without one open.
+    app.listen_for_launches(incoming);
     let options = native_options(&cli);
     #[cfg(feature = "demo")]
     let demo_setup = DemoSetup::from(&cli);
-    let mut incoming = Some(incoming);
-    fastframe_shell::Shell::new(app, &waker).run(|lease| {
-        let incoming = incoming.take();
-        #[cfg(feature = "demo")]
-        let demo_setup = demo_setup.clone();
-        eframe::run_native(
-            "NoSlacking",
-            options.clone(),
-            Box::new(move |cc| {
-                let mut app = lease.take(&cc.egui_ctx);
-                app.attach(&cc.egui_ctx);
-                Ok(Box::new(Window {
-                    app,
-                    recovery_checked: false,
-                    incoming,
-                    #[cfg(feature = "demo")]
-                    demo: demo_setup,
-                }))
-            }),
-        )
-    })
+    fastframe_shell::Shell::new(app, &waker)
+        // On macOS the tray item answers only while AppKit's loop runs.
+        .idle(fastframe_tray::idle)
+        .start_hidden(cli.hidden)
+        .run(|lease| {
+            #[cfg(feature = "demo")]
+            let demo_setup = demo_setup.clone();
+            eframe::run_native(
+                "NoSlacking",
+                options.clone(),
+                Box::new(move |cc| {
+                    let mut app = lease.take(&cc.egui_ctx);
+                    app.attach(&cc.egui_ctx);
+                    Ok(Box::new(Window {
+                        app,
+                        recovery_checked: false,
+                        #[cfg(feature = "demo")]
+                        demo: demo_setup,
+                    }))
+                }),
+            )
+        })
 }
 
 fn native_options(cli: &Cli) -> eframe::NativeOptions {
@@ -253,7 +261,6 @@ fn app_icon() -> egui::IconData {
 struct Window {
     app: fastframe_shell::Held<App>,
     recovery_checked: bool,
-    incoming: Option<mpsc::Receiver<Request>>,
     #[cfg(feature = "demo")]
     demo: DemoSetup,
 }
@@ -324,23 +331,6 @@ impl eframe::App for Window {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if !std::mem::replace(&mut self.recovery_checked, true) {
             fastframe_shell::window::recover_offscreen(ctx, frame);
-        }
-        if let Some(incoming) = &self.incoming {
-            while let Ok(request) = incoming.try_recv() {
-                match request {
-                    Request::Show => {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    }
-                    Request::Open(link) => {
-                        self.app
-                            .backend
-                            .send(noslacking::backend::Command::Callback(link));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    }
-                }
-            }
         }
         self.app.background_frame(ctx);
         fastframe_macos::align_traffic_lights(frame, ctx, 52.0);

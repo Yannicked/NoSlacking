@@ -11,7 +11,12 @@ use crate::model::Action;
 use crate::settings::{Appearance, Redirect};
 use crate::theme::{self, Palette};
 
-fn group(ui: &mut egui::Ui, palette: &Palette, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn group(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    title: &str,
+    add: impl FnOnce(&mut egui::Ui),
+) {
     ui.add_space(18.0);
     ui.label(
         RichText::new(title)
@@ -34,7 +39,7 @@ fn group(ui: &mut egui::Ui, palette: &Palette, title: &str, add: impl FnOnce(&mu
 /// A setting: its name and explanation on the left, its control on the
 /// right. `add` gets the name's id, so a control without a label of its own
 /// can be `labelled_by` it for screen readers.
-fn row(
+pub(super) fn row(
     ui: &mut egui::Ui,
     palette: &Palette,
     label: &str,
@@ -231,6 +236,9 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             app.settings_changed();
         }
     });
+
+    super::desktop::settings_group(app, ui, palette);
+    super::desktop::window_group(app, ui, palette);
 
     group(ui, palette, &t("Workspaces"), |ui| {
         let workspaces: Vec<(String, String, Option<String>)> = app

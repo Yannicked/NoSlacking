@@ -549,6 +549,14 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
             section("L05", SectionKind::Apps, "", "", &[]),
         ],
     });
+    // #deploys is muted, as a browser session's preferences would say.
+    sink.send(Event::SlackPrefs {
+        team: TEAM.into(),
+        prefs: crate::desktop::SlackPrefs {
+            muted: std::collections::HashSet::from(["C05".to_owned()]),
+            ..crate::desktop::SlackPrefs::default()
+        },
+    });
     sink.send(Event::Socket(Socket::Connected));
     let mut sent = 0;
     while let Some(command) = commands.recv().await {

@@ -24,6 +24,8 @@ use crate::paths::AppDirs;
 use crate::settings::{Appearance, Settings, WorkspaceMeta};
 use crate::theme::{self, Catalog, Palette};
 
+mod desktop;
+
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(5);
 /// Read markers are sent at most this often per conversation.
@@ -157,6 +159,8 @@ pub struct WorkspaceState {
     /// Raised whenever people arrive, so lookups built from `users` know
     /// when to rebuild.
     users_version: u64,
+    /// Notification choices and the like for this workspace.
+    pub desktop: crate::desktop::TeamState,
 }
 
 impl WorkspaceState {
@@ -178,6 +182,7 @@ impl WorkspaceState {
             requested_bots: HashSet::new(),
             requested_conversations: HashSet::new(),
             users_version: 0,
+            desktop: crate::desktop::TeamState::default(),
         }
     }
 
@@ -306,6 +311,13 @@ impl WorkspaceState {
         out.sort();
         out.dedup();
         out
+    }
+
+    /// Whether a conversation shows as unread: a muted one only for its
+    /// mentions, as in Slack.
+    pub fn is_unread(&self, conversation: &Conversation) -> bool {
+        conversation.has_unread()
+            && (conversation.mentions > 0 || !self.desktop.is_muted(&conversation.id))
     }
 
     /// Whether a message mentions you (or everyone).
@@ -554,6 +566,8 @@ impl WorkspaceState {
         let known = self.conversation(channel).is_some();
         let from_me = message.user.as_deref() == Some(self.info.user_id.as_str());
         let mentions_me = self.mentions_me(&message);
+        // A muted direct message counts only what mentions you.
+        let counts_all = !self.desktop.is_muted(channel);
         if message.is_reply() {
             let parent_ts = message.thread_ts.clone().unwrap_or_default();
             let key = (channel.to_owned(), parent_ts);
@@ -593,7 +607,7 @@ impl WorkspaceState {
                 if from_me {
                     conversation.last_read = Some(ts);
                     conversation.mentions = 0;
-                } else if !viewing && (mentions_me || conversation.kind.is_dm()) {
+                } else if !viewing && (mentions_me || (conversation.kind.is_dm() && counts_all)) {
                     conversation.mentions += 1;
                 }
             }
@@ -890,6 +904,11 @@ pub struct App {
     settings_due: crate::settings::Debounce,
     saver: crate::settings::Saver,
     quit: bool,
+    /// Shows desktop notifications; `None` in the demo or without them.
+    notifier: Option<crate::notify::Notifier>,
+    /// The desktop's side of the window: requests for it, and what its
+    /// title and badge last showed.
+    desktop: desktop::Desktop,
 }
 
 impl App {
@@ -936,6 +955,7 @@ impl App {
                 user_id: meta.user_id.clone(),
             });
             state.active = settings.last_conversation.get(&meta.team_id).cloned();
+            state.desktop = settings.desktop.team_state(&meta.team_id);
             workspaces.push(state);
         }
         let page = if workspaces.is_empty() && !options.demo {
@@ -987,8 +1007,12 @@ impl App {
             settings_due: crate::settings::Debounce::default(),
             saver: crate::settings::Saver::new(),
             quit: false,
+            notifier: desktop::notifier(waker, options.demo),
+            desktop: desktop::Desktop::new(options.demo),
         };
         app.start_theme_scan();
+        app.start_tray();
+        app.refresh_autostart();
         app
     }
 
@@ -1011,6 +1035,7 @@ impl App {
     /// Called once the window's egui context exists.
     pub fn attach(&mut self, ctx: &egui::Context) {
         self.waker.attach(ctx);
+        self.window_made();
         theme::install(ctx);
         ctx.add_bytes_loader(std::sync::Arc::new(self.backend.images.clone()));
         #[cfg(feature = "demo")]
@@ -1133,6 +1158,7 @@ impl App {
             self.start_theme_scan();
         }
         self.flush_marks();
+        self.desktop_frame();
         let now = Instant::now();
         self.toasts.retain(|t| t.until > now);
         if self.settings_due.take_due(now) {
@@ -1151,6 +1177,7 @@ impl App {
             self.mark_active_read();
         }
         self.window_focused = focused;
+        self.desktop_window(&ctx);
         crate::ui::show(self, ui);
         // Applying an action may queue another (editing the last message).
         for _ in 0..4 {
@@ -1230,6 +1257,8 @@ impl App {
             Event::Socket(socket) => self.socket_changed(socket),
             Event::Error(error) => self.toast(error, true),
             Event::Notice(text) => self.toast(text, false),
+            Event::Dnd { team, dnd } => self.dnd_arrived(&team, dnd),
+            Event::SlackPrefs { team, prefs } => self.prefs_arrived(&team, prefs),
             // A workspace's conversations, people, apps and sidebar.
             Event::Conversations {
                 team,
@@ -1386,6 +1415,7 @@ impl App {
             None => {
                 let mut state = WorkspaceState::new(info);
                 state.active = self.settings.last_conversation.get(&team).cloned();
+                state.desktop = self.settings.desktop.team_state(&team);
                 self.workspaces.push(state);
             }
         }
@@ -1483,6 +1513,11 @@ impl App {
 
     fn message(&mut self, team: &str, channel: &str, message: Message, changed: bool) {
         let viewing = self.is_viewing(team, channel);
+        let note = if changed {
+            None
+        } else {
+            self.note_for(team, channel, &message, viewing)
+        };
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
@@ -1508,6 +1543,9 @@ impl App {
         }
         if viewing {
             self.waker.wake();
+        }
+        if let Some(note) = note {
+            self.notify(note);
         }
     }
 
@@ -1926,6 +1964,9 @@ impl App {
             Action::DismissError => self.toasts.clear(),
             // Leaving the app: links, folders and the clipboard.
             Action::OpenUrl(url) => self.open_url(&url),
+            Action::NotifyLevel { channel, level } => self.set_notify_level(&channel, level),
+            Action::Snooze(choice) => self.snooze(choice),
+            Action::Mute { channel, muted } => self.mute(&channel, muted),
             Action::OpenFolder(path) => {
                 if let Err(error) = open::that_detached(&path) {
                     let error = error.to_string();
@@ -2442,20 +2483,27 @@ fn slack_link_channel(url: &str, workspace: Option<&WorkspaceState>) -> Option<S
 
 impl fastframe_shell::Resident for App {
     fn closed(&self) -> Closed {
-        Closed::Quit
+        self.closed_action()
     }
 
     fn window_gone(&mut self) {
         self.waker.detach();
+        self.window_left();
     }
 
     fn headless_frame(&mut self, ctx: &egui::Context) -> Headless {
         self.background_frame(ctx);
         if self.quit {
             Headless::Quit
+        } else if self.wants_window() {
+            Headless::Show
         } else {
             Headless::Wait
         }
+    }
+
+    fn start_hidden(&mut self) -> bool {
+        self.can_start_hidden()
     }
 
     fn shutdown(&mut self) {

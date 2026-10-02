@@ -5,6 +5,7 @@
 //! [`Event`]s and wakes the window for each one, so egui sleeps when
 //! nothing happens.
 
+pub mod desktop;
 pub mod worker;
 
 use std::collections::HashMap;
@@ -137,6 +138,25 @@ pub enum Command {
         channel: String,
     },
     Reconnect,
+    /// Snoozes notifications in Slack for this many minutes, or with
+    /// `None` ends the snooze.
+    Snooze {
+        team: String,
+        minutes: Option<u32>,
+    },
+    /// Asks Slack for the Do Not Disturb state again.
+    FetchDnd {
+        team: String,
+    },
+    /// Mutes or unmutes a conversation in your Slack preferences (browser
+    /// sessions). `all` is every muted conversation after the change, for
+    /// the older preference that lists them.
+    Mute {
+        team: String,
+        channel: String,
+        muted: bool,
+        all: Vec<String>,
+    },
 }
 
 /// Prints every field except the secrets: a pasted token, the session
@@ -291,6 +311,24 @@ impl std::fmt::Debug for Command {
                 .field("channel", channel)
                 .finish(),
             Self::Reconnect => f.write_str("Reconnect"),
+            Self::Snooze { team, minutes } => f
+                .debug_struct("Snooze")
+                .field("team", team)
+                .field("minutes", minutes)
+                .finish(),
+            Self::FetchDnd { team } => f.debug_struct("FetchDnd").field("team", team).finish(),
+            Self::Mute {
+                team,
+                channel,
+                muted,
+                all,
+            } => f
+                .debug_struct("Mute")
+                .field("team", team)
+                .field("channel", channel)
+                .field("muted", muted)
+                .field("all", all)
+                .finish(),
         }
     }
 }
@@ -443,6 +481,16 @@ pub enum Event {
     Socket(Socket),
     Error(String),
     Notice(String),
+    /// Your Do Not Disturb state in a workspace.
+    Dnd {
+        team: String,
+        dnd: crate::dnd::Dnd,
+    },
+    /// Your notification preferences in a workspace (browser sessions).
+    SlackPrefs {
+        team: String,
+        prefs: crate::desktop::SlackPrefs,
+    },
 }
 
 /// The interface's end of the bridge.

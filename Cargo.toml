@@ -49,6 +49,7 @@ fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
 fastframe-log = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
 fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
 fastframe-macos = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
+fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
 # The Web API and file transfers. rustls everywhere so the client links one
 # TLS stack and builds without OpenSSL on every platform.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "http2", "multipart", "cookies", "stream"] }
@@ -69,6 +70,11 @@ jiff = "0.2"
 # The native file picker for uploads.
 rfd = "0.17.2"
 
+# Desktop notifications: D-Bus on Linux and the BSDs, the notification
+# center on macOS, toasts on Windows. Elsewhere there are none.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly", target_os = "macos", windows))'.dependencies]
+notify-rust = "4.18"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
 
@@ -76,6 +82,9 @@ apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
 windows-native-keyring-store = { version = "1.1", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# The unread count on the launcher icon (the LauncherEntry signal). Already
+# in the tree for the keyring and accessibility; same version.
+zbus = { version = "5.19", default-features = false, features = ["blocking-api"] }
 zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-tokio-crypto-rust"] }
 
 [build-dependencies]
