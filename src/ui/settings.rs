@@ -11,6 +11,8 @@ use crate::model::Action;
 use crate::settings::{Appearance, Redirect};
 use crate::theme::{self, Palette};
 
+mod network;
+
 pub(super) fn group(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -363,6 +365,8 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             }
         }
     });
+
+    network::show(app, ui, palette);
 
     group(ui, palette, &t("Files"), |ui| {
         let folders = [

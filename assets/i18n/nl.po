@@ -1199,3 +1199,42 @@ msgstr "Niet nodig: aanmelden gebruikt PKCE"
 
 msgid "Must be one of the app's redirect URLs under OAuth & Permissions. The manifest adds the loopback one; add noslacking://oauth/callback there yourself to use it."
 msgstr "Moet een van de redirect-URL's van de app onder OAuth & Permissions zijn. Het manifest voegt de loopback-URL toe; voeg noslacking://oauth/callback daar zelf toe om die te gebruiken."
+
+msgid "Network"
+msgstr "Netwerk"
+
+msgid "Use system proxy"
+msgstr "Systeemproxy gebruiken"
+
+msgid "No proxy"
+msgstr "Geen proxy"
+
+msgid "Manual"
+msgstr "Handmatig"
+
+msgid "Proxy"
+msgstr "Proxy"
+
+msgid "The system proxy follows the HTTPS_PROXY and NO_PROXY variables, and on macOS and Windows the system's settings."
+msgstr "De systeemproxy volgt de variabelen HTTPS_PROXY en NO_PROXY, en op macOS en Windows de systeeminstellingen."
+
+msgid "Proxy URL"
+msgstr "Proxy-URL"
+
+msgid "Apply"
+msgstr "Toepassen"
+
+msgid "http:// or socks5:// (socks5h:// to let the proxy look up names). A user name may go in the URL; a password cannot be saved."
+msgstr "http:// of socks5:// (socks5h:// om de proxy namen te laten opzoeken). Een gebruikersnaam mag in de URL; een wachtwoord kan niet worden bewaard."
+
+msgid "Enter a proxy URL."
+msgstr "Vul een proxy-URL in."
+
+msgid "That is not a proxy URL with a host and port."
+msgstr "Dat is geen proxy-URL met een host en poort."
+
+msgid "The proxy URL must start with http://, socks5:// or socks5h://."
+msgstr "De proxy-URL moet beginnen met http://, socks5:// of socks5h://."
+
+msgid "A proxy password cannot be saved; leave it out of the URL."
+msgstr "Een proxywachtwoord kan niet worden bewaard; laat het weg uit de URL."

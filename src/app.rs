@@ -1048,6 +1048,11 @@ impl App {
                 credentials_in_memory: false,
             }
         };
+        // Before the worker's first request, so nothing goes around the
+        // chosen proxy.
+        if let Err(error) = crate::slack::net::configure(&settings.proxy) {
+            log::warn!("ignoring the saved proxy setting: {error}");
+        }
         let backend = backend::spawn(waker, source, dirs.images());
         let mut catalog = Catalog::default();
         if !options.demo {
@@ -2415,6 +2420,9 @@ impl App {
             }
             Action::SignOut(team) => self.backend.send(Command::SignOut(team)),
             Action::Reconnect => self.backend.send(Command::Reconnect),
+            Action::ApplyProxy => self
+                .backend
+                .send(Command::SetProxy(self.settings.proxy.clone())),
             Action::SignInSession => {
                 self.sign_in = None;
                 self.backend.send(Command::SignInSession {

@@ -134,7 +134,6 @@ struct Live {
 }
 
 pub struct Worker {
-    http: reqwest::Client,
     credentials: Credentials,
     dirs: AppDirs,
     sink: Sink,
@@ -175,16 +174,9 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn new(
-        http: reqwest::Client,
-        credentials: Credentials,
-        dirs: AppDirs,
-        sink: Sink,
-        images: ImageLoader,
-    ) -> Self {
+    pub fn new(credentials: Credentials, dirs: AppDirs, sink: Sink, images: ImageLoader) -> Self {
         let (internal, internal_rx) = mpsc::unbounded_channel();
         Self {
-            http,
             credentials,
             dirs,
             sink,
@@ -344,7 +336,7 @@ impl Worker {
     fn make_client(&self, team: &str, token: Token, sink: Sink) -> Client {
         let credentials = self.credentials.clone();
         let team = team.to_owned();
-        Client::new(self.http.clone(), token).with_refresh(
+        Client::shared(token).with_refresh(
             self.app.as_ref().and_then(AppCredentials::oauth),
             move |result| {
                 let credentials = credentials.clone();
@@ -475,7 +467,7 @@ impl Worker {
         self.report_socket();
         let internal = self.internal.clone();
         tokio::spawn(socket::run(
-            self.http.clone(),
+            crate::slack::net::api(),
             token,
             move |event| {
                 let _ = internal.send(Internal::Socket { generation, event });
@@ -659,6 +651,13 @@ impl Worker {
                 }
             }
             Command::Reconnect => self.reconnect(),
+            Command::SetProxy(proxy) => match crate::slack::net::configure(&proxy) {
+                // New clients only help once the sockets reconnect on them.
+                Ok(()) => self.reconnect(),
+                Err(error) => self
+                    .sink
+                    .send(Event::Error(format!("Could not use the proxy: {error}"))),
+            },
             Command::Snooze { team, minutes } => {
                 if let Some((client, sink)) = self.team(&team) {
                     tokio::spawn(super::desktop::snooze(client, team, minutes, sink));
@@ -725,7 +724,7 @@ impl Worker {
     }
 
     fn paste_token(&mut self, token: String) {
-        let http = self.http.clone();
+        let http = crate::slack::net::api();
         let internal = self.internal.clone();
         self.sink.send(Event::SignIn(SignIn::Exchanging));
         tokio::spawn(async move {
@@ -1268,7 +1267,7 @@ impl Worker {
             return;
         };
         self.sink.send(Event::SignIn(SignIn::Exchanging));
-        let http = self.http.clone();
+        let http = crate::slack::net::api();
         let internal = self.internal.clone();
         tokio::spawn(async move {
             let result = auth::exchange(&http, &app, &flow, &code)
@@ -1336,7 +1335,7 @@ impl Worker {
             }
             Internal::SignedIn(Err(error)) => self.sink.send(Event::SignIn(SignIn::Failed(error))),
             Internal::SignedIn(Ok(signed)) => {
-                let http = self.http.clone();
+                let http = crate::slack::net::api();
                 let credentials = self.credentials.clone();
                 let internal = self.internal.clone();
                 let sink = self.sink.clone();
@@ -2909,19 +2908,8 @@ mod tests {
             gate: None,
         };
         let root = std::env::temp_dir().join(format!("noslacking-test-{}", std::process::id()));
-        let http = reqwest::Client::new();
-        let images = ImageLoader::new(
-            http.clone(),
-            tokio::runtime::Handle::current(),
-            root.join("images"),
-        );
-        let worker = Worker::new(
-            http,
-            Credentials::memory(),
-            AppDirs::under(&root),
-            sink,
-            images,
-        );
+        let images = ImageLoader::new(tokio::runtime::Handle::current(), root.join("images"));
+        let worker = Worker::new(Credentials::memory(), AppDirs::under(&root), sink, images);
         (worker, events)
     }
 
