@@ -94,6 +94,9 @@ pub struct Settings {
     pub proxy: crate::slack::net::ProxySettings,
     /// Spell checking in the composer.
     pub spelling: crate::spell::SpellSettings,
+    /// Direct messages closed in the sidebar, by workspace: each one's
+    /// newest message when it was closed. Anything newer brings it back.
+    pub closed: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Default for Settings {
@@ -118,6 +121,7 @@ impl Default for Settings {
             recent_emoji: Vec::new(),
             proxy: crate::slack::net::ProxySettings::default(),
             spelling: crate::spell::SpellSettings::default(),
+            closed: BTreeMap::new(),
         }
     }
 }
@@ -212,6 +216,7 @@ impl Settings {
             recent_emoji,
             proxy,
             spelling,
+            closed,
         );
         // One damaged workspace must not sign you out of the others, so
         // these are read entry by entry.

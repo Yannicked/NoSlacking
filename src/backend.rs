@@ -174,6 +174,12 @@ pub enum Command {
         team: String,
         channel: String,
     },
+    /// Closes a direct message or group DM in Slack (`conversations.close`),
+    /// as closing it in Slack's own sidebar does.
+    CloseConversation {
+        team: String,
+        channel: String,
+    },
     Reconnect,
     /// Switches every connection to this proxy setting and restarts the
     /// live ones.
@@ -393,6 +399,11 @@ impl std::fmt::Debug for Command {
                 .finish(),
             Self::FetchConversation { team, channel } => f
                 .debug_struct("FetchConversation")
+                .field("team", team)
+                .field("channel", channel)
+                .finish(),
+            Self::CloseConversation { team, channel } => f
+                .debug_struct("CloseConversation")
                 .field("team", team)
                 .field("channel", channel)
                 .finish(),

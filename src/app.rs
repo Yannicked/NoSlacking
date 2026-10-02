@@ -1989,10 +1989,38 @@ impl App {
         });
     }
 
+    /// Hides a direct message from the sidebar until it has something
+    /// new, and closes it in Slack too.
+    fn close_conversation(&mut self, channel: String) {
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        let latest = self
+            .workspace_mut(&team)
+            .and_then(|w| w.conversation(&channel))
+            .and_then(|c| c.latest.clone())
+            .map_or_else(|| "0".to_owned(), |ts| ts.0);
+        self.settings
+            .closed
+            .entry(team.clone())
+            .or_default()
+            .insert(channel.clone(), latest);
+        self.save_settings();
+        self.backend
+            .send(Command::CloseConversation { team, channel });
+    }
+
     pub fn open_conversation(&mut self, channel: &str) {
         let Some(team) = self.active_team() else {
             return;
         };
+        // Opening a closed conversation opens it in the sidebar again.
+        if let Some(closed) = self.settings.closed.get_mut(&team)
+            && closed.remove(channel).is_some()
+            && closed.is_empty()
+        {
+            self.settings.closed.remove(&team);
+        }
         if let Some(workspace) = self.workspace_mut(&team) {
             workspace.active = Some(channel.to_owned());
         }
@@ -2346,6 +2374,7 @@ impl App {
             // Where you are.
             Action::SelectWorkspace(team) => self.select_workspace(team),
             Action::PopOut(channel) => self.pop_out(channel),
+            Action::CloseConversation(channel) => self.close_conversation(channel),
             Action::OpenConversation(channel) => self.open_conversation(&channel),
             Action::OpenThread { channel, ts } => self.open_thread(channel, ts),
             Action::CloseThread => self.thread = None,
