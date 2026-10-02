@@ -66,6 +66,13 @@ enum Internal {
         event: crate::slack::rtm::RtmEvent,
     },
     SignInListenerFailed(String),
+    /// These people and apps could not be fetched for a passing reason;
+    /// the next request for them should try again.
+    FetchFailed {
+        team: String,
+        users: Vec<String>,
+        bots: Vec<String>,
+    },
 }
 
 struct Team {
@@ -789,16 +796,30 @@ impl Worker {
             return;
         }
         let sink = self.sink.clone();
+        let internal = self.internal.clone();
         tokio::spawn(async move {
             let mut users = Vec::new();
+            let mut retry = Vec::new();
             for id in ids {
                 match client
                     .call::<types::UserInfo>("users.info", &[("user", id.clone())])
                     .await
                 {
                     Ok(info) => users.push(info.user.into_model()),
-                    Err(error) => log::debug!("users.info {id}: {error}"),
+                    Err(error) => {
+                        log::debug!("users.info {id}: {error}");
+                        if worth_retrying(&error) {
+                            retry.push(id);
+                        }
+                    }
                 }
+            }
+            if !retry.is_empty() {
+                let _ = internal.send(Internal::FetchFailed {
+                    team: team.clone(),
+                    users: retry,
+                    bots: Vec::new(),
+                });
             }
             if !users.is_empty() {
                 sink.send(Event::Users { team, users });
@@ -818,8 +839,10 @@ impl Worker {
             return;
         }
         let sink = self.sink.clone();
+        let internal = self.internal.clone();
         tokio::spawn(async move {
             let mut bots = Vec::new();
+            let mut retry = Vec::new();
             for id in ids {
                 match client
                     .call::<types::BotInfo>("bots.info", &[("bot", id.clone())])
@@ -832,8 +855,20 @@ impl Worker {
                         }
                         bots.push(bot);
                     }
-                    Err(error) => log::debug!("bots.info {id}: {error}"),
+                    Err(error) => {
+                        log::debug!("bots.info {id}: {error}");
+                        if worth_retrying(&error) {
+                            retry.push(id);
+                        }
+                    }
                 }
+            }
+            if !retry.is_empty() {
+                let _ = internal.send(Internal::FetchFailed {
+                    team: team.clone(),
+                    users: Vec::new(),
+                    bots: retry,
+                });
             }
             if !bots.is_empty() {
                 sink.send(Event::Bots { team, bots });
@@ -933,6 +968,9 @@ impl Worker {
             });
         }
         self.images.remove_client(team);
+        // A later sign-in to the same workspace fetches everyone afresh.
+        self.users_requested.retain(|(t, _)| t != team);
+        self.bots_requested.retain(|(t, _)| t != team);
         self.sink.send(Event::SignedOut {
             team: team.to_owned(),
             reason: None,
@@ -946,6 +984,14 @@ impl Worker {
     async fn internal(&mut self, message: Internal) {
         match message {
             Internal::Loaded { app, workspaces } => self.loaded(app, workspaces).await,
+            Internal::FetchFailed { team, users, bots } => {
+                for id in users {
+                    self.users_requested.remove(&(team.clone(), id));
+                }
+                for id in bots {
+                    self.bots_requested.remove(&(team.clone(), id));
+                }
+            }
             Internal::Callback(url) => self.callback(url),
             Internal::SignInListenerFailed(error) => {
                 self.sink.send(Event::SignIn(SignIn::Failed(format!(
@@ -1128,6 +1174,12 @@ pub fn describe(error: &SlackError) -> String {
         },
         other => other.to_string(),
     }
+}
+
+/// Whether a failed fetch may work later: an outage or a rate limit, not
+/// Slack saying no (an unknown id stays unknown).
+fn worth_retrying(error: &SlackError) -> bool {
+    !matches!(error, SlackError::Api(_))
 }
 
 /// Checks a pasted token and finds out whose it is.
@@ -2224,6 +2276,33 @@ mod tests {
             })
             .collect();
         assert_eq!(signed_out, ["TA", "TB", "TC"]);
+    }
+
+    #[tokio::test]
+    async fn failed_fetches_can_be_asked_for_again() {
+        let (mut worker, _events) = worker();
+        // A session token, so signing out revokes nothing over the network.
+        team(&mut worker, "TA", session());
+        for id in ["U1", "U2"] {
+            worker
+                .users_requested
+                .insert(("TA".to_owned(), id.to_owned()));
+        }
+        worker.bots_requested.insert(("TA".into(), "B1".into()));
+        worker
+            .internal(Internal::FetchFailed {
+                team: "TA".into(),
+                users: vec!["U1".into()],
+                bots: vec!["B1".into()],
+            })
+            .await;
+        assert!(!worker.users_requested.contains(&("TA".into(), "U1".into())));
+        assert!(worker.users_requested.contains(&("TA".into(), "U2".into())));
+        assert!(worker.bots_requested.is_empty());
+        worker.sign_out("TA");
+        assert!(worker.users_requested.is_empty());
+        assert!(worth_retrying(&SlackError::RateLimited));
+        assert!(!worth_retrying(&SlackError::Api("user_not_found".into())));
     }
 
     #[test]
