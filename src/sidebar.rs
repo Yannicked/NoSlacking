@@ -251,6 +251,22 @@ pub fn title(section: &SidebarSection) -> String {
 }
 
 /// The sections to draw, each with its conversations in order.
+/// Whether a conversation was closed (see `Settings::closed`) and has had
+/// nothing new since.
+pub fn is_closed(
+    closed: Option<&std::collections::BTreeMap<String, String>>,
+    conversation: &Conversation,
+) -> bool {
+    closed
+        .and_then(|closed| closed.get(&conversation.id))
+        .is_some_and(|at| {
+            conversation
+                .latest
+                .as_ref()
+                .is_none_or(|latest| *latest <= crate::model::Ts::new(at.clone()))
+        })
+}
+
 pub fn layout<'a>(
     sections: Option<&[SidebarSection]>,
     conversations: &'a [Conversation],
@@ -632,6 +648,19 @@ mod tests {
             unread: 0,
             mentions: 0,
         }
+    }
+
+    #[test]
+    fn closed_conversations_come_back_with_something_new() {
+        let closed: std::collections::BTreeMap<String, String> =
+            [("D1".to_owned(), "20.0".to_owned())].into();
+        let dm = |latest: &str| conversation("D1", "ana", ConversationKind::Direct, latest);
+        assert!(is_closed(Some(&closed), &dm("20.0")));
+        assert!(is_closed(Some(&closed), &dm("9.0")));
+        assert!(!is_closed(Some(&closed), &dm("21.0")));
+        assert!(!is_closed(None, &dm("9.0")));
+        let other = conversation("D2", "bob", ConversationKind::Direct, "1.0");
+        assert!(!is_closed(Some(&closed), &other));
     }
 
     fn section(id: &str, kind: SectionKind, name: &str, ids: &[&str]) -> SidebarSection {

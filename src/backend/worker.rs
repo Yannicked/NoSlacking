@@ -661,6 +661,12 @@ impl Worker {
             Command::FetchUsers { team, ids } => self.fetch_users(team, ids),
             Command::FetchBots { team, ids } => self.fetch_bots(team, ids),
             Command::Sidebar { team, calls } => self.edit_sidebar(team, calls),
+            Command::CloseConversation { team, channel } => self.act(
+                &team,
+                "conversations.close",
+                vec![("channel", channel)],
+                &["channel_not_found", "already_closed"],
+            ),
             Command::FetchConversation { team, channel } => {
                 if let Some((client, sink)) = self.team(&team) {
                     tokio::spawn(conversation_info(client, team, channel, sink));

@@ -553,6 +553,9 @@ pub enum Action {
     OpenConversation(String),
     /// Opens a conversation of the active workspace in a window of its own.
     PopOut(String),
+    /// Closes a direct message or group DM of the active workspace: it
+    /// leaves the sidebar until something new arrives in it.
+    CloseConversation(String),
     OpenThread {
         channel: String,
         ts: Ts,

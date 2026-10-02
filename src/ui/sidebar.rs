@@ -320,6 +320,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         ui,
                         &palette,
                         workspace,
+                        settings.closed.get(&workspace.info.team_id),
                         sidebar_filter,
                         settings.sidebar_sort,
                         actions,
@@ -342,10 +343,15 @@ fn matches(workspace: &WorkspaceState, conversation: &Conversation, filter: &str
             .contains(&filter.to_lowercase())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the sidebar's parts, borrowed apart from the app"
+)]
 fn list(
     ui: &mut egui::Ui,
     palette: &Palette,
     workspace: &WorkspaceState,
+    closed: Option<&std::collections::BTreeMap<String, String>>,
     filter: &str,
     sort: sidebar::Sort,
     actions: &mut Vec<Action>,
@@ -370,6 +376,10 @@ fn list(
             .iter()
             .copied()
             .filter(|c| matches(workspace, c, filter))
+            // Closed ones stay out until something new arrives, unless open.
+            .filter(|c| {
+                workspace.active.as_deref() == Some(c.id.as_str()) || !sidebar::is_closed(closed, c)
+            })
             .filter(|c| {
                 // Skip deactivated people's DMs unless they have something new.
                 c.user
@@ -638,6 +648,10 @@ fn row_menu(
 fn window_items(ui: &mut egui::Ui, conversation: &Conversation, actions: &mut Vec<Action>) {
     if ui.button(t("Open in new window")).clicked() {
         actions.push(Action::PopOut(conversation.id.clone()));
+        ui.close();
+    }
+    if conversation.kind.is_dm() && ui.button(t("Close conversation")).clicked() {
+        actions.push(Action::CloseConversation(conversation.id.clone()));
         ui.close();
     }
 }
