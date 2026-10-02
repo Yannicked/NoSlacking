@@ -61,6 +61,19 @@ pub fn unescape(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// Whether `url` is safe to hand to the system opener: web pages and mail
+/// only. Other schemes (`file:`, `smb:`, `C:\…`) can launch programs.
+pub fn is_openable(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once(':') else {
+        return false;
+    };
+    match scheme.to_ascii_lowercase().as_str() {
+        "http" | "https" => rest.starts_with("//") && rest.len() > 2,
+        "mailto" => !rest.is_empty(),
+        _ => false,
+    }
+}
+
 /// Escapes what Slack treats as markup in text a person typed.
 pub fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
@@ -251,8 +264,21 @@ fn special(text: &str, style: Style, out: &mut Vec<Inline>) -> Option<usize> {
             Inline::Broadcast(command.split('^').next().unwrap_or(command).to_owned())
         }
     } else if target.contains(':') {
+        let url = unescape(target);
+        if !is_openable(&url) {
+            // A `file:`, `smb:` or drive path would run whatever it names
+            // when clicked; show what was written instead of a link.
+            let text = label.filter(|l| !l.is_empty()).unwrap_or(url);
+            match out.last_mut() {
+                Some(Inline::Text(previous, previous_style)) if *previous_style == style => {
+                    previous.push_str(&text)
+                }
+                _ => out.push(Inline::Text(text, style)),
+            }
+            return Some(end + 1);
+        }
         Inline::Link {
-            url: unescape(target),
+            url,
             label: label.filter(|l| !l.is_empty()),
             style,
         }
@@ -463,6 +489,30 @@ mod tests {
         assert_eq!(
             parse("a < b > c"),
             [Block::Paragraph(vec![text("a < b > c")])]
+        );
+    }
+
+    #[test]
+    fn only_web_and_mail_links_are_links() {
+        assert!(is_openable("https://x.y/a"));
+        assert!(is_openable("HTTP://x.y"));
+        assert!(is_openable("mailto:a@b.c"));
+        for unsafe_url in [
+            "C:\\Users\\Public\\x.exe",
+            "file:///etc/passwd",
+            "smb://host/share",
+            "javascript:alert(1)",
+            "https:",
+            "https://",
+            "nothing",
+        ] {
+            assert!(!is_openable(unsafe_url), "{unsafe_url}");
+        }
+        assert_eq!(
+            parse("<C:\\x.exe|report.pdf> and <file:///etc/passwd>"),
+            [Block::Paragraph(vec![text(
+                "report.pdf and file:///etc/passwd"
+            )])]
         );
     }
 
