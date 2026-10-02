@@ -411,7 +411,7 @@ impl Client {
                     tokio::time::sleep(backoff(attempt)).await;
                     continue;
                 }
-                Err(error) => return Err(SlackError::Network(error.without_url().to_string())),
+                Err(error) => return Err(error.into()),
             };
             let status = response.status().as_u16();
             if let Some(wait) = retry_after(status, response.headers().get("retry-after")) {
@@ -428,10 +428,7 @@ impl Client {
                 tokio::time::sleep(backoff(attempt)).await;
                 continue;
             }
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
+            let bytes = response.bytes().await?;
             drop(permit);
             if !(200..300).contains(&status) && bytes.is_empty() {
                 return Err(SlackError::Http(status));
@@ -489,8 +486,7 @@ impl Client {
             .post(&target.upload_url)
             .multipart(form)
             .send()
-            .await
-            .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
+            .await?;
         if !response.status().is_success() {
             return Err(SlackError::Http(response.status().as_u16()));
         }
@@ -582,11 +578,7 @@ pub async fn get_bytes(
 ) -> Result<Vec<u8>, SlackError> {
     let mut response = fetch(http, url, token, cookie).await?;
     let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| SlackError::Network(e.without_url().to_string()))?
-    {
+    while let Some(chunk) = response.chunk().await? {
         bytes.extend_from_slice(&chunk);
         if bytes.len() > max {
             return Err(SlackError::Decode("file too large".into()));
@@ -611,10 +603,7 @@ async fn fetch(
     if let Some(cookie) = cookie {
         request = request.header(reqwest::header::COOKIE, format!("d={cookie}"));
     }
-    let response = request
-        .send()
-        .await
-        .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
+    let response = request.send().await?;
     if !response.status().is_success() {
         return Err(SlackError::Http(response.status().as_u16()));
     }
@@ -645,12 +634,8 @@ pub async fn refresh_token(
             ("refresh_token", refresh),
         ])
         .send()
-        .await
-        .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
+        .await?;
+    let bytes = response.bytes().await?;
     let access: types::OauthAccess = decode(&bytes)?;
     token_from(access).ok_or_else(|| SlackError::Decode("no user token in refresh".into()))
 }
