@@ -26,6 +26,7 @@ pub mod links;
 pub mod model;
 pub mod mrkdwn;
 pub mod notify;
+pub mod offline;
 pub mod paste;
 pub mod paths;
 pub mod redact;

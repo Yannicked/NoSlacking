@@ -95,12 +95,18 @@ impl AppDirs {
         self.cache.join("images")
     }
 
-    /// The users seen in a workspace, so names show before the network answers.
+    /// The encrypted offline cache (see [`crate::offline`]).
+    pub fn offline(&self) -> PathBuf {
+        crate::offline::root(&self.cache)
+    }
+
+    /// Where older builds kept a workspace's users unencrypted; removed
+    /// now that [`crate::offline`] keeps them.
     pub fn users_cache(&self, team: &str) -> PathBuf {
         self.cache.join(format!("users-{}.json", sanitize(team)))
     }
 
-    /// The conversation list of a workspace, for an instant sidebar on launch.
+    /// Where older builds kept a workspace's conversation list unencrypted.
     pub fn conversations_cache(&self, team: &str) -> PathBuf {
         self.cache
             .join(format!("conversations-{}.json", sanitize(team)))
