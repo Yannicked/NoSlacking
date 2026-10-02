@@ -4,7 +4,9 @@
 //! OS keyring (see [`crate::credentials`]).
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use crate::i18n::Locale;
 use crate::theme::CustomTheme;
@@ -242,14 +244,16 @@ impl Settings {
     }
 
     pub fn save(&self, path: &Path) {
-        match serde_json::to_vec_pretty(self) {
-            Ok(bytes) => {
-                if let Err(error) = crate::paths::write_atomic(path, &bytes) {
-                    log::warn!("could not save settings: {error}");
-                }
-            }
-            Err(error) => log::warn!("could not encode settings: {error}"),
+        if let Some(bytes) = self.encode() {
+            write(path, &bytes);
         }
+    }
+
+    /// The file's bytes, or `None` (logged) if they cannot be encoded.
+    pub fn encode(&self) -> Option<Vec<u8>> {
+        serde_json::to_vec_pretty(self)
+            .map_err(|error| log::warn!("could not encode settings: {error}"))
+            .ok()
     }
 
     pub fn workspace(&self, team: &str) -> Option<&WorkspaceMeta> {
@@ -285,10 +289,179 @@ fn backup_path(path: &Path, suffix: &str) -> std::path::PathBuf {
     path.with_file_name(name)
 }
 
+fn write(path: &Path, bytes: &[u8]) {
+    if let Err(error) = crate::paths::write_atomic(path, bytes) {
+        log::warn!("could not save settings: {error}");
+    }
+}
+
+/// How long settings must hold still before they are written: dragging a
+/// panel edge or the zoom slider changes them every frame.
+pub const SAVE_AFTER: Duration = Duration::from_millis(500);
+
+/// When a burst of changes is due to be saved: each change pushes the
+/// moment back, so a drag is written once, after it ends.
+#[derive(Debug, Default)]
+pub struct Debounce {
+    due: Option<Instant>,
+}
+
+impl Debounce {
+    /// Notes a change at `now`.
+    pub fn poke(&mut self, now: Instant) {
+        self.due = Some(now + SAVE_AFTER);
+    }
+
+    /// Whether a change is waiting at all.
+    pub fn pending(&self) -> bool {
+        self.due.is_some()
+    }
+
+    /// Whether the changes have held still long enough by `now`; answering
+    /// yes forgets them.
+    pub fn take_due(&mut self, now: Instant) -> bool {
+        if self.due.is_some_and(|due| now >= due) {
+            self.due = None;
+            return true;
+        }
+        false
+    }
+
+    /// Forgets the waiting changes, for a save made some other way.
+    pub fn clear(&mut self) {
+        self.due = None;
+    }
+}
+
+enum Job {
+    Write(PathBuf, Vec<u8>),
+    /// Answer once everything sent before has been written.
+    Flush(mpsc::Sender<()>),
+}
+
+/// Writes the settings file on its own thread, so a slow disk never stalls
+/// a frame. Writes queued faster than the disk takes them collapse into the
+/// newest, and they land in the order they were sent.
+pub struct Saver {
+    jobs: Option<mpsc::Sender<Job>>,
+}
+
+impl Default for Saver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Saver {
+    /// Starts the writer thread; without one, saves happen in place.
+    pub fn new() -> Self {
+        let (jobs, queue) = mpsc::channel::<Job>();
+        let spawned = std::thread::Builder::new()
+            .name("settings-saver".into())
+            .spawn(move || run(&queue));
+        match spawned {
+            Ok(_) => Self { jobs: Some(jobs) },
+            Err(error) => {
+                log::warn!("no settings thread, saving in place: {error}");
+                Self { jobs: None }
+            }
+        }
+    }
+
+    /// Writes `settings` to `path` soon, off this thread.
+    pub fn save(&self, settings: &Settings, path: &Path) {
+        let Some(bytes) = settings.encode() else {
+            return;
+        };
+        let Some(jobs) = &self.jobs else {
+            write(path, &bytes);
+            return;
+        };
+        if let Err(mpsc::SendError(Job::Write(path, bytes))) =
+            jobs.send(Job::Write(path.to_owned(), bytes))
+        {
+            // The thread is gone: write here rather than lose the change.
+            write(&path, &bytes);
+        }
+    }
+
+    /// Writes `settings` and waits until it is on disk, for quitting: the
+    /// newest state must win over any write still queued.
+    pub fn save_now(&self, settings: &Settings, path: &Path) {
+        self.save(settings, path);
+        let Some(jobs) = &self.jobs else {
+            return;
+        };
+        let (done, wait) = mpsc::channel();
+        if jobs.send(Job::Flush(done)).is_ok() && wait.recv_timeout(Duration::from_secs(5)).is_err()
+        {
+            log::warn!("the settings file took too long to write");
+        }
+    }
+}
+
+impl std::fmt::Debug for Saver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Saver")
+            .field("threaded", &self.jobs.is_some())
+            .finish()
+    }
+}
+
+/// The writer thread: takes the newest of whatever is queued, writes it,
+/// and answers flushes once what came before them is written.
+fn run(queue: &mpsc::Receiver<Job>) {
+    while let Ok(first) = queue.recv() {
+        let mut latest = None;
+        let mut flushes = Vec::new();
+        for job in std::iter::once(first).chain(queue.try_iter()) {
+            match job {
+                Job::Write(path, bytes) => latest = Some((path, bytes)),
+                Job::Flush(done) => flushes.push(done),
+            }
+        }
+        if let Some((path, bytes)) = latest {
+            write(&path, &bytes);
+        }
+        for done in flushes {
+            let _ = done.send(());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::paths::TestDir;
+
+    #[test]
+    fn a_burst_of_changes_is_saved_once_it_holds_still() {
+        let start = Instant::now();
+        let mut debounce = Debounce::default();
+        assert!(!debounce.take_due(start));
+        debounce.poke(start);
+        debounce.poke(start + Duration::from_millis(300));
+        assert!(!debounce.take_due(start + Duration::from_millis(600)));
+        assert!(debounce.pending());
+        assert!(debounce.take_due(start + Duration::from_millis(800)));
+        assert!(!debounce.pending());
+        assert!(!debounce.take_due(start + Duration::from_millis(900)));
+    }
+
+    #[test]
+    fn the_saver_leaves_the_newest_settings_on_disk() {
+        let dir = TestDir::new("saver");
+        let path = dir.0.join("settings.json");
+        let saver = Saver::new();
+        let mut settings = Settings::default();
+        for zoom in [1.1, 1.2, 1.3] {
+            settings.zoom = zoom;
+            saver.save(&settings, &path);
+        }
+        settings.zoom = 1.4;
+        saver.save_now(&settings, &path);
+        assert!((Settings::load(&path).zoom - 1.4).abs() < 1e-6);
+    }
 
     #[test]
     fn one_bad_field_keeps_the_others() {

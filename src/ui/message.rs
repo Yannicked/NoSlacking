@@ -75,6 +75,38 @@ pub fn continues(previous: Option<&Message>, message: &Message) -> bool {
 
 const GUTTER: f32 = 44.0;
 
+/// About how tall a message will be before it is first drawn, for placing
+/// it in a long list: close enough that the scroll bar does not lurch when
+/// it is drawn and measured.
+pub fn guess_height(message: &Message, lead: Lead) -> f32 {
+    if message.is_system() {
+        return 26.0;
+    }
+    let mut height = if lead == Lead::Full { 56.0 } else { 26.0 };
+    // About a line per hundred characters.
+    height += (message.text.len() / 100) as f32 * 20.0;
+    for file in &message.files {
+        height += match file.thumb_size {
+            // As `file_view` sizes the picture, before it has loaded.
+            Some([w, h]) if file.is_image() && w > 0.0 && h > 0.0 => {
+                let scale = (420.0 / w).min(320.0 / h).min(1.0);
+                (h * scale).max(24.0) + 4.0
+            }
+            _ if file.is_image() => 244.0,
+            _ => 64.0,
+        };
+    }
+    height += message.attachments.len() as f32 * 90.0;
+    height += message.blocks.len() as f32 * 30.0;
+    if !message.reactions.is_empty() {
+        height += 32.0;
+    }
+    if message.reply_count > 0 {
+        height += 32.0;
+    }
+    height
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     row: &Row<'_>,
@@ -290,8 +322,14 @@ fn header(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec
                 .font(theme::regular(12.0))
                 .color(palette.dim),
         );
-        if let Some(full) = super::full_time(&message.ts) {
-            time.on_hover_text(full);
+        // The full date only when asked for: formatting it for every
+        // message on every frame was wasted work.
+        if message.ts.seconds().is_some() {
+            time.on_hover_ui(|ui| {
+                if let Some(full) = super::full_time(&message.ts) {
+                    ui.label(full);
+                }
+            });
         }
     });
 }
@@ -929,18 +967,6 @@ fn reactions(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
                 .response
                 .interact(Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
-            let names: Vec<String> = reaction
-                .users
-                .iter()
-                .take(12)
-                .map(|id| {
-                    if id == me {
-                        t("You").into_owned()
-                    } else {
-                        row.workspace.user_label(id)
-                    }
-                })
-                .collect();
             let spoken = crate::i18n::fill(
                 &tn(
                     "{count} reaction with :{emoji}:",
@@ -951,10 +977,26 @@ fn reactions(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
             );
             theme::focus_ring(ui, &response, palette, 12);
             theme::describe_selected(&response, egui::WidgetType::Button, mine, &spoken);
-            let response = response.on_hover_text(tf(
-                "{names} reacted with :{emoji}:",
-                &[("names", &names.join(", ")), ("emoji", &reaction.name)],
-            ));
+            // Who reacted, built only while hovered rather than for every
+            // reaction on every frame.
+            let response = response.on_hover_ui(|ui| {
+                let names: Vec<String> = reaction
+                    .users
+                    .iter()
+                    .take(12)
+                    .map(|id| {
+                        if id == me {
+                            t("You").into_owned()
+                        } else {
+                            row.workspace.user_label(id)
+                        }
+                    })
+                    .collect();
+                ui.label(tf(
+                    "{names} reacted with :{emoji}:",
+                    &[("names", &names.join(", ")), ("emoji", &reaction.name)],
+                ));
+            });
             if response.clicked() {
                 actions.push(Action::React {
                     channel: row.channel.to_owned(),

@@ -154,6 +154,9 @@ pub struct WorkspaceState {
     requested_users: HashSet<String>,
     requested_bots: HashSet<String>,
     requested_conversations: HashSet<String>,
+    /// Raised whenever people arrive, so lookups built from `users` know
+    /// when to rebuild.
+    users_version: u64,
 }
 
 impl WorkspaceState {
@@ -174,7 +177,14 @@ impl WorkspaceState {
             requested_users: HashSet::new(),
             requested_bots: HashSet::new(),
             requested_conversations: HashSet::new(),
+            users_version: 0,
         }
+    }
+
+    /// Changes whenever `users` gains or updates someone through the
+    /// worker; pair it with `users.len()` for edits made directly.
+    pub fn users_version(&self) -> u64 {
+        self.users_version
     }
 
     pub fn conversation(&self, id: &str) -> Option<&Conversation> {
@@ -439,6 +449,7 @@ impl WorkspaceState {
     }
 
     fn users_arrived(&mut self, users: Vec<User>) {
+        self.users_version += 1;
         for user in users {
             self.requested_users.remove(&user.id);
             self.users.insert(user.id.clone(), user);
@@ -875,7 +886,9 @@ pub struct App {
     marks: HashMap<(String, String), (Ts, Instant)>,
     pending_marks: HashMap<(String, String), Ts>,
     window_focused: bool,
-    settings_dirty: bool,
+    /// When changed settings are next written, and the thread that writes them.
+    settings_due: crate::settings::Debounce,
+    saver: crate::settings::Saver,
     quit: bool,
 }
 
@@ -971,7 +984,8 @@ impl App {
             marks: HashMap::new(),
             pending_marks: HashMap::new(),
             window_focused: true,
-            settings_dirty: false,
+            settings_due: crate::settings::Debounce::default(),
+            saver: crate::settings::Saver::new(),
             quit: false,
         };
         app.start_theme_scan();
@@ -1080,8 +1094,11 @@ impl App {
         self.waker.wake_after(TOAST_FOR);
     }
 
+    /// Saves the settings once they hold still, off the interface thread:
+    /// a drag changes them every frame.
     fn save_settings(&mut self) {
-        self.settings_dirty = true;
+        self.settings_due.poke(Instant::now());
+        self.waker.wake_after(crate::settings::SAVE_AFTER);
     }
 
     pub fn settings_changed(&mut self) {
@@ -1118,9 +1135,11 @@ impl App {
         self.flush_marks();
         let now = Instant::now();
         self.toasts.retain(|t| t.until > now);
-        if self.settings_dirty {
-            self.settings_dirty = false;
-            self.settings.save(&self.dirs.settings_file());
+        if self.settings_due.take_due(now) {
+            self.saver.save(&self.settings, &self.dirs.settings_file());
+        } else if self.settings_due.pending() {
+            // A newer change pushed the save back past the wake asked for.
+            self.waker.wake_after(crate::settings::SAVE_AFTER);
         }
     }
 
@@ -2129,8 +2148,11 @@ impl App {
             .map(|c| c.id.clone())
     }
 
+    /// Writes the settings now and waits for the disk, for quitting.
     pub fn save_state(&mut self) {
-        self.settings.save(&self.dirs.settings_file());
+        self.settings_due.clear();
+        self.saver
+            .save_now(&self.settings, &self.dirs.settings_file());
     }
 
     pub fn request_quit(&mut self) {

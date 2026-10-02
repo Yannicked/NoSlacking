@@ -54,6 +54,24 @@ fn styled(rich: &Rich<'_>, text: &str, style: Style, size: f32) -> RichText {
     text
 }
 
+thread_local! {
+    /// Parsed text, kept while it stays on screen: parsing every message
+    /// on every frame was most of the cost of drawing a long history. The
+    /// interface draws on one thread, so one cache per thread is one cache.
+    static PARSED: std::cell::RefCell<mrkdwn::ParseCache> =
+        std::cell::RefCell::new(mrkdwn::ParseCache::default());
+}
+
+/// The blocks of `text`, parsed on this frame or an earlier one.
+fn parsed(text: &str) -> std::sync::Arc<[Block]> {
+    PARSED.with(|cache| cache.borrow_mut().get(text))
+}
+
+/// Forgets the parsed text not drawn since the last call; once a frame.
+pub fn end_frame() {
+    PARSED.with(|cache| cache.borrow_mut().sweep());
+}
+
 /// Draws `text`; `edited` adds Slack's quiet "(edited)".
 pub fn show(
     ui: &mut egui::Ui,
@@ -77,7 +95,7 @@ fn show_blocks(
     edited: bool,
     actions: &mut Vec<Action>,
 ) {
-    let blocks = mrkdwn::parse(text);
+    let blocks = parsed(text);
     let size = if mrkdwn::only_emoji(&blocks) {
         30.0
     } else {
@@ -261,19 +279,24 @@ fn flow(
     });
 }
 
-/// Draws `:name:` as the emoji it stands for.
+/// Draws `:name:` as the emoji it stands for. Its name shows on hover, and
+/// is formatted only then.
 pub fn emoji(ui: &mut egui::Ui, rich: &Rich<'_>, name: &str, size: f32) {
     match rich.workspace.emoji.resolve(name) {
         Resolved::Unicode(text) => {
             ui.add(egui::Label::new(
                 RichText::new(text).font(theme::regular(size * 1.1)),
             ))
-            .on_hover_text(format!(":{name}:"));
+            .on_hover_ui(|ui| {
+                ui.label(format!(":{name}:"));
+            });
         }
         Resolved::Image(url) => {
             let side = size * 1.3;
             ui.add(egui::Image::new(url).fit_to_exact_size(Vec2::splat(side)))
-                .on_hover_text(format!(":{name}:"));
+                .on_hover_ui(|ui| {
+                    ui.label(format!(":{name}:"));
+                });
         }
         Resolved::Unknown => {
             ui.add(egui::Label::new(

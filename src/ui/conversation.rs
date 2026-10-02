@@ -5,6 +5,7 @@ use egui::{Align, CornerRadius, Margin, RichText, Stroke, Vec2};
 
 use super::composer::{self, Composer};
 use super::message::{self, Lead, Row};
+use super::rows;
 use crate::app::{App, Draft};
 use crate::backend::Socket;
 use crate::i18n::{t, tf};
@@ -282,7 +283,14 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         .as_ref()
         .filter(|(key, _)| *key == scroll_key)
         .and_then(|(_, ts)| ts.clone());
-    let output = area.show(ui, |ui| {
+    // Heights of the rows as last drawn: only the rows in and near the
+    // view are laid out, the rest are placed by these.
+    let heights_id = egui::Id::new(("row-heights", &scroll_key));
+    let mut heights: rows::Heights = ui
+        .data_mut(|d| d.remove_temp(heights_id))
+        .unwrap_or_default();
+    let mut moved = 0.0;
+    let output = area.show_viewport(ui, |ui, viewport| {
         ui.spacing_mut().item_spacing.y = 0.0;
         let Some(timeline) = timeline.filter(|t| t.loaded) else {
             ui.add_space(40.0);
@@ -291,29 +299,6 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
             });
             return;
         };
-        if timeline.has_more {
-            ui.add_space(12.0);
-            ui.vertical_centered(|ui| {
-                if timeline.loading {
-                    ui.add(egui::Spinner::new().size(18.0).color(palette.dim));
-                } else if ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new(t("Load older messages"))
-                                .font(theme::medium(13.0))
-                                .color(palette.secondary),
-                        )
-                        .fill(palette.surface),
-                    )
-                    .clicked()
-                {
-                    actions.push(Action::LoadOlder);
-                }
-            });
-            ui.add_space(12.0);
-        } else {
-            beginning(ui, workspace, conversation, &palette);
-        }
         let row = Row {
             palette: &palette,
             workspace,
@@ -325,32 +310,71 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
                 .as_ref()
                 .filter(|s| !s.in_thread && s.channel == channel),
         };
+        // What the list holds: its top, then each message with the day
+        // separator or "New" line above it, if any.
+        let mut items = vec![Item::Top];
+        let mut days = Days::default();
         let mut previous = None;
         let mut previous_day: Option<jiff::civil::Date> = None;
         let mut drew_new_line = false;
         for message in timeline.messages.iter().filter(|m| m.in_channel()) {
-            let day = message.ts.zoned().map(|z| z.date());
+            let day = days.of(&message.ts);
             let new_day = day.is_some() && day != previous_day;
             if new_day {
-                day_separator(ui, &palette, &super::day_label(&message.ts));
                 previous_day = day;
             }
             let unread = !drew_new_line
                 && !message.ts.is_local()
                 && read_line.as_ref().is_some_and(|read| message.ts > *read)
                 && message.user.as_deref() != Some(workspace.info.user_id.as_str());
-            if unread {
-                drew_new_line = true;
-                new_line(ui, &palette);
-            }
+            drew_new_line |= unread;
             let lead = if !new_day && !unread && message::continues(previous, message) {
                 Lead::Compact
             } else {
                 Lead::Full
             };
-            message::show(ui, &row, message, lead, editing, actions);
+            items.push(Item::Message {
+                message,
+                lead,
+                new_day,
+                unread,
+            });
             previous = Some(message);
         }
+        let entries: Vec<rows::Entry> = items
+            .iter()
+            .map(|item| item.entry(timeline.has_more))
+            .collect();
+        let plan = rows::plan(
+            entries.iter().map(|entry| heights.planned(entry)),
+            viewport.min.y,
+            viewport.max.y,
+            MARGIN,
+        );
+        heights.sweep();
+        moved = rows::show(
+            ui,
+            &mut heights,
+            &entries,
+            &plan,
+            |ui, index| match &items[index] {
+                Item::Top => top(ui, workspace, conversation, timeline, &palette, actions),
+                Item::Message {
+                    message,
+                    lead,
+                    new_day,
+                    unread,
+                } => {
+                    if *new_day {
+                        day_separator(ui, &palette, &super::day_label(&message.ts));
+                    }
+                    if *unread {
+                        new_line(ui, &palette);
+                    }
+                    message::show(ui, &row, message, *lead, editing, actions);
+                }
+            },
+        );
         ui.add_space(12.0);
         if to_bottom {
             // Jump, don't glide, so this very frame already shows the end;
@@ -390,7 +414,15 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         let anchored = offset + (content - before).max(0.0);
         ui.data_mut(|d| d.insert_temp(offset_id, anchored));
         ui.ctx().request_repaint();
+    } else if moved.abs() > 0.5 {
+        // Rows above the one being read were drawn for the first time, or
+        // changed while out of view, and are not the height they were
+        // placed with: move the view with them so the reading stays put.
+        let kept = (offset + moved).clamp(0.0, bottom);
+        ui.data_mut(|d| d.insert_temp(offset_id, kept));
+        ui.ctx().request_repaint();
     }
+    ui.data_mut(|d| d.insert_temp(heights_id, heights));
     ui.data_mut(|d| {
         d.insert_temp(pin_id, (pinned, content));
         d.insert_temp(height_id, content);
@@ -407,6 +439,113 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         && content > output.inner_rect.height()
     {
         actions.push(Action::LoadOlder);
+    }
+}
+
+/// How far beyond the view rows are still drawn, so they are measured
+/// before they scroll in.
+const MARGIN: f32 = 400.0;
+
+/// A row of the message list.
+enum Item<'a> {
+    /// "Load older messages", or the beginning of the conversation.
+    Top,
+    Message {
+        message: &'a crate::model::Message,
+        lead: Lead,
+        new_day: bool,
+        unread: bool,
+    },
+}
+
+impl Item<'_> {
+    fn entry(&self, has_more: bool) -> rows::Entry {
+        match self {
+            Item::Top => rows::Entry {
+                key: egui::Id::new("top").value(),
+                guess: if has_more { 52.0 } else { 120.0 },
+            },
+            Item::Message {
+                message,
+                lead,
+                new_day,
+                unread,
+            } => rows::Entry {
+                key: egui::Id::new(message.ts.as_str()).value(),
+                guess: message::guess_height(message, *lead)
+                    + if *new_day { DAY_SEPARATOR } else { 0.0 }
+                    + if *unread { NEW_LINE } else { 0.0 },
+            },
+        }
+    }
+}
+
+/// The height of a day separator.
+const DAY_SEPARATOR: f32 = 36.0;
+/// The height of the "New" line.
+const NEW_LINE: f32 = 20.0;
+
+/// The local day of each message, worked out once per day rather than
+/// once per message: messages come in order, so most share the day of the
+/// one before.
+#[derive(Default)]
+struct Days {
+    /// The seconds the last day found spans, and its date.
+    current: Option<(i64, i64, jiff::civil::Date)>,
+}
+
+impl Days {
+    fn of(&mut self, ts: &Ts) -> Option<jiff::civil::Date> {
+        let seconds = ts.seconds()?;
+        if let Some((start, end, date)) = self.current
+            && (start..end).contains(&seconds)
+        {
+            return Some(date);
+        }
+        let zoned = ts.zoned()?;
+        let date = zoned.date();
+        let start = zoned.start_of_day().ok()?.timestamp().as_second();
+        let end = zoned
+            .tomorrow()
+            .ok()
+            .and_then(|next| next.start_of_day().ok())
+            .map_or(start + 86_400, |next| next.timestamp().as_second());
+        self.current = Some((start, end, date));
+        Some(date)
+    }
+}
+
+/// The top of the list: older history to load, or where it begins.
+fn top(
+    ui: &mut egui::Ui,
+    workspace: &crate::app::WorkspaceState,
+    conversation: &crate::model::Conversation,
+    timeline: &crate::model::Timeline,
+    palette: &crate::theme::Palette,
+    actions: &mut Vec<Action>,
+) {
+    if timeline.has_more {
+        ui.add_space(12.0);
+        ui.vertical_centered(|ui| {
+            if timeline.loading {
+                ui.add(egui::Spinner::new().size(18.0).color(palette.dim));
+            } else if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(t("Load older messages"))
+                            .font(theme::medium(13.0))
+                            .color(palette.secondary),
+                    )
+                    .fill(palette.surface),
+                )
+                .clicked()
+            {
+                actions.push(Action::LoadOlder);
+            }
+        });
+        ui.add_space(12.0);
+    } else {
+        beginning(ui, workspace, conversation, palette);
     }
 }
 
@@ -467,8 +606,10 @@ fn beginning(
 }
 
 fn day_separator(ui: &mut egui::Ui, palette: &crate::theme::Palette, label: &str) {
-    let (rect, _) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), DAY_SEPARATOR),
+        egui::Sense::hover(),
+    );
     let y = rect.center().y;
     ui.painter().hline(
         rect.x_range().shrink(16.0),
@@ -492,8 +633,10 @@ fn day_separator(ui: &mut egui::Ui, palette: &crate::theme::Palette, label: &str
 }
 
 fn new_line(ui: &mut egui::Ui, palette: &crate::theme::Palette) {
-    let (rect, _) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), NEW_LINE),
+        egui::Sense::hover(),
+    );
     let y = rect.center().y;
     let range = egui::Rangef::new(rect.left() + 16.0, rect.right() - 16.0);
     ui.painter()

@@ -8,6 +8,7 @@ mod login;
 mod message;
 mod overlays;
 mod rich;
+mod rows;
 mod selection;
 mod settings;
 mod sidebar;
@@ -38,6 +39,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
     overlays::show(app, ui.ctx());
+    rich::end_frame();
 }
 
 /// A rounded square picture, or coloured initials until there is one.
