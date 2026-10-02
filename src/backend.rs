@@ -490,6 +490,9 @@ pub enum Event {
         ts: Ts,
     },
     Socket(Socket),
+    /// A `slack://` link the desktop handed over, for a signed-in
+    /// workspace: open what it names.
+    DeepLink(crate::links::Link),
     Error(String),
     Notice(String),
 }

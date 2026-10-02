@@ -665,3 +665,15 @@ msgstr "Log daar zoals gewoonlijk in; NoSlacking rondt het daarna zelf af. Als j
 
 msgid "Load newer messages"
 msgstr "Nieuwere berichten laden"
+
+msgid "That conversation is not open to you here"
+msgstr "Dat gesprek is hier niet voor je open"
+
+msgid "Link copied"
+msgstr "Link gekopieerd"
+
+msgid "This message has no link yet"
+msgstr "Dit bericht heeft nog geen link"
+
+msgid "Copy link"
+msgstr "Link kopiëren"

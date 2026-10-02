@@ -1171,6 +1171,13 @@ impl Worker {
             if self.browser_sign_in_pending() && crate::slack::magic::parse_link(&url).is_some() {
                 self.browser_sign_in = None;
                 self.sign_in_link(&url);
+            } else if let Some(link) = crate::links::parse_deep(&url).filter(|link| {
+                link.team
+                    .as_ref()
+                    .is_some_and(|t| self.teams.contains_key(t))
+            }) {
+                // A link to a conversation of a workspace signed in here.
+                self.sink.send(Event::DeepLink(link));
             } else {
                 log::info!("ignoring a slack:// link with no browser sign-in in progress");
             }
@@ -2823,6 +2830,21 @@ mod tests {
         worker.command(Command::Callback("slack://channel?team=T1&id=C1".into()));
         assert!(events.try_iter().next().is_none());
         assert!(worker.browser_sign_in_pending());
+    }
+
+    #[tokio::test]
+    async fn deep_links_reach_the_interface_only_for_signed_in_workspaces() {
+        let (mut worker, events) = worker();
+        worker.waiting = None;
+        team(&mut worker, "TA", session());
+        worker.command(Command::Callback("slack://channel?team=TB&id=C1".into()));
+        assert!(events.try_iter().next().is_none(), "not signed in here");
+        worker.command(Command::Callback("slack://channel?team=TA&id=C1".into()));
+        let events: Vec<Event> = events.try_iter().collect();
+        assert!(
+            matches!(&events[..], [Event::DeepLink(link)] if link.team.as_deref() == Some("TA")),
+            "{events:?}"
+        );
     }
 
     #[tokio::test]

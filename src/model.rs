@@ -640,6 +640,12 @@ pub enum Action {
         name: String,
     },
     OpenUrl(String),
+    /// Copies a message's permalink; `thread` is its parent for a reply.
+    CopyLink {
+        channel: String,
+        ts: Ts,
+        thread: Option<Ts>,
+    },
     OpenProfile(String),
     Copy(String),
     ShowSettings,

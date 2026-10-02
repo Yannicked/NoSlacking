@@ -1304,6 +1304,11 @@ impl App {
             Event::Socket(socket) => self.socket_changed(socket),
             Event::Error(error) => self.toast(error, true),
             Event::Notice(text) => self.toast(text, false),
+            Event::DeepLink(link) => {
+                if !self.follow(&link) {
+                    self.toast(t("That conversation is not open to you here"), true);
+                }
+            }
             // A workspace's conversations, people, apps and sidebar.
             Event::Conversations {
                 team,
@@ -2058,6 +2063,11 @@ impl App {
                     );
                 }
             }
+            Action::CopyLink {
+                channel,
+                ts,
+                thread,
+            } => self.copy_link(ctx, &channel, &ts, thread.as_ref()),
             Action::Copy(text) => {
                 ctx.copy_text(text);
                 self.toast(t("Copied").into_owned(), false);
@@ -2307,8 +2317,8 @@ impl App {
     }
 
     fn open_url(&mut self, url: &str) {
-        if let Some(channel) = slack_link_channel(url, self.active_workspace()) {
-            self.open_conversation(&channel);
+        if crate::links::parse_web(url).is_some_and(|link| self.follow(&link)) {
+            // A link into a signed-in workspace opens here.
         } else if !mrkdwn::is_openable(url) {
             // Attachments and blocks carry URLs a bot chose.
             self.toast(t("Only web and mail links can be opened"), true);
@@ -2318,6 +2328,64 @@ impl App {
                 tf("Could not open the link: {error}", &[("error", &error)]),
                 true,
             );
+        }
+    }
+
+    /// Opens what a link into Slack names, in the workspace it is for.
+    /// Returns whether that workspace is signed in here and has it.
+    fn follow(&mut self, link: &crate::links::Link) -> bool {
+        use crate::links::Target;
+        let Some(workspace) = self
+            .workspaces
+            .iter()
+            .find(|w| link.is_for(&w.info.team_id, &w.info.domain))
+        else {
+            return false;
+        };
+        let team = workspace.info.team_id.clone();
+        let known = |channel: &str| workspace.conversation(channel).is_some();
+        match &link.target {
+            Target::Workspace => {
+                self.select_workspace(team);
+            }
+            Target::Conversation(channel) if known(channel) => {
+                if self.active_team().as_deref() != Some(team.as_str()) {
+                    self.select_workspace(team);
+                }
+                self.open_conversation(channel);
+            }
+            Target::Message {
+                channel,
+                ts,
+                thread,
+            } if known(channel) => {
+                self.jump_to(&team, channel, ts.clone(), thread.clone());
+            }
+            Target::User(user) => {
+                if self.active_team().as_deref() != Some(team.as_str()) {
+                    self.select_workspace(team);
+                }
+                match self.direct_message(user) {
+                    Some(channel) => self.open_conversation(&channel),
+                    None => self.profile = Some(user.clone()),
+                }
+            }
+            Target::Conversation(_) | Target::Message { .. } => return false,
+        }
+        true
+    }
+
+    /// Copies the permalink of a message of the open workspace.
+    fn copy_link(&mut self, ctx: &egui::Context, channel: &str, ts: &Ts, thread: Option<&Ts>) {
+        let link = self
+            .active_workspace()
+            .and_then(|w| crate::links::permalink(&w.info.domain, channel, ts, thread));
+        match link {
+            Some(link) => {
+                ctx.copy_text(link);
+                self.toast(t("Link copied"), false);
+            }
+            None => self.toast(t("This message has no link yet"), true),
         }
     }
 
@@ -2663,19 +2731,6 @@ pub fn to_editable(
     }
     let text = pieces.iter().map(|p| p.shown.as_str()).collect();
     (text, mentions)
-}
-
-/// The conversation a link to this workspace's Slack points at
-/// (`https://acme.slack.com/archives/C123/p…`).
-fn slack_link_channel(url: &str, workspace: Option<&WorkspaceState>) -> Option<String> {
-    let workspace = workspace?;
-    if workspace.info.domain.is_empty() {
-        return None;
-    }
-    let prefix = format!("https://{}.slack.com/archives/", workspace.info.domain);
-    let rest = url.strip_prefix(&prefix)?;
-    let channel = rest.split(['/', '?']).next()?;
-    workspace.conversation(channel).map(|c| c.id.clone())
 }
 
 impl fastframe_shell::Resident for App {
