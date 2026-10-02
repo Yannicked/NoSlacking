@@ -719,6 +719,9 @@ pub enum Action {
     PasteImage {
         thread: Option<Ts>,
     },
+    /// Puts a picture on the clipboard, from the first of these image
+    /// loader URIs that loads (the full picture, then its thumbnail).
+    CopyImage(Vec<String>),
     /// Stops an upload by its [`crate::app::Upload::id`].
     CancelUpload(u64),
     Download {

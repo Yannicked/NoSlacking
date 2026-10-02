@@ -79,6 +79,46 @@ fn clipboard_image(
     .map(Some)
 }
 
+/// Decodes `bytes` (a PNG, JPEG, GIF or WebP) to the pixels a clipboard
+/// takes, refusing what would decode to far more than it weighs.
+pub fn clipboard_pixels(bytes: &[u8]) -> Result<arboard::ImageData<'static>, String> {
+    crate::images::check_decoded_size(bytes)?;
+    let image = image::load_from_memory(bytes)
+        .map_err(|e| e.to_string())?
+        .to_rgba8();
+    Ok(arboard::ImageData {
+        width: image.width() as usize,
+        height: image.height() as usize,
+        bytes: image.into_raw().into(),
+    })
+}
+
+/// Puts `pixels` on the clipboard. On X11 and Wayland a clipboard lives
+/// only as long as the program offering it, so there this keeps offering
+/// it until something else is copied: call it on a thread of its own.
+pub fn copy_image(pixels: arboard::ImageData<'static>) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+    ))]
+    {
+        use arboard::SetExtLinux as _;
+        clipboard
+            .set()
+            .wait()
+            .image(pixels)
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(all(
+        unix,
+        not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+    )))]
+    {
+        clipboard.set_image(pixels).map_err(|e| e.to_string())
+    }
+}
+
 /// Writes `rgba` pixels, `width` by `height`, as `dir/name`, numbered
 /// (`name-2.png`) when a file of that name is already there: two pastes
 /// in one second must not overwrite each other mid-upload.
@@ -157,6 +197,19 @@ mod tests {
         assert_eq!(pasted_files(&dir.0.display().to_string()), None);
         assert_eq!(pasted_files("notes.txt"), None);
         assert_eq!(pasted_files(""), None);
+    }
+
+    #[test]
+    fn pictures_decode_to_clipboard_pixels() {
+        let mut png = Vec::new();
+        image::RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255])
+            .expect("pixels")
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encoded");
+        let pixels = clipboard_pixels(&png).expect("decoded");
+        assert_eq!((pixels.width, pixels.height), (2, 1));
+        assert_eq!(&pixels.bytes[..4], &[255, 0, 0, 255]);
+        assert!(clipboard_pixels(b"not an image").is_err());
     }
 
     #[test]

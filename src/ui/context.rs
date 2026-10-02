@@ -20,6 +20,9 @@ pub enum Target {
         download: Option<String>,
         /// Its page on Slack, to open in the browser.
         permalink: Option<String>,
+        /// The image loader's URIs to copy it from, best first: the full
+        /// picture, then the thumbnail on screen.
+        copy: Vec<String>,
     },
     /// A link in the text.
     Link(String),
