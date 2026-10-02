@@ -420,6 +420,11 @@ fn history(channel: &str) -> Vec<Message> {
                 ..message(NOW - 900, "U05", "")
             },
             message(
+                NOW - 600,
+                "U03",
+                "The backoff, for the record:\n```rust\n/// Waits longer after each failure.\nfn backoff(attempt: u32) -> Duration {\n    let ms = 500 * 2u64.pow(attempt.min(5));\n    Duration::from_millis(ms) // at most 16 s\n}\n```",
+            ),
+            message(
                 NOW - 300,
                 "U04",
                 "Heads up <!here>: staging restarts at 15:00. Ping <@U00> if anything looks off.",

@@ -662,3 +662,6 @@ msgstr "Inloglink"
 
 msgid "Sign in there as usual; NoSlacking finishes by itself. If your browser asks, let it open NoSlacking. If nothing happens, paste the slack:// link from the page here (open the page source with Ctrl+U and search for magic-login)."
 msgstr "Log daar zoals gewoonlijk in; NoSlacking rondt het daarna zelf af. Als je browser het vraagt, laat hem NoSlacking openen. Gebeurt er niets, plak dan hier de slack://-link van de pagina (open de paginabron met Ctrl+U en zoek naar magic-login)."
+
+msgid "Copy code"
+msgstr "Code kopiëren"

@@ -11,6 +11,8 @@ pub mod credentials;
 #[cfg(feature = "demo")]
 pub mod demo;
 pub mod emoji;
+#[cfg(feature = "highlight")]
+pub mod highlight;
 pub mod i18n;
 pub mod images;
 pub mod model;
