@@ -25,8 +25,19 @@ use crate::slack::{Client, SlackError, Token, types};
 const HISTORY_PAGE: u32 = 50;
 /// How often the open conversation is polled while Socket Mode is down.
 const POLL_EVERY: Duration = Duration::from_secs(6);
-/// The most users fetched with `users.list` (200 per page).
+/// The most pages read from each listing. Each is far beyond what a
+/// workspace normally has; they only stop a cursor that never ends, and
+/// hitting one is logged.
+/// `users.list`, 200 people a page.
 const USER_PAGES: usize = 40;
+/// `users.conversations`, 200 conversations a page.
+const CONVERSATION_PAGES: usize = 100;
+/// `conversations.replies`, 200 replies a page.
+const THREAD_PAGES: usize = 50;
+/// `users.channelSections.list`.
+const SECTION_PAGES: usize = 10;
+/// `stars.list`, 200 stars a page.
+const STAR_PAGES: usize = 20;
 const MAX_UPLOAD: u64 = 1024 * 1024 * 1024;
 /// Why a command for a workspace the worker does not have cannot run.
 const NOT_SIGNED_IN: &str = "that workspace is not signed in";
@@ -1235,6 +1246,47 @@ pub fn describe(error: &SlackError) -> String {
     }
 }
 
+/// Walks a cursor-paged listing.
+///
+/// `page` fetches the page at a cursor (none for the first) and answers its
+/// items and the next cursor; `each` takes every page's items as they come,
+/// so a caller can show them early and keeps what arrived before a failure.
+/// The walk ends at an empty cursor, at the first error, or after
+/// `max_pages`, which is logged: a listing cut short looks complete
+/// otherwise.
+async fn paginate<T, Fut>(
+    what: &str,
+    max_pages: usize,
+    mut page: impl FnMut(Option<String>) -> Fut,
+    mut each: impl FnMut(Vec<T>),
+) -> Result<(), SlackError>
+where
+    Fut: std::future::Future<Output = Result<(Vec<T>, Option<String>), SlackError>>,
+{
+    let mut cursor = None;
+    for _ in 0..max_pages {
+        let (items, next) = page(cursor.take()).await?;
+        each(items);
+        match next.filter(|next| !next.is_empty()) {
+            Some(next) => cursor = Some(next),
+            None => return Ok(()),
+        }
+    }
+    log::warn!("{what}: stopped after {max_pages} pages; the rest is left out");
+    Ok(())
+}
+
+/// `params`, plus the cursor when there is one.
+fn with_cursor(
+    mut params: Vec<(&'static str, String)>,
+    cursor: Option<String>,
+) -> Vec<(&'static str, String)> {
+    if let Some(cursor) = cursor {
+        params.push(("cursor", cursor));
+    }
+    params
+}
+
 /// Whether a failed fetch may work later: an outage or a rate limit, not
 /// Slack saying no (an unknown id stays unknown).
 fn worth_retrying(error: &SlackError) -> bool {
@@ -1378,35 +1430,35 @@ async fn conversations(
     sink: Sink,
 ) -> Option<Vec<Conversation>> {
     let mut list = Vec::new();
-    let mut cursor: Option<String> = None;
-    loop {
-        let mut params = vec![
-            ("types", "public_channel,private_channel,mpim,im".to_owned()),
-            ("exclude_archived", "true".to_owned()),
-            ("limit", "200".to_owned()),
-        ];
-        if let Some(cursor) = &cursor {
-            params.push(("cursor", cursor.clone()));
-        }
-        match client
-            .call::<types::ConversationsPage>("users.conversations", &params)
-            .await
-        {
-            Ok(page) => {
-                list.extend(page.channels.into_iter().map(types::Channel::into_model));
-                cursor = page.response_metadata.cursor();
-                if cursor.is_none() {
-                    break;
-                }
+    let walked = paginate(
+        "users.conversations",
+        CONVERSATION_PAGES,
+        |cursor| {
+            let params = with_cursor(
+                vec![
+                    ("types", "public_channel,private_channel,mpim,im".to_owned()),
+                    ("exclude_archived", "true".to_owned()),
+                    ("limit", "200".to_owned()),
+                ],
+                cursor,
+            );
+            let client = &client;
+            async move {
+                let page: types::ConversationsPage =
+                    client.call("users.conversations", &params).await?;
+                let next = page.response_metadata.cursor();
+                Ok((page.channels, next))
             }
-            Err(error) => {
-                sink.send(Event::Error(format!(
-                    "Could not list conversations: {}",
-                    describe(&error)
-                )));
-                return None;
-            }
-        }
+        },
+        |channels| list.extend(channels.into_iter().map(types::Channel::into_model)),
+    )
+    .await;
+    if let Err(error) = walked {
+        sink.send(Event::Error(format!(
+            "Could not list conversations: {}",
+            describe(&error)
+        )));
+        return None;
     }
     write_cache(&dirs.conversations_cache(&team), &list);
     sink.send(Event::Conversations {
@@ -1417,7 +1469,6 @@ async fn conversations(
     Some(list)
 }
 
-/// The workspace's people, page by page.
 /// Your sidebar sections and starred conversations, as Slack's own client
 /// gets them. `users.channelSections.list` is undocumented and only answers
 /// browser sessions; anything else keeps the plain sidebar.
@@ -1425,27 +1476,40 @@ async fn sections(client: Client, team: String, sink: Sink) {
     // The web client sends the token in the form; do the same.
     let token = client.token().access;
     let mut all = Vec::new();
-    let mut cursor: Option<String> = None;
-    for _ in 0..10 {
-        let mut params = vec![("token", token.clone())];
-        if let Some(cursor) = &cursor {
-            params.push(("cursor", cursor.clone()));
-        }
-        match client
-            .call::<types::ChannelSectionsPage>("users.channelSections.list", &params)
-            .await
+    let walked = paginate(
+        "users.channelSections.list",
+        SECTION_PAGES,
+        |cursor| {
+            let params = with_cursor(vec![("token", token.clone())], cursor);
+            let client = &client;
+            async move {
+                let page: types::ChannelSectionsPage =
+                    client.call("users.channelSections.list", &params).await?;
+                Ok((page.channel_sections, page.cursor))
+            }
+        },
+        |sections| all.extend(sections),
+    )
+    .await;
+    if let Err(error) = walked {
+        log::info!("no sidebar sections ({error}); using the plain sidebar");
+        return;
+    }
+    for section in &all {
+        // Slack sends a long section's first channels only, with a cursor
+        // for the rest through a call that is not known; say so rather
+        // than show the section as complete without a word.
+        if section
+            .channel_ids_page
+            .cursor
+            .as_deref()
+            .is_some_and(|c| !c.is_empty())
         {
-            Ok(page) => {
-                all.extend(page.channel_sections);
-                cursor = page.cursor.filter(|c| !c.is_empty());
-                if cursor.is_none() {
-                    break;
-                }
-            }
-            Err(error) => {
-                log::info!("no sidebar sections ({error}); using the plain sidebar");
-                return;
-            }
+            log::warn!(
+                "sidebar section {} has more channels than Slack sent; showing {}",
+                section.channel_section_id,
+                section.channel_ids_page.channel_ids.len()
+            );
         }
     }
     let mut ordered = types::order_sections(all);
@@ -1454,14 +1518,33 @@ async fn sections(client: Client, team: String, sink: Sink) {
         .iter_mut()
         .find(|s| s.kind == crate::model::SectionKind::Starred)
     {
-        match client
-            .call::<types::StarsList>(
-                "stars.list",
-                &[("token", token.clone()), ("limit", "1000".into())],
-            )
-            .await
-        {
-            Ok(stars) => starred.channel_ids = stars.conversations(),
+        let mut items = Vec::new();
+        let walked = paginate(
+            "stars.list",
+            STAR_PAGES,
+            |cursor| {
+                let params = with_cursor(
+                    vec![("token", token.clone()), ("limit", "200".into())],
+                    cursor,
+                );
+                let client = &client;
+                async move {
+                    let page: types::StarsList = client.call("stars.list", &params).await?;
+                    let next = page.response_metadata.cursor();
+                    Ok((page.items, next))
+                }
+            },
+            |page| items.extend(page),
+        )
+        .await;
+        match walked {
+            Ok(()) => {
+                starred.channel_ids = types::StarsList {
+                    items,
+                    ..Default::default()
+                }
+                .conversations();
+            }
             Err(error) => log::info!("stars.list: {error}"),
         }
     }
@@ -1619,36 +1702,34 @@ async fn edit_sidebar(
     sections(client, team, sink).await;
 }
 
+/// The workspace's people, page by page, each page shown as it arrives.
 async fn users(client: Client, team: String, dirs: AppDirs, sink: Sink) {
     let mut all = Vec::new();
-    let mut cursor: Option<String> = None;
-    for _ in 0..USER_PAGES {
-        let mut params = vec![("limit", "200".to_owned())];
-        if let Some(cursor) = &cursor {
-            params.push(("cursor", cursor.clone()));
-        }
-        match client.call::<types::UsersPage>("users.list", &params).await {
-            Ok(page) => {
-                let users: Vec<User> = page
-                    .members
-                    .into_iter()
-                    .map(types::User::into_model)
-                    .collect();
-                all.extend(users.iter().cloned());
-                sink.send(Event::Users {
-                    team: team.clone(),
-                    users,
-                });
-                cursor = page.response_metadata.cursor();
-                if cursor.is_none() {
-                    break;
-                }
+    let walked = paginate(
+        "users.list",
+        USER_PAGES,
+        |cursor| {
+            let params = with_cursor(vec![("limit", "200".to_owned())], cursor);
+            let client = &client;
+            async move {
+                let page: types::UsersPage = client.call("users.list", &params).await?;
+                let next = page.response_metadata.cursor();
+                Ok((page.members, next))
             }
-            Err(error) => {
-                log::info!("users.list: {error}");
-                break;
-            }
-        }
+        },
+        |members| {
+            let users: Vec<User> = members.into_iter().map(types::User::into_model).collect();
+            all.extend(users.iter().cloned());
+            sink.send(Event::Users {
+                team: team.clone(),
+                users,
+            });
+        },
+    )
+    .await;
+    // What arrived before a failure is still worth keeping.
+    if let Err(error) = walked {
+        log::info!("users.list: {error}");
     }
     if !all.is_empty() {
         write_cache(&dirs.users_cache(&team), &all);
@@ -1741,39 +1822,35 @@ async fn history(
 
 async fn thread(client: Client, team: String, channel: String, ts: Ts, sink: Sink) {
     let mut messages = Vec::new();
-    let mut cursor: Option<String> = None;
-    for _ in 0..10 {
-        let mut params = vec![
-            ("channel", channel.clone()),
-            ("ts", ts.0.clone()),
-            ("limit", "200".to_owned()),
-        ];
-        if let Some(cursor) = &cursor {
-            params.push(("cursor", cursor.clone()));
-        }
-        match client
-            .call::<types::HistoryPage>("conversations.replies", &params)
-            .await
-        {
-            Ok(page) => {
-                messages.extend(
-                    page.messages
-                        .into_iter()
-                        .filter_map(types::Message::into_model),
-                );
-                cursor = page.response_metadata.cursor();
-                if cursor.is_none() {
-                    break;
-                }
+    let walked = paginate(
+        "conversations.replies",
+        THREAD_PAGES,
+        |cursor| {
+            let params = with_cursor(
+                vec![
+                    ("channel", channel.clone()),
+                    ("ts", ts.0.clone()),
+                    ("limit", "200".to_owned()),
+                ],
+                cursor,
+            );
+            let client = &client;
+            async move {
+                let page: types::HistoryPage =
+                    client.call("conversations.replies", &params).await?;
+                let next = page.response_metadata.cursor();
+                Ok((page.messages, next))
             }
-            Err(error) => {
-                sink.send(Event::Error(format!(
-                    "Could not load the thread: {}",
-                    describe(&error)
-                )));
-                return;
-            }
-        }
+        },
+        |page| messages.extend(page.into_iter().filter_map(types::Message::into_model)),
+    )
+    .await;
+    if let Err(error) = walked {
+        sink.send(Event::Error(format!(
+            "Could not load the thread: {}",
+            describe(&error)
+        )));
+        return;
     }
     sink.send(Event::Thread {
         team,
@@ -2445,6 +2522,54 @@ mod tests {
             "{events:?}"
         );
         assert!(pending.await.is_err_and(|e| e.is_cancelled()));
+    }
+
+    type Page = std::future::Ready<Result<(Vec<u32>, Option<String>), SlackError>>;
+
+    /// A pretend listing: page `n` holds `n`, and the cursor for page `n+1`
+    /// is `"n+1"` until `last`.
+    fn pages(
+        last: u32,
+        fail_at: Option<u32>,
+        asked: &mut Vec<Option<String>>,
+    ) -> impl FnMut(Option<String>) -> Page {
+        move |cursor| {
+            asked.push(cursor.clone());
+            let n = cursor.map_or(0, |c| c.parse().unwrap_or(0));
+            if fail_at == Some(n) {
+                return std::future::ready(Err(SlackError::RateLimited));
+            }
+            let next = (n < last).then(|| (n + 1).to_string());
+            std::future::ready(Ok((vec![n], next)))
+        }
+    }
+
+    #[tokio::test]
+    async fn paginate_follows_cursors_to_the_end() {
+        let mut asked = Vec::new();
+        let mut seen = Vec::new();
+        let walked = paginate("t", 10, pages(3, None, &mut asked), |p| seen.extend(p)).await;
+        assert_eq!(walked, Ok(()));
+        assert_eq!(seen, [0, 1, 2, 3]);
+        assert_eq!(
+            asked,
+            [None, Some("1".into()), Some("2".into()), Some("3".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn paginate_stops_at_the_cap_and_at_errors() {
+        let mut asked = Vec::new();
+        let mut seen = Vec::new();
+        let walked = paginate("t", 2, pages(100, None, &mut asked), |p| seen.extend(p)).await;
+        assert_eq!(walked, Ok(()));
+        assert_eq!(seen, [0, 1]);
+        let mut asked = Vec::new();
+        let mut seen = Vec::new();
+        let walked = paginate("t", 10, pages(5, Some(2), &mut asked), |p| seen.extend(p)).await;
+        assert_eq!(walked, Err(SlackError::RateLimited));
+        // What came before the failure was handed over.
+        assert_eq!(seen, [0, 1]);
     }
 
     #[test]
