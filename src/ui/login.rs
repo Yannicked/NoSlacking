@@ -10,7 +10,7 @@ use egui::{CornerRadius, Margin, RichText, Stroke};
 use crate::app::App;
 use crate::backend::SignIn;
 use crate::credentials::AppCredentials;
-use crate::i18n::t;
+use crate::i18n::{t, tf};
 use crate::model::Action;
 use crate::theme::{self, Palette};
 
@@ -66,7 +66,7 @@ fn field(
     hint: &str,
     secret: bool,
 ) {
-    ui.label(
+    let label = ui.label(
         RichText::new(label)
             .font(theme::semibold(13.0))
             .color(palette.secondary),
@@ -77,7 +77,8 @@ fn field(
             .hint_text(hint)
             .desired_width(f32::INFINITY)
             .margin(Margin::symmetric(8, 6)),
-    );
+    )
+    .labelled_by(label.id);
 }
 
 fn card(palette: &Palette) -> egui::Frame {
@@ -262,7 +263,7 @@ fn sign_in_status(app: &App, ui: &mut egui::Ui, palette: &Palette) {
         }
         Some(SignIn::Done(name)) => {
             ui.label(
-                RichText::new(format!("{} {name}.", t("Signed in to")))
+                RichText::new(tf("Signed in to {name}.", &[("name", name)]))
                     .font(theme::regular(13.0))
                     .color(palette.accent),
             );
@@ -347,6 +348,11 @@ fn app_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             )
             .id_salt("manual-token")
             .show(ui, |ui| {
+                let label = ui.label(
+                    RichText::new(t("User token"))
+                        .font(theme::semibold(13.0))
+                        .color(palette.secondary),
+                );
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut app.setup.user_token)
@@ -354,7 +360,8 @@ fn app_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                             .hint_text("xoxp-…")
                             .desired_width(ui.available_width() - 90.0)
                             .margin(Margin::symmetric(8, 6)),
-                    );
+                    )
+                    .labelled_by(label.id);
                     let ready = app.setup.user_token.trim().starts_with("xox") && !busy(app);
                     ui.add_enabled_ui(ready, |ui| {
                         if theme::primary_button(ui, palette, &t("Sign in")).clicked() {
@@ -371,10 +378,9 @@ fn keyring_note(app: &App, ui: &mut egui::Ui, palette: &Palette) {
     if let Some(error) = &app.keyring_error {
         ui.add_space(12.0);
         ui.label(
-            RichText::new(format!(
-                "{} {error}. {}",
-                t("The system keyring is unavailable:"),
-                t("NoSlacking keeps tokens only there; unlock it or install a Secret Service provider such as GNOME Keyring or KWallet.")
+            RichText::new(tf(
+                "The system keyring is unavailable: {error}. NoSlacking keeps tokens only there; unlock it or install a Secret Service provider such as GNOME Keyring or KWallet.",
+                &[("error", error)],
             ))
             .font(theme::regular(13.0))
             .color(palette.warning),

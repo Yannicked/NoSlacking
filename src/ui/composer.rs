@@ -5,7 +5,7 @@ use egui::text::{CCursor, CCursorRange};
 use egui::{CornerRadius, Key, Margin, Modifiers, RichText, Sense, Stroke, Vec2};
 
 use crate::app::{Draft, WorkspaceState};
-use crate::i18n::t;
+use crate::i18n::{t, tf};
 use crate::model::{Action, Ts};
 use crate::theme::{self, Icon, Palette};
 
@@ -43,6 +43,15 @@ impl Suggestion {
             Self::Emoji { name } => format!(":{name}: "),
             Self::Special(name) => format!("@{name} "),
         }
+    }
+}
+
+/// What `@here`, `@channel` and `@everyone` each do, for the suggestion.
+fn broadcast_description(name: &str) -> std::borrow::Cow<'static, str> {
+    match name {
+        "here" => t("Notify everyone online in this conversation"),
+        "channel" => t("Notify every member of this conversation"),
+        _ => t("Notify everyone in the workspace"),
     }
 }
 
@@ -291,7 +300,7 @@ pub fn show(
                 ui.add_space(8.0);
                 ui.checkbox(
                     &mut draft.broadcast,
-                    RichText::new(format!("{} #{channel}", t("Also send to")))
+                    RichText::new(tf("Also send to #{channel}", &[("channel", channel)]))
                         .font(theme::regular(12.5))
                         .color(palette.secondary),
                 );
@@ -317,10 +326,15 @@ pub fn show(
                     egui::Rect::from_center_size(rect.center(), Vec2::splat(16.0)),
                 );
                 let tip = if composer.enter_sends {
-                    t("Send (Enter)")
+                    t("Send (Enter)").into_owned()
                 } else {
-                    t("Send (Ctrl+Enter)")
+                    tf(
+                        "Send ({shortcut})",
+                        &[("shortcut", &super::keys::command("Enter"))],
+                    )
                 };
+                theme::focus_ring(ui, &response, palette, theme::RADIUS_SMALL);
+                theme::describe(&response, egui::WidgetType::Button, &tip);
                 if response
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .on_hover_text(tip)
@@ -415,12 +429,18 @@ fn suggestion_list(
                                 .color(palette.text),
                         );
                         child.label(
-                            RichText::new(t("Notify everyone here"))
+                            RichText::new(broadcast_description(name))
                                 .font(theme::regular(12.5))
                                 .color(palette.dim),
                         );
                     }
                 }
+                theme::describe_selected(
+                    &response,
+                    egui::WidgetType::SelectableLabel,
+                    index == selected,
+                    &suggestion.insert(),
+                );
                 if response
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()

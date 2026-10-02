@@ -6,3 +6,635 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "{weekday}, {month} {day}, {year}"
+msgstr "{weekday} {day} {month} {year}"
+
+msgid "{weekday}, {month} {day}"
+msgstr "{weekday} {day} {month}"
+
+msgid "{date} at {time}"
+msgstr "{date} om {time}"
+
+msgid "Monday"
+msgstr "maandag"
+
+msgid "Tuesday"
+msgstr "dinsdag"
+
+msgid "Wednesday"
+msgstr "woensdag"
+
+msgid "Thursday"
+msgstr "donderdag"
+
+msgid "Friday"
+msgstr "vrijdag"
+
+msgid "Saturday"
+msgstr "zaterdag"
+
+msgid "Sunday"
+msgstr "zondag"
+
+msgid "January"
+msgstr "januari"
+
+msgid "February"
+msgstr "februari"
+
+msgid "March"
+msgstr "maart"
+
+msgid "April"
+msgstr "april"
+
+msgid "May"
+msgstr "mei"
+
+msgid "June"
+msgstr "juni"
+
+msgid "July"
+msgstr "juli"
+
+msgid "August"
+msgstr "augustus"
+
+msgid "September"
+msgstr "september"
+
+msgid "October"
+msgstr "oktober"
+
+msgid "November"
+msgstr "november"
+
+msgid "December"
+msgstr "december"
+
+msgid "Today"
+msgstr "Vandaag"
+
+msgid "Yesterday"
+msgstr "Gisteren"
+
+msgid "Smileys & Emotion"
+msgstr "Smileys & emoties"
+
+msgid "People & Body"
+msgstr "Mensen & lichaam"
+
+msgid "Animals & Nature"
+msgstr "Dieren & natuur"
+
+msgid "Food & Drink"
+msgstr "Eten & drinken"
+
+msgid "Travel & Places"
+msgstr "Reizen & plaatsen"
+
+msgid "Activities"
+msgstr "Activiteiten"
+
+msgid "Objects"
+msgstr "Voorwerpen"
+
+msgid "Symbols"
+msgstr "Symbolen"
+
+msgid "Flags"
+msgstr "Vlaggen"
+
+msgid "Notify everyone online in this conversation"
+msgstr "Iedereen in dit gesprek die online is een melding sturen"
+
+msgid "Notify every member of this conversation"
+msgstr "Alle leden van dit gesprek een melding sturen"
+
+msgid "Notify everyone in the workspace"
+msgstr "Iedereen in de werkruimte een melding sturen"
+
+msgid "Starred"
+msgstr "Met ster"
+
+msgid "Channels"
+msgstr "Kanalen"
+
+msgid "Direct messages"
+msgstr "Privéberichten"
+
+msgid "Apps"
+msgstr "Apps"
+
+msgid "Other"
+msgstr "Overig"
+
+msgid "App"
+msgstr "App"
+
+msgid "Unknown"
+msgstr "Onbekend"
+
+msgid "Keyring: {error}"
+msgstr "Sleutelbos: {error}"
+
+msgid "Could not load messages: {error}"
+msgstr "Kan berichten niet laden: {error}"
+
+msgid "Signed in to {name}."
+msgstr "Aangemeld bij {name}."
+
+msgid "Slack refused the app-level token ({reason})"
+msgstr "Slack weigerde het app-token ({reason})"
+
+msgid "Message not sent: {error}"
+msgstr "Bericht niet verstuurd: {error}"
+
+msgid "Could not open the folder: {error}"
+msgstr "Kan de map niet openen: {error}"
+
+msgid "Copied"
+msgstr "Gekopieerd"
+
+msgid "Only web and mail links can be opened"
+msgstr "Alleen web- en maillinks kunnen worden geopend"
+
+msgid "Could not open the link: {error}"
+msgstr "Kan de link niet openen: {error}"
+
+msgid "(edited)"
+msgstr "(bewerkt)"
+
+msgid "Upload a file"
+msgstr "Bestand uploaden"
+
+msgid "Emoji"
+msgstr "Emoji"
+
+msgid "Mention someone"
+msgstr "Iemand noemen"
+
+msgid "Also send to #{channel}"
+msgstr "Ook naar #{channel} sturen"
+
+msgid "Send (Enter)"
+msgstr "Versturen (Enter)"
+
+msgid "Send ({shortcut})"
+msgstr "Versturen ({shortcut})"
+
+msgid "Add a workspace"
+msgstr "Werkruimte toevoegen"
+
+msgid "Settings ({shortcut})"
+msgstr "Instellingen ({shortcut})"
+
+msgid "{name}, {mentions}"
+msgstr "{name}, {mentions}"
+
+msgid "{name}, unread"
+msgstr "{name}, ongelezen"
+
+msgid "Live"
+msgstr "Live"
+
+msgid "Live updates off"
+msgstr "Live-updates uit"
+
+msgid "Connecting…"
+msgstr "Verbinden…"
+
+msgid "Offline"
+msgstr "Offline"
+
+msgid "New section"
+msgstr "Nieuwe sectie"
+
+msgid "Signed out: {reason}"
+msgstr "Afgemeld: {reason}"
+
+msgid "Sign in again"
+msgstr "Opnieuw aanmelden"
+
+msgid "Find a conversation"
+msgstr "Gesprek zoeken"
+
+msgid "Show more ({count})"
+msgstr "Meer tonen ({count})"
+
+msgid "New section…"
+msgstr "Nieuwe sectie…"
+
+msgid "Rename…"
+msgstr "Hernoemen…"
+
+msgid "Move up"
+msgstr "Omhoog"
+
+msgid "Move down"
+msgstr "Omlaag"
+
+msgid "Delete section"
+msgstr "Sectie verwijderen"
+
+msgid "Unstar"
+msgstr "Ster weghalen"
+
+msgid "Star"
+msgstr "Ster geven"
+
+msgid "Move to section"
+msgstr "Naar sectie verplaatsen"
+
+msgid "Remove from section"
+msgstr "Uit sectie halen"
+
+msgid "Back"
+msgstr "Terug"
+
+msgid "A native Slack client. Connect a workspace by reusing your browser session, or with your own Slack app."
+msgstr "Een native Slack-client. Koppel een werkruimte via je browsersessie of met je eigen Slack-app."
+
+msgid "Sign in with your Slack session"
+msgstr "Aanmelden met je Slack-sessie"
+
+msgid "Reuse the Slack you are already logged in to in your browser. Nothing to register. New messages arrive live over Slack's session socket."
+msgstr "Gebruik de Slack waarbij je in je browser al bent aangemeld. Niets te registreren. Nieuwe berichten komen live binnen via de sessiesocket van Slack."
+
+msgid "Workspace address"
+msgstr "Adres van de werkruimte"
+
+msgid "Session cookie (the d cookie)"
+msgstr "Sessiecookie (de d-cookie)"
+
+msgid "How to find the d cookie"
+msgstr "Zo vind je de d-cookie"
+
+msgid "1. Open app.slack.com in your browser and sign in.\n2. Open developer tools (F12) → Application (or Storage) → Cookies → https://app.slack.com.\n3. Copy the value of the cookie named d — it starts with xoxd-.\nIt is a secret: treat it like a password. One cookie covers every workspace you are signed in to."
+msgstr "1. Open app.slack.com in je browser en meld je aan.\n2. Open de ontwikkelaarshulpmiddelen (F12) → Application (of Opslag) → Cookies → https://app.slack.com.\n3. Kopieer de waarde van de cookie met de naam d — die begint met xoxd-.\nHet is geheim: behandel hem als een wachtwoord. Eén cookie geldt voor elke werkruimte waarbij je bent aangemeld."
+
+msgid "Open app.slack.com"
+msgstr "app.slack.com openen"
+
+msgid "Sign in"
+msgstr "Aanmelden"
+
+msgid "Signing in…"
+msgstr "Aanmelden…"
+
+msgid "Advanced: use your own Slack app"
+msgstr "Geavanceerd: je eigen Slack-app gebruiken"
+
+msgid "Official OAuth sign-in and live Socket Mode updates, through a free Slack app you create. A workspace admin may need to approve it."
+msgstr "Officieel aanmelden met OAuth en live-updates via Socket Mode, met een gratis Slack-app die je zelf maakt. Een beheerder van de werkruimte moet die mogelijk goedkeuren."
+
+msgid "Create your Slack app from the manifest"
+msgstr "Maak je Slack-app vanuit het manifest"
+
+msgid "Create the app on Slack"
+msgstr "App maken op Slack"
+
+msgid "Copy manifest"
+msgstr "Manifest kopiëren"
+
+msgid "After creating it, add a redirect URL under OAuth & Permissions that matches the one below, and generate an app-level token with connections:write on Basic Information."
+msgstr "Voeg daarna onder OAuth & Permissions een redirect-URL toe die overeenkomt met die hieronder, en maak onder Basic Information een app-token met connections:write."
+
+msgid "Paste the app's credentials"
+msgstr "Plak de gegevens van de app"
+
+msgid "Client ID"
+msgstr "Client-ID"
+
+msgid "Client secret"
+msgstr "Clientgeheim"
+
+msgid "App-level token"
+msgstr "App-token"
+
+msgid "Save"
+msgstr "Opslaan"
+
+msgid "Sign in with Slack"
+msgstr "Aanmelden met Slack"
+
+msgid "Cancel"
+msgstr "Annuleren"
+
+msgid "Copy the sign-in link"
+msgstr "Aanmeldlink kopiëren"
+
+msgid "Or paste a user token"
+msgstr "Of plak een gebruikerstoken"
+
+msgid "User token"
+msgstr "Gebruikerstoken"
+
+msgid "The system keyring is unavailable: {error}. NoSlacking keeps tokens only there; unlock it or install a Secret Service provider such as GNOME Keyring or KWallet."
+msgstr "De sleutelbos van het systeem is niet beschikbaar: {error}. NoSlacking bewaart tokens alleen daar; ontgrendel hem of installeer een Secret Service-provider zoals GNOME Keyring of KWallet."
+
+msgid "Rename section"
+msgstr "Sectie hernoemen"
+
+msgid "Section name"
+msgstr "Naam van de sectie"
+
+msgid "Rename"
+msgstr "Hernoemen"
+
+msgid "Create"
+msgstr "Maken"
+
+msgid "Jump to a channel or person…"
+msgstr "Ga naar een kanaal of persoon…"
+
+msgid "Nothing matches."
+msgstr "Niets gevonden."
+
+msgid "Close"
+msgstr "Sluiten"
+
+msgid "Search emoji"
+msgstr "Emoji zoeken"
+
+msgid "{time} local time"
+msgstr "{time} lokale tijd"
+
+msgid "Message"
+msgstr "Bericht sturen"
+
+msgid "Delete message?"
+msgstr "Bericht verwijderen?"
+
+msgid "This cannot be undone."
+msgstr "Dit kan niet ongedaan worden gemaakt."
+
+msgid "Delete"
+msgstr "Verwijderen"
+
+msgid "Settings"
+msgstr "Instellingen"
+
+msgid "Done"
+msgstr "Klaar"
+
+msgid "Appearance"
+msgstr "Weergave"
+
+msgid "Theme"
+msgstr "Thema"
+
+msgid "Follow the system"
+msgstr "Systeem volgen"
+
+msgid "Dark"
+msgstr "Donker"
+
+msgid "Light"
+msgstr "Licht"
+
+msgid "Add your own palettes as JSON files in the themes folder."
+msgstr "Voeg je eigen paletten toe als JSON-bestanden in de themamap."
+
+msgid "Open folder"
+msgstr "Map openen"
+
+msgid "Zoom"
+msgstr "Zoom"
+
+msgid "Language"
+msgstr "Taal"
+
+msgid "Messages"
+msgstr "Berichten"
+
+msgid "Enter sends"
+msgstr "Enter verstuurt"
+
+msgid "Off: {shortcut} sends and Enter starts a new line."
+msgstr "Uit: {shortcut} verstuurt en Enter begint een nieuwe regel."
+
+msgid "Sort channels"
+msgstr "Kanalen sorteren"
+
+msgid "Within each sidebar section. Direct messages are always newest first."
+msgstr "Binnen elke sectie van de zijbalk. Privéberichten staan altijd op nieuwste eerst."
+
+msgid "By name"
+msgstr "Op naam"
+
+msgid "By recent activity"
+msgstr "Op recente activiteit"
+
+msgid "Workspaces"
+msgstr "Werkruimtes"
+
+msgid "Sign out"
+msgstr "Afmelden"
+
+msgid "Slack app"
+msgstr "Slack-app"
+
+msgid "Live updates connected"
+msgstr "Live-updates verbonden"
+
+msgid "No live connection: messages are fetched every few seconds"
+msgstr "Geen live-verbinding: berichten worden om de paar seconden opgehaald"
+
+msgid "Offline, reconnecting"
+msgstr "Offline, opnieuw verbinden"
+
+msgid "Slack refused the app-level token"
+msgstr "Slack weigerde het app-token"
+
+msgid "Connection"
+msgstr "Verbinding"
+
+msgid "Reconnect"
+msgstr "Opnieuw verbinden"
+
+msgid "Sign-in redirect"
+msgstr "Redirect bij aanmelden"
+
+msgid "Must be one of the app's redirect URLs under OAuth & Permissions."
+msgstr "Moet een van de redirect-URL's van de app onder OAuth & Permissions zijn."
+
+msgid "Loopback port"
+msgstr "Loopback-poort"
+
+msgid "Files"
+msgstr "Bestanden"
+
+msgid "Settings and themes"
+msgstr "Instellingen en thema's"
+
+msgid "Logs"
+msgstr "Logboeken"
+
+msgid "Cache"
+msgstr "Cache"
+
+msgid "Open"
+msgstr "Openen"
+
+msgid "No workspace"
+msgstr "Geen werkruimte"
+
+msgid "Pick a conversation"
+msgstr "Kies een gesprek"
+
+msgid "Loading conversations…"
+msgstr "Gesprekken laden…"
+
+msgid "Jump to… ({shortcut})"
+msgstr "Ga naar… ({shortcut})"
+
+msgid "No live connection: new messages in this conversation are fetched every few seconds."
+msgstr "Geen live-verbinding: nieuwe berichten in dit gesprek worden om de paar seconden opgehaald."
+
+msgid "Message #{name}"
+msgstr "Bericht aan #{name}"
+
+msgid "Message {name}"
+msgstr "Bericht aan {name}"
+
+msgid "This channel is archived."
+msgstr "Dit kanaal is gearchiveerd."
+
+msgid "Load older messages"
+msgstr "Oudere berichten laden"
+
+msgid "This is the very beginning of your direct message history with {name}."
+msgstr "Dit is het allereerste begin van je privéberichten met {name}."
+
+msgid "This is the very beginning of this group conversation."
+msgstr "Dit is het allereerste begin van dit groepsgesprek."
+
+msgid "This is the very beginning of #{name}."
+msgstr "Dit is het allereerste begin van #{name}."
+
+msgid "New"
+msgstr "Nieuw"
+
+msgid "{author}, {time}: {text}"
+msgstr "{author}, {time}: {text}"
+
+msgid "↑↓ Move · R React · T Thread · E Edit · Del Delete · C Copy · Esc Back"
+msgstr "↑↓ Verplaatsen · R Reageren · T Thread · E Bewerken · Del Verwijderen · C Kopiëren · Esc Terug"
+
+msgid "↑↓ Move · R React · E Edit · Del Delete · C Copy · Esc Back"
+msgstr "↑↓ Verplaatsen · R Reageren · E Bewerken · Del Verwijderen · C Kopiëren · Esc Terug"
+
+msgid "↑↓ Move · R React · T Thread · C Copy · Esc Back"
+msgstr "↑↓ Verplaatsen · R Reageren · T Thread · C Kopiëren · Esc Terug"
+
+msgid "↑↓ Move · R React · C Copy · Esc Back"
+msgstr "↑↓ Verplaatsen · R Reageren · C Kopiëren · Esc Terug"
+
+msgid "APP"
+msgstr "APP"
+
+msgid "replied to a thread"
+msgstr "reageerde in een thread"
+
+msgid "Not sent: {error}."
+msgstr "Niet verstuurd: {error}."
+
+msgid "Retry"
+msgstr "Opnieuw"
+
+msgid "Discard"
+msgstr "Weggooien"
+
+msgid "Enter to save, Esc to cancel"
+msgstr "Enter om op te slaan, Esc om te annuleren"
+
+msgid "{shortcut} to save, Esc to cancel"
+msgstr "{shortcut} om op te slaan, Esc om te annuleren"
+
+msgid "Download"
+msgstr "Downloaden"
+
+msgid "Download {name}"
+msgstr "{name} downloaden"
+
+msgid "This button works only in Slack itself."
+msgstr "Deze knop werkt alleen in Slack zelf."
+
+msgid "You"
+msgstr "Jij"
+
+msgid "{names} reacted with :{emoji}:"
+msgstr "{names} reageerde met :{emoji}:"
+
+msgid "Add reaction"
+msgstr "Reactie toevoegen"
+
+msgid "Last reply {when}"
+msgstr "Laatste antwoord {when}"
+
+msgid "React with :{emoji}:"
+msgstr "Reageren met :{emoji}:"
+
+msgid "Add reaction (R)"
+msgstr "Reactie toevoegen (R)"
+
+msgid "Reply in thread (T)"
+msgstr "Antwoorden in thread (T)"
+
+msgid "Copy text (C)"
+msgstr "Tekst kopiëren (C)"
+
+msgid "Edit message (E)"
+msgstr "Bericht bewerken (E)"
+
+msgid "Delete message (Del)"
+msgstr "Bericht verwijderen (Del)"
+
+msgid "just now"
+msgstr "zojuist"
+
+msgid "Thread"
+msgstr "Thread"
+
+msgid "Close (Esc)"
+msgstr "Sluiten (Esc)"
+
+msgid "Reply…"
+msgstr "Antwoorden…"
+
+msgid "{count} mention"
+msgid_plural "{count} mentions"
+msgstr[0] "{count} vermelding"
+msgstr[1] "{count} vermeldingen"
+
+msgid "{count} member"
+msgid_plural "{count} members"
+msgstr[0] "{count} lid"
+msgstr[1] "{count} leden"
+
+msgid "{count} reaction with :{emoji}:"
+msgid_plural "{count} reactions with :{emoji}:"
+msgstr[0] "{count} reactie met :{emoji}:"
+msgstr[1] "{count} reacties met :{emoji}:"
+
+msgid "{count} reply"
+msgid_plural "{count} replies"
+msgstr[0] "{count} antwoord"
+msgstr[1] "{count} antwoorden"
+
+msgid "{count} minute ago"
+msgid_plural "{count} minutes ago"
+msgstr[0] "{count} minuut geleden"
+msgstr[1] "{count} minuten geleden"
+
+msgid "{count} hour ago"
+msgid_plural "{count} hours ago"
+msgstr[0] "{count} uur geleden"
+msgstr[1] "{count} uur geleden"
+
+msgid "{count} day ago"
+msgid_plural "{count} days ago"
+msgstr[0] "{count} dag geleden"
+msgstr[1] "{count} dagen geleden"

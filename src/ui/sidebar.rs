@@ -3,7 +3,7 @@
 use egui::{CornerRadius, Margin, RichText, Sense, Stroke, Vec2};
 
 use crate::app::{App, Page, WorkspaceState};
-use crate::i18n::t;
+use crate::i18n::{t, tf, tn};
 use crate::model::{Action, Conversation, ConversationKind, SectionKind, SidebarSection};
 use crate::sidebar::{self, SidebarEdit};
 use crate::theme::{self, Icon, Palette};
@@ -89,6 +89,13 @@ pub fn rail(app: &mut App, ui: &mut egui::Ui) {
                         Some(reason) => format!("{} ({reason})", workspace.info.name),
                         None => workspace.info.name.clone(),
                     };
+                    theme::focus_ring(ui, &response, &palette, 12);
+                    theme::describe_selected(
+                        &response,
+                        egui::WidgetType::SelectableLabel,
+                        selected,
+                        &spoken(&tip, unread, mentions),
+                    );
                     let response = response
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text(tip);
@@ -108,6 +115,8 @@ pub fn rail(app: &mut App, ui: &mut egui::Ui) {
                     ui,
                     egui::Rect::from_center_size(rect.center(), Vec2::splat(20.0)),
                 );
+                theme::focus_ring(ui, &response, &palette, 9);
+                theme::describe(&response, egui::WidgetType::Button, &t("Add a workspace"));
                 if response
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .on_hover_text(t("Add a workspace"))
@@ -118,8 +127,11 @@ pub fn rail(app: &mut App, ui: &mut egui::Ui) {
             });
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 let settings_open = app.page == Page::Settings;
-                let response =
-                    theme::icon_button(ui, &palette, Icon::Settings, 20.0, &t("Settings (Ctrl+,)"));
+                let tip = tf(
+                    "Settings ({shortcut})",
+                    &[("shortcut", &super::keys::command(","))],
+                );
+                let response = theme::icon_button(ui, &palette, Icon::Settings, 20.0, &tip);
                 if response.clicked() {
                     app.actions.push(if settings_open {
                         Action::HideSettings
@@ -129,6 +141,27 @@ pub fn rail(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
         });
+}
+
+/// What a screen reader says for a workspace or a conversation: its name,
+/// and whether there is something new in it.
+fn spoken(name: &str, unread: bool, mentions: u32) -> String {
+    if mentions > 0 {
+        tf(
+            "{name}, {mentions}",
+            &[
+                ("name", name),
+                (
+                    "mentions",
+                    &tn("{count} mention", "{count} mentions", mentions),
+                ),
+            ],
+        )
+    } else if unread {
+        tf("{name}, unread", &[("name", name)])
+    } else {
+        name.to_owned()
+    }
 }
 
 /// The mention count on a workspace icon. The dot fits one digit, and
@@ -230,7 +263,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(
-                            RichText::new(format!("{} {reason}", t("Signed out:")))
+                            RichText::new(tf("Signed out: {reason}", &[("reason", reason)]))
                                 .font(theme::regular(12.5))
                                 .color(palette.text),
                         );
@@ -385,6 +418,13 @@ fn section_view(
         galley,
         palette.secondary,
     );
+    theme::focus_ring(ui, &response, palette, theme::RADIUS_SMALL);
+    theme::describe_selected(
+        &response,
+        egui::WidgetType::CollapsingHeader,
+        open || !filter.is_empty(),
+        &section.title,
+    );
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.clicked() {
         ui.data_mut(|d| d.insert_persisted(open_id, !open));
@@ -410,10 +450,16 @@ fn section_view(
     if (open || !filter.is_empty()) && rows.len() > rows_to_show.len() {
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
+        let label = tf(
+            "Show more ({count})",
+            &[("count", &(rows.len() - rows_to_show.len()).to_string())],
+        );
+        theme::focus_ring(ui, &response, palette, theme::RADIUS_SMALL);
+        theme::describe(&response, egui::WidgetType::Button, &label);
         ui.painter().text(
             egui::pos2(rect.left() + 32.0, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            format!("{} ({})", t("Show more"), rows.len() - rows_to_show.len()),
+            label,
             theme::medium(13.0),
             palette.dim,
         );
@@ -618,6 +664,13 @@ fn row(
     };
     let max_text = rect.width() - 36.0 - 8.0 - badge_width;
     // One line, cut with an ellipsis.
+    theme::focus_ring(ui, &response, palette, theme::RADIUS_SMALL + 2);
+    theme::describe_selected(
+        &response,
+        egui::WidgetType::SelectableLabel,
+        selected,
+        &spoken(&title, unread, conversation.mentions),
+    );
     let mut job = egui::text::LayoutJob::simple_singleline(title, font, text_color);
     job.wrap = egui::text::TextWrapping::truncate_at_width(max_text);
     let galley = ui.painter().layout_job(job);

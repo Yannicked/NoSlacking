@@ -4,7 +4,7 @@
 use egui::{CornerRadius, Key, Margin, Modifiers, RichText, Sense, Stroke, Vec2};
 
 use crate::app::{App, PickerTarget};
-use crate::i18n::t;
+use crate::i18n::{t, tf};
 use crate::model::{Action, ConversationKind};
 use crate::theme::{self, Icon};
 
@@ -36,19 +36,21 @@ fn section_dialog(app: &mut App, ctx: &egui::Context) {
             } else {
                 t("New section")
             };
-            ui.label(
+            let heading = ui.label(
                 RichText::new(heading)
                     .font(theme::bold(17.0))
                     .color(palette.text),
             );
             ui.add_space(6.0);
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut dialog.name)
-                    .id(egui::Id::new("section-name"))
-                    .hint_text(t("Section name"))
-                    .desired_width(f32::INFINITY)
-                    .margin(Margin::symmetric(8, 6)),
-            );
+            let field = ui
+                .add(
+                    egui::TextEdit::singleline(&mut dialog.name)
+                        .id(egui::Id::new("section-name"))
+                        .hint_text(t("Section name"))
+                        .desired_width(f32::INFINITY)
+                        .margin(Margin::symmetric(8, 6)),
+                )
+                .labelled_by(heading.id);
             if focus {
                 field.request_focus();
             }
@@ -209,6 +211,12 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
                     },
                     palette.text,
                 );
+                theme::describe_selected(
+                    &response,
+                    egui::WidgetType::SelectableLabel,
+                    index == selected,
+                    title,
+                );
                 if response.clicked() {
                     open = Some(id.clone());
                 }
@@ -342,7 +350,9 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                                                 Vec2::splat(24.0),
                                             ),
                                         );
-                                    if response.on_hover_text(format!(":{name}:")).clicked() {
+                                    let label = format!(":{name}:");
+                                    theme::describe(&response, egui::WidgetType::Button, &label);
+                                    if response.on_hover_text(label).clicked() {
                                         chosen = Some(name.clone());
                                     }
                                 }
@@ -362,11 +372,7 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                             continue;
                         }
                         ui.add_space(4.0);
-                        super::section_label(
-                            ui,
-                            &palette,
-                            &format!("{group:?}").replace("And", " & "),
-                        );
+                        super::section_label(ui, &palette, &crate::emoji::group_name(*group));
                         for chunk in list.chunks(columns) {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 0.0;
@@ -388,7 +394,9 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                                         palette.text,
                                     );
                                     let code = emoji.shortcode().unwrap_or_default();
-                                    if response.on_hover_text(format!(":{code}:")).clicked() {
+                                    let label = format!(":{code}:");
+                                    theme::describe(&response, egui::WidgetType::Button, &label);
+                                    if response.on_hover_text(label).clicked() {
                                         chosen = Some(code.to_owned());
                                     }
                                 }
@@ -486,9 +494,12 @@ fn profile(app: &mut App, ctx: &egui::Context) {
                 {
                     let local = jiff::Timestamp::now().to_zoned(zone);
                     ui.label(
-                        RichText::new(format!("{} {}", local.strftime("%H:%M"), t("local time")))
-                            .font(theme::regular(13.0))
-                            .color(palette.dim),
+                        RichText::new(tf(
+                            "{time} local time",
+                            &[("time", &local.strftime("%H:%M").to_string())],
+                        ))
+                        .font(theme::regular(13.0))
+                        .color(palette.dim),
                     );
                 }
             }

@@ -92,6 +92,24 @@ pub fn unicode(name: &str, tone: Option<u8>) -> Option<String> {
     Some(toned.unwrap_or(emoji).as_str().to_owned())
 }
 
+/// A standard emoji group's name in the interface language, for the
+/// picker's headings.
+pub fn group_name(group: emojis::Group) -> std::borrow::Cow<'static, str> {
+    use crate::i18n::t;
+    use emojis::Group;
+    match group {
+        Group::SmileysAndEmotion => t("Smileys & Emotion"),
+        Group::PeopleAndBody => t("People & Body"),
+        Group::AnimalsAndNature => t("Animals & Nature"),
+        Group::FoodAndDrink => t("Food & Drink"),
+        Group::TravelAndPlaces => t("Travel & Places"),
+        Group::Activities => t("Activities"),
+        Group::Objects => t("Objects"),
+        Group::Symbols => t("Symbols"),
+        Group::Flags => t("Flags"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

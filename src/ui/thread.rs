@@ -28,6 +28,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         settings,
         actions,
         editing,
+        selected,
         ..
     } = app;
     let Some(workspace) = crate::app::active_in(workspaces, settings) else {
@@ -131,6 +132,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         in_thread: true,
                         enter_sends: settings.enter_sends,
                         overlay,
+                        selected: selected
+                            .as_ref()
+                            .filter(|s| s.in_thread && s.channel == channel),
                     };
                     egui::ScrollArea::vertical()
                         .id_salt(("thread", &channel, ts.as_str()))
