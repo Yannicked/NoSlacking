@@ -22,6 +22,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let mut draft: Draft = app.drafts.remove(&key).unwrap_or_default();
     let to_bottom = app.scroll_to_bottom.remove(&key);
     let width = app.settings.thread_width;
+    let overlay = app.overlay_open();
     let App {
         workspaces,
         settings,
@@ -130,6 +131,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         workspace,
                         channel: &channel,
                         in_thread: true,
+                        enter_sends: settings.enter_sends,
+                        overlay,
                     };
                     egui::ScrollArea::vertical()
                         .id_salt(("thread", &channel, ts.as_str()))

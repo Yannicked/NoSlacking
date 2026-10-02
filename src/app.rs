@@ -58,6 +58,12 @@ pub struct Editing {
     pub text: String,
     /// The mentions and links in `text`, as for [`Draft::mentions`].
     pub mentions: Vec<(String, String)>,
+    /// Whether the field is in the thread panel, which can show the same
+    /// message (a thread's parent) as the conversation.
+    pub in_thread: bool,
+    /// Focus the field when it is next drawn. Only once, so you can click
+    /// or tab away from it.
+    pub focus: bool,
 }
 
 /// An unsent message.
@@ -1589,27 +1595,8 @@ impl App {
                 self.picker_query.clear();
                 self.picker = Some(PickerTarget::Draft(draft));
             }
-            Action::StartEdit { channel, ts } => {
-                let found = self.active_workspace().and_then(|w| {
-                    w.timelines
-                        .get(&channel)
-                        .and_then(|t| t.messages.iter().find(|m| m.ts == ts))
-                        .or_else(|| {
-                            w.threads
-                                .values()
-                                .find_map(|t| t.messages.iter().find(|m| m.ts == ts))
-                        })
-                        .map(|m| w.editable(&m.text))
-                });
-                if let Some((text, mentions)) = found {
-                    self.editing = Some(Editing {
-                        channel,
-                        ts,
-                        text,
-                        mentions,
-                    });
-                }
-            }
+            Action::StartEdit { channel, ts } => self.start_edit(channel, ts, false),
+            Action::StartEditInThread { channel, ts } => self.start_edit(channel, ts, true),
             Action::CancelEdit => self.editing = None,
             Action::EditLast => {
                 let found = self.active_workspace().and_then(|w| {
@@ -1714,6 +1701,41 @@ impl App {
             Action::Reconnect => self.backend.send(Command::Reconnect),
             Action::DismissError => self.toasts.clear(),
         }
+    }
+
+    fn start_edit(&mut self, channel: String, ts: Ts, in_thread: bool) {
+        let found = self.active_workspace().and_then(|w| {
+            w.timelines
+                .get(&channel)
+                .and_then(|t| t.messages.iter().find(|m| m.ts == ts))
+                .or_else(|| {
+                    w.threads
+                        .values()
+                        .find_map(|t| t.messages.iter().find(|m| m.ts == ts))
+                })
+                .map(|m| w.editable(&m.text))
+        });
+        if let Some((text, mentions)) = found {
+            self.editing = Some(Editing {
+                channel,
+                ts,
+                text,
+                mentions,
+                in_thread,
+                focus: true,
+            });
+        }
+    }
+
+    /// Whether a dialog or picker covers the window, so its keys come
+    /// first.
+    pub fn overlay_open(&self) -> bool {
+        self.switcher.is_some()
+            || self.picker.is_some()
+            || self.profile.is_some()
+            || self.preview.is_some()
+            || self.confirm_delete.is_some()
+            || self.section_dialog.is_some()
     }
 
     /// Changes the sidebar at once, and in Slack, which then sends back the

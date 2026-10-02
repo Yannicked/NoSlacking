@@ -13,12 +13,12 @@ use crate::app::{App, Page};
 use crate::model::{Action, Conversation};
 
 pub fn global(app: &mut App, ctx: &egui::Context) {
-    let overlay = app.switcher.is_some()
-        || app.picker.is_some()
-        || app.profile.is_some()
-        || app.preview.is_some()
-        || app.confirm_delete.is_some()
-        || app.section_dialog.is_some();
+    let overlay = app.overlay_open();
+    // Esc in the edit field cancels the edit, and nothing else.
+    let editing = app
+        .editing
+        .as_ref()
+        .is_some_and(|e| ctx.memory(|m| m.has_focus(super::message::edit_id(e))));
     let (switch, settings, unread_up, unread_down, up, down, escape, zoom_in, zoom_out, zoom_reset) =
         ctx.input_mut(|input| {
             (
@@ -29,7 +29,7 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
                 input.consume_key(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowDown),
                 input.consume_key(Modifiers::ALT, Key::ArrowUp),
                 input.consume_key(Modifiers::ALT, Key::ArrowDown),
-                !overlay && app.editing.is_none() && input.key_pressed(Key::Escape),
+                !overlay && !editing && input.key_pressed(Key::Escape),
                 input.consume_key(Modifiers::COMMAND, Key::Equals)
                     || input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Equals)
                     || input.consume_key(Modifiers::COMMAND, Key::Plus),

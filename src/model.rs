@@ -544,6 +544,12 @@ pub enum Action {
         channel: String,
         ts: Ts,
     },
+    /// Like `StartEdit`, in the thread panel: a thread's parent shows in
+    /// both panels, and only one of them gets the edit field.
+    StartEditInThread {
+        channel: String,
+        ts: Ts,
+    },
     CancelEdit,
     /// Edits your newest message in the open conversation.
     EditLast,
