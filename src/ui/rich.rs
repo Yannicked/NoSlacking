@@ -279,19 +279,24 @@ fn flow(
     });
 }
 
-/// Draws `:name:` as the emoji it stands for.
+/// Draws `:name:` as the emoji it stands for. Its name shows on hover, and
+/// is formatted only then.
 pub fn emoji(ui: &mut egui::Ui, rich: &Rich<'_>, name: &str, size: f32) {
     match rich.workspace.emoji.resolve(name) {
         Resolved::Unicode(text) => {
             ui.add(egui::Label::new(
                 RichText::new(text).font(theme::regular(size * 1.1)),
             ))
-            .on_hover_text(format!(":{name}:"));
+            .on_hover_ui(|ui| {
+                ui.label(format!(":{name}:"));
+            });
         }
         Resolved::Image(url) => {
             let side = size * 1.3;
             ui.add(egui::Image::new(url).fit_to_exact_size(Vec2::splat(side)))
-                .on_hover_text(format!(":{name}:"));
+                .on_hover_ui(|ui| {
+                    ui.label(format!(":{name}:"));
+                });
         }
         Resolved::Unknown => {
             ui.add(egui::Label::new(
