@@ -275,7 +275,9 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             app_token: app.setup.app_token.trim().to_owned(),
         };
         let changed = app.app_credentials.as_ref() != Some(&form);
-        ui.add_enabled_ui(changed, |ui| {
+        // As on the sign-in page: an app without both halves of its OAuth
+        // credentials cannot sign anyone in, so it is not worth saving.
+        ui.add_enabled_ui(changed && form.can_sign_in(), |ui| {
             if theme::primary_button(ui, palette, &t("Save")).clicked() {
                 app.backend.send(Command::SaveApp(form.clone()));
                 app.app_credentials = Some(form.clone());
