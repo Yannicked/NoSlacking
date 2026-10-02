@@ -151,6 +151,13 @@ fn session_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 .color(palette.secondary),
         );
         ui.add_space(2.0);
+        browser_sign_in(app, ui, palette);
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(t("Or paste the session cookie"))
+                .font(theme::semibold(13.5))
+                .color(palette.text),
+        );
         field(
             ui,
             palette,
@@ -198,6 +205,40 @@ fn session_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 }
             });
             sign_in_status(app, ui, palette);
+        });
+    });
+}
+
+/// Signing in through the browser, which then
+/// offers a `slack://` link to paste here.
+fn browser_sign_in(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
+    ui.horizontal(|ui| {
+        if theme::secondary_button(ui, palette, &t("Sign in with your browser")).clicked() {
+            app.actions
+                .push(Action::OpenUrl(crate::slack::magic::SIGN_IN_URL.to_owned()));
+        }
+    });
+    ui.label(
+        RichText::new(t(
+            "Sign in there as usual. When the page offers to open the Slack app, cancel that and copy its link instead (right-click the Open Slack button → Copy link). It starts with slack://.",
+        ))
+        .font(theme::regular(13.0))
+        .color(palette.secondary),
+    );
+    field(
+        ui,
+        palette,
+        &t("Sign-in link"),
+        &mut app.setup.session_link,
+        "slack://…",
+        true,
+    );
+    let ready = app.setup.session_link.trim().starts_with("slack://") && !busy(app);
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(ready, |ui| {
+            if theme::primary_button(ui, palette, &t("Sign in with the link")).clicked() {
+                app.actions.push(Action::SignInLink);
+            }
         });
     });
 }
