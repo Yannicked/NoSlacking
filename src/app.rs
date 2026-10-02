@@ -2269,7 +2269,7 @@ impl App {
         }
     }
 
-    /// Uploads the clipboard's image, if it holds one and no text: Ctrl+V
+    /// Uploads the clipboard's files or image, if it holds no text: Ctrl+V
     /// with text was already pasted into the field by egui. The clipboard
     /// is read on a thread of its own, as some desktops answer slowly.
     fn paste_image(&mut self, thread: Option<Ts>) {
@@ -2279,13 +2279,14 @@ impl App {
         let sender = self.uploads.0.clone();
         let waker = self.waker.clone();
         let dir = self.dirs.pasted();
-        std::thread::spawn(move || match crate::paste::clipboard_image(&dir) {
-            Ok(Some(path)) => {
-                let _ = sender.send((target, path));
+        std::thread::spawn(move || match crate::paste::clipboard_files(&dir) {
+            Ok(paths) => {
+                for path in paths {
+                    let _ = sender.send((target.clone(), path));
+                }
                 waker.wake();
             }
-            Ok(None) => {}
-            Err(error) => log::warn!("could not paste the image: {error}"),
+            Err(error) => log::warn!("could not paste: {error}"),
         });
     }
 

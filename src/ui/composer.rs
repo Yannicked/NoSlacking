@@ -338,6 +338,26 @@ pub fn show(
                     thread: composer.thread.clone(),
                 });
             }
+            // Files copied in a file manager paste as their paths: upload
+            // them instead of typing the paths into the message.
+            input.events.retain(|event| {
+                let egui::Event::Paste(text) = event else {
+                    return true;
+                };
+                match crate::paste::pasted_files(text) {
+                    Some(paths) => {
+                        for path in paths {
+                            actions.push(Action::Upload {
+                                thread: composer.thread.clone(),
+                                path,
+                                comment: String::new(),
+                            });
+                        }
+                        false
+                    }
+                    None => true,
+                }
+            });
             // Esc closes the suggestions, so "@chan" can be sent as typed.
             if !found.is_empty() && input.consume_key(Modifiers::NONE, Key::Escape) {
                 draft.dismissed = word.clone();
