@@ -321,6 +321,7 @@ fn long_history() -> Vec<Message> {
                     thumb: None,
                     footer: None,
                     blocks: Vec::new(),
+                    ..Attachment::default()
                 });
             }
             message
@@ -391,8 +392,27 @@ fn history(channel: &str) -> Vec<Message> {
                     thumb: Some(PICTURE.into()),
                     thumb_size: Some([480.0, 270.0]),
                     permalink: None,
+                    original_size: Some([480.0, 270.0]),
+                    ..File::default()
                 }],
                 ..message(NOW - 2400, "U01", "New sidebar spacing, what do you think?")
+            },
+            Message {
+                files: vec![File {
+                    id: "F02".into(),
+                    name: "sidebar-v2-light.png".into(),
+                    title: "sidebar-v2-light.png".into(),
+                    mimetype: "image/png".into(),
+                    size: 51_002,
+                    thumb: Some(PICTURE.into()),
+                    thumb_size: Some([480.0, 270.0]),
+                    original_size: Some([480.0, 270.0]),
+                    permalink: Some(
+                        "https://acme.slack.com/files/U01/F02/sidebar-v2-light.png".into(),
+                    ),
+                    ..File::default()
+                }],
+                ..message(NOW - 2380, "U01", "And in the light theme.")
             },
             message(
                 NOW - 2350,
@@ -423,6 +443,7 @@ fn history(channel: &str) -> Vec<Message> {
                     thumb: None,
                     footer: Some("ci.example.com".into()),
                     blocks: Vec::new(),
+                    ..Attachment::default()
                 }],
                 ..message(NOW - 900, "U05", "")
             },
@@ -477,6 +498,89 @@ fn history(channel: &str) -> Vec<Message> {
                     NOW - 90 * (LONG - 20) as u64
                 ),
             ),
+        ],
+        // Media: a video link's preview, a blog post's, a screen recording,
+        // a voice memo and a PDF.
+        "C03" => vec![
+            Message {
+                attachments: vec![Attachment {
+                    service: Some("YouTube".into()),
+                    author: Some("Rust Conference".into()),
+                    author_link: Some("https://www.youtube.com/@rustconf".into()),
+                    title: Some("Immediate mode interfaces in practice".into()),
+                    title_link: Some("https://www.youtube.com/watch?v=demo".into()),
+                    thumb: Some(PICTURE.into()),
+                    thumb_size: Some([480.0, 270.0]),
+                    video: Some("https://www.youtube.com/watch?v=demo".into()),
+                    color: Some(egui::Color32::from_rgb(0xff, 0x00, 0x33)),
+                    ..Attachment::default()
+                }],
+                ..message(
+                    NOW - 9600,
+                    "U01",
+                    "Worth watching: <https://www.youtube.com/watch?v=demo>",
+                )
+            },
+            Message {
+                attachments: vec![Attachment {
+                    service: Some("Design Notes".into()),
+                    title: Some("Density, revisited".into()),
+                    title_link: Some("https://design.example/density".into()),
+                    text:
+                        "How much should fit on one screen? Notes from a year of compact layouts."
+                            .into(),
+                    image: Some(PICTURE.into()),
+                    image_size: Some([1200.0, 675.0]),
+                    ..Attachment::default()
+                }],
+                ..message(NOW - 9500, "U03", "<https://design.example/density>")
+            },
+            Message {
+                files: vec![
+                    File {
+                        id: "F10".into(),
+                        name: "sidebar-walkthrough.mp4".into(),
+                        mimetype: "video/mp4".into(),
+                        size: 8_412_000,
+                        url_private: Some(
+                            "https://files.slack.com/files-pri/TDEMO-F10/walkthrough.mp4".into(),
+                        ),
+                        poster: Some(PICTURE.into()),
+                        poster_size: Some([640.0, 360.0]),
+                        ..File::default()
+                    },
+                    File {
+                        id: "F11".into(),
+                        name: "voice-memo.m4a".into(),
+                        mimetype: "audio/mp4".into(),
+                        size: 412_000,
+                        url_private: Some(
+                            "https://files.slack.com/files-pri/TDEMO-F11/memo.m4a".into(),
+                        ),
+                        ..File::default()
+                    },
+                ],
+                ..message(NOW - 9200, "U01", "Screen recording and my notes:")
+            },
+            Message {
+                files: vec![File {
+                    id: "F12".into(),
+                    name: "style-guide.pdf".into(),
+                    mimetype: "application/pdf".into(),
+                    size: 1_204_000,
+                    download_url: Some(
+                        "https://files.slack.com/files-pri/TDEMO-F12/download/style-guide.pdf"
+                            .into(),
+                    ),
+                    url_private: Some(
+                        "https://files.slack.com/files-pri/TDEMO-F12/style-guide.pdf".into(),
+                    ),
+                    poster: Some(PICTURE.into()),
+                    poster_size: Some([480.0, 270.0]),
+                    ..File::default()
+                }],
+                ..message(NOW - 9000, "U03", "The style guide, updated.")
+            },
         ],
         _ => vec![message(
             NOW - 9000,
@@ -848,6 +952,9 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
             }
             Command::Download { name, .. } => {
                 sink.send(Event::Notice(format!("Demo: would save {name}")));
+            }
+            Command::OpenFile { name, .. } => {
+                sink.send(Event::Notice(format!("Demo: would play {name}")));
             }
             Command::Convos { team, command } => {
                 for event in crate::backend::convos::demo(&team, command) {

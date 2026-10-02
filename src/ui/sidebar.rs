@@ -177,6 +177,13 @@ fn rail_count(mentions: u32) -> String {
     }
 }
 
+/// Room between the header's last button and the sidebar's right edge,
+/// where the panel's resize handle also sits: enough that a button's hover
+/// highlight never touches the edge or hides the handle.
+const HEADER_RIGHT: i8 = 12;
+/// Room between the header's buttons, so their highlights do not merge.
+const HEADER_GAP: f32 = 2.0;
+
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let width = app.settings.sidebar_width;
@@ -204,7 +211,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 .show_separator_line(false)
                 .frame(egui::Frame::new().inner_margin(Margin {
                     left: 16,
-                    right: 10,
+                    right: HEADER_RIGHT,
                     top: inset as i8,
                     bottom: 0,
                 }))
@@ -216,49 +223,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         Stroke::new(1.0, palette.outline),
                     );
                     ui.horizontal_centered(|ui| {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(&workspace.info.name)
-                                    .font(theme::bold(16.0))
-                                    .color(palette.text),
-                            )
-                            .truncate(),
-                        );
-                        let (color, tip) = match socket {
-                            crate::backend::Socket::Connected => (palette.accent, t("Live")),
-                            crate::backend::Socket::Off => (palette.dim, t("Live updates off")),
-                            crate::backend::Socket::Connecting => {
-                                (palette.warning, t("Connecting…"))
-                            }
-                            _ => (palette.danger, t("Offline")),
-                        };
-                        let (dot, response) =
-                            ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                        ui.painter().circle_filled(dot.center(), 4.0, color);
-                        response.on_hover_text(tip);
-                        super::desktop::dnd_button(ui, &palette, workspace, actions);
-                        if workspace.sections.is_some() {
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if theme::icon_button(
-                                        ui,
-                                        &palette,
-                                        Icon::Plus,
-                                        16.0,
-                                        &t("New section"),
-                                    )
-                                    .clicked()
-                                    {
-                                        actions.push(Action::NameSection {
-                                            rename: None,
-                                            channel: None,
-                                        });
-                                    }
-                                },
-                            );
-                        }
+                        // The buttons are placed first, from the right edge
+                        // in, so a long workspace name is cut short instead
+                        // of pushing them past the edge.
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = HEADER_GAP;
                             super::browse::header_buttons(ui, &palette, actions);
                             if workspace.sections.is_some()
                                 && theme::icon_button(
@@ -275,6 +244,38 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                     channel: None,
                                 });
                             }
+                            ui.add_space(4.0);
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&workspace.info.name)
+                                                .font(theme::bold(16.0))
+                                                .color(palette.text),
+                                        )
+                                        .truncate(),
+                                    );
+                                    let (color, tip) = match socket {
+                                        crate::backend::Socket::Connected => {
+                                            (palette.accent, t("Live"))
+                                        }
+                                        crate::backend::Socket::Off => {
+                                            (palette.dim, t("Live updates off"))
+                                        }
+                                        crate::backend::Socket::Connecting => {
+                                            (palette.warning, t("Connecting…"))
+                                        }
+                                        _ => (palette.danger, t("Offline")),
+                                    };
+                                    let (dot, response) =
+                                        ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                                    ui.painter().circle_filled(dot.center(), 4.0, color);
+                                    response.on_hover_text(tip);
+                                    super::desktop::dnd_button(ui, &palette, workspace, actions);
+                                },
+                            );
                         });
                     });
                 });

@@ -1187,3 +1187,66 @@ msgstr "{time} uur achter op jou"
 
 msgid "{time} local time, {difference}"
 msgstr "{time} lokale tijd, {difference}"
+
+msgid "Open in browser"
+msgstr "Openen in de browser"
+
+msgid "Zoom in (+)"
+msgstr "Inzoomen (+)"
+
+msgid "Zoom out (-)"
+msgstr "Uitzoomen (-)"
+
+msgid "Fit to the window (0)"
+msgstr "Passend in het venster (0)"
+
+msgid "{index} of {count}"
+msgstr "{index} van {count}"
+
+msgid "Previous image (←)"
+msgstr "Vorige afbeelding (←)"
+
+msgid "Next image (→)"
+msgstr "Volgende afbeelding (→)"
+
+msgid "Could not show this image: {error}"
+msgstr "Kan deze afbeelding niet tonen: {error}"
+
+msgid "Play {name}"
+msgstr "{name} afspelen"
+
+msgid "Open {name}"
+msgstr "{name} openen"
+
+msgid "Play in your media player"
+msgstr "Afspelen in je mediaspeler"
+
+msgid "Play in the browser"
+msgstr "Afspelen in de browser"
+
+msgid "Opening {name}…"
+msgstr "{name} wordt geopend…"
+
+msgid "Message density"
+msgstr "Berichtdichtheid"
+
+msgid "Compact puts the time, name and text of each message on one line."
+msgstr "Compact zet de tijd, naam en tekst van elk bericht op één regel."
+
+msgid "Comfortable"
+msgstr "Ruim"
+
+msgid "Compact"
+msgstr "Compact"
+
+msgid "Show images and previews inline"
+msgstr "Afbeeldingen en voorbeelden direct tonen"
+
+msgid "Off: pictures and link previews wait for a click, and are not fetched before."
+msgstr "Uit: afbeeldingen en linkvoorbeelden wachten op een klik en worden pas dan opgehaald."
+
+msgid "Show the picture"
+msgstr "Afbeelding tonen"
+
+msgid "Show the picture: {name}"
+msgstr "Afbeelding tonen: {name}"

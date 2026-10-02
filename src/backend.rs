@@ -151,6 +151,13 @@ pub enum Command {
         url: String,
         name: String,
     },
+    /// Fetches a file into the workspace's private cache and opens it in
+    /// the system's own app: videos and sounds, which play there.
+    OpenFile {
+        team: String,
+        url: String,
+        name: String,
+    },
     Mark {
         team: String,
         channel: String,
@@ -363,6 +370,12 @@ impl std::fmt::Debug for Command {
             Self::CancelUpload { id } => f.debug_struct("CancelUpload").field("id", id).finish(),
             Self::Download { team, url, name } => f
                 .debug_struct("Download")
+                .field("team", team)
+                .field("url", url)
+                .field("name", name)
+                .finish(),
+            Self::OpenFile { team, url, name } => f
+                .debug_struct("OpenFile")
                 .field("team", team)
                 .field("url", url)
                 .field("name", name)

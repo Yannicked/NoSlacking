@@ -24,6 +24,20 @@ pub enum Appearance {
     Custom(String),
 }
 
+/// How tightly messages are laid out.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Density {
+    /// Avatars, a name line above the text, room between messages.
+    #[default]
+    Comfortable,
+    /// One line per message as in IRC: time, name and text side by side,
+    /// no avatars, little room between.
+    Compact,
+}
+
 /// How Slack sends the browser back after sign-in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -99,6 +113,11 @@ pub struct Settings {
     /// The emoji you used lately, newest first, by name without a tone;
     /// at most [`crate::emoji::RECENT_MAX`].
     pub recent_emoji: Vec<String>,
+    /// How tightly messages are laid out.
+    pub density: Density,
+    /// Whether pictures and link previews show in messages, or wait for
+    /// a click.
+    pub inline_media: bool,
 }
 
 impl Default for Settings {
@@ -121,6 +140,8 @@ impl Default for Settings {
             desktop: crate::desktop::DesktopSettings::default(),
             skin_tone: 0,
             recent_emoji: Vec::new(),
+            density: Density::Comfortable,
+            inline_media: true,
         }
     }
 }
@@ -213,6 +234,8 @@ impl Settings {
             desktop,
             skin_tone,
             recent_emoji,
+            density,
+            inline_media,
         );
         // One damaged workspace must not sign you out of the others, so
         // these are read entry by entry.
@@ -605,6 +628,21 @@ mod tests {
         assert_eq!(settings.appearance, Appearance::Custom("Nord.json".into()));
         assert!(settings.enter_sends);
         assert_eq!(settings.redirect, Redirect::default());
+    }
+
+    #[test]
+    fn density_and_inline_media_round_trip() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"density":"compact","inline_media":false}"#).expect("parses");
+        assert_eq!(settings.density, Density::Compact);
+        assert!(!settings.inline_media);
+        let encoded = settings.encode().expect("encodes");
+        let again: Settings = serde_json::from_slice(&encoded).expect("parses");
+        assert_eq!(again.density, Density::Compact);
+        // Older files have neither: messages look as they always did.
+        let old: Settings = serde_json::from_str("{}").expect("parses");
+        assert_eq!(old.density, Density::Comfortable);
+        assert!(old.inline_media);
     }
 
     #[test]

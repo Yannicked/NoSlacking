@@ -325,6 +325,8 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     let mut heights: rows::Heights = ui
         .data_mut(|d| d.remove_temp(heights_id))
         .unwrap_or_default();
+    let look = message::Look::of(settings);
+    heights.for_layout(look.key());
     let mut moved = 0.0;
     let output = area.show_viewport(ui, |ui, viewport| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -341,6 +343,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
             channel,
             in_thread: false,
             enter_sends: settings.enter_sends,
+            look,
             overlay,
             selected: selected
                 .as_ref()
@@ -382,7 +385,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         }
         let entries: Vec<rows::Entry> = items
             .iter()
-            .map(|item| item.entry(timeline.has_more))
+            .map(|item| item.entry(timeline.has_more, look))
             .collect();
         let plan = rows::plan(
             entries.iter().map(|entry| heights.planned(entry)),
@@ -565,7 +568,7 @@ enum Item<'a> {
 }
 
 impl Item<'_> {
-    fn entry(&self, has_more: bool) -> rows::Entry {
+    fn entry(&self, has_more: bool, look: message::Look) -> rows::Entry {
         match self {
             Item::Top => rows::Entry {
                 key: egui::Id::new("top").value(),
@@ -582,7 +585,7 @@ impl Item<'_> {
                 unread,
             } => rows::Entry {
                 key: egui::Id::new(message.ts.as_str()).value(),
-                guess: message::guess_height(message, *lead)
+                guess: message::guess_height(message, *lead, look)
                     + if *new_day { DAY_SEPARATOR } else { 0.0 }
                     + if *unread { NEW_LINE } else { 0.0 },
             },

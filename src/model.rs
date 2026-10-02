@@ -236,7 +236,7 @@ pub struct Reaction {
 }
 
 /// A file shared in a message.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct File {
     pub id: String,
     pub name: String,
@@ -250,11 +250,41 @@ pub struct File {
     pub thumb: Option<String>,
     pub thumb_size: Option<[f32; 2]>,
     pub permalink: Option<String>,
+    /// The picture's own size in pixels, for the image viewer.
+    pub original_size: Option<[f32; 2]>,
+    /// A still Slack made of a file that is not a picture: a video's
+    /// first frame, a PDF's first page.
+    pub poster: Option<String>,
+    pub poster_size: Option<[f32; 2]>,
+}
+
+/// A file to play rather than look at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Media {
+    Video,
+    Audio,
 }
 
 impl File {
     pub fn is_image(&self) -> bool {
         self.mimetype.starts_with("image/") && self.thumb.is_some()
+    }
+
+    /// Whether this is a video or a sound, which open in the system's
+    /// player: Slack's own player needs its web page.
+    pub fn media(&self) -> Option<Media> {
+        let mimetype = self.mimetype.to_ascii_lowercase();
+        if mimetype.starts_with("video/") {
+            Some(Media::Video)
+        } else if mimetype.starts_with("audio/") {
+            Some(Media::Audio)
+        } else {
+            None
+        }
+    }
+
+    pub fn is_pdf(&self) -> bool {
+        self.mimetype.eq_ignore_ascii_case("application/pdf")
     }
 }
 
@@ -270,11 +300,25 @@ pub struct Field {
 }
 
 /// An attachment card: a link unfurl or a bot's legacy attachment.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Attachment {
     pub color: Option<egui::Color32>,
-    /// The service or author shown above the title.
+    /// The site the link is on ("YouTube"), shown above the title.
     pub service: Option<String>,
+    /// The site's little icon, beside its name.
+    pub service_icon: Option<String>,
+    /// Who wrote what the link shows (a channel, an account).
+    pub author: Option<String>,
+    pub author_icon: Option<String>,
+    pub author_link: Option<String>,
+    /// The size Slack gives for `image` and `thumb`, so they take their
+    /// place before they have loaded.
+    pub image_size: Option<[f32; 2]>,
+    pub thumb_size: Option<[f32; 2]>,
+    /// For a video or other player (YouTube, Vimeo, a tweet's clip): the
+    /// page to open to play it. The thumbnail is then shown large, with a
+    /// play button over it.
+    pub video: Option<String>,
     /// mrkdwn shown above the card, outside its colour bar.
     pub pretext: Option<String>,
     pub title: Option<String>,
@@ -624,6 +668,15 @@ pub enum Action {
         uri: String,
         name: String,
     },
+    /// Opens the image viewer on file `file` of message `ts`, stepping
+    /// through the images of the list it is in: the thread with parent
+    /// `thread`, or else the conversation.
+    ViewImage {
+        channel: String,
+        thread: Option<Ts>,
+        ts: Ts,
+        file: String,
+    },
     OpenSwitcher,
     /// Opens the search window.
     OpenSearch,
@@ -654,6 +707,11 @@ pub enum Action {
     /// Stops an upload by its [`crate::app::Upload::id`].
     CancelUpload(u64),
     Download {
+        url: String,
+        name: String,
+    },
+    /// Opens a file (a video, a sound) in the system's app for it.
+    OpenFile {
         url: String,
         name: String,
     },

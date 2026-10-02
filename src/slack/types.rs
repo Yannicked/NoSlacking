@@ -195,6 +195,12 @@ pub struct File {
     pub thumb_720_h: Option<f32>,
     pub original_w: Option<f32>,
     pub original_h: Option<f32>,
+    pub thumb_video: Option<String>,
+    pub thumb_video_w: Option<f32>,
+    pub thumb_video_h: Option<f32>,
+    pub thumb_pdf: Option<String>,
+    pub thumb_pdf_w: Option<f32>,
+    pub thumb_pdf_h: Option<f32>,
 }
 
 impl File {
@@ -212,14 +218,30 @@ impl File {
         .find_map(|(url, w, h)| url.map(|url| (Some(url), w.zip(h).map(|(w, h)| [w, h]))))
         .unwrap_or((None, None));
         // Small GIFs and PNGs come without thumbnails; show the file itself.
+        let original_size = self.original_w.zip(self.original_h).map(|(w, h)| [w, h]);
         let (thumb, size) = match thumb {
             Some(thumb) => (Some(thumb), size),
-            None if self.mimetype.starts_with("image/") && self.size < 4 * 1024 * 1024 => (
-                self.url_private.clone(),
-                self.original_w.zip(self.original_h).map(|(w, h)| [w, h]),
-            ),
+            None if self.mimetype.starts_with("image/") && self.size < 4 * 1024 * 1024 => {
+                (self.url_private.clone(), original_size)
+            }
             None => (None, None),
         };
+        // A still for what is not a picture: a video's frame, a PDF's
+        // first page, or the ordinary thumbnail Slack made of it.
+        let is_image = self.mimetype.starts_with("image/");
+        let (poster, poster_size) = [
+            (self.thumb_video, self.thumb_video_w, self.thumb_video_h),
+            (self.thumb_pdf, self.thumb_pdf_w, self.thumb_pdf_h),
+        ]
+        .into_iter()
+        .find_map(|(url, w, h)| url.map(|url| (Some(url), w.zip(h).map(|(w, h)| [w, h]))))
+        .unwrap_or_else(|| {
+            if is_image {
+                (None, None)
+            } else {
+                (thumb.clone(), size)
+            }
+        });
         Some(model::File {
             id: self.id,
             name: self.name,
@@ -231,6 +253,9 @@ impl File {
             thumb,
             thumb_size: size,
             permalink: self.permalink,
+            original_size,
+            poster,
+            poster_size,
         })
     }
 }
@@ -250,6 +275,20 @@ pub struct Attachment {
     pub thumb_url: Option<String>,
     pub footer: Option<String>,
     pub is_msg_unfurl: bool,
+    pub service_icon: Option<String>,
+    pub author_icon: Option<String>,
+    pub author_link: Option<String>,
+    // Sizes are numbers, but kept loose: one written as text must not
+    // lose the whole message.
+    pub image_width: Option<Value>,
+    pub image_height: Option<Value>,
+    pub thumb_width: Option<Value>,
+    pub thumb_height: Option<Value>,
+    /// An embedded player, for videos; only its presence matters here.
+    pub video_html: Option<String>,
+    pub video_url: Option<String>,
+    pub from_url: Option<String>,
+    pub original_url: Option<String>,
     pub fields: Vec<AttachmentField>,
     pub blocks: Vec<Value>,
 }
@@ -290,20 +329,54 @@ impl Attachment {
         {
             return None;
         }
+        let title_link = non_empty(self.title_link);
+        let thumb = non_empty(self.thumb_url);
+        // A player: the page to watch it on, which is where the link
+        // points. Without a picture to show there is nothing to press.
+        let video = (non_empty(self.video_html).is_some() || non_empty(self.video_url).is_some())
+            .then(|| {
+                title_link
+                    .clone()
+                    .or(non_empty(self.from_url.clone()))
+                    .or(non_empty(self.original_url.clone()))
+            })
+            .flatten()
+            .filter(|_| thumb.is_some());
         Some(model::Attachment {
             color: self.color.as_deref().and_then(parse_hex),
-            service: non_empty(self.service_name).or(non_empty(self.author_name)),
+            service: non_empty(self.service_name),
+            service_icon: non_empty(self.service_icon),
+            author: non_empty(self.author_name),
+            author_icon: non_empty(self.author_icon),
+            author_link: non_empty(self.author_link),
+            image_size: size_of(self.image_width.as_ref(), self.image_height.as_ref()),
+            thumb_size: size_of(self.thumb_width.as_ref(), self.thumb_height.as_ref()),
+            video,
             pretext: non_empty(self.pretext),
             title,
-            title_link: non_empty(self.title_link),
+            title_link,
             text,
             fields,
             image,
-            thumb: non_empty(self.thumb_url),
+            thumb,
             footer: non_empty(self.footer),
             blocks,
         })
     }
+}
+
+/// A picture's width and height from loosely typed JSON (a number, or a
+/// number written as text), when both are there and above zero.
+fn size_of(width: Option<&Value>, height: Option<&Value>) -> Option<[f32; 2]> {
+    let number = |value: &Value| -> Option<f32> {
+        let number = match value {
+            Value::Number(n) => n.as_f64()?,
+            Value::String(s) => s.trim().parse().ok()?,
+            _ => return None,
+        };
+        (number.is_finite() && number > 0.0).then_some(number as f32)
+    };
+    Some([number(width?)?, number(height?)?])
 }
 
 /// A Block Kit text object as mrkdwn: `mrkdwn` as it is, `plain_text`
@@ -1029,6 +1102,50 @@ mod tests {
             .ok()
             .and_then(Message::into_model)
             .expect("a message")
+    }
+
+    #[test]
+    fn video_unfurls_keep_their_player_link_and_sizes() {
+        let message = parsed(
+            r#"{"type":"message","ts":"1.0","user":"U1","text":"<https://youtu.be/x>",
+            "attachments":[{"service_name":"YouTube","service_icon":"https://a.ytimg.com/yt.png",
+            "author_name":"Rust Channel","author_link":"https://youtube.com/@rust",
+            "title":"Talk","title_link":"https://youtu.be/x","thumb_url":"https://i.ytimg.com/x.jpg",
+            "thumb_width":480,"thumb_height":"360","video_html":"<iframe></iframe>",
+            "image_width":0,"image_height":10},
+            {"service_name":"Blog","title":"Post","title_link":"https://blog.example/p",
+            "image_url":"https://blog.example/p.png","image_width":1200,"image_height":630}]}"#,
+        );
+        let video = &message.attachments[0];
+        assert_eq!(video.service.as_deref(), Some("YouTube"));
+        assert_eq!(video.author.as_deref(), Some("Rust Channel"));
+        assert_eq!(video.video.as_deref(), Some("https://youtu.be/x"));
+        assert_eq!(video.thumb_size, Some([480.0, 360.0]), "text numbers too");
+        assert_eq!(video.image_size, None, "a zero size is no size");
+        let post = &message.attachments[1];
+        assert_eq!(post.video, None);
+        assert_eq!(post.image_size, Some([1200.0, 630.0]));
+    }
+
+    #[test]
+    fn videos_and_pdfs_get_their_still() {
+        let message = parsed(
+            r#"{"type":"message","ts":"1.0","user":"U1","text":"",
+            "files":[{"id":"F1","name":"clip.mp4","mimetype":"video/mp4","size":10,
+            "thumb_video":"https://files.slack.com/v.jpg","thumb_video_w":640,"thumb_video_h":360},
+            {"id":"F2","name":"plan.pdf","mimetype":"application/pdf","size":10,
+            "thumb_pdf":"https://files.slack.com/p.png","thumb_pdf_w":300,"thumb_pdf_h":400},
+            {"id":"F3","name":"a.png","mimetype":"image/png","size":10,
+            "thumb_360":"https://files.slack.com/t.png"}]}"#,
+        );
+        let [video, pdf, image] = &message.files[..] else {
+            panic!("three files");
+        };
+        assert_eq!(video.media(), Some(model::Media::Video));
+        assert_eq!(video.poster_size, Some([640.0, 360.0]));
+        assert!(pdf.is_pdf());
+        assert_eq!(pdf.poster.as_deref(), Some("https://files.slack.com/p.png"));
+        assert_eq!(image.poster, None, "a picture shows itself");
     }
 
     #[test]

@@ -975,7 +975,8 @@ pub struct App {
     pub profile: Option<String>,
     pub picker: Option<PickerTarget>,
     pub picker_query: String,
-    pub preview: Option<(String, String)>,
+    /// The image viewer, when open.
+    pub preview: Option<crate::lightbox::Lightbox>,
     /// A message waiting for "Delete?" to be answered.
     pub confirm_delete: Option<(String, Ts)>,
     pub section_dialog: Option<SectionDialog>,
@@ -2350,6 +2351,13 @@ impl App {
                     self.backend.send(Command::Download { team, url, name });
                 }
             }
+            Action::OpenFile { url, name } => {
+                if let Some(team) = self.active_team() {
+                    // Fetching a video can take a while; say it started.
+                    self.toast(tf("Opening {name}…", &[("name", &name)]), false);
+                    self.backend.send(Command::OpenFile { team, url, name });
+                }
+            }
             Action::Sidebar(edit) => self.edit_sidebar(edit),
             // What floats over the window.
             Action::PickReaction { channel, ts } => {
@@ -2358,7 +2366,24 @@ impl App {
             Action::PickEmoji { draft } => self.open_picker(PickerTarget::Draft(draft)),
             Action::AskDelete { channel, ts } => self.confirm_delete = Some((channel, ts)),
             Action::NameSection { rename, channel } => self.name_section(rename, channel),
-            Action::Preview { uri, name } => self.preview = Some((uri, name)),
+            Action::Preview { uri, name } => {
+                let picture = crate::lightbox::Picture {
+                    uri,
+                    thumb: None,
+                    size: None,
+                    name,
+                    download: None,
+                    permalink: None,
+                    source: None,
+                };
+                self.preview = crate::lightbox::Lightbox::new(vec![picture], 0);
+            }
+            Action::ViewImage {
+                channel,
+                thread,
+                ts,
+                file,
+            } => self.view_image(&channel, thread.as_ref(), &ts, &file),
             Action::OpenSwitcher => {
                 self.focus_overlay = true;
                 self.switcher = Some((String::new(), 0));
@@ -2815,6 +2840,34 @@ impl App {
                 in_thread,
                 focus: true,
             });
+        }
+    }
+
+    /// Opens the image viewer on a file, with the other images of the same
+    /// list (the thread, or the conversation) to step through.
+    fn view_image(&mut self, channel: &str, thread: Option<&Ts>, ts: &Ts, file: &str) {
+        let Some(workspace) = self.active_workspace() else {
+            return;
+        };
+        let team = workspace.info.team_id.as_str();
+        let lightbox = match thread {
+            Some(parent) => workspace
+                .threads
+                .get(&(channel.to_owned(), parent.clone()))
+                .and_then(|t| crate::lightbox::open(team, &t.messages, ts, file)),
+            None => workspace.timelines.get(channel).and_then(|t| {
+                let listed = t.messages.iter().filter(|m| m.in_channel());
+                crate::lightbox::open(team, listed, ts, file)
+            }),
+        };
+        // A message found nowhere else (a parent shown before its thread
+        // has loaded) still opens, on its own.
+        let lightbox = lightbox.or_else(|| {
+            let message = workspace.find_message(channel, ts)?;
+            crate::lightbox::open(team, std::iter::once(message), ts, file)
+        });
+        if lightbox.is_some() {
+            self.preview = lightbox;
         }
     }
 

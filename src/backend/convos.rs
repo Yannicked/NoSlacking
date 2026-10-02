@@ -615,11 +615,8 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
                 title: name.into(),
                 mimetype: mimetype.into(),
                 size,
-                url_private: None,
                 download_url: Some(format!("https://files.example/{name}")),
-                thumb: None,
-                thumb_size: None,
-                permalink: None,
+                ..crate::model::File::default()
             };
             vec![Event::Convos {
                 team: team.to_owned(),
