@@ -8,7 +8,7 @@
 use egui::{CornerRadius, Margin, RichText, Stroke};
 
 use crate::app::App;
-use crate::backend::{Command, SignIn};
+use crate::backend::SignIn;
 use crate::credentials::AppCredentials;
 use crate::i18n::t;
 use crate::model::Action;
@@ -194,11 +194,7 @@ fn session_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         ui.horizontal(|ui| {
             ui.add_enabled_ui(ready, |ui| {
                 if theme::primary_button(ui, palette, &t("Sign in")).clicked() {
-                    app.sign_in = None;
-                    app.backend.send(Command::SignInSession {
-                        cookie: app.setup.session_cookie.trim().to_owned(),
-                        workspace_url: app.setup.session_workspace.trim().to_owned(),
-                    });
+                    app.actions.push(Action::SignInSession);
                 }
             });
             sign_in_status(app, ui, palette);
@@ -284,8 +280,7 @@ fn app_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             let changed = app.app_credentials.as_ref() != Some(&form);
             ui.add_enabled_ui(changed && form.can_sign_in(), |ui| {
                 if theme::primary_button(ui, palette, &t("Save")).clicked() {
-                    app.backend.send(Command::SaveApp(form.clone()));
-                    app.app_credentials = Some(form.clone());
+                    app.actions.push(Action::SaveApp);
                 }
             });
             ui.separator();
@@ -293,16 +288,11 @@ fn app_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(saved && !busy(app), |ui| {
                     if theme::primary_button(ui, palette, &t("Sign in with Slack")).clicked() {
-                        app.sign_in = None;
-                        app.backend.send(Command::StartSignIn {
-                            redirect: app.settings.redirect,
-                            port: app.settings.loopback_port,
-                        });
+                        app.actions.push(Action::StartSignIn);
                     }
                 });
                 if busy(app) && theme::secondary_button(ui, palette, &t("Cancel")).clicked() {
-                    app.backend.send(Command::CancelSignIn);
-                    app.sign_in = None;
+                    app.actions.push(Action::CancelSignIn);
                 }
                 sign_in_status(app, ui, palette);
             });
@@ -327,8 +317,7 @@ fn app_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                     let ready = app.setup.user_token.trim().starts_with("xox") && !busy(app);
                     ui.add_enabled_ui(ready, |ui| {
                         if theme::primary_button(ui, palette, &t("Sign in")).clicked() {
-                            app.backend
-                                .send(Command::PasteToken(app.setup.user_token.trim().to_owned()));
+                            app.actions.push(Action::PasteToken);
                         }
                     });
                 });

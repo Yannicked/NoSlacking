@@ -4,7 +4,7 @@
 use egui::{CornerRadius, Margin, RichText, Stroke};
 
 use crate::app::App;
-use crate::backend::{Command, Socket};
+use crate::backend::Socket;
 use crate::credentials::AppCredentials;
 use crate::i18n::{Locale, t};
 use crate::model::Action;
@@ -138,7 +138,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 .color(palette.dim),
             );
             if ui.link(t("Open folder")).clicked() {
-                let _ = open::that_detached(app.dirs.themes());
+                app.actions.push(Action::OpenFolder(app.dirs.themes()));
             }
         });
         let mut zoom = app.settings.zoom;
@@ -279,8 +279,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         // credentials cannot sign anyone in, so it is not worth saving.
         ui.add_enabled_ui(changed && form.can_sign_in(), |ui| {
             if theme::primary_button(ui, palette, &t("Save")).clicked() {
-                app.backend.send(Command::SaveApp(form.clone()));
-                app.app_credentials = Some(form.clone());
+                app.actions.push(Action::SaveApp);
             }
         });
         ui.separator();
@@ -338,7 +337,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         for (label, path) in folders {
             row(ui, palette, &label, &path.display().to_string(), |ui| {
                 if theme::secondary_button(ui, palette, &t("Open")).clicked() {
-                    let _ = open::that_detached(&path);
+                    app.actions.push(Action::OpenFolder(path.clone()));
                 }
             });
         }
