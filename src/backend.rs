@@ -5,6 +5,7 @@
 //! [`Event`]s and wakes the window for each one, so egui sleeps when
 //! nothing happens.
 
+mod around;
 pub mod worker;
 
 use std::collections::HashMap;
@@ -65,6 +66,18 @@ pub enum Command {
         team: String,
         channel: String,
         ts: Ts,
+    },
+    /// The messages just before and after `ts`, to show it in context.
+    LoadAround {
+        team: String,
+        channel: String,
+        ts: Ts,
+    },
+    /// The page of messages right after `after`.
+    LoadNewer {
+        team: String,
+        channel: String,
+        after: Ts,
     },
     Send {
         team: String,
@@ -187,6 +200,22 @@ impl std::fmt::Debug for Command {
                 .field("team", team)
                 .field("channel", channel)
                 .field("ts", ts)
+                .finish(),
+            Self::LoadAround { team, channel, ts } => f
+                .debug_struct("LoadAround")
+                .field("team", team)
+                .field("channel", channel)
+                .field("ts", ts)
+                .finish(),
+            Self::LoadNewer {
+                team,
+                channel,
+                after,
+            } => f
+                .debug_struct("LoadNewer")
+                .field("team", team)
+                .field("channel", channel)
+                .field("after", after)
                 .finish(),
             Self::Send {
                 team,
@@ -390,6 +419,26 @@ pub enum Event {
         team: String,
         channel: String,
         error: String,
+    },
+    /// The messages around `ts`, oldest first, which replace what the
+    /// conversation's list held: the stretch asked for by
+    /// [`Command::LoadAround`].
+    Around {
+        team: String,
+        channel: String,
+        ts: Ts,
+        messages: Vec<Message>,
+        /// Whether older messages exist, and the cursor for them.
+        has_older: bool,
+        cursor: Option<String>,
+        has_newer: bool,
+    },
+    /// The page after the newest message loaded, oldest first.
+    Newer {
+        team: String,
+        channel: String,
+        messages: Vec<Message>,
+        has_newer: bool,
     },
     Thread {
         team: String,
