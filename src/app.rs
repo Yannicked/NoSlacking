@@ -254,8 +254,11 @@ impl WorkspaceState {
     }
 }
 
-/// A file chosen in the picker, and the thread it goes to.
-type PickedFile = (Option<Ts>, PathBuf);
+/// Where a file goes: the team, the channel and the thread, if any.
+type UploadTarget = (String, String, Option<Ts>);
+
+/// A file chosen in the picker, and where it goes.
+type PickedFile = (UploadTarget, PathBuf);
 
 pub struct AppOptions {
     pub demo: bool,
@@ -515,8 +518,14 @@ impl App {
                 ctx.forget_all_images();
             }
         }
-        while let Ok((thread, path)) = self.uploads.1.try_recv() {
-            self.upload(thread, path, String::new());
+        while let Ok(((team, channel, thread), path)) = self.uploads.1.try_recv() {
+            self.backend.send(Command::Upload {
+                team,
+                channel,
+                thread,
+                path,
+                comment: String::new(),
+            });
         }
         if self.catalog.poll() {
             self.refresh_custom_theme();
@@ -1389,15 +1398,19 @@ impl App {
         }
     }
 
-    fn upload(&mut self, thread: Option<Ts>, path: PathBuf, comment: String) {
-        let Some(team) = self.active_team() else {
-            return;
-        };
+    /// Where a file from the composer of `thread` (or the conversation)
+    /// goes, as it is on screen now.
+    fn upload_target(&self, thread: Option<Ts>) -> Option<UploadTarget> {
+        let team = self.active_team()?;
         let channel = match &thread {
             Some(_) => self.thread.as_ref().map(|(c, _)| c.clone()),
             None => self.active_workspace().and_then(|w| w.active.clone()),
-        };
-        if let Some(channel) = channel {
+        }?;
+        Some((team, channel, thread))
+    }
+
+    fn upload(&mut self, thread: Option<Ts>, path: PathBuf, comment: String) {
+        if let Some((team, channel, thread)) = self.upload_target(thread) {
             self.backend.send(Command::Upload {
                 team,
                 channel,
@@ -1599,11 +1612,16 @@ impl App {
                 comment,
             } => self.upload(thread, path, comment),
             Action::PickUpload { thread } => {
+                // Decided now: the dialog may stay open while you switch to
+                // another conversation, and the file belongs to this one.
+                let Some(target) = self.upload_target(thread) else {
+                    return;
+                };
                 let sender = self.uploads.0.clone();
                 let waker = self.waker.clone();
                 std::thread::spawn(move || {
                     if let Some(path) = rfd::FileDialog::new().pick_file() {
-                        let _ = sender.send((thread, path));
+                        let _ = sender.send((target, path));
                         waker.wake();
                     }
                 });
