@@ -897,8 +897,9 @@ pub struct App {
     quit: bool,
     /// Shows desktop notifications; `None` in the demo or without them.
     notifier: Option<crate::notify::Notifier>,
-    /// What the window should do next frame for the desktop.
-    window_requests: desktop::WindowRequests,
+    /// The desktop's side of the window: requests for it, and what its
+    /// title and badge last showed.
+    desktop: desktop::Desktop,
 }
 
 impl App {
@@ -998,7 +999,7 @@ impl App {
             saver: crate::settings::Saver::new(),
             quit: false,
             notifier: desktop::notifier(waker, options.demo),
-            window_requests: desktop::WindowRequests::default(),
+            desktop: desktop::Desktop::new(options.demo),
         };
         app.start_theme_scan();
         app
