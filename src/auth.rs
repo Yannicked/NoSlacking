@@ -100,23 +100,44 @@ impl Flow {
     }
 }
 
-/// The code in a redirect, after checking it belongs to this attempt.
-pub fn parse_callback(url: &str, expected_state: &str) -> Result<String, String> {
+/// The `code`, `state` and `error` of a redirect URL. A repeated key makes
+/// the whole URL suspect, so it yields `None`.
+fn callback_params(url: &str) -> Option<[Option<String>; 3]> {
     let query = url.split_once('?').map_or("", |(_, q)| q);
     let query = query.split('#').next().unwrap_or("");
-    let mut code = None;
-    let mut state = None;
-    let mut error = None;
+    let mut params: [Option<String>; 3] = [None, None, None];
     for pair in query.split('&') {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let slot = match key {
+            "code" => 0,
+            "state" => 1,
+            "error" => 2,
+            _ => continue,
+        };
+        if params[slot].is_some() {
+            return None;
+        }
         let value =
             urlencoding::decode(value).map_or_else(|_| value.to_owned(), |v| v.into_owned());
-        match key {
-            "code" => code = Some(value),
-            "state" => state = Some(value),
-            "error" => error = Some(value),
-            _ => {}
-        }
+        params[slot] = Some(value);
+    }
+    Some(params)
+}
+
+/// Whether a redirect URL carries this attempt's `state`, so the loopback
+/// listener can ignore requests that are not Slack's answer.
+pub fn belongs_to(url: &str, expected_state: &str) -> bool {
+    callback_params(url).is_some_and(|[_, state, _]| state.as_deref() == Some(expected_state))
+}
+
+/// The code in a redirect, after checking it belongs to this attempt.
+pub fn parse_callback(url: &str, expected_state: &str) -> Result<String, String> {
+    let foreign = || "This sign-in link does not belong to the current attempt.".to_owned();
+    let [code, state, error] = callback_params(url).ok_or_else(foreign)?;
+    // The state comes first: a link without it must not be able to end, or
+    // even cancel, the attempt.
+    if state.as_deref() != Some(expected_state) {
+        return Err(foreign());
     }
     if let Some(error) = error {
         return Err(if error == "access_denied" {
@@ -124,9 +145,6 @@ pub fn parse_callback(url: &str, expected_state: &str) -> Result<String, String>
         } else {
             format!("Slack refused the sign-in: {error}")
         });
-    }
-    if state.as_deref() != Some(expected_state) {
-        return Err("This sign-in link does not belong to the current attempt.".to_owned());
     }
     code.filter(|c| !c.is_empty())
         .ok_or_else(|| "Slack sent no authorization code.".to_owned())
@@ -179,9 +197,11 @@ const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>NoSlacking</t
 <style>body{font:16px system-ui;display:grid;place-items:center;height:90vh;color:#333}</style>\
 <p>You can close this tab and go back to NoSlacking.</p>";
 
-/// Waits for Slack to send the browser to the loopback redirect, answers it,
-/// and returns the URL it asked for.
-pub async fn loopback(port: u16) -> std::io::Result<String> {
+/// Waits for Slack to send the browser to the loopback redirect carrying
+/// `state`, answers it, and returns the URL it asked for. Any other request
+/// (a stray page, an old redirect) is answered and ignored, so it cannot
+/// end the attempt.
+pub async fn loopback(port: u16, state: &str) -> std::io::Result<String> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     loop {
         let (mut stream, _) = listener.accept().await?;
@@ -204,7 +224,9 @@ pub async fn loopback(port: u16) -> std::io::Result<String> {
         else {
             continue;
         };
-        if !path.starts_with("/callback") {
+        let ours = path == "/callback" || path.starts_with("/callback?");
+        let url = format!("http://127.0.0.1:{port}{path}");
+        if !ours || !belongs_to(&url, state) {
             let _ = stream
                 .write_all(
                     b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -218,7 +240,7 @@ pub async fn loopback(port: u16) -> std::io::Result<String> {
         );
         let _ = stream.write_all(response.as_bytes()).await;
         let _ = stream.shutdown().await;
-        return Ok(format!("http://127.0.0.1:{port}{path}"));
+        return Ok(url);
     }
 }
 
@@ -355,5 +377,23 @@ mod tests {
             Err("Sign-in was cancelled.".to_owned())
         );
         assert!(parse_callback("noslacking://oauth/callback?state=s1", "s1").is_err());
+    }
+
+    #[test]
+    fn foreign_links_cannot_end_the_attempt() {
+        // An error without the state is not Slack's answer.
+        assert_eq!(
+            parse_callback("http://127.0.0.1:1/callback?error=access_denied", "s1"),
+            Err("This sign-in link does not belong to the current attempt.".to_owned())
+        );
+        // Neither is a link that names a key twice.
+        assert!(parse_callback("x://cb?code=a&state=s1&state=s1", "s1").is_err());
+        assert!(parse_callback("x://cb?code=a&code=b&state=s1", "s1").is_err());
+        assert!(belongs_to(
+            "http://127.0.0.1:1/callback?code=a&state=s1",
+            "s1"
+        ));
+        assert!(!belongs_to("http://127.0.0.1:1/callback?state=x", "s1"));
+        assert!(!belongs_to("http://127.0.0.1:1/callback", "s1"));
     }
 }

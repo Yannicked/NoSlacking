@@ -698,8 +698,9 @@ impl Worker {
             }
             Redirect::Loopback => {
                 let internal = self.internal.clone();
+                let state = flow.state.clone();
                 self.listener = Some(tokio::spawn(async move {
-                    match auth::loopback(port).await {
+                    match auth::loopback(port, &state).await {
                         Ok(url) => {
                             let _ = internal.send(Internal::Callback(url));
                         }
