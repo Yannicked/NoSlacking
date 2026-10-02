@@ -1187,3 +1187,15 @@ msgstr "{time} uur achter op jou"
 
 msgid "{time} local time, {difference}"
 msgstr "{time} lokale tijd, {difference}"
+
+msgid "After creating it, generate an app-level token with connections:write on Basic Information. The manifest already allows the sign-in redirect http://localhost:53682/callback; to come back through noslacking:// links instead, add noslacking://oauth/callback under OAuth & Permissions yourself and pick it in Settings."
+msgstr "Maak daarna onder Basic Information een app-token met connections:write. Het manifest staat de redirect http://localhost:53682/callback al toe; wil je via noslacking://-links terugkomen, voeg dan zelf noslacking://oauth/callback toe onder OAuth & Permissions en kies die in Instellingen."
+
+msgid "Client secret (optional)"
+msgstr "Clientgeheim (optioneel)"
+
+msgid "Not needed: sign-in uses PKCE"
+msgstr "Niet nodig: aanmelden gebruikt PKCE"
+
+msgid "Must be one of the app's redirect URLs under OAuth & Permissions. The manifest adds the loopback one; add noslacking://oauth/callback there yourself to use it."
+msgstr "Moet een van de redirect-URL's van de app onder OAuth & Permissions zijn. Het manifest voegt de loopback-URL toe; voeg noslacking://oauth/callback daar zelf toe om die te gebruiken."

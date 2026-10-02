@@ -152,20 +152,11 @@ impl std::fmt::Debug for Token {
     }
 }
 
-/// The app's OAuth credentials, for refreshing rotating tokens.
-#[derive(Clone)]
+/// The app's OAuth identity, for refreshing rotating tokens. Only the
+/// client id: a PKCE app refreshes without its secret.
+#[derive(Clone, Debug)]
 pub struct OauthApp {
     pub client_id: String,
-    pub client_secret: String,
-}
-
-impl std::fmt::Debug for OauthApp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OauthApp")
-            .field("client_id", &self.client_id)
-            .field("client_secret", &crate::redact::REDACTED)
-            .finish()
-    }
 }
 
 type OnRefresh = Arc<dyn Fn(Result<Token, SlackError>) -> BoxFuture<'static, ()> + Send + Sync>;
@@ -650,7 +641,9 @@ async fn fetch(
     Ok(response)
 }
 
-/// Exchanges a refresh token for a new access token.
+/// Exchanges a refresh token for a new access token. Slack's PKCE flow
+/// sends only the client id and the refresh token here: no secret, and no
+/// verifier, which belongs to the first exchange alone.
 pub async fn refresh_token(
     http: &reqwest::Client,
     base: &str,
@@ -661,7 +654,6 @@ pub async fn refresh_token(
         .post(format!("{base}oauth.v2.access"))
         .form(&[
             ("client_id", app.client_id.as_str()),
-            ("client_secret", app.client_secret.as_str()),
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh),
         ])
@@ -744,13 +736,9 @@ mod tests {
         };
         let app = OauthApp {
             client_id: "123.456".into(),
-            client_secret: "s3cr3t".into(),
         };
         let printed = format!("{token:?} {app:?} {:#?}", token);
-        assert!(
-            !printed.contains("xox") && !printed.contains("s3cr3t"),
-            "{printed}"
-        );
+        assert!(!printed.contains("xox"), "{printed}");
         assert!(printed.contains("123.456") && printed.contains("expires_at"));
     }
 
@@ -819,7 +807,6 @@ mod tests {
         let clone = client.clone();
         client.set_app(Some(OauthApp {
             client_id: "1.2".into(),
-            client_secret: "s".into(),
         }));
         assert!(lock(&clone.shared.app).is_some());
         assert!(Arc::ptr_eq(&client.shared, &clone.shared));

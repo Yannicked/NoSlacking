@@ -1192,7 +1192,7 @@ impl Worker {
     fn start_sign_in(&mut self, redirect: Redirect, port: u16) {
         let Some(app) = self.app.clone().filter(AppCredentials::can_sign_in) else {
             self.sink.send(Event::SignIn(SignIn::Failed(
-                "Enter the Slack app's client ID and client secret first.".into(),
+                "Enter the Slack app's client ID first.".into(),
             )));
             return;
         };
