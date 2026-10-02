@@ -48,6 +48,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.data_mut(|d| d.insert_temp(drafts_id(), drafts));
     let view_open = app.views.open.is_some();
     ui.data_mut(|d| d.insert_temp(views::open_id(), view_open));
+    let saved = std::sync::Arc::new(
+        app.active_team()
+            .and_then(|team| app.views.team(&team))
+            .map(|v| v.saved_keys.clone())
+            .unwrap_or_default(),
+    );
+    ui.data_mut(|d| d.insert_temp(views::saved_id(), saved));
     // First, so Esc leaves a selected message before it closes the thread.
     selection::keys(app, ui.ctx());
     keys::global(app, ui.ctx());

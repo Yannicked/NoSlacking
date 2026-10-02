@@ -1,8 +1,8 @@
 //! The views at the top of the sidebar that take the place of the open
 //! conversation, as in Slack: Activity (what mentions you or answers you)
 //! All unreads (every conversation with something new, with the new
-//! messages) and Threads (the threads you follow, with their newest
-//! replies).
+//! messages), Threads (the threads you follow, with their newest replies)
+//! and Later (messages saved for later, and your reminders).
 //!
 //! Views push [`Action`]s (wrapped in [`crate::model::Action::Views`]);
 //! [`apply`] turns them into [`Command`]s for the worker, whose answers come
@@ -34,11 +34,13 @@ pub enum View {
     Unreads,
     /// Threads you follow, with their newest replies.
     Threads,
+    /// Messages saved for later, and reminders.
+    Later,
 }
 
 impl View {
     /// Every view, in the sidebar's order.
-    pub const ALL: [Self; 3] = [Self::Unreads, Self::Threads, Self::Activity];
+    pub const ALL: [Self; 4] = [Self::Unreads, Self::Threads, Self::Activity, Self::Later];
 
     /// Its name in the sidebar and its header.
     pub fn label(self) -> String {
@@ -46,6 +48,7 @@ impl View {
             Self::Activity => t("Activity").into_owned(),
             Self::Unreads => t("All unreads").into_owned(),
             Self::Threads => t("Threads").into_owned(),
+            Self::Later => t("Later").into_owned(),
         }
     }
 }
@@ -67,6 +70,11 @@ pub enum Action {
     MarkAllRead,
     /// Opens a thread of the threads list beside it, and marks it read.
     OpenThread { channel: String, ts: Ts },
+    /// Saves a message for later, or with `save` false takes it off the
+    /// list.
+    Save { channel: String, ts: Ts, save: bool },
+    /// Marks a reminder complete.
+    CompleteReminder { id: String },
 }
 
 /// What the interface asks the worker to do for one workspace.
@@ -85,6 +93,14 @@ pub enum Command {
     /// Tells Slack you read thread `thread` up to `ts` (browser sessions;
     /// others keep no thread read state to tell).
     ReadThread { channel: String, thread: Ts, ts: Ts },
+    /// The messages saved for later, newest saved first.
+    Saved,
+    /// Your reminders that are not complete.
+    Reminders,
+    /// Saves a message for later or takes it off the list, already shown.
+    Save { channel: String, ts: Ts, save: bool },
+    /// Marks a reminder complete, already taken off the list.
+    CompleteReminder { id: String },
 }
 
 impl Command {
@@ -104,6 +120,21 @@ impl Command {
                 searched: false,
             },
             Self::ReadThread { .. } => Event::Nothing,
+            Self::Saved => Event::Saved {
+                result: Err(error),
+                starred: false,
+            },
+            Self::Reminders => Event::Reminders { result: Err(error) },
+            Self::Save { channel, ts, save } => Event::SaveFailed {
+                channel: channel.clone(),
+                ts: ts.clone(),
+                save: *save,
+                error,
+            },
+            Self::CompleteReminder { id } => Event::CompleteFailed {
+                id: id.clone(),
+                error,
+            },
         }
     }
 }
@@ -131,9 +162,48 @@ pub enum Event {
         result: Result<Vec<Followed>, String>,
         searched: bool,
     },
+    /// The messages saved for later, or why there are none. `starred` says
+    /// they are the older starred messages (OAuth sign-ins, which cannot
+    /// read Later).
+    Saved {
+        result: Result<Vec<Saved>, String>,
+        starred: bool,
+    },
+    Reminders {
+        result: Result<Vec<Reminder>, String>,
+    },
+    /// Saving (`save`) or taking a message off the list failed; the list
+    /// shows it as it was.
+    SaveFailed {
+        channel: String,
+        ts: Ts,
+        save: bool,
+        error: String,
+    },
+    /// Completing a reminder failed; the reminders are read again.
+    CompleteFailed { id: String, error: String },
     /// A command that needs no answer was carried out (or not, which
     /// changes nothing on screen).
     Nothing,
+}
+
+/// A message saved for later.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Saved {
+    pub channel: String,
+    pub message: Message,
+}
+
+/// A reminder Slack will send you.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reminder {
+    pub id: String,
+    /// What to be reminded of, as typed.
+    pub text: String,
+    /// When, in seconds since the epoch; a recurring one names its next
+    /// time.
+    pub time: Option<i64>,
+    pub recurring: bool,
 }
 
 /// A thread you follow: you started it, replied in it, or asked to.
@@ -276,6 +346,13 @@ pub struct TeamViews {
     pub threads: Fetch<Vec<Followed>>,
     /// Whether the threads came from a search rather than Slack's list.
     pub threads_searched: bool,
+    pub saved: Fetch<Vec<Saved>>,
+    /// Whether the saved messages are the older starred ones.
+    pub starred: bool,
+    pub reminders: Fetch<Vec<Reminder>>,
+    /// The messages known to be saved, by conversation and timestamp, for
+    /// the message toolbar's "Save for later" or "Remove from Later".
+    pub saved_keys: HashSet<(String, Ts)>,
 }
 
 /// Everything the views hold.
@@ -515,6 +592,33 @@ pub fn apply(app: &mut App, action: Action) {
                 app.mark_read(&team, &channel);
             }
         }
+        Action::Save { channel, ts, save } => {
+            if ts.is_local() {
+                return;
+            }
+            let message = app
+                .workspaces
+                .iter()
+                .find(|w| w.info.team_id == team)
+                .and_then(|w| w.find_message(&channel, &ts))
+                .cloned();
+            saved(app.views.team_mut(&team), &channel, &ts, save, message);
+            app.toast(
+                if save {
+                    t("Saved for later")
+                } else {
+                    t("Removed from Later")
+                },
+                false,
+            );
+            send(app, &team, Command::Save { channel, ts, save });
+        }
+        Action::CompleteReminder { id } => {
+            if let Some(reminders) = app.views.team_mut(&team).reminders.value.as_mut() {
+                reminders.retain(|r| r.id != id);
+            }
+            send(app, &team, Command::CompleteReminder { id });
+        }
         Action::OpenThread { channel, ts } => {
             let newest = app
                 .views
@@ -543,6 +647,31 @@ pub fn apply(app: &mut App, action: Action) {
             app.actions
                 .push(crate::model::Action::OpenThread { channel, ts });
         }
+    }
+}
+
+/// Shows a message as saved or not: in the toolbar's state, and in the
+/// saved list when it is loaded (a message saved that is not loaded here
+/// joins the list when it is next read).
+pub fn saved(views: &mut TeamViews, channel: &str, ts: &Ts, save: bool, message: Option<Message>) {
+    let key = (channel.to_owned(), ts.clone());
+    if save {
+        views.saved_keys.insert(key);
+    } else {
+        views.saved_keys.remove(&key);
+    }
+    let Some(list) = views.saved.value.as_mut() else {
+        return;
+    };
+    list.retain(|s| !(s.channel == channel && s.message.ts == *ts));
+    if save && let Some(message) = message {
+        list.insert(
+            0,
+            Saved {
+                channel: channel.to_owned(),
+                message,
+            },
+        );
     }
 }
 
@@ -613,6 +742,13 @@ fn load(app: &mut App, team: &str, view: View) {
             app.views.team_mut(team).threads.start();
             send(app, team, Command::Threads { me });
         }
+        View::Later => {
+            let views = app.views.team_mut(team);
+            views.saved.start();
+            views.reminders.start();
+            send(app, team, Command::Saved);
+            send(app, team, Command::Reminders);
+        }
     }
 }
 
@@ -672,6 +808,58 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                 sort_threads(&mut threads);
                 threads
             }));
+        }
+        Event::Saved { result, starred } => {
+            if let Ok(list) = &result {
+                let people: Vec<String> =
+                    list.iter().filter_map(|s| s.message.user.clone()).collect();
+                crate::convos::fetch_unknown(app, team, &people);
+            }
+            let views = app.views.team_mut(team);
+            if let Ok(list) = &result {
+                views.starred = starred;
+                views.saved_keys = list
+                    .iter()
+                    .map(|s| (s.channel.clone(), s.message.ts.clone()))
+                    .collect();
+            }
+            views.saved.arrived(result);
+        }
+        Event::Reminders { result } => app.views.team_mut(team).reminders.arrived(result),
+        Event::SaveFailed {
+            channel,
+            ts,
+            save,
+            error,
+        } => {
+            let message = app
+                .workspaces
+                .iter()
+                .find(|w| w.info.team_id == team)
+                .and_then(|w| w.find_message(&channel, &ts))
+                .cloned();
+            saved(app.views.team_mut(team), &channel, &ts, !save, message);
+            let text = if save {
+                tf("Could not save the message: {error}", &[("error", &error)])
+            } else {
+                tf(
+                    "Could not remove the message from Later: {error}",
+                    &[("error", &error)],
+                )
+            };
+            app.toast(text, true);
+        }
+        Event::CompleteFailed { id, error } => {
+            log::debug!("reminder {id} was not completed");
+            app.toast(
+                tf(
+                    "Could not complete the reminder: {error}",
+                    &[("error", &error)],
+                ),
+                true,
+            );
+            app.views.team_mut(team).reminders.start();
+            send(app, team, Command::Reminders);
         }
         Event::Nothing => {}
     }
@@ -844,6 +1032,38 @@ mod tests {
         let mut threads = vec![quiet, thread];
         sort_threads(&mut threads);
         assert_eq!(threads[0].channel, "C1");
+    }
+
+    #[test]
+    fn saving_shows_at_once_and_undoes_cleanly() {
+        let mut views = TeamViews::default();
+        let message = bare_message(Ts::new("1.0"), None, "keep".into(), None);
+        saved(
+            &mut views,
+            "C1",
+            &Ts::new("1.0"),
+            true,
+            Some(message.clone()),
+        );
+        assert!(views.saved_keys.contains(&("C1".into(), Ts::new("1.0"))));
+        assert!(
+            views.saved.value.is_none(),
+            "a list never read stays unread"
+        );
+        views.saved.arrived(Ok(Vec::new()));
+        saved(&mut views, "C1", &Ts::new("1.0"), true, Some(message));
+        saved(&mut views, "C1", &Ts::new("1.0"), true, None);
+        assert_eq!(views.saved.value.as_ref().map(Vec::len), Some(0));
+        saved(
+            &mut views,
+            "C1",
+            &Ts::new("2.0"),
+            true,
+            Some(bare_message(Ts::new("2.0"), None, String::new(), None)),
+        );
+        saved(&mut views, "C1", &Ts::new("2.0"), false, None);
+        assert!(!views.saved_keys.contains(&("C1".into(), Ts::new("2.0"))));
+        assert_eq!(views.saved.value.as_ref().map(Vec::len), Some(0));
     }
 
     #[test]

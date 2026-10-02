@@ -1267,3 +1267,59 @@ msgstr[1] "Bekijk alle {count} reacties"
 
 msgid "Open the thread"
 msgstr "Thread openen"
+msgid "Later"
+msgstr "Later"
+
+msgid "Saved for later"
+msgstr "Bewaard voor later"
+
+msgid "Removed from Later"
+msgstr "Uit Later gehaald"
+
+msgid "Could not save the message: {error}"
+msgstr "Het bericht kon niet worden bewaard: {error}"
+
+msgid "Could not remove the message from Later: {error}"
+msgstr "Het bericht kon niet uit Later worden gehaald: {error}"
+
+msgid "Could not complete the reminder: {error}"
+msgstr "De herinnering kon niet worden afgerond: {error}"
+
+msgid "Could not load the saved messages: {error}"
+msgstr "De bewaarde berichten konden niet worden geladen: {error}"
+
+msgid "Could not load the reminders: {error}"
+msgstr "De herinneringen konden niet worden geladen: {error}"
+
+msgid "Starred messages"
+msgstr "Berichten met een ster"
+
+msgid "Reminders"
+msgstr "Herinneringen"
+
+msgid "Nothing saved. Save a message from its ⋯ menu."
+msgstr "Niets bewaard. Bewaar een bericht via het ⋯-menu."
+
+msgid "No reminders. Ask Slack with /remind."
+msgstr "Geen herinneringen. Vraag Slack erom met /remind."
+
+msgid "Remove from Later"
+msgstr "Uit Later halen"
+
+msgid "Next on {when}, repeating"
+msgstr "Volgende keer {when}, herhalend"
+
+msgid "Due {when}"
+msgstr "Gepland voor {when}"
+
+msgid "Repeating"
+msgstr "Herhalend"
+
+msgid "Mark as complete"
+msgstr "Als afgerond markeren"
+
+msgid "More actions"
+msgstr "Meer acties"
+
+msgid "Save for later"
+msgstr "Bewaren voor later"

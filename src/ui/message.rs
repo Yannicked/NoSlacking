@@ -30,6 +30,12 @@ pub fn row_id(channel: &str, ts: &crate::model::Ts, in_thread: bool) -> egui::Id
     egui::Id::new(("message-row", channel, ts.as_str(), in_thread))
 }
 
+/// The id of a message's "More" menu, which keeps its toolbar up while it
+/// is open.
+pub fn more_id(channel: &str, ts: &crate::model::Ts, in_thread: bool) -> egui::Id {
+    egui::Id::new(("message-more", channel, ts.as_str(), in_thread))
+}
+
 /// A message's text as plain words, with people and channels by name, for
 /// the clipboard and screen readers.
 pub fn plain_text(workspace: &WorkspaceState, message: &Message) -> String {
@@ -161,7 +167,10 @@ pub fn show(
     if let Some(selected) = selected {
         keyboard_row(ui, row, message, selected, rect);
     }
-    let hovered = (ui.rect_contains_pointer(rect) || selected.is_some()) && !is_editing;
+    let menu_open =
+        egui::Popup::is_id_open(ui.ctx(), more_id(row.channel, &message.ts, row.in_thread));
+    let hovered =
+        (ui.rect_contains_pointer(rect) || selected.is_some() || menu_open) && !is_editing;
     if hovered {
         ui.painter().set(
             background,
@@ -1091,8 +1100,8 @@ fn thread_summary(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: 
     }
 }
 
-/// Quick reactions, react, reply, edit, delete and copy, over the message's
-/// top-right corner.
+/// Quick reactions, react, reply, copy, edit, delete and a "More" menu
+/// (save for later, copy link, pin), over the message's top-right corner.
 fn toolbar(
     ui: &mut egui::Ui,
     row: &Row<'_>,
@@ -1105,7 +1114,7 @@ fn toolbar(
     let quick: std::sync::Arc<Vec<String>> = ui
         .data(|d| d.get_temp(super::quick_reactions_id()))
         .unwrap_or_default();
-    let mut buttons = 5 + usize::from(!row.in_thread);
+    let mut buttons = 4 + usize::from(!row.in_thread);
     if me {
         buttons += 2;
     }
@@ -1197,25 +1206,10 @@ fn toolbar(
         if theme::icon_button(ui, palette, Icon::Copy, 16.0, &t("Copy text (C)")).clicked() {
             actions.push(Action::Copy(plain_text(row.workspace, message)));
         }
-        if theme::icon_button(ui, palette, Icon::Link, 16.0, &t("Copy link")).clicked() {
-            actions.push(Action::CopyLink {
-                channel: row.channel.to_owned(),
-                ts: message.ts.clone(),
-                thread: message.thread_ts.clone(),
-            });
-        }
-        let (icon, tip) = if message.pinned {
-            (Icon::PinOff, t("Unpin from the conversation"))
-        } else {
-            (Icon::Pin, t("Pin to the conversation"))
-        };
-        if theme::icon_button(ui, palette, icon, 16.0, &tip).clicked() {
-            actions.push(Action::Convos(crate::convos::Action::Pin {
-                channel: row.channel.to_owned(),
-                ts: message.ts.clone(),
-                pin: !message.pinned,
-            }));
-        }
+        let more = theme::icon_button(ui, palette, Icon::Ellipsis, 16.0, &t("More actions"));
+        egui::Popup::menu(&more)
+            .id(more_id(row.channel, &message.ts, row.in_thread))
+            .show(|ui| more_menu(ui, row, message, actions));
         if me {
             if theme::icon_button(ui, palette, Icon::Pencil, 16.0, &t("Edit message (E)")).clicked()
             {
@@ -1237,4 +1231,44 @@ fn toolbar(
             }
         }
     });
+}
+
+/// What a message's "More" menu offers: what is used less often than the
+/// toolbar's own buttons.
+fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<Action>) {
+    let saved = super::views::is_saved(ui, row.channel, &message.ts);
+    let save = if saved {
+        t("Remove from Later")
+    } else {
+        t("Save for later")
+    };
+    if ui.button(save).clicked() {
+        actions.push(Action::Views(crate::views::Action::Save {
+            channel: row.channel.to_owned(),
+            ts: message.ts.clone(),
+            save: !saved,
+        }));
+        ui.close();
+    }
+    if ui.button(t("Copy link")).clicked() {
+        actions.push(Action::CopyLink {
+            channel: row.channel.to_owned(),
+            ts: message.ts.clone(),
+            thread: message.thread_ts.clone(),
+        });
+        ui.close();
+    }
+    let pin = if message.pinned {
+        t("Unpin from the conversation")
+    } else {
+        t("Pin to the conversation")
+    };
+    if ui.button(pin).clicked() {
+        actions.push(Action::Convos(crate::convos::Action::Pin {
+            channel: row.channel.to_owned(),
+            ts: message.ts.clone(),
+            pin: !message.pinned,
+        }));
+        ui.close();
+    }
 }

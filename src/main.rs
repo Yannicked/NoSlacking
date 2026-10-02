@@ -529,11 +529,12 @@ impl DemoSetup {
                 }));
             }
             // The views at the top of the sidebar.
-            Some(view @ ("activity" | "unreads" | "threads")) => {
+            Some(view @ ("activity" | "unreads" | "threads" | "later")) => {
                 use noslacking::views::{Action as Views, View};
                 let view = match view {
                     "unreads" => View::Unreads,
                     "threads" => View::Threads,
+                    "later" => View::Later,
                     _ => View::Activity,
                 };
                 app.actions.push(Action::Views(Views::Open(view)));
