@@ -289,13 +289,14 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                     .margin(Margin::symmetric(8, 6)),
             );
             field.request_focus();
-            if ui.input(|i| i.key_pressed(Key::Enter)) {
-                // Enter picks the first match.
+            // Enter picks the first match of what you searched for; with
+            // nothing typed there is no match, only the whole list.
+            if !needle.is_empty() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 let first = standard_emoji()
                     .iter()
                     .flat_map(|(_, list)| list.iter())
                     .filter_map(|e| e.shortcode())
-                    .find(|code| !needle.is_empty() && code.contains(&needle));
+                    .find(|code| code.contains(&needle));
                 chosen = custom
                     .first()
                     .map(|(name, _)| name.clone())
