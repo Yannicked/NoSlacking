@@ -5,6 +5,7 @@ use egui::{Align, Margin, RichText, Stroke};
 
 use super::composer::{self, Composer};
 use super::message::{self, Lead, Row};
+use super::rows;
 use crate::app::{App, Draft};
 use crate::i18n::{t, tn};
 use crate::model::Action;
@@ -132,62 +133,130 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         enter_sends: settings.enter_sends,
                         overlay,
                     };
-                    egui::ScrollArea::vertical()
+                    // Only the rows in and near the view are laid out; the
+                    // rest are placed by the heights they were last drawn at.
+                    let heights_id = egui::Id::new(("thread-heights", &channel, ts.as_str()));
+                    let mut heights: rows::Heights = ui
+                        .data_mut(|d| d.remove_temp(heights_id))
+                        .unwrap_or_default();
+                    let output = egui::ScrollArea::vertical()
                         .id_salt(("thread", &channel, ts.as_str()))
                         .auto_shrink([false, false])
                         .stick_to_bottom(true)
-                        .show(ui, |ui| {
+                        .show_viewport(ui, |ui, viewport| {
                             ui.spacing_mut().item_spacing.y = 0.0;
-                            ui.add_space(4.0);
-                            if let Some(parent) = parent {
-                                message::show(ui, &row, parent, Lead::Full, editing, actions);
-                            }
                             let replies: Vec<_> = timeline
                                 .map(|t| t.messages.iter().filter(|m| m.ts != ts).collect())
                                 .unwrap_or_default();
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                ui.add_space(16.0);
-                                ui.label(
-                                    RichText::new(tn(
-                                        "{count} reply",
-                                        "{count} replies",
-                                        replies.len() as u32,
-                                    ))
-                                    .font(theme::regular(12.5))
-                                    .color(palette.dim),
-                                );
-                                let rect = ui.max_rect();
-                                ui.painter().hline(
-                                    egui::Rangef::new(ui.cursor().min.x + 8.0, rect.right() - 16.0),
-                                    rect.center().y,
-                                    Stroke::new(1.0, palette.outline),
-                                );
-                            });
-                            ui.add_space(4.0);
-                            if timeline.is_none_or(|t| t.loading && !t.loaded) {
-                                ui.add_space(16.0);
-                                ui.vertical_centered(|ui| {
-                                    ui.add(egui::Spinner::new().size(18.0).color(palette.dim));
-                                });
-                            }
+                            // The first row is the parent with the reply
+                            // count under it; then a row per reply.
+                            let mut leads = Vec::with_capacity(replies.len());
+                            let mut entries = vec![rows::Entry {
+                                key: egui::Id::new("parent").value(),
+                                guess: parent.map_or(0.0, |p| message::guess_height(p, Lead::Full))
+                                    + 40.0,
+                            }];
                             let mut previous = None;
-                            for reply in replies {
+                            for reply in &replies {
                                 let lead = if message::continues(previous, reply) {
                                     Lead::Compact
                                 } else {
                                     Lead::Full
                                 };
-                                message::show(ui, &row, reply, lead, editing, actions);
-                                previous = Some(reply);
+                                leads.push(lead);
+                                entries.push(rows::Entry {
+                                    key: egui::Id::new(reply.ts.as_str()).value(),
+                                    guess: message::guess_height(reply, lead),
+                                });
+                                previous = Some(*reply);
                             }
+                            let plan = rows::plan(
+                                entries.iter().map(|entry| heights.planned(entry)),
+                                viewport.min.y,
+                                viewport.max.y,
+                                400.0,
+                            );
+                            heights.sweep();
+                            let moved =
+                                rows::show(ui, &mut heights, &entries, &plan, |ui, index| {
+                                    if index == 0 {
+                                        ui.add_space(4.0);
+                                        if let Some(parent) = parent {
+                                            message::show(
+                                                ui,
+                                                &row,
+                                                parent,
+                                                Lead::Full,
+                                                editing,
+                                                actions,
+                                            );
+                                        }
+                                        ui.add_space(6.0);
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(16.0);
+                                            ui.label(
+                                                RichText::new(tn(
+                                                    "{count} reply",
+                                                    "{count} replies",
+                                                    replies.len() as u32,
+                                                ))
+                                                .font(theme::regular(12.5))
+                                                .color(palette.dim),
+                                            );
+                                            let rect = ui.max_rect();
+                                            ui.painter().hline(
+                                                egui::Rangef::new(
+                                                    ui.cursor().min.x + 8.0,
+                                                    rect.right() - 16.0,
+                                                ),
+                                                rect.center().y,
+                                                Stroke::new(1.0, palette.outline),
+                                            );
+                                        });
+                                        ui.add_space(4.0);
+                                        if timeline.is_none_or(|t| t.loading && !t.loaded) {
+                                            ui.add_space(16.0);
+                                            ui.vertical_centered(|ui| {
+                                                ui.add(
+                                                    egui::Spinner::new()
+                                                        .size(18.0)
+                                                        .color(palette.dim),
+                                                );
+                                            });
+                                        }
+                                    } else {
+                                        let reply = replies[index - 1];
+                                        message::show(
+                                            ui,
+                                            &row,
+                                            reply,
+                                            leads[index - 1],
+                                            editing,
+                                            actions,
+                                        );
+                                    }
+                                });
                             ui.add_space(12.0);
                             if to_bottom {
                                 // Your own reply: show it even when reading
                                 // further up.
                                 ui.scroll_to_cursor(Some(Align::BOTTOM));
                             }
+                            moved
                         });
+                    ui.data_mut(|d| d.insert_temp(heights_id, heights));
+                    // Rows above the one being read came out taller or
+                    // shorter than placed: move with them so the reading
+                    // stays put. At the end, egui keeps the view stuck there.
+                    let moved = output.inner;
+                    let offset = output.state.offset.y;
+                    let bottom = (output.content_size.y - output.inner_rect.height()).max(0.0);
+                    if !to_bottom && moved.abs() > 0.5 && offset < bottom - 1.0 {
+                        let mut state = output.state;
+                        state.offset.y = (offset + moved).clamp(0.0, bottom);
+                        state.store(ui.ctx(), output.id);
+                        ui.ctx().request_repaint();
+                    }
                 });
         });
     let width = response.response.rect.width();

@@ -50,6 +50,38 @@ pub fn continues(previous: Option<&Message>, message: &Message) -> bool {
 
 const GUTTER: f32 = 44.0;
 
+/// About how tall a message will be before it is first drawn, for placing
+/// it in a long list: close enough that the scroll bar does not lurch when
+/// it is drawn and measured.
+pub fn guess_height(message: &Message, lead: Lead) -> f32 {
+    if message.is_system() {
+        return 26.0;
+    }
+    let mut height = if lead == Lead::Full { 56.0 } else { 26.0 };
+    // About a line per hundred characters.
+    height += (message.text.len() / 100) as f32 * 20.0;
+    for file in &message.files {
+        height += match file.thumb_size {
+            // As `file_view` sizes the picture, before it has loaded.
+            Some([w, h]) if file.is_image() && w > 0.0 && h > 0.0 => {
+                let scale = (420.0 / w).min(320.0 / h).min(1.0);
+                (h * scale).max(24.0) + 4.0
+            }
+            _ if file.is_image() => 244.0,
+            _ => 64.0,
+        };
+    }
+    height += message.attachments.len() as f32 * 90.0;
+    height += message.blocks.len() as f32 * 30.0;
+    if !message.reactions.is_empty() {
+        height += 32.0;
+    }
+    if message.reply_count > 0 {
+        height += 32.0;
+    }
+    height
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     row: &Row<'_>,
