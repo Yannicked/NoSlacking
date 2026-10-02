@@ -571,10 +571,11 @@ fn row_menu(
     actions: &mut Vec<Action>,
 ) {
     let Some(sections) = workspace.sections.as_deref() else {
-        // Without Slack's sections, leaving is all there is to offer.
-        if !conversation.kind.is_dm() {
-            response.context_menu(|ui| super::browse::leave_item(ui, conversation, false, actions));
-        }
+        // Without Slack's sections there is nothing to move or star.
+        response.context_menu(|ui| {
+            window_items(ui, conversation, actions);
+            super::browse::leave_item(ui, conversation, true, actions);
+        });
         return;
     };
     let channel = conversation.id.clone();
@@ -627,8 +628,18 @@ fn row_menu(
         }
         ui.separator();
         super::desktop::conversation_menu(ui, workspace, conversation, actions);
+        ui.separator();
+        window_items(ui, conversation, actions);
         super::browse::leave_item(ui, conversation, true, actions);
     });
+}
+
+/// What every conversation's menu offers, sections or not.
+fn window_items(ui: &mut egui::Ui, conversation: &Conversation, actions: &mut Vec<Action>) {
+    if ui.button(t("Open in new window")).clicked() {
+        actions.push(Action::PopOut(conversation.id.clone()));
+        ui.close();
+    }
 }
 
 fn row(

@@ -55,6 +55,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
         settings,
         actions,
         socket,
+        popouts,
         ..
     } = app;
     let Some(workspace) = crate::app::active_in(workspaces, settings) else {
@@ -63,6 +64,9 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
     let Some(conversation) = workspace.conversation(channel) else {
         return;
     };
+    let popped_out = popouts
+        .iter()
+        .any(|p| p.team == workspace.info.team_id && p.channel == conversation.id);
     let inset = theme::titlebar_inset(ui.ctx());
     egui::Panel::top("conversation-header")
         .exact_size(52.0 + inset)
@@ -144,6 +148,11 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                     let tip = tf("Search ({shortcut})", &[("shortcut", &super::keys::command("F"))]);
                     if theme::icon_button(ui, &palette, Icon::Search, 17.0, &tip).clicked() {
                         actions.push(Action::OpenSearch);
+                    }
+                    if !popped_out
+                        && theme::icon_button(ui, &palette, Icon::ExternalLink, 16.0, &t("Open in new window")).clicked()
+                    {
+                        actions.push(Action::PopOut(conversation.id.clone()));
                     }
                     if conversation.kind != ConversationKind::Direct
                         && theme::icon_button(ui, &palette, Icon::Info, 17.0, &t("Details")).clicked()

@@ -551,6 +551,8 @@ impl Timeline {
 pub enum Action {
     SelectWorkspace(String),
     OpenConversation(String),
+    /// Opens a conversation of the active workspace in a window of its own.
+    PopOut(String),
     OpenThread {
         channel: String,
         ts: Ts,

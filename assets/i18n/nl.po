@@ -1256,3 +1256,6 @@ msgstr "Automatisch"
 
 msgid "No spellings found"
 msgstr "Geen spellingen gevonden"
+
+msgid "Open in new window"
+msgstr "Openen in nieuw venster"
