@@ -6,7 +6,7 @@ use egui::{CornerRadius, Margin, RichText, Stroke};
 use crate::app::App;
 use crate::backend::Socket;
 use crate::credentials::AppCredentials;
-use crate::i18n::{Locale, t};
+use crate::i18n::{Locale, t, tf};
 use crate::model::Action;
 use crate::settings::{Appearance, Redirect};
 use crate::theme::{self, Palette};
@@ -176,7 +176,10 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             ui,
             palette,
             &t("Enter sends"),
-            &t("Off: Ctrl+Enter sends and Enter starts a new line."),
+            &tf(
+                "Off: {shortcut} sends and Enter starts a new line.",
+                &[("shortcut", &super::keys::command("Enter"))],
+            ),
             |ui| {
                 ui.checkbox(&mut enter, "");
             },

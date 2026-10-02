@@ -326,9 +326,12 @@ pub fn show(
                     egui::Rect::from_center_size(rect.center(), Vec2::splat(16.0)),
                 );
                 let tip = if composer.enter_sends {
-                    t("Send (Enter)")
+                    t("Send (Enter)").into_owned()
                 } else {
-                    t("Send (Ctrl+Enter)")
+                    tf(
+                        "Send ({shortcut})",
+                        &[("shortcut", &super::keys::command("Enter"))],
+                    )
                 };
                 if response
                     .on_hover_cursor(egui::CursorIcon::PointingHand)

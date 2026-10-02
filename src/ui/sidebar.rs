@@ -118,8 +118,11 @@ pub fn rail(app: &mut App, ui: &mut egui::Ui) {
             });
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 let settings_open = app.page == Page::Settings;
-                let response =
-                    theme::icon_button(ui, &palette, Icon::Settings, 20.0, &t("Settings (Ctrl+,)"));
+                let tip = tf(
+                    "Settings ({shortcut})",
+                    &[("shortcut", &super::keys::command(","))],
+                );
+                let response = theme::icon_button(ui, &palette, Icon::Settings, 20.0, &tip);
                 if response.clicked() {
                     app.actions.push(if settings_open {
                         Action::HideSettings

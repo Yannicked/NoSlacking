@@ -372,9 +372,12 @@ fn edit(
             });
         }
         let hint = if row.enter_sends {
-            t("Enter to save, Esc to cancel")
+            t("Enter to save, Esc to cancel").into_owned()
         } else {
-            t("Ctrl+Enter to save, Esc to cancel")
+            tf(
+                "{shortcut} to save, Esc to cancel",
+                &[("shortcut", &super::keys::command("Enter"))],
+            )
         };
         ui.label(
             RichText::new(hint)
