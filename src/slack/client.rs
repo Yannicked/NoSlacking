@@ -55,6 +55,14 @@ pub fn is_auth_code(code: &str) -> bool {
     AUTH_ERRORS.contains(&code)
 }
 
+/// A transport failure. The URL is left out: a file URL or a socket URL
+/// can carry a secret.
+impl From<reqwest::Error> for SlackError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Network(error.without_url().to_string())
+    }
+}
+
 impl SlackError {
     /// Whether the token no longer works and the workspace needs signing in
     /// again.
@@ -222,6 +230,27 @@ pub fn http() -> reqwest::Client {
             log::error!("HTTP client setup failed, using defaults: {error}");
             reqwest::Client::new()
         })
+}
+
+/// How long a transfer may go without a single byte moving.
+const TRANSFER_STALL: Duration = Duration::from_secs(60);
+
+/// The client for uploads and downloads. It has no total deadline: a
+/// large file on a slow line can take longer than any fixed one. A
+/// transfer fails instead when no data has moved for [`TRANSFER_STALL`].
+fn transfers() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(concat!("NoSlacking/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(TRANSFER_STALL)
+            .build()
+            .unwrap_or_else(|error| {
+                log::error!("transfer client setup failed, using defaults: {error}");
+                reqwest::Client::new()
+            })
+    })
 }
 
 pub fn now() -> i64 {
@@ -422,13 +451,26 @@ impl Client {
         get_bytes(&self.http, url, Some(&token), self.cookie().as_deref(), max).await
     }
 
-    /// Uploads a file with Slack's two-step external upload.
+    /// Starts downloading a file for saving, with the same rule for the
+    /// token as [`Client::get_bytes`]. The body is left to the caller to
+    /// read chunk by chunk, so a large file never sits in memory.
+    pub async fn download(&self, url: &str) -> Result<reqwest::Response, SlackError> {
+        if !is_slack_file_url(url) {
+            return fetch(transfers(), url, None, None).await;
+        }
+        let token = self.access_token().await?;
+        fetch(transfers(), url, Some(&token), self.cookie().as_deref()).await
+    }
+
+    /// Uploads a file with Slack's two-step external upload, streaming
+    /// `length` bytes from `file` rather than reading it into memory.
     pub async fn upload(
         &self,
         channel: &str,
         thread: Option<&str>,
         name: &str,
-        bytes: Vec<u8>,
+        file: tokio::fs::File,
+        length: u64,
         comment: &str,
     ) -> Result<(), SlackError> {
         let target: types::UploadUrl = self
@@ -436,14 +478,14 @@ impl Client {
                 "files.getUploadURLExternal",
                 &[
                     ("filename", name.to_owned()),
-                    ("length", bytes.len().to_string()),
+                    ("length", length.to_string()),
                 ],
             )
             .await?;
-        let part = reqwest::multipart::Part::bytes(bytes).file_name(name.to_owned());
+        let part =
+            reqwest::multipart::Part::stream_with_length(file, length).file_name(name.to_owned());
         let form = reqwest::multipart::Form::new().part("file", part);
-        let response = self
-            .http
+        let response = transfers()
             .post(&target.upload_url)
             .multipart(form)
             .send()
@@ -538,6 +580,30 @@ pub async fn get_bytes(
     cookie: Option<&str>,
     max: usize,
 ) -> Result<Vec<u8>, SlackError> {
+    let mut response = fetch(http, url, token, cookie).await?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| SlackError::Network(e.without_url().to_string()))?
+    {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() > max {
+            return Err(SlackError::Decode("file too large".into()));
+        }
+    }
+    Ok(bytes)
+}
+
+/// Sends a GET for a file and checks the answer is the file: a success,
+/// and not HTML (Slack answers a bad token on a file with its sign-in
+/// page).
+async fn fetch(
+    http: &reqwest::Client,
+    url: &str,
+    token: Option<&str>,
+    cookie: Option<&str>,
+) -> Result<reqwest::Response, SlackError> {
     let mut request = http.get(url);
     if let Some(token) = token {
         request = request.bearer_auth(token);
@@ -545,7 +611,7 @@ pub async fn get_bytes(
     if let Some(cookie) = cookie {
         request = request.header(reqwest::header::COOKIE, format!("d={cookie}"));
     }
-    let mut response = request
+    let response = request
         .send()
         .await
         .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
@@ -560,18 +626,7 @@ pub async fn get_bytes(
     if html {
         return Err(SlackError::Api("file_needs_sign_in".into()));
     }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| SlackError::Network(e.without_url().to_string()))?
-    {
-        bytes.extend_from_slice(&chunk);
-        if bytes.len() > max {
-            return Err(SlackError::Decode("file too large".into()));
-        }
-    }
-    Ok(bytes)
+    Ok(response)
 }
 
 /// Exchanges a refresh token for a new access token.
