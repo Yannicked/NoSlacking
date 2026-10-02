@@ -7,6 +7,7 @@
 pub mod app;
 pub mod auth;
 pub mod backend;
+pub mod convos;
 pub mod credentials;
 #[cfg(feature = "demo")]
 pub mod demo;

@@ -5,6 +5,7 @@
 //! [`Event`]s and wakes the window for each one, so egui sleeps when
 //! nothing happens.
 
+pub mod convos;
 pub mod worker;
 
 use std::collections::HashMap;
@@ -137,6 +138,11 @@ pub enum Command {
         channel: String,
     },
     Reconnect,
+    /// Starts, finds or looks after a conversation (see [`crate::convos`]).
+    Convos {
+        team: String,
+        command: crate::convos::Command,
+    },
 }
 
 /// Prints every field except the secrets: a pasted token, the session
@@ -291,6 +297,11 @@ impl std::fmt::Debug for Command {
                 .field("channel", channel)
                 .finish(),
             Self::Reconnect => f.write_str("Reconnect"),
+            Self::Convos { team, command } => f
+                .debug_struct("Convos")
+                .field("team", team)
+                .field("command", command)
+                .finish(),
         }
     }
 }
@@ -443,6 +454,12 @@ pub enum Event {
     Socket(Socket),
     Error(String),
     Notice(String),
+    /// An answer about starting, finding or looking after a conversation
+    /// (see [`crate::convos`]).
+    Convos {
+        team: String,
+        event: crate::convos::Event,
+    },
 }
 
 /// The interface's end of the bridge.

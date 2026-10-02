@@ -622,6 +622,11 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
             Command::Download { name, .. } => {
                 sink.send(Event::Notice(format!("Demo: would save {name}")));
             }
+            Command::Convos { team, command } => {
+                for event in crate::backend::convos::demo(&team, command) {
+                    sink.send(event);
+                }
+            }
             _ => {}
         }
     }

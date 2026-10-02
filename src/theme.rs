@@ -376,6 +376,7 @@ fastframe_icons::icons! {
         Settings => lucide "settings",
         Smile => "smile",
         SmilePlus => "smile-plus",
+        SquarePen => lucide "square-pen",
         Trash => lucide "trash-2",
         User => lucide "user",
         Users => lucide "users",

@@ -588,6 +588,18 @@ impl Worker {
                 }
             }
             Command::Reconnect => self.reconnect(),
+            Command::Convos { team, command } => match self.team(&team) {
+                Some((client, sink)) => {
+                    tokio::spawn(super::convos::run(client, team, command, sink));
+                }
+                None => self.sink.send(Event::Convos {
+                    team,
+                    event: crate::convos::Event::Failed {
+                        what: command.failure(),
+                        error: NOT_SIGNED_IN.to_owned(),
+                    },
+                }),
+            },
         }
     }
 

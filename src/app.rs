@@ -865,6 +865,8 @@ pub struct App {
     /// A message waiting for "Delete?" to be answered.
     pub confirm_delete: Option<(String, Ts)>,
     pub section_dialog: Option<SectionDialog>,
+    /// The dialogs and panels for starting and finding conversations.
+    pub convos: crate::convos::State,
     /// Where the "New" line goes: the read marker when the open
     /// conversation was opened, by `team/channel`.
     pub read_line: Option<(String, Option<Ts>)>,
@@ -972,6 +974,7 @@ impl App {
             preview: None,
             confirm_delete: None,
             section_dialog: None,
+            convos: crate::convos::State::default(),
             read_line: None,
             sidebar_filter: String::new(),
             demo: options.demo,
@@ -1332,6 +1335,7 @@ impl App {
                 change,
                 result,
             } => self.settled(&team, &channel, change, result),
+            Event::Convos { team, event } => crate::convos::handle(self, &team, event),
         }
     }
 
@@ -1980,6 +1984,7 @@ impl App {
                 self.backend.send(Command::CancelSignIn);
                 self.sign_in = None;
             }
+            Action::Convos(action) => crate::convos::apply(self, action),
         }
     }
 
@@ -2120,6 +2125,7 @@ impl App {
             || self.preview.is_some()
             || self.confirm_delete.is_some()
             || self.section_dialog.is_some()
+            || self.convos.overlay_open()
     }
 
     /// Changes the sidebar at once, and in Slack, which then sends back the
