@@ -706,6 +706,9 @@ pub enum Action {
     },
     /// Starts, finds or looks after a conversation (see [`crate::convos`]).
     Convos(crate::convos::Action),
+    /// Something about people: your typing, your status (see
+    /// [`crate::people`]).
+    People(crate::people::Action),
 }
 
 #[cfg(test)]

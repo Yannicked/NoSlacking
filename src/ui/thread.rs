@@ -109,7 +109,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     left: 16,
                     right: 16,
                     top: 4,
-                    bottom: 16,
+                    // The typing line fills the rest of the bottom space.
+                    bottom: 2,
                 }))
                 .show(ui, |ui| {
                     let composer = Composer {
@@ -123,7 +124,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         channel_name: Some(channel_name.clone()),
                         uploads: transfers,
                     };
+                    let before = draft.text.clone();
                     composer::show(ui, &composer, &mut draft, actions);
+                    if crate::people::is_typing(&before, &draft.text) {
+                        actions.push(Action::People(crate::people::Action::Typing {
+                            channel: channel.clone(),
+                            thread: Some(ts.clone()),
+                        }));
+                    }
+                    super::people::typing(ui, &palette, workspace, &channel, Some(&ts));
                 });
             egui::CentralPanel::default()
                 .frame(egui::Frame::new())

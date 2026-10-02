@@ -247,7 +247,8 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
                     left: 20,
                     right: 20,
                     top: 4,
-                    bottom: 16,
+                    // The typing line fills the rest of the bottom space.
+                    bottom: 2,
                 }),
         )
         .show(ui, |ui| {
@@ -266,7 +267,15 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
                 channel_name: None,
                 uploads: transfers,
             };
+            let before = draft.text.clone();
             composer::show(ui, &composer, &mut draft, actions);
+            if crate::people::is_typing(&before, &draft.text) {
+                actions.push(Action::People(crate::people::Action::Typing {
+                    channel: channel.to_owned(),
+                    thread: None,
+                }));
+            }
+            super::people::typing(ui, &palette, workspace, channel, None);
         });
     app.drafts.insert(key, draft);
 }

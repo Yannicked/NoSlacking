@@ -1757,6 +1757,9 @@ impl App {
             return;
         }
         let from_me = message.user.as_deref() == Some(workspace.info.user_id.as_str());
+        if let Some(user) = &message.user {
+            workspace.people.stopped_typing(channel, user);
+        }
         let (arrived, fetch_conversation) = workspace.message_arrived(channel, message, viewing);
         if fetch_conversation {
             self.backend.send(Command::FetchConversation {
@@ -2458,6 +2461,7 @@ impl App {
                 self.sign_in = None;
             }
             Action::Convos(action) => crate::convos::apply(self, action),
+            Action::People(action) => crate::people::apply(self, action),
         }
     }
 

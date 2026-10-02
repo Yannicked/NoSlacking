@@ -1193,3 +1193,12 @@ msgstr "Actief"
 
 msgid "Away"
 msgstr "Afwezig"
+
+msgid "{name} is typing…"
+msgstr "{name} is aan het typen…"
+
+msgid "{first} and {second} are typing…"
+msgstr "{first} en {second} zijn aan het typen…"
+
+msgid "Several people are typing…"
+msgstr "Meerdere mensen zijn aan het typen…"

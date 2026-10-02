@@ -113,6 +113,21 @@ impl Hub {
     /// Runs one command for `team`.
     pub fn command(&mut self, team: &str, command: Command) {
         match command {
+            Command::Typing { channel, thread } => {
+                let Some(rtm) = self
+                    .teams
+                    .get(team)
+                    .filter(|w| w.live)
+                    .and_then(|w| w.rtm.as_ref())
+                else {
+                    return;
+                };
+                let mut frame = json!({"type": "typing", "channel": channel});
+                if let Some(thread) = thread {
+                    frame["thread_ts"] = thread.as_str().into();
+                }
+                let _ = rtm.send(frame);
+            }
             Command::Watch { mut users } => {
                 users.sort();
                 users.dedup();
@@ -232,6 +247,16 @@ pub fn translate(event: &Value) -> Option<people::Event> {
                 users: users.into_iter().map(|u| (u, presence)).collect(),
             })
         }
+        // Someone typing, over RTM. Socket Mode never sends these.
+        "user_typing" => Some(people::Event::Typing {
+            channel: event.get("channel")?.as_str()?.to_owned(),
+            thread: event
+                .get("thread_ts")
+                .and_then(Value::as_str)
+                .filter(|ts| !ts.is_empty())
+                .map(crate::model::Ts::new),
+            user: event.get("user")?.as_str()?.to_owned(),
+        }),
         _ => None,
     }
 }
@@ -240,6 +265,7 @@ pub fn translate(event: &Value) -> Option<people::Event> {
 #[cfg(feature = "demo")]
 pub fn demo(team: &str, command: Command) -> Vec<Event> {
     match command {
+        Command::Typing { .. } => Vec::new(),
         Command::Watch { users } => vec![Event::People {
             team: team.to_owned(),
             event: people::Event::Presence {
@@ -317,6 +343,60 @@ mod tests {
             None
         );
         assert_eq!(translate(&json!({"type": "hello"})), None);
+    }
+
+    #[test]
+    fn typing_names_the_place_and_the_person() {
+        assert_eq!(
+            translate(&json!({"type": "user_typing", "channel": "C1", "user": "U1"})),
+            Some(people::Event::Typing {
+                channel: "C1".into(),
+                thread: None,
+                user: "U1".into()
+            })
+        );
+        assert_eq!(
+            translate(&json!({
+                "type": "user_typing",
+                "channel": "C1",
+                "thread_ts": "1.0",
+                "user": "U1"
+            })),
+            Some(people::Event::Typing {
+                channel: "C1".into(),
+                thread: Some(crate::model::Ts::new("1.0")),
+                user: "U1".into()
+            })
+        );
+        assert_eq!(
+            translate(&json!({"type": "user_typing", "channel": "C1"})),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn typing_goes_out_only_over_a_live_socket() {
+        let (sender, mut sent) = tokio::sync::mpsc::unbounded_channel();
+        let mut hub = Hub::default();
+        let typing = || Command::Typing {
+            channel: "C1".into(),
+            thread: Some(crate::model::Ts::new("1.0")),
+        };
+        hub.command("T1", typing());
+        hub.rtm_started("T1", sender);
+        hub.command("T1", typing());
+        assert!(sent.try_recv().is_err());
+        hub.rtm_live("T1", true);
+        // The subscription to nobody, then the notice.
+        assert_eq!(
+            sent.try_recv().expect("a subscription")["type"],
+            "presence_sub"
+        );
+        hub.command("T1", typing());
+        let frame = sent.try_recv().expect("typing");
+        assert_eq!(frame["type"], "typing");
+        assert_eq!(frame["channel"], "C1");
+        assert_eq!(frame["thread_ts"], "1.0");
     }
 
     #[tokio::test]
