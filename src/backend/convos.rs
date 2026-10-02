@@ -30,6 +30,51 @@ struct ListPage {
     response_metadata: types::ResponseMetadata,
 }
 
+/// The most pages of `conversations.members` read, 200 people a page.
+const MEMBER_PAGES: usize = 50;
+/// How many of a conversation's newest files its Files tab lists.
+const FILES: usize = 100;
+
+/// The parts of `conversations.info` the details panel adds to the
+/// sidebar's copy.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Made {
+    channel: MadeChannel,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct MadeChannel {
+    created: Option<i64>,
+    creator: Option<String>,
+}
+
+/// A page of `conversations.members`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct MembersPage {
+    members: Vec<String>,
+    response_metadata: types::ResponseMetadata,
+}
+
+/// `files.list`'s answer.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct FilesPage {
+    files: Vec<ListedFile>,
+}
+
+/// A file in `files.list`: a message's file, and who shared it when.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ListedFile {
+    #[serde(flatten)]
+    file: types::File,
+    user: Option<String>,
+    created: Option<i64>,
+}
+
 /// Runs one command and reports back. Every failure is answered, so a
 /// dialog waiting on it never waits for ever.
 pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
@@ -40,10 +85,130 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
         Command::Join { channel } => join(&client, &team, &channel, &sink).await,
         Command::Leave { channel } => leave(&client, &team, &channel, &sink).await,
         Command::Create { name, private } => create(&client, &team, &name, private, &sink).await,
+        Command::About { channel } => {
+            let result = about(&client, &channel).await.map_err(|e| explain(&e));
+            reply(&sink, &team, convos::Event::About { channel, result });
+            Ok(())
+        }
+        Command::Members { channel } => {
+            let result = members(&client, &channel).await.map_err(|e| explain(&e));
+            reply(&sink, &team, convos::Event::Members { channel, result });
+            Ok(())
+        }
+        Command::Files { channel } => {
+            let result = files(&client, &channel).await.map_err(|e| explain(&e));
+            reply(&sink, &team, convos::Event::Files { channel, result });
+            Ok(())
+        }
+        Command::Describe {
+            channel,
+            field,
+            text,
+        } => describe_channel(&client, &team, &channel, field, text, &sink).await,
     };
     if let Err(error) = result {
         fail(&sink, team, what, &error);
     }
+}
+
+/// Sends one of [`convos::Event`]s.
+fn reply(sink: &Sink, team: &str, event: convos::Event) {
+    sink.send(Event::Convos {
+        team: team.to_owned(),
+        event,
+    });
+}
+
+/// When and by whom a conversation was made.
+async fn about(client: &Client, channel: &str) -> Result<convos::About, SlackError> {
+    let made: Made = client
+        .call("conversations.info", &[("channel", channel.to_owned())])
+        .await?;
+    Ok(convos::About {
+        created: made.channel.created.filter(|c| *c > 0),
+        creator: made.channel.creator.filter(|c| !c.is_empty()),
+    })
+}
+
+/// Everyone in a conversation.
+async fn members(client: &Client, channel: &str) -> Result<Vec<String>, SlackError> {
+    let mut all = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..MEMBER_PAGES {
+        let mut params = vec![("channel", channel.to_owned()), ("limit", "200".to_owned())];
+        if let Some(cursor) = cursor.take() {
+            params.push(("cursor", cursor));
+        }
+        let page: MembersPage = client.call("conversations.members", &params).await?;
+        all.extend(page.members);
+        match page
+            .response_metadata
+            .cursor()
+            .filter(|next| seen.insert(next.clone()))
+        {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    Ok(all)
+}
+
+/// The newest files shared in a conversation.
+async fn files(client: &Client, channel: &str) -> Result<Vec<convos::SharedFile>, SlackError> {
+    let page: FilesPage = client
+        .call(
+            "files.list",
+            &[
+                ("channel", channel.to_owned()),
+                ("count", FILES.to_string()),
+            ],
+        )
+        .await?;
+    Ok(shared(page))
+}
+
+/// The files of a `files.list` page that can still be shown.
+fn shared(page: FilesPage) -> Vec<convos::SharedFile> {
+    page.files
+        .into_iter()
+        .filter_map(|listed| {
+            Some(convos::SharedFile {
+                file: listed.file.into_model()?,
+                user: listed.user.filter(|u| !u.is_empty()),
+                created: listed.created,
+            })
+        })
+        .collect()
+}
+
+/// Sets a topic or purpose, then fetches the conversation so every view
+/// shows what Slack kept (it trims and may shorten).
+async fn describe_channel(
+    client: &Client,
+    team: &str,
+    channel: &str,
+    field: convos::Field,
+    text: String,
+    sink: &Sink,
+) -> Result<(), SlackError> {
+    let (method, key) = match field {
+        convos::Field::Topic => ("conversations.setTopic", "topic"),
+        convos::Field::Purpose => ("conversations.setPurpose", "purpose"),
+    };
+    client
+        .act::<serde_json::Value>(method, &[("channel", channel.to_owned()), (key, text)])
+        .await?;
+    if let Ok(info) = client
+        .call::<types::ChannelInfo>("conversations.info", &[("channel", channel.to_owned())])
+        .await
+    {
+        sink.send(Event::Conversation {
+            team: team.to_owned(),
+            conversation: info.channel.into_model(),
+        });
+    }
+    Ok(())
 }
 
 /// Tells the interface that `what` failed.
@@ -300,6 +465,59 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
             };
             demo_opened(team, conversation.into_model())
         }
+        Command::About { channel } => vec![Event::Convos {
+            team: team.to_owned(),
+            event: convos::Event::About {
+                channel,
+                result: Ok(convos::About {
+                    created: Some(1_700_000_000),
+                    creator: Some("U01".into()),
+                }),
+            },
+        }],
+        Command::Members { channel } => vec![Event::Convos {
+            team: team.to_owned(),
+            event: convos::Event::Members {
+                channel,
+                result: Ok(["U00", "U01", "U02", "U03", "U04", "U05"]
+                    .map(str::to_owned)
+                    .to_vec()),
+            },
+        }],
+        Command::Files { channel } => {
+            let file = |id: &str, name: &str, mimetype: &str, size: u64| crate::model::File {
+                id: id.into(),
+                name: name.into(),
+                title: name.into(),
+                mimetype: mimetype.into(),
+                size,
+                url_private: None,
+                download_url: Some(format!("https://files.example/{name}")),
+                thumb: None,
+                thumb_size: None,
+                permalink: None,
+            };
+            vec![Event::Convos {
+                team: team.to_owned(),
+                event: convos::Event::Files {
+                    channel,
+                    result: Ok(vec![
+                        convos::SharedFile {
+                            file: file("F1", "roadmap-q4.pdf", "application/pdf", 482_113),
+                            user: Some("U03".into()),
+                            created: Some(1_790_100_000),
+                        },
+                        convos::SharedFile {
+                            file: file("F2", "sidebar-spacing.png", "image/png", 91_034),
+                            user: Some("U01".into()),
+                            created: Some(1_790_000_000),
+                        },
+                    ]),
+                },
+            }]
+        }
+        // The interface already shows the new text.
+        Command::Describe { .. } => Vec::new(),
     }
 }
 
@@ -367,6 +585,39 @@ mod tests {
                 members: 7,
             }]
         );
+    }
+
+    #[test]
+    fn files_say_who_shared_them_and_when() {
+        let page: FilesPage = serde_json::from_str(
+            r#"{"ok":true,"files":[
+                {"id":"F1","name":"a.pdf","mimetype":"application/pdf","size":10,
+                 "user":"U1","created":1700000000},
+                {"id":"F2","name":"gone","mode":"tombstone"}
+            ]}"#,
+        )
+        .expect("json");
+        let files = shared(page);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file.name, "a.pdf");
+        assert_eq!(files[0].user.as_deref(), Some("U1"));
+        assert_eq!(files[0].created, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn members_and_creation_come_from_their_own_answers() {
+        let page: MembersPage = serde_json::from_str(
+            r#"{"ok":true,"members":["U1","U2"],"response_metadata":{"next_cursor":""}}"#,
+        )
+        .expect("json");
+        assert_eq!(page.members, ["U1", "U2"]);
+        assert_eq!(page.response_metadata.cursor(), None);
+        let made: Made = serde_json::from_str(
+            r#"{"ok":true,"channel":{"id":"C1","created":1600000000,"creator":"U9"}}"#,
+        )
+        .expect("json");
+        assert_eq!(made.channel.created, Some(1_600_000_000));
+        assert_eq!(made.channel.creator.as_deref(), Some("U9"));
     }
 
     #[test]
