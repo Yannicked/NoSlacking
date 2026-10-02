@@ -821,9 +821,7 @@ impl App {
                     .workspace_mut(&team)
                     .and_then(|w| w.conversation_mut(&channel))
                 {
-                    conversation.last_read = Some(ts);
-                    conversation.unread = 0;
-                    conversation.mentions = 0;
+                    read_up_to(conversation, ts);
                 }
             }
             Event::Socket(socket) => {
@@ -1719,6 +1717,30 @@ fn merge_conversation(existing: &mut Conversation, fresh: Conversation) {
         unread,
         ..fresh
     };
+    // Read on another device: Slack's count lags, the markers do not.
+    if read_through(existing) {
+        existing.unread = 0;
+        existing.mentions = 0;
+    }
+}
+
+/// Whether the read marker is at or past the newest message.
+fn read_through(conversation: &Conversation) -> bool {
+    matches!(
+        (&conversation.last_read, &conversation.latest),
+        (Some(read), Some(latest)) if read >= latest
+    )
+}
+
+/// Moves the read marker to `ts`, never back: markers from other devices
+/// and from polling can arrive out of order. The counts clear only once
+/// nothing newer is left.
+fn read_up_to(conversation: &mut Conversation, ts: Ts) {
+    conversation.last_read = max_ts(conversation.last_read.take(), Some(ts));
+    if conversation.latest.is_none() || read_through(conversation) {
+        conversation.unread = 0;
+        conversation.mentions = 0;
+    }
 }
 
 fn max_ts(a: Option<Ts>, b: Option<Ts>) -> Option<Ts> {
@@ -2073,5 +2095,53 @@ mod tests {
         assert_eq!(existing.latest, Some(Ts::new("9.0")));
         assert_eq!(existing.last_read, Some(Ts::new("7.0")));
         assert_eq!(existing.mentions, 2);
+    }
+
+    fn conversation(last_read: &str, latest: &str, unread: u32, mentions: u32) -> Conversation {
+        Conversation {
+            id: "C1".into(),
+            name: "general".into(),
+            kind: ConversationKind::Channel,
+            user: None,
+            topic: String::new(),
+            purpose: String::new(),
+            members: None,
+            archived: false,
+            last_read: Some(Ts::new(last_read)),
+            latest: Some(Ts::new(latest)),
+            unread,
+            mentions,
+        }
+    }
+
+    #[test]
+    fn counts_clear_when_read_elsewhere() {
+        let mut existing = conversation("5.0", "9.0", 4, 1);
+        merge_conversation(&mut existing, conversation("9.0", "9.0", 4, 0));
+        assert_eq!(existing.unread, 0);
+        assert_eq!(existing.mentions, 0);
+        assert!(!existing.has_unread());
+        // Still behind: Slack's count stands.
+        let mut existing = conversation("5.0", "9.0", 0, 1);
+        merge_conversation(&mut existing, conversation("6.0", "9.0", 3, 0));
+        assert_eq!(existing.unread, 3);
+        assert_eq!(existing.mentions, 1);
+    }
+
+    #[test]
+    fn read_markers_never_move_back() {
+        let mut c = conversation("5.0", "9.0", 2, 1);
+        read_up_to(&mut c, Ts::new("9.0"));
+        assert_eq!(c.last_read, Some(Ts::new("9.0")));
+        assert_eq!((c.unread, c.mentions), (0, 0));
+        // A late, older marker changes nothing.
+        read_up_to(&mut c, Ts::new("7.0"));
+        assert_eq!(c.last_read, Some(Ts::new("9.0")));
+        // Read only part of the way: what is left stays unread.
+        let mut c = conversation("5.0", "9.0", 2, 1);
+        read_up_to(&mut c, Ts::new("7.0"));
+        assert_eq!(c.last_read, Some(Ts::new("7.0")));
+        assert_eq!((c.unread, c.mentions), (2, 1));
+        assert!(c.has_unread());
     }
 }
