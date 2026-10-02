@@ -20,6 +20,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     };
     let key = App::draft_key(&team, &channel, Some(&ts));
     let mut draft: Draft = app.drafts.remove(&key).unwrap_or_default();
+    let to_bottom = app.scroll_to_bottom.remove(&key);
     let width = app.settings.thread_width;
     let App {
         workspaces,
@@ -180,6 +181,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                 previous = Some(reply);
                             }
                             ui.add_space(12.0);
+                            if to_bottom {
+                                // Your own reply: show it even when reading
+                                // further up.
+                                ui.scroll_to_cursor(Some(Align::BOTTOM));
+                            }
                         });
                 });
         });
