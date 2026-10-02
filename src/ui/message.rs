@@ -5,7 +5,7 @@ use egui::{Align, CornerRadius, Layout, Margin, RichText, Sense, Stroke, UiBuild
 
 use super::rich::{self, Rich};
 use crate::app::{Editing, WorkspaceState};
-use crate::i18n::{t, tn};
+use crate::i18n::{t, tf, tn};
 use crate::model::{
     Accessory, Action, Attachment, Button, ContextItem, Delivery, Field, File, KitBlock, Message,
 };
@@ -262,7 +262,7 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
                 .image(palette.danger, 14.0)
                 .paint_at(ui, icon);
             ui.label(
-                RichText::new(format!("{} {error}.", t("Not sent:")))
+                RichText::new(tf("Not sent: {error}.", &[("error", error)]))
                     .font(theme::regular(12.5))
                     .color(palette.danger),
             );
@@ -849,8 +849,10 @@ fn reactions(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
                     }
                 })
                 .collect();
-            let response =
-                response.on_hover_text(format!("{} :{}:", names.join(", "), reaction.name));
+            let response = response.on_hover_text(tf(
+                "{names} reacted with :{emoji}:",
+                &[("names", &names.join(", ")), ("emoji", &reaction.name)],
+            ));
             if response.clicked() {
                 actions.push(Action::React {
                     channel: row.channel.to_owned(),
@@ -903,9 +905,12 @@ fn thread_summary(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: 
                 );
                 if let Some(latest) = &message.latest_reply {
                     ui.label(
-                        RichText::new(format!("{} {}", t("Last reply"), super::relative(latest)))
-                            .font(theme::regular(12.5))
-                            .color(palette.dim),
+                        RichText::new(tf(
+                            "Last reply {when}",
+                            &[("when", &super::relative(latest))],
+                        ))
+                        .font(theme::regular(12.5))
+                        .color(palette.dim),
                     );
                 }
             });

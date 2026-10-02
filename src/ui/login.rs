@@ -10,7 +10,7 @@ use egui::{CornerRadius, Margin, RichText, Stroke};
 use crate::app::App;
 use crate::backend::SignIn;
 use crate::credentials::AppCredentials;
-use crate::i18n::t;
+use crate::i18n::{t, tf};
 use crate::model::Action;
 use crate::theme::{self, Palette};
 
@@ -221,7 +221,7 @@ fn sign_in_status(app: &App, ui: &mut egui::Ui, palette: &Palette) {
         }
         Some(SignIn::Done(name)) => {
             ui.label(
-                RichText::new(format!("{} {name}.", t("Signed in to")))
+                RichText::new(tf("Signed in to {name}.", &[("name", name)]))
                     .font(theme::regular(13.0))
                     .color(palette.accent),
             );
@@ -330,10 +330,9 @@ fn keyring_note(app: &App, ui: &mut egui::Ui, palette: &Palette) {
     if let Some(error) = &app.keyring_error {
         ui.add_space(12.0);
         ui.label(
-            RichText::new(format!(
-                "{} {error}. {}",
-                t("The system keyring is unavailable:"),
-                t("NoSlacking keeps tokens only there; unlock it or install a Secret Service provider such as GNOME Keyring or KWallet.")
+            RichText::new(tf(
+                "The system keyring is unavailable: {error}. NoSlacking keeps tokens only there; unlock it or install a Secret Service provider such as GNOME Keyring or KWallet.",
+                &[("error", error)],
             ))
             .font(theme::regular(13.0))
             .color(palette.warning),

@@ -7,7 +7,7 @@ use super::composer::{self, Composer};
 use super::message::{self, Lead, Row};
 use crate::app::{App, Draft};
 use crate::backend::Socket;
-use crate::i18n::t;
+use crate::i18n::{t, tf};
 use crate::model::{Action, ConversationKind, Ts};
 use crate::theme::{self, Icon};
 
@@ -204,9 +204,9 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     let title = workspace.title(conversation);
     let placeholder = match conversation.kind {
         ConversationKind::Channel | ConversationKind::Private => {
-            format!("{} #{title}", t("Message"))
+            tf("Message #{name}", &[("name", &title)])
         }
-        _ => format!("{} {title}", t("Message")),
+        _ => tf("Message {name}", &[("name", &title)]),
     };
     egui::Panel::bottom("composer")
         .show_separator_line(false)
@@ -423,9 +423,9 @@ fn beginning(
             let (heading, line) = match conversation.kind {
                 ConversationKind::Direct => (
                     title.clone(),
-                    format!(
-                        "{} {title}.",
-                        t("This is the very beginning of your direct message history with")
+                    tf(
+                        "This is the very beginning of your direct message history with {name}.",
+                        &[("name", &title)],
                     ),
                 ),
                 ConversationKind::Group => (
@@ -434,7 +434,10 @@ fn beginning(
                 ),
                 _ => (
                     format!("#{title}"),
-                    format!("{} #{title}.", t("This is the very beginning of")),
+                    tf(
+                        "This is the very beginning of #{name}.",
+                        &[("name", &title)],
+                    ),
                 ),
             };
             ui.label(
