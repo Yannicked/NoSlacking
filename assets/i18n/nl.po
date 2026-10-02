@@ -1202,3 +1202,75 @@ msgstr "{first} en {second} zijn aan het typen…"
 
 msgid "Several people are typing…"
 msgstr "Meerdere mensen zijn aan het typen…"
+
+msgid "Don't clear"
+msgstr "Niet wissen"
+
+msgid "30 minutes"
+msgstr "30 minuten"
+
+msgid "1 hour"
+msgstr "1 uur"
+
+msgid "4 hours"
+msgstr "4 uur"
+
+msgid "This week"
+msgstr "Deze week"
+
+msgid "In a meeting"
+msgstr "In een vergadering"
+
+msgid "Commuting"
+msgstr "Onderweg"
+
+msgid "Out sick"
+msgstr "Ziek"
+
+msgid "Vacationing"
+msgstr "Op vakantie"
+
+msgid "Working remotely"
+msgstr "Werkt op afstand"
+
+msgid "Could not change your presence: {error}"
+msgstr "Je aanwezigheid kon niet worden gewijzigd: {error}"
+
+msgid "Could not set your status: {error}"
+msgstr "Je status kon niet worden ingesteld: {error}"
+
+msgid "Edit status…"
+msgstr "Status bewerken…"
+
+msgid "Set a status…"
+msgstr "Status instellen…"
+
+msgid "Clear status"
+msgstr "Status wissen"
+
+msgid "Set yourself as active"
+msgstr "Jezelf als actief tonen"
+
+msgid "Set yourself as away"
+msgstr "Jezelf als afwezig tonen"
+
+msgid "View profile"
+msgstr "Profiel bekijken"
+
+msgid "Set a status"
+msgstr "Status instellen"
+
+msgid ":emoji:"
+msgstr ":emoji:"
+
+msgid "A shortcode such as :coffee:, or the emoji itself"
+msgstr "Een code zoals :coffee:, of de emoji zelf"
+
+msgid "What's your status?"
+msgstr "Wat is je status?"
+
+msgid "For example"
+msgstr "Bijvoorbeeld"
+
+msgid "Clear after"
+msgstr "Wissen na"

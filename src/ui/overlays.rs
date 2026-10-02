@@ -15,6 +15,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     preview(app, ctx);
     confirm_delete(app, ctx);
     section_dialog(app, ctx);
+    super::people::status_dialog(app, ctx);
     toasts(app, ctx);
 }
 

@@ -113,6 +113,9 @@ impl Hub {
     /// Runs one command for `team`.
     pub fn command(&mut self, team: &str, command: Command) {
         match command {
+            Command::SetStatus { .. } | Command::SetAway(_) => {
+                log::debug!("{command:?} needs the workspace's client");
+            }
             Command::Typing { channel, thread } => {
                 let Some(rtm) = self
                     .teams
@@ -221,6 +224,73 @@ async fn poll(client: Client, team: String, users: Vec<String>, sink: Sink) {
     }
 }
 
+/// Runs a command that calls Slack, answering with its result. Returns
+/// the command back when it is one [`Hub::command`] handles.
+pub fn call(client: Client, team: String, command: Command, sink: Sink) -> Option<Command> {
+    match command {
+        Command::SetStatus {
+            emoji,
+            text,
+            expiration,
+        } => {
+            tokio::spawn(async move {
+                let result = set_status(&client, &emoji, &text, expiration).await;
+                sink.send(Event::People {
+                    team,
+                    event: people::Event::StatusSet {
+                        result: result.map_err(|e| super::worker::describe(&e)),
+                    },
+                });
+            });
+            None
+        }
+        Command::SetAway(away) => {
+            tokio::spawn(async move {
+                let result = set_away(&client, away).await;
+                sink.send(Event::People {
+                    team,
+                    event: people::Event::AwaySet {
+                        away,
+                        result: result.map_err(|e| super::worker::describe(&e)),
+                    },
+                });
+            });
+            None
+        }
+        other => Some(other),
+    }
+}
+
+/// Sets your status: `emoji` as `:name:`, both empty to clear it, and
+/// when it clears by itself in Unix seconds (0 for never). `/status`
+/// goes through here too.
+pub async fn set_status(
+    client: &Client,
+    emoji: &str,
+    text: &str,
+    expiration: i64,
+) -> Result<(), SlackError> {
+    let profile = json!({
+        "status_text": text,
+        "status_emoji": emoji,
+        "status_expiration": expiration,
+    });
+    client
+        .act::<Value>("users.profile.set", &[("profile", profile.to_string())])
+        .await
+        .map(|_| ())
+}
+
+/// Shows you as away, or lets Slack decide again (`auto`), which shows
+/// you active while you use it. `/away` and `/active` go through here.
+pub async fn set_away(client: &Client, away: bool) -> Result<(), SlackError> {
+    let presence = if away { "away" } else { "auto" };
+    client
+        .act::<Value>("users.setPresence", &[("presence", presence.to_owned())])
+        .await
+        .map(|_| ())
+}
+
 /// Reads a real-time event about people, if it is one.
 pub fn translate(event: &Value) -> Option<people::Event> {
     let kind = event.get("type").and_then(Value::as_str)?;
@@ -247,6 +317,10 @@ pub fn translate(event: &Value) -> Option<people::Event> {
                 users: users.into_iter().map(|u| (u, presence)).collect(),
             })
         }
+        // You set yourself away or active, here or in another client.
+        "manual_presence_change" => Some(people::Event::ManualPresence {
+            away: event.get("presence")?.as_str()? == "away",
+        }),
         // Someone typing, over RTM. Socket Mode never sends these.
         "user_typing" => Some(people::Event::Typing {
             channel: event.get("channel")?.as_str()?.to_owned(),
@@ -266,6 +340,17 @@ pub fn translate(event: &Value) -> Option<people::Event> {
 pub fn demo(team: &str, command: Command) -> Vec<Event> {
     match command {
         Command::Typing { .. } => Vec::new(),
+        Command::SetStatus { .. } => vec![Event::People {
+            team: team.to_owned(),
+            event: people::Event::StatusSet { result: Ok(()) },
+        }],
+        Command::SetAway(away) => vec![Event::People {
+            team: team.to_owned(),
+            event: people::Event::AwaySet {
+                away,
+                result: Ok(()),
+            },
+        }],
         Command::Watch { users } => vec![Event::People {
             team: team.to_owned(),
             event: people::Event::Presence {
