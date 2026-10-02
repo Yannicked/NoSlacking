@@ -638,3 +638,27 @@ msgid "{count} day ago"
 msgid_plural "{count} days ago"
 msgstr[0] "{count} dag geleden"
 msgstr[1] "{count} dagen geleden"
+
+msgid "Could not change the reaction"
+msgstr "De reactie kon niet worden gewijzigd"
+
+msgid "Could not delete the message"
+msgstr "Het bericht kon niet worden verwijderd"
+
+msgid "Could not edit the message"
+msgstr "Het bericht kon niet worden bewerkt"
+
+msgid "Or paste the session cookie"
+msgstr "Of plak de sessiecookie"
+
+msgid "Sign in with the link"
+msgstr "Inloggen met de link"
+
+msgid "Sign in with your browser"
+msgstr "Inloggen met je browser"
+
+msgid "Sign-in link"
+msgstr "Inloglink"
+
+msgid "Sign in there as usual. When the page offers to open the Slack app, cancel that and copy its link instead (right-click the Open Slack button → Copy link). It starts with slack://."
+msgstr "Log daar zoals gewoonlijk in. Als de pagina aanbiedt de Slack-app te openen, annuleer dat en kopieer in plaats daarvan de link (klik met rechts op de knop Slack openen → Link kopiëren). Die begint met slack://."
