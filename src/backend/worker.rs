@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
-use super::{Command, Event, Gate, SignIn, Sink, Socket};
+use super::{Change, Command, Event, Gate, SignIn, Sink, Socket};
 use crate::auth::{self, Flow, SignedIn};
 use crate::credentials::{AppCredentials, Credentials};
 use crate::images::ImageLoader;
@@ -534,25 +534,29 @@ impl Worker {
                 channel,
                 ts,
                 text,
-            } => self.act(
-                &team,
-                "chat.update",
-                vec![("channel", channel), ("ts", ts.0), ("text", text)],
-                &[],
-            ),
-            Command::Delete { team, channel, ts } => self.act(
-                &team,
-                "chat.delete",
-                vec![("channel", channel), ("ts", ts.0)],
-                &["message_not_found"],
-            ),
+                before,
+            } => self.change(team, channel, Change::Edit { ts, text, before }),
+            Command::Delete {
+                team,
+                channel,
+                ts,
+                removed,
+            } => self.change(team, channel, Change::Delete { ts, removed }),
             Command::React {
                 team,
                 channel,
                 ts,
                 name,
                 add,
-            } => self.react(team, channel, ts, name, add),
+            } => self.change(
+                team,
+                channel,
+                Change::React {
+                    ts,
+                    name,
+                    added: add,
+                },
+            ),
             Command::Upload {
                 team,
                 channel,
@@ -704,47 +708,33 @@ impl Worker {
         });
     }
 
-    fn react(&self, team: String, channel: String, ts: Ts, name: String, add: bool) {
+    /// Saves an edit, delete or reaction the interface already shows,
+    /// and always answers with [`Event::Settled`] so a refused change can
+    /// be undone, even for a workspace that is not signed in.
+    fn change(&self, team: String, channel: String, change: Change) {
         let Some((client, sink)) = self.team(&team) else {
-            self.not_signed_in("change the reaction");
+            self.sink.send(Event::Settled {
+                team,
+                channel,
+                change,
+                result: Err(NOT_SIGNED_IN.to_owned()),
+            });
             return;
         };
-        let user = self
-            .teams
-            .get(&team)
-            .map(|t| t.user_id.clone())
-            .unwrap_or_default();
         tokio::spawn(async move {
-            let method = if add {
-                "reactions.add"
-            } else {
-                "reactions.remove"
+            let (method, params, ignore) = request(&channel, &change);
+            let result = match client.act::<Value>(method, &params).await {
+                Ok(_) => Ok(()),
+                // Already as asked: nothing to undo.
+                Err(SlackError::Api(code)) if ignore.contains(&code.as_str()) => Ok(()),
+                Err(error) => Err(describe(&error)),
             };
-            let params = [
-                ("channel", channel.clone()),
-                ("timestamp", ts.0.clone()),
-                ("name", name.clone()),
-            ];
-            match client.act::<Value>(method, &params).await {
-                Ok(_) => {}
-                Err(SlackError::Api(code))
-                    if code == "already_reacted" || code == "no_reaction" => {}
-                Err(error) => {
-                    // Undo the optimistic change.
-                    sink.send(Event::Reaction {
-                        team,
-                        channel,
-                        ts,
-                        name,
-                        user,
-                        added: !add,
-                    });
-                    sink.send(Event::Error(format!(
-                        "Could not change the reaction: {}",
-                        describe(&error)
-                    )));
-                }
-            }
+            sink.send(Event::Settled {
+                team,
+                channel,
+                change,
+                result,
+            });
         });
     }
 
@@ -1278,6 +1268,40 @@ impl Worker {
 }
 
 /// A user-facing description of an API failure.
+/// The Web API call that makes a [`Change`], and the error codes that
+/// mean it is already made.
+fn request(
+    channel: &str,
+    change: &Change,
+) -> (
+    &'static str,
+    Vec<(&'static str, String)>,
+    &'static [&'static str],
+) {
+    let channel = ("channel", channel.to_owned());
+    match change {
+        Change::Edit { ts, text, .. } => (
+            "chat.update",
+            vec![channel, ("ts", ts.0.clone()), ("text", text.clone())],
+            &[],
+        ),
+        Change::Delete { ts, .. } => (
+            "chat.delete",
+            vec![channel, ("ts", ts.0.clone())],
+            &["message_not_found"],
+        ),
+        Change::React { ts, name, added } => (
+            if *added {
+                "reactions.add"
+            } else {
+                "reactions.remove"
+            },
+            vec![channel, ("timestamp", ts.0.clone()), ("name", name.clone())],
+            &["already_reacted", "no_reaction"],
+        ),
+    }
+}
+
 pub fn describe(error: &SlackError) -> String {
     if error.is_auth() {
         return "the sign-in is no longer valid; sign in again".into();
@@ -2618,6 +2642,7 @@ mod tests {
             team: "TX".into(),
             channel: "C1".into(),
             ts: Ts::new("1.0"),
+            removed: None,
         });
         worker.command(Command::LoadHistory {
             team: "TX".into(),
@@ -2627,7 +2652,7 @@ mod tests {
         assert!(
             matches!(&events[..], [
                 Event::Sent { local, result: Err(_), .. },
-                Event::Error(_),
+                Event::Settled { change: Change::Delete { .. }, result: Err(_), .. },
                 Event::HistoryFailed { .. },
             ] if local.as_str() == "local-1"),
             "{events:?}"
