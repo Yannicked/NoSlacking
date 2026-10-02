@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
-use super::{Command, Event, SignIn, Sink, Socket};
+use super::{Command, Event, Gate, SignIn, Sink, Socket};
 use crate::auth::{self, Flow, SignedIn};
 use crate::credentials::{AppCredentials, Credentials};
 use crate::images::ImageLoader;
@@ -80,6 +80,21 @@ enum Internal {
 struct Team {
     client: Client,
     user_id: String,
+    /// What this workspace's tasks report through. Signing out closes
+    /// `gate`, so nothing they send afterwards reaches the interface.
+    sink: Sink,
+    gate: Gate,
+    /// The start-up work (lists, people, sections, the unread sweep),
+    /// stopped on sign-out rather than left calling Slack for nothing.
+    boot: tokio::task::AbortHandle,
+}
+
+impl Team {
+    /// Stops everything still running for this workspace.
+    fn shut(&self) {
+        self.gate.close();
+        self.boot.abort();
+    }
 }
 
 /// A real-time socket the worker started, and what it last reported.
@@ -272,13 +287,15 @@ impl Worker {
         }
     }
 
-    fn client(&self, team: &str) -> Option<Client> {
-        self.teams.get(team).map(|t| t.client.clone())
+    /// A workspace's client and the sink for its tasks.
+    fn team(&self, team: &str) -> Option<(Client, Sink)> {
+        self.teams
+            .get(team)
+            .map(|t| (t.client.clone(), t.sink.clone()))
     }
 
-    fn make_client(&self, team: &str, token: Token) -> Client {
+    fn make_client(&self, team: &str, token: Token, sink: Sink) -> Client {
         let credentials = self.credentials.clone();
-        let sink = self.sink.clone();
         let team = team.to_owned();
         Client::new(self.http.clone(), token).with_refresh(
             self.app.as_ref().and_then(AppCredentials::oauth),
@@ -308,23 +325,32 @@ impl Worker {
 
     /// Starts using a signed-in workspace.
     fn add_team(&mut self, workspace: Workspace, token: Token) {
-        let client = self.make_client(&workspace.team_id, token);
+        let (sink, gate) = self.sink.gated();
+        let client = self.make_client(&workspace.team_id, token, sink.clone());
         self.images.set_client(&workspace.team_id, client.clone());
-        self.teams.insert(
+        let session = client.token().is_session();
+        self.sink.send(Event::WorkspaceReady(workspace.clone()));
+        let boot = tokio::spawn(boot(
+            client.clone(),
+            workspace.clone(),
+            self.dirs.clone(),
+            sink.clone(),
+        ))
+        .abort_handle();
+        let replaced = self.teams.insert(
             workspace.team_id.clone(),
             Team {
                 client: client.clone(),
                 user_id: workspace.user_id.clone(),
+                sink,
+                gate,
+                boot,
             },
         );
-        let session = client.token().is_session();
-        self.sink.send(Event::WorkspaceReady(workspace.clone()));
-        tokio::spawn(boot(
-            client.clone(),
-            workspace.clone(),
-            self.dirs.clone(),
-            self.sink.clone(),
-        ));
+        // Signing in again replaces the old sign-in and its tasks.
+        if let Some(old) = replaced {
+            old.shut();
+        }
         if session {
             self.start_rtm(&workspace.team_id, client);
         }
@@ -512,8 +538,8 @@ impl Worker {
                 self.report_socket();
             }
             Command::LoadHistory { team, channel } => {
-                if let Some(client) = self.client(&team) {
-                    tokio::spawn(history(client, team, channel, None, self.sink.clone()));
+                if let Some((client, sink)) = self.team(&team) {
+                    tokio::spawn(history(client, team, channel, None, sink));
                 } else {
                     self.history_unavailable(team, channel);
                 }
@@ -523,21 +549,15 @@ impl Worker {
                 channel,
                 cursor,
             } => {
-                if let Some(client) = self.client(&team) {
-                    tokio::spawn(history(
-                        client,
-                        team,
-                        channel,
-                        Some(cursor),
-                        self.sink.clone(),
-                    ));
+                if let Some((client, sink)) = self.team(&team) {
+                    tokio::spawn(history(client, team, channel, Some(cursor), sink));
                 } else {
                     self.history_unavailable(team, channel);
                 }
             }
             Command::LoadThread { team, channel, ts } => {
-                if let Some(client) = self.client(&team) {
-                    tokio::spawn(thread(client, team, channel, ts, self.sink.clone()));
+                if let Some((client, sink)) = self.team(&team) {
+                    tokio::spawn(thread(client, team, channel, ts, sink));
                 } else {
                     self.not_signed_in("load the thread");
                 }
@@ -550,8 +570,7 @@ impl Worker {
                 broadcast,
                 local,
             } => {
-                if let Some(client) = self.client(&team) {
-                    let sink = self.sink.clone();
+                if let Some((client, sink)) = self.team(&team) {
                     tokio::spawn(async move {
                         let mut params = vec![("channel", channel.clone()), ("text", text)];
                         if let Some(thread) = &thread {
@@ -615,7 +634,7 @@ impl Worker {
                 name,
                 add,
             } => {
-                let Some(client) = self.client(&team) else {
+                let Some((client, sink)) = self.team(&team) else {
                     self.not_signed_in("change the reaction");
                     return;
                 };
@@ -624,7 +643,6 @@ impl Worker {
                     .get(&team)
                     .map(|t| t.user_id.clone())
                     .unwrap_or_default();
-                let sink = self.sink.clone();
                 tokio::spawn(async move {
                     let method = if add {
                         "reactions.add"
@@ -665,11 +683,10 @@ impl Worker {
                 path,
                 comment,
             } => {
-                let Some(client) = self.client(&team) else {
+                let Some((client, sink)) = self.team(&team) else {
                     self.not_signed_in("upload the file");
                     return;
                 };
-                let sink = self.sink.clone();
                 let poll_after = !self.is_live(&team);
                 tokio::spawn(async move {
                     let name = path
@@ -725,11 +742,10 @@ impl Worker {
                 });
             }
             Command::Download { team, url, name } => {
-                let Some(client) = self.client(&team) else {
+                let Some((client, sink)) = self.team(&team) else {
                     self.not_signed_in(&format!("download {name}"));
                     return;
                 };
-                let sink = self.sink.clone();
                 tokio::spawn(async move {
                     match download(&client, &url, &name).await {
                         Ok(path) => sink.send(Event::Notice(format!("Saved {}", path.display()))),
@@ -750,15 +766,15 @@ impl Worker {
             Command::FetchUsers { team, ids } => self.fetch_users(team, ids),
             Command::FetchBots { team, ids } => self.fetch_bots(team, ids),
             Command::Sidebar { team, calls } => {
-                if let Some(client) = self.client(&team) {
-                    tokio::spawn(edit_sidebar(client, team, calls, self.sink.clone()));
+                if let Some((client, sink)) = self.team(&team) {
+                    tokio::spawn(edit_sidebar(client, team, calls, sink));
                 } else {
                     self.not_signed_in("change the sidebar");
                 }
             }
             Command::FetchConversation { team, channel } => {
-                if let Some(client) = self.client(&team) {
-                    tokio::spawn(conversation_info(client, team, channel, self.sink.clone()));
+                if let Some((client, sink)) = self.team(&team) {
+                    tokio::spawn(conversation_info(client, team, channel, sink));
                 }
             }
             Command::Reconnect => {
@@ -777,7 +793,7 @@ impl Worker {
                         team.client.clone(),
                         id.clone(),
                         self.dirs.clone(),
-                        self.sink.clone(),
+                        team.sink.clone(),
                     ));
                 }
             }
@@ -793,12 +809,11 @@ impl Worker {
         params: Vec<(&'static str, String)>,
         ignore: &'static [&'static str],
     ) {
-        let Some(client) = self.client(team) else {
+        let Some((client, sink)) = self.team(team) else {
             self.sink
                 .send(Event::Error(format!("{method} failed: {NOT_SIGNED_IN}")));
             return;
         };
-        let sink = self.sink.clone();
         tokio::spawn(async move {
             match client.act::<Value>(method, &params).await {
                 Ok(_) => {}
@@ -829,7 +844,8 @@ impl Worker {
     }
 
     fn fetch_users(&mut self, team: String, ids: Vec<String>) {
-        let Some(client) = self.client(&team) else {
+        let Some((client, sink)) = self.team(&team) else {
+            log::debug!("not fetching people in {team}: signed out");
             return;
         };
         let ids: Vec<String> = ids
@@ -839,7 +855,6 @@ impl Worker {
         if ids.is_empty() {
             return;
         }
-        let sink = self.sink.clone();
         let internal = self.internal.clone();
         tokio::spawn(async move {
             let mut users = Vec::new();
@@ -872,7 +887,8 @@ impl Worker {
     }
 
     fn fetch_bots(&mut self, team: String, ids: Vec<String>) {
-        let Some(client) = self.client(&team) else {
+        let Some((client, sink)) = self.team(&team) else {
+            log::debug!("not fetching apps in {team}: signed out");
             return;
         };
         let ids: Vec<String> = ids
@@ -882,7 +898,6 @@ impl Worker {
         if ids.is_empty() {
             return;
         }
-        let sink = self.sink.clone();
         let internal = self.internal.clone();
         tokio::spawn(async move {
             let mut bots = Vec::new();
@@ -996,6 +1011,9 @@ impl Worker {
             let _ = live.stop.send(true);
         }
         if let Some(removed) = self.teams.remove(team) {
+            // Before SignedOut goes out: nothing from a task still running
+            // for this workspace can follow it and bring the workspace back.
+            removed.shut();
             let credentials = self.credentials.clone();
             let team = team.to_owned();
             // A session token belongs to the browser login; revoking it would
@@ -1028,6 +1046,8 @@ impl Worker {
     async fn internal(&mut self, message: Internal) {
         match message {
             Internal::Loaded { app, workspaces } => self.loaded(app, workspaces).await,
+            // Signed out since: its entries are gone already.
+            Internal::FetchFailed { team, .. } if !self.teams.contains_key(&team) => {}
             Internal::FetchFailed { team, users, bots } => {
                 for id in users {
                     self.users_requested.remove(&(team.clone(), id));
@@ -1141,18 +1161,13 @@ impl Worker {
             match translated {
                 Translated::Event(event) => self.sink.send(event),
                 Translated::Refresh(channel) => {
-                    if let Some(client) = self.client(team) {
-                        tokio::spawn(conversation_info(
-                            client,
-                            team.to_owned(),
-                            channel,
-                            self.sink.clone(),
-                        ));
+                    if let Some((client, sink)) = self.team(team) {
+                        tokio::spawn(conversation_info(client, team.to_owned(), channel, sink));
                     }
                 }
                 Translated::RefreshSections => {
-                    if let Some(client) = self.client(team) {
-                        tokio::spawn(sections(client, team.to_owned(), self.sink.clone()));
+                    if let Some((client, sink)) = self.team(team) {
+                        tokio::spawn(sections(client, team.to_owned(), sink));
                     }
                 }
             }
@@ -1179,13 +1194,13 @@ impl Worker {
         if self.is_live(team) {
             return;
         }
-        if let Some(client) = self.client(team) {
+        if let Some((client, sink)) = self.team(team) {
             self.polling = Some(tokio::spawn(history(
                 client,
                 team.clone(),
                 channel.clone(),
                 None,
-                self.sink.clone(),
+                sink,
             )));
         }
     }
@@ -1341,11 +1356,18 @@ async fn boot(client: Client, workspace: Workspace, dirs: AppDirs, sink: Sink) {
         }),
         Err(error) => log::info!("emoji.list: {error}"),
     }
-    tokio::spawn(users(client.clone(), team.clone(), dirs, sink.clone()));
-    tokio::spawn(sections(client.clone(), team.clone(), sink.clone()));
-    if let Some(list) = list {
-        unread_sweep(client, team, list, sink).await;
-    }
+    // Side by side, but inside this task, so stopping the boot on sign-out
+    // stops them too.
+    let sweep = async {
+        if let Some(list) = list {
+            unread_sweep(client.clone(), team.clone(), list, sink.clone()).await;
+        }
+    };
+    tokio::join!(
+        users(client.clone(), team.clone(), dirs, sink.clone()),
+        sections(client.clone(), team.clone(), sink.clone()),
+        sweep,
+    );
 }
 
 /// Every conversation you are in.
@@ -2161,6 +2183,7 @@ mod tests {
         let sink = Sink {
             sender,
             waker: super::super::Waker::default(),
+            gate: None,
         };
         let root = std::env::temp_dir().join(format!("noslacking-test-{}", std::process::id()));
         let http = reqwest::Client::new();
@@ -2181,11 +2204,16 @@ mod tests {
 
     fn team(worker: &mut Worker, id: &str, token: Token) {
         let client = Client::new(reqwest::Client::new(), token);
+        let (sink, gate) = worker.sink.gated();
+        let boot = tokio::spawn(async {}).abort_handle();
         worker.teams.insert(
             id.to_owned(),
             Team {
                 client,
                 user_id: "U1".into(),
+                sink,
+                gate,
+                boot,
             },
         );
     }
@@ -2385,6 +2413,38 @@ mod tests {
             ] if local.as_str() == "local-1"),
             "{events:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn nothing_from_a_signed_out_workspace_gets_through() {
+        let (mut worker, events) = worker();
+        team(&mut worker, "TA", session());
+        let (_, sink) = worker.team("TA").expect("signed in");
+        let pending = tokio::spawn(std::future::pending::<()>());
+        if let Some(team) = worker.teams.get_mut("TA") {
+            team.boot = pending.abort_handle();
+        }
+        worker.sign_out("TA");
+        // A task that outlived the sign-out reports a late WorkspaceReady.
+        sink.send(Event::WorkspaceReady(Workspace {
+            team_id: "TA".into(),
+            name: "A".into(),
+            domain: String::new(),
+            icon: None,
+            user_id: "U1".into(),
+        }));
+        let events: Vec<Event> = events.try_iter().collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::SignedOut { team, reason: None } if team == "TA")),
+            "{events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::WorkspaceReady(_))),
+            "{events:?}"
+        );
+        assert!(pending.await.is_err_and(|e| e.is_cancelled()));
     }
 
     #[test]

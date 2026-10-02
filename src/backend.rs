@@ -9,7 +9,7 @@ pub mod worker;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
 pub use fastframe_shell::Waker;
 
@@ -266,12 +266,53 @@ impl Backend {
 pub struct Sink {
     sender: mpsc::Sender<Event>,
     waker: Waker,
+    /// For one workspace's tasks: whether the workspace is still signed
+    /// in. Closed, the sink drops everything.
+    gate: Option<Arc<Mutex<bool>>>,
 }
 
 impl Sink {
     pub fn send(&self, event: Event) {
-        let _ = self.sender.send(event);
+        match &self.gate {
+            Some(gate) => {
+                // The lock is held across the send, so once `close` has
+                // returned no event from this sink can still arrive.
+                let open = gate.lock().unwrap_or_else(PoisonError::into_inner);
+                if !*open {
+                    return;
+                }
+                let _ = self.sender.send(event);
+            }
+            None => {
+                let _ = self.sender.send(event);
+            }
+        }
         self.waker.wake();
+    }
+
+    /// A sink for one workspace's tasks, and the gate that silences it when
+    /// the workspace signs out. A task that is still running then cannot
+    /// bring the workspace back with a late event.
+    pub fn gated(&self) -> (Sink, Gate) {
+        let gate = Arc::new(Mutex::new(true));
+        let sink = Sink {
+            sender: self.sender.clone(),
+            waker: self.waker.clone(),
+            gate: Some(gate.clone()),
+        };
+        (sink, Gate(gate))
+    }
+}
+
+/// Silences the sinks made with it by [`Sink::gated`].
+#[derive(Debug)]
+pub struct Gate(Arc<Mutex<bool>>);
+
+impl Gate {
+    /// Drops every later event from the gated sinks. Events already sent
+    /// stay sent.
+    pub fn close(&self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = false;
     }
 }
 
@@ -293,6 +334,7 @@ pub fn spawn(waker: &Waker, source: Source, cache_dir: PathBuf) -> Backend {
     let sink = Sink {
         sender,
         waker: waker.clone(),
+        gate: None,
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
