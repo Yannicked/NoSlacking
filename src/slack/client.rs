@@ -288,8 +288,13 @@ impl Client {
         }
     }
 
-    /// Downloads a file that needs the token (`url_private`).
+    /// Downloads a file that needs the token (`url_private`). The token and
+    /// cookie go only to Slack's file host; any other URL, which a bot or a
+    /// link preview can choose, is fetched without them.
     pub async fn get_bytes(&self, url: &str, max: usize) -> Result<Vec<u8>, SlackError> {
+        if !is_slack_file_url(url) {
+            return get_bytes(&self.http, url, None, None, max).await;
+        }
         let token = self.access_token().await?;
         get_bytes(&self.http, url, Some(&token), self.cookie().as_deref(), max).await
     }
@@ -368,6 +373,25 @@ pub fn retry_after(status: u16, header: Option<&reqwest::header::HeaderValue>) -
 
 fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(500 * 2u64.pow(attempt.min(5)))
+}
+
+/// The hosts that serve private files and may see the token.
+const FILE_HOSTS: &[&str] = &["files.slack.com"];
+
+/// Whether `url` is a private file on Slack's file host: `https`, an exact
+/// host match, the default port and no credentials of its own. Anything
+/// else must never be sent the workspace's token.
+pub fn is_slack_file_url(url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url
+            .host_str()
+            .is_some_and(|host| FILE_HOSTS.contains(&host))
 }
 
 /// Fetches `url`, with the token when given, refusing more than `max` bytes
@@ -497,6 +521,28 @@ mod tests {
             Some(Duration::from_secs(120))
         );
         assert_eq!(retry_after(200, Some(&header)), None);
+    }
+
+    #[test]
+    fn only_slack_file_urls_may_see_the_token() {
+        assert!(is_slack_file_url(
+            "https://files.slack.com/files-pri/T1-F1/a.png"
+        ));
+        assert!(is_slack_file_url("https://FILES.slack.com/files-pri/a.png"));
+        for hostile in [
+            "https://evil.example/x.png?files.slack.com",
+            "https://evil.example/files.slack.com/x.png",
+            "https://files.slack.com.evil.example/x.png",
+            "https://files.slack.com@evil.example/x.png",
+            "https://user@files.slack.com/x.png",
+            "https://files.slack.com:8443/x.png",
+            "http://files.slack.com/x.png",
+            "https://evilfiles.slack.com/x.png",
+            "files.slack.com/x.png",
+            "",
+        ] {
+            assert!(!is_slack_file_url(hostile), "{hostile}");
+        }
     }
 
     #[test]

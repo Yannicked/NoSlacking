@@ -174,10 +174,10 @@ pub fn file_size(bytes: u64) -> String {
 /// The URI an image of `team` loads by: public URLs as they are, files
 /// through the authenticated loader.
 pub fn image_uri(team: &str, url: &str) -> String {
-    if url.starts_with("bytes://") || !url.contains("files.slack.com") {
-        url.to_owned()
-    } else {
+    if crate::slack::client::is_slack_file_url(url) {
         crate::images::authed(team, url)
+    } else {
+        url.to_owned()
     }
 }
 
@@ -202,5 +202,10 @@ mod tests {
             image_uri("T1", "https://avatars.slack-edge.com/a.png"),
             "https://avatars.slack-edge.com/a.png"
         );
+        assert_eq!(
+            image_uri("T1", "https://evil.example/x.png?files.slack.com"),
+            "https://evil.example/x.png?files.slack.com"
+        );
+        assert_eq!(image_uri("T1", "bytes://a.png"), "bytes://a.png");
     }
 }
