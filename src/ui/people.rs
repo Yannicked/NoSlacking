@@ -346,6 +346,28 @@ pub fn huddle_button(
     }
 }
 
+/// What the globe beside an external conversation or person says.
+pub fn external_tip(direct: bool) -> std::borrow::Cow<'static, str> {
+    if direct {
+        t("From another organization")
+    } else {
+        t("Shared with another organization")
+    }
+}
+
+/// A small globe and "External", beside a name.
+pub fn external_tag(ui: &mut egui::Ui, palette: &Palette, direct: bool) {
+    let tag = egui::Button::image_and_text(
+        theme::Icon::Globe.image(palette.secondary, 12.0),
+        RichText::new(t("External"))
+            .font(theme::regular(12.0))
+            .color(palette.secondary),
+    )
+    .frame(false)
+    .sense(egui::Sense::hover());
+    ui.add(tag).on_hover_text(external_tip(direct));
+}
+
 /// The word for a presence, for tooltips and screen readers.
 pub fn word(presence: Presence) -> std::borrow::Cow<'static, str> {
     match presence {

@@ -1282,3 +1282,12 @@ msgstr[1] "Huddle · {count} personen"
 
 msgid "Join the huddle in Slack: {names}"
 msgstr "Neem deel aan de huddle in Slack: {names}"
+
+msgid "From another organization"
+msgstr "Van een andere organisatie"
+
+msgid "Shared with another organization"
+msgstr "Gedeeld met een andere organisatie"
+
+msgid "External"
+msgstr "Extern"

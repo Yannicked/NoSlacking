@@ -126,6 +126,9 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                         .sense(egui::Sense::click()),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if crate::people::is_external_conversation(workspace, conversation) {
+                    super::people::external_tag(ui, &palette, conversation.kind == ConversationKind::Direct);
+                }
                 if name.clicked()
                     && let Some(user) = &conversation.user
                 {

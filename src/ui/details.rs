@@ -421,13 +421,20 @@ fn members(
                     } else {
                         String::new()
                     };
-                    ui.painter().text(
+                    let detail = ui.painter().text(
                         egui::pos2(label.right() + 8.0, rect.center().y),
                         egui::Align2::LEFT_CENTER,
                         detail,
                         theme::regular(12.5),
                         palette.dim,
                     );
+                    if crate::people::is_external(workspace, id) {
+                        let at = egui::Rect::from_center_size(
+                            egui::pos2(detail.right() + 14.0, rect.center().y),
+                            Vec2::splat(12.0),
+                        );
+                        theme::Icon::Globe.image(palette.dim, 12.0).paint_at(ui, at);
+                    }
                 }
                 theme::describe(&row, egui::WidgetType::Button, &name);
                 if row

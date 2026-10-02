@@ -98,6 +98,11 @@ fn users() -> Vec<User> {
             is_bot: true,
             ..user("U05", "ci", "Deploy Bot", "")
         },
+        // Someone from a partner company, reached through Slack Connect.
+        User {
+            team: "TPARTNER".into(),
+            ..user("U06", "lee", "Lee Chen", "Partner engineer")
+        },
     ]
 }
 
@@ -121,6 +126,7 @@ fn conversation(
         latest: Some(ts(latest)),
         unread: 0,
         mentions: 0,
+        external: false,
     }
 }
 
@@ -179,6 +185,17 @@ fn conversations() -> Vec<Conversation> {
             NOW - 100,
             NOW - 100,
         ),
+        // Shared with a partner company through Slack Connect.
+        Conversation {
+            external: true,
+            ..conversation(
+                "C06",
+                "acme-partners",
+                ConversationKind::Channel,
+                NOW - 20_000,
+                NOW - 20_000,
+            )
+        },
     ];
     for (id, user, latest, read) in [
         ("D01", "U01", NOW - 200, NOW - 900),
