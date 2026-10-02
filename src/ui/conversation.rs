@@ -249,11 +249,12 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
 fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     let palette = app.palette;
     let scroll_key = format!("{team}/{channel}");
-    let to_bottom = std::mem::take(&mut app.scroll_to_bottom);
+    let to_bottom = app.scroll_to_bottom.remove(&scroll_key);
+    // An anchor for another list is stale by now: drop it either way.
     let prepended = app
         .prepended
-        .take_if(|(key, _)| *key == scroll_key)
-        .is_some();
+        .take()
+        .is_some_and(|(key, _)| key == scroll_key);
     let App {
         workspaces,
         settings,

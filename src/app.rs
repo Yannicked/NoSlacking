@@ -340,8 +340,10 @@ pub struct App {
     pub demo: bool,
     /// Older history arrived: the list keeps its place by this much.
     pub prepended: Option<(String, f32)>,
-    /// Scroll the open conversation to the bottom next frame.
-    pub scroll_to_bottom: bool,
+    /// Lists to scroll to the bottom when next drawn, by
+    /// [`App::draft_key`]: a reply sent in a thread must not move the
+    /// conversation beside it.
+    pub scroll_to_bottom: HashSet<String>,
     /// Focus the composer next frame.
     pub focus_composer: bool,
     local_counter: u64,
@@ -436,7 +438,7 @@ impl App {
             sidebar_filter: String::new(),
             demo: options.demo,
             prepended: None,
-            scroll_to_bottom: true,
+            scroll_to_bottom: HashSet::new(),
             focus_composer: true,
             local_counter: 0,
             uploads: mpsc::channel(),
@@ -993,7 +995,8 @@ impl App {
             self.prepended = Some((format!("{team}/{channel}"), 0.0));
         }
         if first {
-            self.scroll_to_bottom = true;
+            self.scroll_to_bottom
+                .insert(Self::draft_key(team, channel, None));
         }
         self.fetch_users(team, users);
         self.fetch_bots(team, bots);
@@ -1278,7 +1281,10 @@ impl App {
         self.thread = None;
         self.editing = None;
         self.page = Page::Main;
-        self.scroll_to_bottom = true;
+        self.scroll_to_bottom
+            .insert(Self::draft_key(&team, channel, None));
+        // An anchor kept for another conversation's older page.
+        self.prepended = None;
         self.focus_composer = true;
         self.remember_read_line(&team, channel);
         self.ensure_loaded(&team, channel);
@@ -1356,7 +1362,8 @@ impl App {
                 .or_default()
                 .upsert(message),
         }
-        self.scroll_to_bottom = true;
+        self.scroll_to_bottom
+            .insert(Self::draft_key(&team, &channel, thread.as_ref()));
         self.backend.send(Command::Send {
             team,
             channel,
@@ -1476,8 +1483,10 @@ impl App {
                 self.save_settings();
                 self.thread = None;
                 self.page = Page::Main;
-                self.scroll_to_bottom = true;
+                self.prepended = None;
                 if let Some(channel) = self.workspace_mut(&team).and_then(|w| w.active.clone()) {
+                    self.scroll_to_bottom
+                        .insert(Self::draft_key(&team, &channel, None));
                     self.remember_read_line(&team, &channel);
                     self.ensure_loaded(&team, &channel);
                     self.mark_read(&team, &channel);
