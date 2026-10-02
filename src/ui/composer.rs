@@ -46,6 +46,15 @@ impl Suggestion {
     }
 }
 
+/// What `@here`, `@channel` and `@everyone` each do, for the suggestion.
+fn broadcast_description(name: &str) -> std::borrow::Cow<'static, str> {
+    match name {
+        "here" => t("Notify everyone online in this conversation"),
+        "channel" => t("Notify every member of this conversation"),
+        _ => t("Notify everyone in the workspace"),
+    }
+}
+
 /// The word before the cursor, and where it starts (in chars).
 fn current_word(text: &str, cursor: usize) -> Option<(usize, String)> {
     let chars: Vec<char> = text.chars().collect();
@@ -415,7 +424,7 @@ fn suggestion_list(
                                 .color(palette.text),
                         );
                         child.label(
-                            RichText::new(t("Notify everyone here"))
+                            RichText::new(broadcast_description(name))
                                 .font(theme::regular(12.5))
                                 .color(palette.dim),
                         );
