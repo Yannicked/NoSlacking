@@ -1085,6 +1085,7 @@ mod tests {
             latest: None,
             unread: 0,
             mentions: 0,
+            external: false,
         });
         assert_eq!(
             existing_dm(&workspace, &["U1".into()]).as_deref(),
@@ -1205,6 +1206,7 @@ mod tests {
             latest: None,
             unread: 0,
             mentions: 0,
+            external: false,
         });
         assert_eq!(
             new_channel_name(&workspace, "General"),

@@ -206,6 +206,7 @@ mod tests {
             latest: Some(Ts::new(if unread { "2.0" } else { "1.0" })),
             unread: 0,
             mentions: 0,
+            external: false,
         }
     }
 

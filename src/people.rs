@@ -1,5 +1,5 @@
 //! People around you: who is active or away, who is typing, who is in a
-//! huddle, and your own status.
+//! huddle, who comes from another organization, and your own status.
 //!
 //! The app works out which people are on screen (your direct messages,
 //! the profile card, a channel's member list) and asks the worker to
@@ -328,6 +328,42 @@ impl TeamPeople {
     }
 }
 
+/// Whether someone comes from outside your organization: Slack calls them
+/// a stranger, or they belong to another workspace that is not part of
+/// the same Enterprise Grid organization as you.
+pub fn is_external(workspace: &WorkspaceState, user: &str) -> bool {
+    let Some(user) = workspace.user(user) else {
+        return false;
+    };
+    if user.stranger {
+        return true;
+    }
+    if user.team.is_empty() || user.team == workspace.info.team_id {
+        return false;
+    }
+    // On Enterprise Grid people of the same organization belong to many
+    // workspaces of it; only another organization is outside.
+    let mine = workspace
+        .user(&workspace.info.user_id)
+        .map(|me| me.enterprise.as_str())
+        .unwrap_or_default();
+    mine.is_empty() || user.enterprise != mine
+}
+
+/// Whether a conversation reaches outside your organization: a channel
+/// shared through Slack Connect, or a direct message with someone from
+/// elsewhere.
+pub fn is_external_conversation(
+    workspace: &WorkspaceState,
+    conversation: &crate::model::Conversation,
+) -> bool {
+    conversation.external
+        || conversation
+            .user
+            .as_deref()
+            .is_some_and(|user| is_external(workspace, user))
+}
+
 /// The line under the composer: who is typing, by name.
 pub fn typing_line(names: &[String]) -> Option<String> {
     match names {
@@ -617,6 +653,7 @@ mod tests {
             latest: Some(Ts::new(latest)),
             unread: 0,
             mentions: 0,
+            external: false,
         }
     }
 
@@ -767,6 +804,74 @@ mod tests {
                 preset.emoji
             );
         }
+    }
+
+    /// Someone as `users.info` sends them, through the real parser.
+    fn parsed(json: serde_json::Value) -> User {
+        serde_json::from_value::<crate::slack::types::User>(json)
+            .expect("a user")
+            .into_model()
+    }
+
+    #[test]
+    fn people_from_other_organizations_are_external() {
+        let mut workspace = workspace();
+        let me = parsed(serde_json::json!({
+            "id": "U0", "team_id": "T1",
+            "enterprise_user": {"id": "U0", "enterprise_id": "E1", "teams": ["T1", "T2"]}
+        }));
+        let colleague = parsed(serde_json::json!({
+            "id": "W1", "team_id": "T2", "profile": {"real_name": "Kim"},
+            "enterprise_user": {"id": "W1", "enterprise_id": "E1", "enterprise_name": "Acme"}
+        }));
+        let partner = parsed(serde_json::json!({
+            "id": "U7", "team_id": "T9", "profile": {"real_name": "Lee"}
+        }));
+        let stranger = parsed(serde_json::json!({"id": "U8", "is_stranger": true}));
+        let local = parsed(serde_json::json!({"id": "U1", "team_id": "T1"}));
+        assert_eq!(colleague.enterprise, "E1");
+        for user in [me, colleague, partner, stranger, local] {
+            workspace.users.insert(user.id.clone(), user);
+        }
+        assert!(!is_external(&workspace, "W1"), "same organization");
+        assert!(is_external(&workspace, "U7"));
+        assert!(is_external(&workspace, "U8"));
+        assert!(!is_external(&workspace, "U1"));
+        assert!(!is_external(&workspace, "U404"), "not known yet");
+        // Without Enterprise Grid, any other workspace is outside.
+        if let Some(me) = workspace.users.get_mut("U0") {
+            me.enterprise.clear();
+        }
+        assert!(is_external(&workspace, "W1"));
+        let mut chat = dm("D7", "U7", "1.0");
+        assert!(is_external_conversation(&workspace, &chat));
+        chat.user = Some("U1".into());
+        assert!(!is_external_conversation(&workspace, &chat));
+    }
+
+    #[test]
+    fn grid_and_connect_channels_parse() {
+        let parse = |json: serde_json::Value| {
+            serde_json::from_value::<crate::slack::types::Channel>(json)
+                .expect("a channel")
+                .into_model()
+        };
+        let connect = parse(serde_json::json!({
+            "id": "C1", "name": "partners", "is_channel": true,
+            "is_shared": true, "is_ext_shared": true,
+            "enterprise_id": "E1", "context_team_id": "T1",
+            "shared_team_ids": ["T1", "T9"], "conversation_host_id": "T9"
+        }));
+        assert!(connect.external);
+        let org = parse(serde_json::json!({
+            "id": "C2", "name": "all-acme", "is_channel": true,
+            "is_shared": true, "is_org_shared": true, "enterprise_id": "E1"
+        }));
+        assert!(!org.external, "shared within the organization only");
+        let pending = parse(serde_json::json!({
+            "id": "C3", "name": "soon", "is_channel": true, "is_pending_ext_shared": true
+        }));
+        assert!(pending.external);
     }
 
     #[test]

@@ -3333,6 +3333,7 @@ mod tests {
             latest: Some(Ts::new("9.0")),
             unread: 0,
             mentions: 2,
+            external: false,
         };
         let fresh = Conversation {
             name: "renamed".into(),
@@ -3362,6 +3363,7 @@ mod tests {
             latest: Some(Ts::new(latest)),
             unread,
             mentions,
+            external: false,
         }
     }
 

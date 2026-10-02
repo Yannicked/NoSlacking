@@ -603,7 +603,7 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
             team: team.to_owned(),
             event: convos::Event::Members {
                 channel,
-                result: Ok(["U00", "U01", "U02", "U03", "U04", "U05"]
+                result: Ok(["U00", "U01", "U02", "U03", "U04", "U05", "U06"]
                     .map(str::to_owned)
                     .to_vec()),
             },

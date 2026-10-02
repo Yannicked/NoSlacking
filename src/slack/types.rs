@@ -82,6 +82,9 @@ pub struct Channel {
     pub latest: Option<Value>,
     pub unread_count: Option<u32>,
     pub unread_count_display: Option<u32>,
+    /// Shared with another organization (Slack Connect), or invited to be.
+    pub is_ext_shared: bool,
+    pub is_pending_ext_shared: bool,
 }
 
 impl Channel {
@@ -129,6 +132,7 @@ impl Channel {
             latest,
             unread: self.unread_count_display.or(self.unread_count).unwrap_or(0),
             mentions: 0,
+            external: self.is_ext_shared || self.is_pending_ext_shared,
         }
     }
 }
@@ -715,6 +719,19 @@ pub struct User {
     pub is_bot: bool,
     pub tz: Option<String>,
     pub profile: Profile,
+    /// The person's own workspace.
+    pub team_id: String,
+    /// Someone from outside your organization you share a channel with.
+    pub is_stranger: bool,
+    /// On Enterprise Grid: the organization the person belongs to.
+    pub enterprise_user: Option<EnterpriseUser>,
+}
+
+/// A person's place in an Enterprise Grid organization.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct EnterpriseUser {
+    pub enterprise_id: String,
 }
 
 impl User {
@@ -735,6 +752,12 @@ impl User {
             status_text: self.profile.status_text,
             status_emoji: self.profile.status_emoji,
             tz: self.tz,
+            team: self.team_id,
+            enterprise: self
+                .enterprise_user
+                .map(|e| e.enterprise_id)
+                .unwrap_or_default(),
+            stranger: self.is_stranger,
         }
     }
 }

@@ -631,6 +631,7 @@ mod tests {
             latest: Some(Ts::new(latest)),
             unread: 0,
             mentions: 0,
+            external: false,
         }
     }
 

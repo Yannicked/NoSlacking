@@ -643,6 +643,7 @@ fn profile(app: &mut App, ctx: &egui::Context) {
     };
     let user = workspace.user(&user_id).cloned();
     let presence = workspace.people.presence(&user_id);
+    let external = crate::people::is_external(workspace, &user_id);
     let dm = app.direct_message(&user_id);
     let mut close = false;
     let response = egui::Modal::new(egui::Id::new("profile"))
@@ -700,6 +701,9 @@ fn profile(app: &mut App, ctx: &egui::Context) {
                                 .font(theme::regular(13.0))
                                 .color(palette.dim),
                         );
+                    }
+                    if external {
+                        super::people::external_tag(ui, &palette, true);
                     }
                 });
             });
