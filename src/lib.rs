@@ -14,6 +14,7 @@ pub mod emoji;
 pub mod i18n;
 pub mod images;
 pub mod jump;
+pub mod links;
 pub mod model;
 pub mod mrkdwn;
 pub mod paths;

@@ -456,6 +456,15 @@ fn history(channel: &str) -> Vec<Message> {
                 "U01",
                 "Sure, sending notes in a bit :slightly_smiling_face:",
             ),
+            // A permalink to an old message in #general, which opens here.
+            message(
+                NOW - 150,
+                "U01",
+                &format!(
+                    "Same question came up before: <https://acme-inc.slack.com/archives/C01/p{}000100>",
+                    NOW - 90 * (LONG - 20) as u64
+                ),
+            ),
         ],
         _ => vec![message(
             NOW - 9000,

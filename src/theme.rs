@@ -362,6 +362,7 @@ fastframe_icons::icons! {
         Hash => "hash",
         Image => "image",
         Info => lucide "info",
+        Link => "link",
         Lock => lucide "lock",
         LogOut => lucide "log-out",
         MessageCircle => "message-circle",
