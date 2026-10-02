@@ -49,12 +49,22 @@ pub fn loopback_redirect(port: u16) -> String {
 }
 
 /// One sign-in attempt.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Flow {
     pub state: String,
     pub verifier: String,
     pub redirect_uri: String,
     pub url: String,
+}
+
+/// Leaves out the PKCE verifier and the state, which together finish the
+/// sign-in.
+impl std::fmt::Debug for Flow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Flow")
+            .field("redirect_uri", &self.redirect_uri)
+            .finish_non_exhaustive()
+    }
 }
 
 fn random_token(bytes: usize) -> String {

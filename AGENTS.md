@@ -24,8 +24,9 @@ ZapFast and Spotifast.
 - Tests never touch the network, the keyring or the clock-dependent world.
   Parse fixtures, test pure functions. `cargo test` must pass offline.
 - Secrets (tokens, cookies, the client secret) live only in the OS keyring
-  (`src/credentials.rs`) and never in settings or logs. `redact_tokens` in
-  `src/main.rs` keeps them out of the log.
+  (`src/credentials.rs`) and never in settings or logs. `src/redact.rs`
+  keeps them out of the log and the panic log; types holding a secret
+  print it as `<redacted>` in `Debug`.
 - Every public item is documented. Comments say why, in plain words.
 - The code compiles on Linux, macOS and Windows; platform code is behind
   `cfg` with a fallback.

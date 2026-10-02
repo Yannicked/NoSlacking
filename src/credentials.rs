@@ -20,12 +20,23 @@ use crate::paths::APP_ID;
 use crate::slack::Token;
 
 /// The Slack app the user registered (see `slack-app-manifest.yaml`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AppCredentials {
     pub client_id: String,
     pub client_secret: String,
     /// The app-level token (`xapp-`) with `connections:write`, for Socket Mode.
     pub app_token: String,
+}
+
+/// Shows only the client id; the secret and app token never print.
+impl std::fmt::Debug for AppCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppCredentials")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &crate::redact::REDACTED)
+            .field("app_token", &crate::redact::REDACTED)
+            .finish()
+    }
 }
 
 impl AppCredentials {

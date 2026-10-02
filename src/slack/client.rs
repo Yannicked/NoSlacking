@@ -57,7 +57,7 @@ impl SlackError {
 }
 
 /// A workspace's user token and, when the app rotates tokens, what renews it.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Token {
     pub access: String,
     #[serde(default)]
@@ -112,11 +112,38 @@ impl Token {
     }
 }
 
+/// Shows only when the token expires and what kind it is.
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Token")
+            .field("access", &crate::redact::REDACTED)
+            .field(
+                "refresh",
+                &self.refresh.as_ref().map(|_| crate::redact::REDACTED),
+            )
+            .field("expires_at", &self.expires_at)
+            .field(
+                "cookie",
+                &self.cookie.as_ref().map(|_| crate::redact::REDACTED),
+            )
+            .finish()
+    }
+}
+
 /// The app's OAuth credentials, for refreshing rotating tokens.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OauthApp {
     pub client_id: String,
     pub client_secret: String,
+}
+
+impl std::fmt::Debug for OauthApp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OauthApp")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &crate::redact::REDACTED)
+            .finish()
+    }
 }
 
 type OnRefresh = Arc<dyn Fn(&Token) + Send + Sync>;
@@ -521,6 +548,27 @@ mod tests {
             Some(Duration::from_secs(120))
         );
         assert_eq!(retry_after(200, Some(&header)), None);
+    }
+
+    #[test]
+    fn secrets_never_print() {
+        let token = Token {
+            access: "xoxp-1".into(),
+            refresh: Some("xoxe-1".into()),
+            expires_at: Some(5),
+            cookie: Some("xoxd-1".into()),
+            workspace_url: None,
+        };
+        let app = OauthApp {
+            client_id: "123.456".into(),
+            client_secret: "s3cr3t".into(),
+        };
+        let printed = format!("{token:?} {app:?} {:#?}", token);
+        assert!(
+            !printed.contains("xox") && !printed.contains("s3cr3t"),
+            "{printed}"
+        );
+        assert!(printed.contains("123.456") && printed.contains("expires_at"));
     }
 
     #[test]
