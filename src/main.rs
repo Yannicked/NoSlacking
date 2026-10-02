@@ -63,6 +63,13 @@ struct Cli {
     #[arg(long, value_name = "X,Y")]
     demo_click: Option<String>,
 
+    /// Press keys one per frame from 2.5 s in, such as
+    /// "Shift+ArrowUp,ArrowUp,R" (egui key names), to capture keyboard
+    /// states.
+    #[cfg(feature = "demo")]
+    #[arg(long, value_name = "KEYS")]
+    demo_keys: Option<String>,
+
     /// Scroll the message list up by this many lines, 2.5 s in, as a
     /// reader would.
     #[cfg(feature = "demo")]
@@ -279,6 +286,20 @@ impl eframe::App for Window {
                 });
             }
         }
+        if self.demo.started.elapsed() > std::time::Duration::from_millis(2500)
+            && !self.demo.keys.is_empty()
+        {
+            let (key, modifiers) = self.demo.keys.remove(0);
+            for pressed in [true, false] {
+                input.events.push(egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                });
+            }
+        }
         if let Some(lines) = self.demo.wheel
             && self.demo.started.elapsed() > std::time::Duration::from_millis(2500)
         {
@@ -337,6 +358,29 @@ fn point(text: Option<&str>) -> Option<egui::Pos2> {
     Some(egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
 
+/// One key of `--demo-keys`: an egui key name after any "Shift+", "Alt+"
+/// or "Ctrl+".
+#[cfg(feature = "demo")]
+fn demo_key(spec: &str) -> Option<(egui::Key, egui::Modifiers)> {
+    let mut modifiers = egui::Modifiers::NONE;
+    let mut rest = spec.trim();
+    loop {
+        if let Some(after) = rest.strip_prefix("Shift+") {
+            modifiers |= egui::Modifiers::SHIFT;
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("Alt+") {
+            modifiers |= egui::Modifiers::ALT;
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("Ctrl+") {
+            modifiers |= egui::Modifiers::COMMAND;
+            rest = after;
+        } else {
+            break;
+        }
+    }
+    Some((egui::Key::from_name(rest)?, modifiers))
+}
+
 /// Screenshot and view options for demo runs.
 #[cfg(feature = "demo")]
 #[derive(Clone)]
@@ -354,6 +398,8 @@ struct DemoSetup {
     right_click: Option<egui::Pos2>,
     /// Where to click, once.
     click: Option<egui::Pos2>,
+    /// Keys still to press, one per frame.
+    keys: Vec<(egui::Key, egui::Modifiers)>,
     started: std::time::Instant,
 }
 
@@ -368,6 +414,13 @@ impl DemoSetup {
             wheel: cli.demo_wheel,
             right_click: point(cli.demo_right_click.as_deref()),
             click: point(cli.demo_click.as_deref()),
+            keys: cli
+                .demo_keys
+                .as_deref()
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(demo_key)
+                .collect(),
             started: std::time::Instant::now(),
             hover: cli
                 .demo_hover
