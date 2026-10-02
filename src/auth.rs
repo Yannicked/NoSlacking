@@ -295,8 +295,10 @@ async fn accept_either(
 
 /// Registers `noslacking://` and `slack://` with the desktop so the browser
 /// can hand sign-in links back. Linux writes a desktop file for this
-/// executable; Windows writes the per-user URL protocol keys. macOS needs an
-/// app bundle, which declares the schemes in its Info.plist.
+/// executable; Windows writes the per-user URL protocol keys. On macOS the
+/// app bundle's Info.plist declares the schemes, but the links arrive as an
+/// Apple event the app cannot receive without `unsafe` AppKit code, so this
+/// fails there (see CONTRIBUTING.md).
 pub fn register_scheme() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     register_scheme_for(&exe)
@@ -384,7 +386,7 @@ fn run_reg(args: &[&str]) -> Result<(), String> {
 #[cfg(not(any(target_os = "linux", windows)))]
 fn register_scheme_for(_exe: &std::path::Path) -> Result<(), String> {
     Err(
-        "noslacking:// links need the app bundle on this platform; use the loopback redirect"
+        "this platform does not hand noslacking:// links to the app yet; use the loopback redirect"
             .into(),
     )
 }

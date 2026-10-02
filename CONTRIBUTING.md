@@ -63,9 +63,21 @@ packaging/macos/bundle.sh target/release/noslacking 0.1.0 dist
 ```
 
 For a universal binary, build `aarch64-apple-darwin` and
-`x86_64-apple-darwin` and `lipo -create` them first. The bundle is not notarized, so Gatekeeper asks on first launch. The
-app does not yet handle macOS's open-URL event, so sign-in there keeps the
-loopback redirect even inside the bundle.
+`x86_64-apple-darwin` and `lipo -create` them first. The bundle is not
+notarized, so Gatekeeper asks on first launch.
+
+The app does not handle macOS's open-URL event yet, so `noslacking://` and
+`slack://` links opened elsewhere do not reach it, even inside the bundle.
+macOS does not start a second copy with the link as an argument (as Linux
+and Windows do); it sends the running app an Apple event, which only an
+`NSApplicationDelegate` with `application:openURLs:` (or an
+`NSAppleEventManager` handler) receives. Neither winit (crmne/winit
+apps-0.30), eframe nor the fastframe crates expose one, and defining one
+takes `unsafe` Objective-C class declarations, which this crate forbids.
+The right home is a small safe API in `fastframe-macos` (which already
+holds the AppKit `unsafe`), forwarding each URL into the same path a second
+launch's `Request::Open` takes (`Command::Callback`). Until then sign-in on
+macOS uses the loopback redirect, the default on every platform.
 
 ### Windows
 
