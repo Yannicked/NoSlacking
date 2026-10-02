@@ -843,20 +843,23 @@ fn reactions(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
                 .response
                 .interact(Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
-            let names: Vec<String> = reaction
-                .users
-                .iter()
-                .take(12)
-                .map(|id| {
-                    if id == me {
-                        t("You").into_owned()
-                    } else {
-                        row.workspace.user_label(id)
-                    }
-                })
-                .collect();
-            let response =
-                response.on_hover_text(format!("{} :{}:", names.join(", "), reaction.name));
+            // Who reacted, built only while hovered rather than for every
+            // reaction on every frame.
+            let response = response.on_hover_ui(|ui| {
+                let names: Vec<String> = reaction
+                    .users
+                    .iter()
+                    .take(12)
+                    .map(|id| {
+                        if id == me {
+                            t("You").into_owned()
+                        } else {
+                            row.workspace.user_label(id)
+                        }
+                    })
+                    .collect();
+                ui.label(format!("{} :{}:", names.join(", "), reaction.name));
+            });
             if response.clicked() {
                 actions.push(Action::React {
                     channel: row.channel.to_owned(),
