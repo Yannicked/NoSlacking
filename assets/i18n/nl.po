@@ -1323,3 +1323,71 @@ msgstr "Meer acties"
 
 msgid "Save for later"
 msgstr "Bewaren voor later"
+msgid "Scheduled"
+msgstr "Gepland"
+
+msgid "A slash command cannot be scheduled."
+msgstr "Een slash-opdracht kan niet worden ingepland."
+
+msgid "Scheduled for {when}"
+msgstr "Ingepland voor {when}"
+
+msgid "Could not schedule the message: {error}"
+msgstr "Het bericht kon niet worden ingepland: {error}"
+
+msgid "Could not cancel the scheduled message: {error}"
+msgstr "Het geplande bericht kon niet worden geannuleerd: {error}"
+
+msgid "Write the date as 2026-03-31."
+msgstr "Schrijf de datum als 2026-03-31."
+
+msgid "Write the time as 14:30."
+msgstr "Schrijf de tijd als 14:30."
+
+msgid "That time has passed."
+msgstr "Dat tijdstip is al voorbij."
+
+msgid "Slack schedules at most 120 days ahead."
+msgstr "Slack plant hoogstens 120 dagen vooruit."
+
+msgid "The message is empty."
+msgstr "Het bericht is leeg."
+
+msgid "Send later"
+msgstr "Later versturen"
+
+msgid "In 30 minutes"
+msgstr "Over 30 minuten"
+
+msgid "Tomorrow at 9:00"
+msgstr "Morgen om 9:00"
+
+msgid "Custom time…"
+msgstr "Zelf een tijd kiezen…"
+
+msgid "See scheduled messages"
+msgstr "Geplande berichten bekijken"
+
+msgid "Nothing scheduled. Pick a time from the clock beside Send."
+msgstr "Niets ingepland. Kies een tijd met de klok naast Versturen."
+
+msgid "To {place}, {when}"
+msgstr "Naar {place}, {when}"
+
+msgid "Do not send it"
+msgstr "Niet versturen"
+
+msgid "Change the scheduled message"
+msgstr "Gepland bericht wijzigen"
+
+msgid "Send at a time of your choosing"
+msgstr "Versturen op een tijd naar keuze"
+
+msgid "Date"
+msgstr "Datum"
+
+msgid "Time"
+msgstr "Tijd"
+
+msgid "Schedule"
+msgstr "Inplannen"

@@ -3,6 +3,7 @@
 use super::{ME, NOW, history, message, thread, ts};
 use crate::backend::Event;
 use crate::model::Message;
+use crate::views::schedule::Scheduled;
 use crate::views::{self, Activity, Command, Followed, Reason, Reminder, Saved};
 
 /// The demo's answers to one command.
@@ -57,6 +58,42 @@ pub fn answer(team: &str, command: Command) -> Vec<Event> {
             ]),
         },
         Command::Save { .. } | Command::CompleteReminder { .. } => views::Event::Nothing,
+        Command::Scheduled => views::Event::ScheduledList {
+            result: Ok(vec![
+                Scheduled {
+                    id: "Q1".into(),
+                    channel: "C02".into(),
+                    post_at: i64::try_from(NOW + 5400).unwrap_or_default(),
+                    text: "Reminder: the release freeze starts at noon :snowflake:".into(),
+                    thread: None,
+                },
+                Scheduled {
+                    id: "Q2".into(),
+                    channel: "D01".into(),
+                    post_at: i64::try_from(NOW + 86_400 + 3600).unwrap_or_default(),
+                    text: "Morning! Notes on the reaction picker are in the doc.".into(),
+                    thread: None,
+                },
+            ]),
+        },
+        Command::Schedule {
+            request,
+            channel,
+            text,
+            thread,
+            post_at,
+            ..
+        } => views::Event::ScheduleDone {
+            request,
+            result: Ok(Scheduled {
+                id: format!("Q{request}0"),
+                channel,
+                post_at,
+                text,
+                thread,
+            }),
+        },
+        Command::CancelScheduled { .. } => views::Event::Nothing,
     };
     vec![Event::Views {
         team: team.to_owned(),

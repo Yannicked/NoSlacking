@@ -1,5 +1,6 @@
 //! The views at the top of the sidebar (All unreads, Threads, Activity,
-//! Later) and the pane each shows in place of the conversation.
+//! Later, Scheduled) and the pane each shows in place of the conversation,
+//! and the composer's "Send later" menu and dialog.
 
 use egui::{CornerRadius, Margin, RichText, Sense, Stroke, Vec2};
 
@@ -24,6 +25,7 @@ fn icon(view: View) -> Icon {
         View::Unreads => Icon::Inbox,
         View::Threads => Icon::Messages,
         View::Later => Icon::Bookmark,
+        View::Scheduled => Icon::Clock,
     }
 }
 
@@ -52,6 +54,8 @@ fn count(view: View, workspace: &WorkspaceState, views: Option<&TeamViews>) -> u
         View::Threads => views.map_or(0, TeamViews::unread_threads),
         // A reminder that is due shows in Slackbot's messages already.
         View::Later => 0,
+        // What waits to be sent is no news.
+        View::Scheduled => 0,
     }
 }
 
@@ -173,20 +177,21 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
     let pressed = ctx.input_mut(|input| {
         View::ALL
             .into_iter()
-            .find(|view| input.consume_key(shift, shortcut(*view)))
+            .find(|view| shortcut(*view).is_some_and(|key| input.consume_key(shift, key)))
     });
     if let Some(view) = pressed {
         app.actions.push(Action::Views(Views::Open(view)));
     }
 }
 
-/// The letter that opens a view with Ctrl+Shift.
-fn shortcut(view: View) -> egui::Key {
+/// The letter that opens a view with Ctrl+Shift, if one does.
+fn shortcut(view: View) -> Option<egui::Key> {
     match view {
-        View::Activity => egui::Key::M,
-        View::Unreads => egui::Key::A,
-        View::Threads => egui::Key::T,
-        View::Later => egui::Key::S,
+        View::Activity => Some(egui::Key::M),
+        View::Unreads => Some(egui::Key::A),
+        View::Threads => Some(egui::Key::T),
+        View::Later => Some(egui::Key::S),
+        View::Scheduled => None,
     }
 }
 
@@ -217,6 +222,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 View::Unreads => unreads(ui, &palette, workspace, data, actions),
                 View::Threads => threads(ui, &palette, workspace, data, actions),
                 View::Later => later(ui, &palette, workspace, data, actions),
+                View::Scheduled => scheduled(ui, &palette, workspace, data, actions),
             }
         });
 }
@@ -235,6 +241,7 @@ fn header(
         View::Unreads => data.unread.values().any(|f| f.loading),
         View::Threads => data.threads.loading,
         View::Later => data.saved.loading || data.reminders.loading,
+        View::Scheduled => data.scheduled.loading,
     };
     egui::Panel::top("view-header")
         .exact_size(52.0 + inset)
@@ -1179,4 +1186,243 @@ fn reminder_row(
         rect.bottom(),
         Stroke::new(1.0, palette.outline.gamma_multiply(0.6)),
     );
+}
+
+/// The composer's "Send later" menu; `ready` says there is something to
+/// send.
+pub fn send_later_menu(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    ready: bool,
+    thread: Option<&Ts>,
+    actions: &mut Vec<Action>,
+) {
+    use crate::views::schedule::When;
+    super::section_label(ui, palette, &t("Send later"));
+    for (when, label) in [
+        (When::HalfHour, t("In 30 minutes")),
+        (When::TomorrowMorning, t("Tomorrow at 9:00")),
+    ] {
+        if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
+            actions.push(Action::Views(Views::SendLater {
+                thread: thread.cloned(),
+                when,
+            }));
+            ui.close();
+        }
+    }
+    if ui
+        .add_enabled(ready, egui::Button::new(t("Custom time…")))
+        .clicked()
+    {
+        actions.push(Action::Views(Views::AskSendLater {
+            thread: thread.cloned(),
+        }));
+        ui.close();
+    }
+    ui.separator();
+    if ui.button(t("See scheduled messages")).clicked() {
+        actions.push(Action::Views(Views::Open(View::Scheduled)));
+        ui.close();
+    }
+}
+
+/// The messages waiting to be sent, soonest first, each with a way to
+/// change or cancel it.
+fn scheduled(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    workspace: &WorkspaceState,
+    data: &TeamViews,
+    actions: &mut Vec<Action>,
+) {
+    status(
+        ui,
+        palette,
+        data.scheduled.waiting(),
+        data.scheduled.error.as_deref(),
+    );
+    let items = data.scheduled.value.as_deref().unwrap_or_default();
+    if items.is_empty() {
+        if !data.scheduled.waiting() {
+            note(
+                ui,
+                palette,
+                &t("Nothing scheduled. Pick a time from the clock beside Send."),
+            );
+        }
+        return;
+    }
+    let keys: Vec<u64> = items.iter().map(|s| key(("scheduled", &s.id))).collect();
+    let guesses: Vec<f32> = items
+        .iter()
+        .map(|s| 70.0 + (s.text.len() / 90) as f32 * 20.0)
+        .collect();
+    list(ui, "scheduled", &keys, &guesses, |ui, index| {
+        let item = &items[index];
+        let inner = egui::Frame::new()
+            .inner_margin(Margin::symmetric(20, 10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let (spot, _) = ui.allocate_exact_size(Vec2::splat(15.0), Sense::hover());
+                    Icon::Clock
+                        .image(palette.secondary, 14.0)
+                        .paint_at(ui, spot);
+                    let line = tf(
+                        "To {place}, {when}",
+                        &[
+                            ("place", &place(workspace, &item.channel)),
+                            ("when", &super::moment_label(item.post_at)),
+                        ],
+                    );
+                    ui.label(
+                        RichText::new(line)
+                            .font(theme::semibold(12.5))
+                            .color(palette.secondary),
+                    );
+                    if item.thread.is_some() {
+                        ui.label(
+                            RichText::new(t("in a thread"))
+                                .font(theme::regular(12.0))
+                                .color(palette.dim),
+                        );
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::icon_button(ui, palette, Icon::Trash, 14.0, &t("Cancel"))
+                            .on_hover_text(t("Do not send it"))
+                            .clicked()
+                        {
+                            actions.push(Action::Views(Views::CancelScheduled {
+                                channel: item.channel.clone(),
+                                id: item.id.clone(),
+                            }));
+                        }
+                        if theme::icon_button(ui, palette, Icon::Pencil, 14.0, &t("Edit")).clicked()
+                        {
+                            actions.push(Action::Views(Views::EditScheduled {
+                                id: item.id.clone(),
+                            }));
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(21.0);
+                    ui.vertical(|ui| {
+                        let rich = Rich::new(palette, workspace).size(14.0);
+                        rich::show(ui, &rich, &item.text, false, actions);
+                    });
+                });
+            });
+        let rect = inner.response.rect;
+        ui.painter().hline(
+            (rect.left() + 20.0)..=(rect.right() - 20.0),
+            rect.bottom(),
+            Stroke::new(1.0, palette.outline.gamma_multiply(0.6)),
+        );
+    });
+}
+
+/// The "Send at" dialog: a date and a time for a draft, and also the text
+/// for a scheduled message being changed.
+pub fn dialog(app: &mut App, ctx: &egui::Context) {
+    use crate::views::schedule::Target;
+    let palette = app.palette;
+    let focus = std::mem::take(&mut app.focus_overlay);
+    let frame = super::overlays::modal_frame(app);
+    let Some(dialog) = app.views.dialog.as_mut() else {
+        return;
+    };
+    let editing = matches!(dialog.target, Target::Edit(_));
+    let mut confirm = false;
+    let mut close = false;
+    let response = egui::Modal::new(egui::Id::new("send-at"))
+        .frame(frame)
+        .show(ctx, |ui| {
+            ui.set_width(380.0);
+            let title = if editing {
+                t("Change the scheduled message")
+            } else {
+                t("Send at a time of your choosing")
+            };
+            ui.label(
+                RichText::new(title)
+                    .font(theme::bold(17.0))
+                    .color(palette.text),
+            );
+            ui.add_space(10.0);
+            if editing {
+                let field = ui.add(
+                    egui::TextEdit::multiline(&mut dialog.text)
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY)
+                        .margin(Margin::symmetric(8, 6)),
+                );
+                if focus {
+                    field.request_focus();
+                }
+                ui.add_space(8.0);
+            }
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    super::section_label(ui, &palette, &t("Date"));
+                    let date = ui.add(
+                        egui::TextEdit::singleline(&mut dialog.date)
+                            .hint_text("2026-03-31")
+                            .desired_width(140.0)
+                            .margin(Margin::symmetric(8, 5)),
+                    );
+                    if focus && !editing {
+                        date.request_focus();
+                    }
+                });
+                ui.vertical(|ui| {
+                    super::section_label(ui, &palette, &t("Time"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut dialog.time)
+                            .hint_text("14:30")
+                            .desired_width(90.0)
+                            .margin(Margin::symmetric(8, 5)),
+                    );
+                });
+            });
+            if let Some(problem) = dialog.problem {
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(problem.to_string())
+                        .font(theme::regular(13.0))
+                        .color(palette.danger),
+                );
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if theme::secondary_button(ui, &palette, &t("Cancel")).clicked() {
+                    close = true;
+                }
+                let label = if editing { t("Save") } else { t("Schedule") };
+                let button = ui.add_enabled_ui(!dialog.busy, |ui| {
+                    theme::primary_button(ui, &palette, &label)
+                });
+                if button.inner.clicked() {
+                    confirm = true;
+                }
+                if dialog.busy {
+                    ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
+                }
+            });
+            // Enter schedules, except in the text, where it breaks a line.
+            if !editing && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                confirm = true;
+            }
+        });
+    if response.should_close() {
+        close = true;
+    }
+    if close {
+        app.actions.push(Action::Views(Views::CloseSchedule));
+    } else if confirm {
+        app.actions.push(Action::Views(Views::ConfirmSchedule));
+    }
 }
