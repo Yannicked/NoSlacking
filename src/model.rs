@@ -617,6 +617,12 @@ pub enum Action {
     PickUpload {
         thread: Option<Ts>,
     },
+    /// Uploads the image on the clipboard, if that is what it holds.
+    PasteImage {
+        thread: Option<Ts>,
+    },
+    /// Stops an upload by its [`crate::app::Upload::id`].
+    CancelUpload(u64),
     Download {
         url: String,
         name: String,

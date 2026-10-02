@@ -30,6 +30,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         actions,
         editing,
         selected,
+        transfers,
         ..
     } = app;
     let Some(workspace) = crate::app::active_in(workspaces, settings) else {
@@ -48,6 +49,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .show_separator_line(false)
         .frame(egui::Frame::new().fill(palette.window))
         .show(ui, |ui| {
+            composer::drop_target(ui, &palette, Some(ts.clone()), false, actions);
             let rect = ui.max_rect();
             ui.painter().vline(
                 rect.left() + 0.5,
@@ -111,6 +113,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         enter_sends: settings.enter_sends,
                         focus: false,
                         channel_name: Some(channel_name.clone()),
+                        uploads: transfers,
                     };
                     composer::show(ui, &composer, &mut draft, actions);
                 });

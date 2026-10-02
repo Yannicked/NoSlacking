@@ -101,12 +101,20 @@ pub enum Command {
         name: String,
         add: bool,
     },
+    /// Uploads a file; its progress comes back as [`Event::UploadProgress`]
+    /// and [`Event::UploadDone`] under `id`.
     Upload {
+        id: u64,
         team: String,
         channel: String,
         thread: Option<Ts>,
         path: PathBuf,
         comment: String,
+    },
+    /// Stops the upload `id`. Before Slack is told to share the file,
+    /// nothing is posted.
+    CancelUpload {
+        id: u64,
     },
     Download {
         team: String,
@@ -245,6 +253,7 @@ impl std::fmt::Debug for Command {
                 .field("add", add)
                 .finish(),
             Self::Upload {
+                id,
                 team,
                 channel,
                 thread,
@@ -252,12 +261,14 @@ impl std::fmt::Debug for Command {
                 comment,
             } => f
                 .debug_struct("Upload")
+                .field("id", id)
                 .field("team", team)
                 .field("channel", channel)
                 .field("thread", thread)
                 .field("path", path)
                 .field("comment", comment)
                 .finish(),
+            Self::CancelUpload { id } => f.debug_struct("CancelUpload").field("id", id).finish(),
             Self::Download { team, url, name } => f
                 .debug_struct("Download")
                 .field("team", team)
@@ -443,6 +454,17 @@ pub enum Event {
     Socket(Socket),
     Error(String),
     Notice(String),
+    /// `sent` of the `total` bytes of upload `id` are on their way.
+    UploadProgress {
+        id: u64,
+        sent: u64,
+        total: u64,
+    },
+    /// Upload `id` ended: shared, failed (with its own error event) or
+    /// cancelled.
+    UploadDone {
+        id: u64,
+    },
 }
 
 /// The interface's end of the bridge.

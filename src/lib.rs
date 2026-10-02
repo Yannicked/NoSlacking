@@ -17,6 +17,7 @@ pub mod i18n;
 pub mod images;
 pub mod model;
 pub mod mrkdwn;
+pub mod paste;
 pub mod paths;
 pub mod redact;
 pub mod settings;

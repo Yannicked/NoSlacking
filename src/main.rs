@@ -43,7 +43,7 @@ struct Cli {
     demo_hover: Option<String>,
 
     /// Open a view before the screenshot: thread, settings, sign-in,
-    /// switcher, picker or profile.
+    /// switcher, picker, profile or upload.
     #[cfg(feature = "demo")]
     #[arg(long, value_name = "VIEW")]
     demo_view: Option<String>,
@@ -487,6 +487,12 @@ impl DemoSetup {
             Some("dm") => app.actions.push(Action::OpenConversation("D01".into())),
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             Some("general") => app.actions.push(Action::OpenConversation("C01".into())),
+            // A file on its way, with its progress and Cancel.
+            Some("upload") => app.actions.push(Action::Upload {
+                thread: None,
+                path: "release-notes.pdf".into(),
+                comment: String::new(),
+            }),
             _ => {}
         }
     }

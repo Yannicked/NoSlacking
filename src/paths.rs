@@ -79,6 +79,12 @@ impl AppDirs {
         self.state.join("panic.log")
     }
 
+    /// Images pasted from the clipboard, written out for upload and
+    /// removed once sent.
+    pub fn pasted(&self) -> PathBuf {
+        self.cache.join("pasted")
+    }
+
     pub fn images(&self) -> PathBuf {
         self.cache.join("images")
     }
