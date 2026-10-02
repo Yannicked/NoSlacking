@@ -1591,6 +1591,9 @@ impl App {
             Action::OpenUrl(url) => {
                 if let Some(channel) = slack_link_channel(&url, self.active_workspace()) {
                     self.open_conversation(&channel);
+                } else if !mrkdwn::is_openable(&url) {
+                    // Attachments and blocks carry URLs a bot chose.
+                    self.toast(t("Only web and mail links can be opened"), true);
                 } else if let Err(error) = open::that_detached(&url) {
                     self.toast(format!("{}: {error}", t("Could not open the link")), true);
                 }
