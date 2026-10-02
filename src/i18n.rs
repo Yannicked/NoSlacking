@@ -82,3 +82,60 @@ pub fn tn(singular: &'static str, plural: &'static str, count: u32) -> String {
     fastframe_i18n::ngettext(locale(), singular, plural, count)
         .replace("{count}", &count.to_string())
 }
+
+/// Translates a sentence with named holes, such as "Signed in to {name}.",
+/// and fills each `{key}` from `args`. The whole sentence goes through the
+/// catalog, so a translation can put the words in its own order.
+pub fn tf(source: &'static str, args: &[(&str, &str)]) -> String {
+    fill(&t(source), args)
+}
+
+/// Replaces each `{key}` in `pattern` with its value from `args`, in one
+/// pass, so braces inside a value (a channel name, an error) stay as they
+/// are. Unknown holes are kept, which shows a broken translation instead of
+/// hiding it.
+pub fn fill(pattern: &str, args: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut rest = pattern;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let found = after.find('}').and_then(|close| {
+            let key = &after[..close];
+            args.iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| (*value, close))
+        });
+        match found {
+            Some((value, close)) => {
+                out.push_str(value);
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push('{');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn holes_are_filled_once_and_by_name() {
+        assert_eq!(
+            fill("{who} said {what}", &[("what", "hi"), ("who", "Ann")]),
+            "Ann said hi"
+        );
+        // A value with braces is not filled again.
+        assert_eq!(
+            fill("Message #{name}", &[("name", "{name}")]),
+            "Message #{name}"
+        );
+        assert_eq!(fill("{unknown} and {", &[]), "{unknown} and {");
+    }
+}

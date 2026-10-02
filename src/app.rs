@@ -14,7 +14,7 @@ use fastframe_shell::{Closed, Headless};
 use crate::backend::{self, Backend, Command, Event, SignIn, Socket, Source, Waker};
 use crate::credentials::AppCredentials;
 use crate::emoji::EmojiSet;
-use crate::i18n::{self, t};
+use crate::i18n::{self, t, tf};
 use crate::model::{
     Action, Bot, Conversation, ConversationKind, Delivery, Message, SidebarSection, Timeline, Ts,
     User, Workspace,
@@ -1088,7 +1088,7 @@ impl App {
             // The account: the app, the keyring, sign-in and the socket.
             Event::AppLoaded(app) => self.app_loaded(app),
             Event::KeyringError(error) => {
-                self.toast(format!("{}: {error}", t("Keyring")), true);
+                self.toast(tf("Keyring: {error}", &[("error", &error)]), true);
                 self.keyring_error = Some(error);
             }
             Event::SignIn(state) => self.sign_in_changed(state),
@@ -1147,7 +1147,10 @@ impl App {
                 if let Some(workspace) = self.workspace_mut(&team) {
                     workspace.history_failed(&channel);
                 }
-                self.toast(format!("{}: {error}", t("Could not load messages")), true);
+                self.toast(
+                    tf("Could not load messages: {error}", &[("error", &error)]),
+                    true,
+                );
             }
             Event::Thread {
                 team,
@@ -1204,7 +1207,7 @@ impl App {
 
     fn sign_in_changed(&mut self, state: SignIn) {
         if let SignIn::Done(name) = &state {
-            self.toast(format!("{} {name}", t("Signed in to")), false);
+            self.toast(tf("Signed in to {name}.", &[("name", name)]), false);
             self.page = Page::Main;
             self.setup.user_token.clear();
         }
@@ -1259,7 +1262,10 @@ impl App {
     fn socket_changed(&mut self, socket: Socket) {
         if let Socket::Rejected(reason) = &socket {
             self.toast(
-                format!("{} ({reason})", t("Slack refused the app-level token")),
+                tf(
+                    "Slack refused the app-level token ({reason})",
+                    &[("reason", reason)],
+                ),
                 true,
             );
         }
@@ -1348,7 +1354,7 @@ impl App {
         };
         workspace.sent(channel, local, &result);
         if let Err(error) = result {
-            self.toast(format!("{}: {error}", t("Message not sent")), true);
+            self.toast(tf("Message not sent: {error}", &[("error", &error)]), true);
         }
     }
 
@@ -1749,7 +1755,11 @@ impl App {
             Action::OpenUrl(url) => self.open_url(&url),
             Action::OpenFolder(path) => {
                 if let Err(error) = open::that_detached(&path) {
-                    self.toast(format!("{}: {error}", t("Could not open the folder")), true);
+                    let error = error.to_string();
+                    self.toast(
+                        tf("Could not open the folder: {error}", &[("error", &error)]),
+                        true,
+                    );
                 }
             }
             Action::Copy(text) => {
@@ -1881,7 +1891,11 @@ impl App {
             // Attachments and blocks carry URLs a bot chose.
             self.toast(t("Only web and mail links can be opened"), true);
         } else if let Err(error) = open::that_detached(url) {
-            self.toast(format!("{}: {error}", t("Could not open the link")), true);
+            let error = error.to_string();
+            self.toast(
+                tf("Could not open the link: {error}", &[("error", &error)]),
+                true,
+            );
         }
     }
 

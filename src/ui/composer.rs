@@ -5,7 +5,7 @@ use egui::text::{CCursor, CCursorRange};
 use egui::{CornerRadius, Key, Margin, Modifiers, RichText, Sense, Stroke, Vec2};
 
 use crate::app::{Draft, WorkspaceState};
-use crate::i18n::t;
+use crate::i18n::{t, tf};
 use crate::model::{Action, Ts};
 use crate::theme::{self, Icon, Palette};
 
@@ -291,7 +291,7 @@ pub fn show(
                 ui.add_space(8.0);
                 ui.checkbox(
                     &mut draft.broadcast,
-                    RichText::new(format!("{} #{channel}", t("Also send to")))
+                    RichText::new(tf("Also send to #{channel}", &[("channel", channel)]))
                         .font(theme::regular(12.5))
                         .color(palette.secondary),
                 );

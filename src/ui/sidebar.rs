@@ -3,7 +3,7 @@
 use egui::{CornerRadius, Margin, RichText, Sense, Stroke, Vec2};
 
 use crate::app::{App, Page, WorkspaceState};
-use crate::i18n::t;
+use crate::i18n::{t, tf};
 use crate::model::{Action, Conversation, ConversationKind, SectionKind, SidebarSection};
 use crate::sidebar::{self, SidebarEdit};
 use crate::theme::{self, Icon, Palette};
@@ -230,7 +230,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(
-                            RichText::new(format!("{} {reason}", t("Signed out:")))
+                            RichText::new(tf("Signed out: {reason}", &[("reason", reason)]))
                                 .font(theme::regular(12.5))
                                 .color(palette.text),
                         );
@@ -413,7 +413,10 @@ fn section_view(
         ui.painter().text(
             egui::pos2(rect.left() + 32.0, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            format!("{} ({})", t("Show more"), rows.len() - rows_to_show.len()),
+            tf(
+                "Show more ({count})",
+                &[("count", &(rows.len() - rows_to_show.len()).to_string())],
+            ),
             theme::medium(13.0),
             palette.dim,
         );

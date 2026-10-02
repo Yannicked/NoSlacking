@@ -4,7 +4,7 @@
 use egui::{CornerRadius, Key, Margin, Modifiers, RichText, Sense, Stroke, Vec2};
 
 use crate::app::{App, PickerTarget};
-use crate::i18n::t;
+use crate::i18n::{t, tf};
 use crate::model::{Action, ConversationKind};
 use crate::theme::{self, Icon};
 
@@ -486,9 +486,12 @@ fn profile(app: &mut App, ctx: &egui::Context) {
                 {
                     let local = jiff::Timestamp::now().to_zoned(zone);
                     ui.label(
-                        RichText::new(format!("{} {}", local.strftime("%H:%M"), t("local time")))
-                            .font(theme::regular(13.0))
-                            .color(palette.dim),
+                        RichText::new(tf(
+                            "{time} local time",
+                            &[("time", &local.strftime("%H:%M").to_string())],
+                        ))
+                        .font(theme::regular(13.0))
+                        .color(palette.dim),
                     );
                 }
             }
