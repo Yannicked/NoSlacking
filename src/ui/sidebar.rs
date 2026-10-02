@@ -233,6 +233,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
                         ui.painter().circle_filled(dot.center(), 4.0, color);
                         response.on_hover_text(tip);
+                        super::desktop::dnd_button(ui, &palette, workspace, actions);
                         if workspace.sections.is_some() {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),

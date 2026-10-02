@@ -112,3 +112,78 @@ pub fn conversation_menu(
         }
     });
 }
+
+/// The bell in the sidebar header: shows whether notifications are on, and
+/// opens the snooze menu.
+pub fn dnd_button(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    workspace: &WorkspaceState,
+    actions: &mut Vec<Action>,
+) {
+    let now = jiff::Zoned::now();
+    let seconds = now.timestamp().as_second();
+    let dnd = &workspace.desktop.dnd;
+    let tz = now.time_zone().clone();
+    let label = |until: i64| crate::dnd::until_label(until, now.date(), &tz);
+    let (icon, tint, tip) = match (dnd.snoozed(seconds), dnd.quiet_until(seconds)) {
+        (Some(until), _) => (
+            theme::Icon::BellOff,
+            palette.warning,
+            crate::i18n::tf("Notifications paused {until}", &[("until", &label(until))]),
+        ),
+        (None, Some(until)) => (
+            theme::Icon::BellOff,
+            palette.warning,
+            crate::i18n::tf("Do not disturb {until}", &[("until", &label(until))]),
+        ),
+        (None, None) => (
+            theme::Icon::Bell,
+            palette.dim,
+            t("Notifications on").into_owned(),
+        ),
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(22.0), egui::Sense::click());
+    if response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(theme::RADIUS_SMALL),
+            palette.surface_hover,
+        );
+    }
+    icon.image(tint, 14.0).paint_at(
+        ui,
+        egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(14.0)),
+    );
+    theme::focus_ring(ui, &response, palette, theme::RADIUS_SMALL);
+    theme::describe(&response, egui::WidgetType::Button, &tip);
+    let response = response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(&tip);
+    egui::Popup::menu(&response).show(|ui| {
+        ui.label(
+            RichText::new(&tip)
+                .font(theme::semibold(12.5))
+                .color(palette.dim),
+        );
+        ui.separator();
+        ui.label(
+            RichText::new(t("Pause notifications"))
+                .font(theme::medium(13.0))
+                .color(palette.text),
+        );
+        for choice in crate::dnd::Snooze::ALL {
+            if ui.button(choice.label()).clicked() {
+                actions.push(Action::Snooze(Some(choice)));
+                ui.close();
+            }
+        }
+        if dnd.snoozed(seconds).is_some() {
+            ui.separator();
+            if ui.button(t("Resume notifications")).clicked() {
+                actions.push(Action::Snooze(None));
+                ui.close();
+            }
+        }
+    });
+}

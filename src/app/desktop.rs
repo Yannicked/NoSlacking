@@ -6,6 +6,7 @@
 
 use crate::backend::Waker;
 use crate::badge::{self, Launcher, Unread};
+use crate::dnd::{Dnd, Snooze};
 use crate::model::{ConversationKind, Message};
 use crate::notify::{self, Level, Note, Notifier};
 
@@ -55,6 +56,11 @@ pub(super) fn notifier(waker: &Waker, demo: bool) -> Option<Notifier> {
     }
     let waker = waker.clone();
     Notifier::spawn(move || waker.wake())
+}
+
+/// The time now in Unix seconds, for Do Not Disturb.
+pub(crate) fn now_seconds() -> i64 {
+    jiff::Timestamp::now().as_second()
 }
 
 /// The kind of a conversation not loaded yet, from its id: Slack starts
@@ -112,6 +118,9 @@ impl App {
             return None;
         }
         let workspace = self.workspaces.iter().find(|w| w.info.team_id == team)?;
+        if workspace.desktop.dnd.quiet(now_seconds()) {
+            return None;
+        }
         let conversation = workspace.conversation(channel);
         // Read on another device already, or the conversation is open in
         // Slack's own client there.
@@ -178,6 +187,23 @@ impl App {
             self.open_conversation(&click.channel);
             self.desktop.raise = true;
         }
+        // A scheduled quiet stretch is over: Slack knows the next one.
+        let now = now_seconds();
+        let passed: Vec<String> = self
+            .workspaces
+            .iter_mut()
+            .filter(|w| !w.desktop.dnd_asked && w.desktop.dnd.schedule_passed(now))
+            .map(|w| {
+                w.desktop.dnd_asked = true;
+                w.info.team_id.clone()
+            })
+            .collect();
+        if !self.demo {
+            for team in passed {
+                self.backend
+                    .send(crate::backend::Command::FetchDnd { team });
+            }
+        }
         if self.desktop.launcher.is_some() {
             let now = unread(&self.workspaces);
             if self.desktop.badge != Some(now) {
@@ -209,6 +235,52 @@ impl App {
         }
     }
 
+    /// Slack's Do Not Disturb state for a workspace.
+    pub(super) fn dnd_arrived(&mut self, team: &str, dnd: Dnd) {
+        if let Some(workspace) = self.workspace_mut(team) {
+            workspace.desktop.dnd = dnd;
+            workspace.desktop.dnd_asked = false;
+        }
+        self.wake_when_quiet_ends(team);
+    }
+
+    /// Snoozes notifications in the open workspace for `choice`, or ends
+    /// the snooze. It holds here at once, and Slack is told.
+    pub(super) fn snooze(&mut self, choice: Option<Snooze>) {
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        let now = jiff::Zoned::now();
+        let minutes = choice.map(|choice| choice.minutes(&now));
+        let until = minutes.map(|m| now.timestamp().as_second() + i64::from(m) * 60);
+        if let Some(workspace) = self.workspace_mut(&team) {
+            workspace.desktop.dnd.snooze_until = until;
+        }
+        if !self.demo {
+            self.backend.send(crate::backend::Command::Snooze {
+                team: team.clone(),
+                minutes,
+            });
+        }
+        self.wake_when_quiet_ends(&team);
+    }
+
+    /// Draws again when a workspace's quiet time ends, so its bell does
+    /// not show it paused for longer than it is.
+    fn wake_when_quiet_ends(&self, team: &str) {
+        let now = now_seconds();
+        let until = self
+            .workspaces
+            .iter()
+            .find(|w| w.info.team_id == team)
+            .and_then(|w| w.desktop.dnd.quiet_until(now));
+        if let Some(until) = until {
+            let seconds = u64::try_from(until - now).unwrap_or(0);
+            self.waker
+                .wake_after(std::time::Duration::from_secs(seconds + 1));
+        }
+    }
+
     /// Sets how much of a conversation in the open workspace notifies.
     pub(super) fn set_notify_level(&mut self, channel: &str, level: Option<Level>) {
         let Some(team) = self.active_team() else {
@@ -217,7 +289,7 @@ impl App {
         self.settings.desktop.set_level(&team, channel, level);
         let state = self.settings.desktop.team_state(&team);
         if let Some(workspace) = self.workspace_mut(&team) {
-            workspace.desktop = state;
+            workspace.desktop.levels = state.levels;
         }
         self.save_settings();
     }
