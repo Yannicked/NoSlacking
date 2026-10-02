@@ -93,7 +93,9 @@ fn main() -> eframe::Result<()> {
     let cli = Cli::parse();
     let demo = cli.demo();
     let dirs = if demo {
-        AppDirs::under(&std::env::temp_dir().join("noslacking-demo"))
+        // Under this user's own cache, not a shared temp folder another
+        // user could create first.
+        AppDirs::under(&AppDirs::discover().cache.join("demo"))
     } else {
         AppDirs::discover()
     };
