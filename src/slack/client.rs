@@ -267,15 +267,18 @@ impl Client {
         params: &[(&str, String)],
         idempotent: bool,
     ) -> Result<T, SlackError> {
-        let _permit = self
-            .limit
-            .acquire()
-            .await
-            .map_err(|_| SlackError::Network("client closed".into()))?;
         let url = format!("{}{method}", self.base);
         let mut attempt = 0;
         loop {
             attempt += 1;
+            // The permit covers one attempt, not the waits between them:
+            // a call sitting out a Retry-After must not hold a slot that a
+            // send could use.
+            let permit = self
+                .limit
+                .acquire()
+                .await
+                .map_err(|_| SlackError::Network("client closed".into()))?;
             let token = self.access_token().await?;
             let mut request = self.http.post(&url).bearer_auth(&token).form(params);
             if let Some(cookie) = self.cookie() {
@@ -286,6 +289,7 @@ impl Client {
                 Ok(response) => response,
                 Err(error) if idempotent && attempt < MAX_ATTEMPTS => {
                     log::debug!("{method}: {error}; retrying");
+                    drop(permit);
                     tokio::time::sleep(backoff(attempt)).await;
                     continue;
                 }
@@ -297,10 +301,12 @@ impl Client {
                     return Err(SlackError::RateLimited);
                 }
                 log::debug!("{method}: rate limited for {wait:?}");
+                drop(permit);
                 tokio::time::sleep(wait).await;
                 continue;
             }
             if status >= 500 && idempotent && attempt < MAX_ATTEMPTS {
+                drop(permit);
                 tokio::time::sleep(backoff(attempt)).await;
                 continue;
             }
@@ -308,6 +314,7 @@ impl Client {
                 .bytes()
                 .await
                 .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
+            drop(permit);
             if !(200..300).contains(&status) && bytes.is_empty() {
                 return Err(SlackError::Http(status));
             }
