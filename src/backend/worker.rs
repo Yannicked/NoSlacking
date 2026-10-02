@@ -313,7 +313,7 @@ impl Worker {
                     crate::slack::session::normalize_workspace(&workspace_url)
                 else {
                     self.sink.send(Event::SignIn(SignIn::Failed(
-                        "Enter your workspace's address, such as acme.slack.com.".into(),
+                        "Enter your workspace's Slack address, such as acme.slack.com.".into(),
                     )));
                     return;
                 };
