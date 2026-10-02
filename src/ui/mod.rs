@@ -47,6 +47,7 @@ pub fn avatar(
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     paint_avatar(ui, rect, url, name, seed);
+    theme::describe(&response, egui::WidgetType::Image, name);
     response
 }
 

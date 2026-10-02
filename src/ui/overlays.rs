@@ -209,6 +209,12 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
                     },
                     palette.text,
                 );
+                theme::describe_selected(
+                    &response,
+                    egui::WidgetType::SelectableLabel,
+                    index == selected,
+                    title,
+                );
                 if response.clicked() {
                     open = Some(id.clone());
                 }
@@ -342,7 +348,9 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                                                 Vec2::splat(24.0),
                                             ),
                                         );
-                                    if response.on_hover_text(format!(":{name}:")).clicked() {
+                                    let label = format!(":{name}:");
+                                    theme::describe(&response, egui::WidgetType::Button, &label);
+                                    if response.on_hover_text(label).clicked() {
                                         chosen = Some(name.clone());
                                     }
                                 }
@@ -384,7 +392,9 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                                         palette.text,
                                     );
                                     let code = emoji.shortcode().unwrap_or_default();
-                                    if response.on_hover_text(format!(":{code}:")).clicked() {
+                                    let label = format!(":{code}:");
+                                    theme::describe(&response, egui::WidgetType::Button, &label);
+                                    if response.on_hover_text(label).clicked() {
                                         chosen = Some(code.to_owned());
                                     }
                                 }

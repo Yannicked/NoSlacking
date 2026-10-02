@@ -410,11 +410,44 @@ pub fn icon_button(
         ui,
         egui::Rect::from_center_size(rect.center(), Vec2::splat(size)),
     );
+    focus_ring(ui, &response, palette, RADIUS_SMALL);
+    describe(&response, egui::WidgetType::Button, tooltip);
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if tooltip.is_empty() {
         response
     } else {
         response.on_hover_text(tooltip)
+    }
+}
+
+/// Tells screen readers what a custom-painted control is and what it is
+/// called. egui's own widgets do this themselves; painted ones are silent
+/// without it.
+pub fn describe(response: &egui::Response, typ: egui::WidgetType, label: &str) {
+    response.widget_info(|| egui::WidgetInfo::labeled(typ, response.enabled(), label));
+}
+
+/// [`describe`] for a control that is on or off: the open conversation, a
+/// reaction of yours, an unfolded section.
+pub fn describe_selected(
+    response: &egui::Response,
+    typ: egui::WidgetType,
+    selected: bool,
+    label: &str,
+) {
+    response.widget_info(|| egui::WidgetInfo::selected(typ, response.enabled(), selected, label));
+}
+
+/// An accent ring around a custom-painted control with keyboard focus, so
+/// Tab shows where it is.
+pub fn focus_ring(ui: &egui::Ui, response: &egui::Response, palette: &Palette, radius: u8) {
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            response.rect,
+            CornerRadius::same(radius),
+            Stroke::new(2.0, palette.accent),
+            egui::StrokeKind::Inside,
+        );
     }
 }
 
