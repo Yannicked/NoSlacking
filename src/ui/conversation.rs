@@ -250,6 +250,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     let palette = app.palette;
     let scroll_key = format!("{team}/{channel}");
     let to_bottom = app.scroll_to_bottom.remove(&scroll_key);
+    let overlay = app.overlay_open();
     // An anchor for another list is stale by now: drop it either way.
     let prepended = app
         .prepended
@@ -326,6 +327,8 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
             workspace,
             channel,
             in_thread: false,
+            enter_sends: settings.enter_sends,
+            overlay,
         };
         let mut previous = None;
         let mut previous_day: Option<jiff::civil::Date> = None;
