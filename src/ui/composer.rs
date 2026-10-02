@@ -5,7 +5,7 @@ use egui::text::{CCursor, CCursorRange};
 use egui::{CornerRadius, Key, Margin, Modifiers, RichText, Sense, Stroke, Vec2};
 
 use super::format::{self, Format};
-use crate::app::{Draft, WorkspaceState};
+use crate::app::{Draft, Upload, WorkspaceState};
 use crate::i18n::{t, tf};
 use crate::model::{Action, Ts};
 use crate::theme::{self, Icon, Palette};
@@ -20,6 +20,8 @@ pub struct Composer<'a> {
     pub focus: bool,
     /// The channel's name, for "also send to #channel" in threads.
     pub channel_name: Option<String>,
+    /// Every upload in flight; the composer shows those sent from it.
+    pub uploads: &'a [Upload],
 }
 
 /// A suggestion for the word being typed.
@@ -259,6 +261,21 @@ pub fn show(
     if focused {
         ui.input_mut(|input| {
             format = format_shortcut(input);
+            // egui only pastes text. When Ctrl+V lets go, the clipboard
+            // is asked for an image, which is uploaded if there is no
+            // text (that went into the field already).
+            let pasted = input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key { key: Key::V, pressed: false, modifiers, .. }
+                        if modifiers.command
+                )
+            });
+            if pasted {
+                actions.push(Action::PasteImage {
+                    thread: composer.thread.clone(),
+                });
+            }
             // Esc closes the suggestions, so "@chan" can be sent as typed.
             if !found.is_empty() && input.consume_key(Modifiers::NONE, Key::Escape) {
                 draft.dismissed = word.clone();
@@ -324,6 +341,8 @@ pub fn show(
             state.store(ui.ctx(), id);
         }
     }
+
+    uploads(ui, composer, actions);
 
     let frame = egui::Frame::new()
         .fill(palette.surface)
@@ -470,6 +489,110 @@ pub fn show(
             thread: composer.thread.clone(),
             broadcast: draft.broadcast,
         });
+    }
+}
+
+/// The uploads sent from this composer, each with its progress and a
+/// button to cancel it.
+fn uploads(ui: &mut egui::Ui, composer: &Composer<'_>, actions: &mut Vec<Action>) {
+    let palette = composer.palette;
+    for upload in composer.uploads.iter().filter(|u| u.key == composer.key) {
+        ui.horizontal(|ui| {
+            let (icon, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+            Icon::Paperclip
+                .image(palette.secondary, 14.0)
+                .paint_at(ui, icon);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&upload.name)
+                        .font(theme::regular(12.5))
+                        .color(palette.text),
+                )
+                .truncate(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::icon_button(ui, palette, Icon::X, 14.0, &t("Cancel upload")).clicked() {
+                    actions.push(Action::CancelUpload(upload.id));
+                }
+                let fraction = if upload.total > 0 {
+                    upload.sent as f32 / upload.total as f32
+                } else {
+                    0.0
+                };
+                let said = tf(
+                    "{percent}% uploaded",
+                    &[("percent", &format!("{:.0}", fraction * 100.0))],
+                );
+                ui.label(
+                    RichText::new(&said)
+                        .font(theme::regular(12.0))
+                        .color(palette.dim),
+                );
+                let bar = egui::ProgressBar::new(fraction)
+                    .desired_width(ui.available_width().clamp(60.0, 220.0))
+                    .desired_height(6.0)
+                    .fill(palette.accent);
+                ui.add(bar);
+            });
+        });
+    }
+}
+
+/// Uploads files dropped on this panel (the one under the pointer), and
+/// shows where they will go while they are dragged over it. With no
+/// pointer position, as some platforms give none during a drag, the
+/// `fallback` panel (the conversation) takes them.
+pub fn drop_target(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    thread: Option<Ts>,
+    fallback: bool,
+    actions: &mut Vec<Action>,
+) {
+    let rect = ui.max_rect();
+    let (hovering, dropped, pointer) = ui.input(|i| {
+        (
+            !i.raw.hovered_files.is_empty(),
+            !i.raw.dropped_files.is_empty(),
+            i.pointer.hover_pos(),
+        )
+    });
+    let here = pointer.map_or(fallback, |p| rect.contains(p));
+    if !here {
+        return;
+    }
+    if hovering {
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new(("drop-target", fallback)),
+        ));
+        let area = rect.shrink(8.0);
+        painter.rect(
+            area,
+            CornerRadius::same(theme::RADIUS),
+            palette.window.gamma_multiply(0.85),
+            Stroke::new(2.0, palette.accent),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            area.center(),
+            egui::Align2::CENTER_CENTER,
+            t("Drop files to upload"),
+            theme::semibold(16.0),
+            palette.text,
+        );
+    }
+    if dropped {
+        let files = ui
+            .ctx()
+            .input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
+        for path in files.iter().map(|file| file.path().to_path_buf()) {
+            actions.push(Action::Upload {
+                thread: thread.clone(),
+                path,
+                comment: String::new(),
+            });
+        }
     }
 }
 

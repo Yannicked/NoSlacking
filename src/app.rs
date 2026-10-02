@@ -96,6 +96,21 @@ pub struct Draft {
     pub suggesting: bool,
 }
 
+/// A file on its way to Slack, shown under the composer it was sent from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Upload {
+    /// The worker's name for it, for progress and cancelling.
+    pub id: u64,
+    /// The composer's draft key ([`App::draft_key`]).
+    pub key: String,
+    pub name: String,
+    pub sent: u64,
+    /// Zero until the worker has opened the file.
+    pub total: u64,
+    /// A pasted image's temporary file, removed once the upload ends.
+    pasted: Option<PathBuf>,
+}
+
 /// The "name this section" dialog.
 #[derive(Clone, Debug, Default)]
 pub struct SectionDialog {
@@ -857,6 +872,9 @@ pub struct App {
     pub selected: Option<Selected>,
     pub toasts: Vec<Toast>,
     pub actions: Vec<Action>,
+    /// Files being uploaded, oldest first.
+    pub transfers: Vec<Upload>,
+    next_upload: u64,
     pub switcher: Option<(String, usize)>,
     pub profile: Option<String>,
     pub picker: Option<PickerTarget>,
@@ -943,6 +961,10 @@ impl App {
         } else {
             Page::Main
         };
+        if !options.demo {
+            // Pasted images left by a run that ended mid-upload.
+            let _ = std::fs::remove_dir_all(dirs.pasted());
+        }
         let mut app = Self {
             dirs,
             settings,
@@ -965,6 +987,8 @@ impl App {
             selected: None,
             toasts: Vec::new(),
             actions: Vec::new(),
+            transfers: Vec::new(),
+            next_upload: 0,
             switcher: None,
             profile: None,
             picker: None,
@@ -1117,14 +1141,8 @@ impl App {
                 ctx.forget_all_images();
             }
         }
-        while let Ok(((team, channel, thread), path)) = self.uploads.1.try_recv() {
-            self.backend.send(Command::Upload {
-                team,
-                channel,
-                thread,
-                path,
-                comment: String::new(),
-            });
+        while let Ok((target, path)) = self.uploads.1.try_recv() {
+            self.start_upload(target, path, String::new());
         }
         if self.catalog.poll() {
             self.refresh_custom_theme();
@@ -1229,6 +1247,13 @@ impl App {
             Event::SignedOut { team, reason } => self.signed_out(&team, reason),
             Event::Socket(socket) => self.socket_changed(socket),
             Event::Error(error) => self.toast(error, true),
+            Event::UploadProgress { id, sent, total } => {
+                if let Some(upload) = self.transfers.iter_mut().find(|u| u.id == id) {
+                    upload.sent = sent;
+                    upload.total = total;
+                }
+            }
+            Event::UploadDone { id } => self.upload_done(id),
             Event::Notice(text) => self.toast(text, false),
             // A workspace's conversations, people, apps and sidebar.
             Event::Conversations {
@@ -1836,15 +1861,76 @@ impl App {
     }
 
     fn upload(&mut self, thread: Option<Ts>, path: PathBuf, comment: String) {
-        if let Some((team, channel, thread)) = self.upload_target(thread) {
-            self.backend.send(Command::Upload {
-                team,
-                channel,
-                thread,
-                path,
-                comment,
-            });
+        if let Some(target) = self.upload_target(thread) {
+            self.start_upload(target, path, comment);
         }
+    }
+
+    /// Sends a file to the worker and lists it under its composer.
+    fn start_upload(
+        &mut self,
+        (team, channel, thread): UploadTarget,
+        path: PathBuf,
+        comment: String,
+    ) {
+        self.next_upload += 1;
+        let id = self.next_upload;
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        let pasted = path.starts_with(self.dirs.pasted()).then(|| path.clone());
+        self.transfers.push(Upload {
+            id,
+            key: Self::draft_key(&team, &channel, thread.as_ref()),
+            name,
+            sent: 0,
+            total: 0,
+            pasted,
+        });
+        self.backend.send(Command::Upload {
+            id,
+            team,
+            channel,
+            thread,
+            path,
+            comment,
+        });
+    }
+
+    /// An upload ended one way or another: it leaves the composer, and a
+    /// pasted image's temporary file goes.
+    fn upload_done(&mut self, id: u64) {
+        let Some(index) = self.transfers.iter().position(|u| u.id == id) else {
+            return;
+        };
+        let upload = self.transfers.remove(index);
+        if let Some(path) = upload.pasted
+            && let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            log::debug!("could not remove a pasted image: {error}");
+        }
+    }
+
+    /// Uploads the clipboard's image, if it holds one and no text: Ctrl+V
+    /// with text was already pasted into the field by egui. The clipboard
+    /// is read on a thread of its own, as some desktops answer slowly.
+    fn paste_image(&mut self, thread: Option<Ts>) {
+        let Some(target) = self.upload_target(thread) else {
+            return;
+        };
+        let sender = self.uploads.0.clone();
+        let waker = self.waker.clone();
+        let dir = self.dirs.pasted();
+        std::thread::spawn(move || match crate::paste::clipboard_image(&dir) {
+            Ok(Some(path)) => {
+                let _ = sender.send((target, path));
+                waker.wake();
+            }
+            Ok(None) => {}
+            Err(error) => log::warn!("could not paste the image: {error}"),
+        });
     }
 
     fn pick_upload(&mut self, thread: Option<Ts>) {
@@ -1904,6 +1990,12 @@ impl App {
                 comment,
             } => self.upload(thread, path, comment),
             Action::PickUpload { thread } => self.pick_upload(thread),
+            Action::PasteImage { thread } => self.paste_image(thread),
+            Action::CancelUpload(id) => {
+                self.backend.send(Command::CancelUpload { id });
+                self.upload_done(id);
+                self.toast(t("Upload cancelled").into_owned(), false);
+            }
             Action::Download { url, name } => {
                 if let Some(team) = self.active_team() {
                     self.backend.send(Command::Download { team, url, name });

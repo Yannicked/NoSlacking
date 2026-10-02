@@ -68,6 +68,10 @@ open = "5"
 jiff = "0.2"
 # The native file picker for uploads.
 rfd = "0.17.2"
+# Images pasted into the composer. egui's clipboard only carries text;
+# egui-winit already links arboard with these features, so this adds no
+# crate to the build.
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }

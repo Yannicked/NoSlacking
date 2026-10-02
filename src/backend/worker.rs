@@ -169,6 +169,9 @@ pub struct Worker {
     /// wait, so a command for a saved workspace is not refused only
     /// because its token is still being read. `None` once started.
     waiting: Option<Vec<Command>>,
+    /// Uploads still running, by the interface's id, so they can be
+    /// cancelled.
+    uploads: HashMap<u64, tokio::task::AbortHandle>,
 }
 
 impl Worker {
@@ -202,6 +205,7 @@ impl Worker {
             internal,
             internal_rx: Some(internal_rx),
             waiting: Some(Vec::new()),
+            uploads: HashMap::new(),
         }
     }
 
@@ -569,12 +573,19 @@ impl Worker {
                 },
             ),
             Command::Upload {
+                id,
                 team,
                 channel,
                 thread,
                 path,
                 comment,
-            } => self.upload(team, channel, thread, path, comment),
+            } => self.upload(id, team, channel, thread, path, comment),
+            Command::CancelUpload { id } => {
+                if let Some(task) = self.uploads.remove(&id) {
+                    task.abort();
+                }
+                self.sink.send(Event::UploadDone { id });
+            }
             Command::Download { team, url, name } => self.download(&team, url, name),
             Command::Mark { team, channel, ts } => self.mark(&team, channel, ts),
             Command::FetchUsers { team, ids } => self.fetch_users(team, ids),
@@ -847,7 +858,8 @@ impl Worker {
     }
 
     fn upload(
-        &self,
+        &mut self,
+        id: u64,
         team: String,
         channel: String,
         thread: Option<Ts>,
@@ -856,57 +868,19 @@ impl Worker {
     ) {
         let Some((client, sink)) = self.team(&team) else {
             self.not_signed_in("upload the file");
+            self.sink.send(Event::UploadDone { id });
             return;
         };
         let poll_after = !self.is_live(&team);
-        tokio::spawn(async move {
-            let name = path
-                .file_name()
-                .map_or_else(|| "file".to_owned(), |n| n.to_string_lossy().into_owned());
-            // The size comes from the open file, so it is the size of what
-            // gets streamed, not of whatever the path named a moment
-            // earlier.
-            let opened = match tokio::fs::File::open(&path).await {
-                Ok(file) => file.metadata().await.map(|meta| (file, meta)),
-                Err(error) => Err(error),
-            };
-            let (file, size) = match opened {
-                Ok((_, meta)) if !meta.is_file() => {
-                    sink.send(Event::Error(format!("{name} is not a file.")));
-                    return;
-                }
-                Ok((file, meta)) => (file, meta.len()),
-                Err(error) => {
-                    sink.send(Event::Error(format!("Could not read {name}: {error}")));
-                    return;
-                }
-            };
-            if size > MAX_UPLOAD {
-                sink.send(Event::Error(format!(
-                    "{name} is larger than Slack's 1 GB limit."
-                )));
-                return;
-            }
-            sink.send(Event::Notice(format!("Uploading {name}…")));
-            let thread = thread.as_ref().map(Ts::as_str);
-            match client
-                .upload(&channel, thread, &name, file, size, &comment)
-                .await
-            {
-                Ok(()) => {
-                    sink.send(Event::Notice(format!("Uploaded {name}")));
-                    // Without a live socket the new file would only show
-                    // at the next poll.
-                    if poll_after {
-                        history(client, team, channel, None, sink).await;
-                    }
-                }
-                Err(error) => sink.send(Event::Error(format!(
-                    "Could not upload {name}: {}",
-                    describe(&error)
-                ))),
-            }
+        self.uploads.retain(|_, task| !task.is_finished());
+        let task = tokio::spawn(async move {
+            upload(
+                id, client, team, channel, thread, path, comment, poll_after, &sink,
+            )
+            .await;
+            sink.send(Event::UploadDone { id });
         });
+        self.uploads.insert(id, task.abort_handle());
     }
 
     fn download(&self, team: &str, url: String, name: String) {
@@ -2199,6 +2173,90 @@ async fn thread(client: Client, team: String, channel: String, ts: Ts, sink: Sin
 /// The body streams into a hidden temporary file next to its final place,
 /// which is renamed once complete, so a large file never sits in memory
 /// and a failed download never appears under the real name.
+/// Uploads one file for [`Worker::upload`], telling the interface how far
+/// it got along the way.
+#[allow(clippy::too_many_arguments)]
+async fn upload(
+    id: u64,
+    client: Client,
+    team: String,
+    channel: String,
+    thread: Option<Ts>,
+    path: std::path::PathBuf,
+    comment: String,
+    poll_after: bool,
+    sink: &Sink,
+) {
+    let name = path
+        .file_name()
+        .map_or_else(|| "file".to_owned(), |n| n.to_string_lossy().into_owned());
+    // The size comes from the open file, so it is the size of what
+    // gets streamed, not of whatever the path named a moment
+    // earlier.
+    let opened = match tokio::fs::File::open(&path).await {
+        Ok(file) => file.metadata().await.map(|meta| (file, meta)),
+        Err(error) => Err(error),
+    };
+    let (file, size) = match opened {
+        Ok((_, meta)) if !meta.is_file() => {
+            sink.send(Event::Error(format!("{name} is not a file.")));
+            return;
+        }
+        Ok((file, meta)) => (file, meta.len()),
+        Err(error) => {
+            sink.send(Event::Error(format!("Could not read {name}: {error}")));
+            return;
+        }
+    };
+    if size > MAX_UPLOAD {
+        sink.send(Event::Error(format!(
+            "{name} is larger than Slack's 1 GB limit."
+        )));
+        return;
+    }
+    sink.send(Event::UploadProgress {
+        id,
+        sent: 0,
+        total: size,
+    });
+    let thread = thread.as_ref().map(Ts::as_str);
+    let progress = {
+        let sink = sink.clone();
+        // Told only at each further hundredth, so a big file does not
+        // wake the window for every chunk.
+        let reported = std::sync::atomic::AtomicU64::new(0);
+        let step = (size / 100).max(1);
+        move |sent: u64| {
+            let last = reported.load(std::sync::atomic::Ordering::Relaxed);
+            if sent / step > last / step || sent == size {
+                reported.store(sent, std::sync::atomic::Ordering::Relaxed);
+                sink.send(Event::UploadProgress {
+                    id,
+                    sent,
+                    total: size,
+                });
+            }
+        }
+    };
+    match client
+        .upload(&channel, thread, &name, file, size, &comment, progress)
+        .await
+    {
+        Ok(()) => {
+            sink.send(Event::Notice(format!("Uploaded {name}")));
+            // Without a live socket the new file would only show
+            // at the next poll.
+            if poll_after {
+                history(client, team, channel, None, sink.clone()).await;
+            }
+        }
+        Err(error) => sink.send(Event::Error(format!(
+            "Could not upload {name}: {}",
+            describe(&error)
+        ))),
+    }
+}
+
 async fn download(client: &Client, url: &str, name: &str) -> Result<std::path::PathBuf, String> {
     use tokio::io::AsyncWriteExt as _;
     let mut response = client
