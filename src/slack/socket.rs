@@ -101,8 +101,7 @@ enum Ended {
 
 /// Opens a Socket Mode URL with the app-level token.
 async fn open_url(http: &reqwest::Client, app_token: &str) -> Result<String, Ended> {
-    let network =
-        |e: reqwest::Error| Ended::Failed(SlackError::Network(e.without_url().to_string()));
+    let network = |e: reqwest::Error| Ended::Failed(e.into());
     let response = http
         .post(format!("{}apps.connections.open", client::API))
         .bearer_auth(app_token)
