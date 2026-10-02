@@ -58,7 +58,97 @@ fn current_word(text: &str, cursor: usize) -> Option<(usize, String)> {
     (!word.is_empty()).then_some((start, word))
 }
 
+/// Someone who can be mentioned, with names lower-cased once rather than
+/// for every person on every frame of typing.
+#[derive(Clone, Debug)]
+struct Person {
+    id: String,
+    label: String,
+    detail: String,
+    avatar: Option<String>,
+    is_bot: bool,
+    /// Lower-cased: the handle, the real name and the display name.
+    names: [String; 3],
+    label_lower: String,
+}
+
+/// Everyone who can be mentioned, built when people arrive.
+#[derive(Clone, Debug, Default)]
+struct People {
+    /// `users.len()` and [`WorkspaceState::users_version`] when built.
+    version: (usize, u64),
+    people: Vec<Person>,
+}
+
+impl People {
+    fn build(workspace: &WorkspaceState) -> Self {
+        let people = workspace
+            .users
+            .values()
+            .filter(|u| !u.deleted)
+            .map(|u| Person {
+                id: u.id.clone(),
+                label: u.label().to_owned(),
+                detail: if u.real_name.is_empty() || u.real_name == u.label() {
+                    u.name.clone()
+                } else {
+                    u.real_name.clone()
+                },
+                avatar: u.avatar.clone(),
+                is_bot: u.is_bot,
+                names: [
+                    u.name.to_lowercase(),
+                    u.real_name.to_lowercase(),
+                    u.display_name.to_lowercase(),
+                ],
+                label_lower: u.label().to_lowercase(),
+            })
+            .collect();
+        Self {
+            version: People::version_of(workspace),
+            people,
+        }
+    }
+
+    fn version_of(workspace: &WorkspaceState) -> (usize, u64) {
+        (workspace.users.len(), workspace.users_version())
+    }
+}
+
+/// The suggestions for the last word typed, kept per composer: the field
+/// asks again on every frame while the word stays the same.
+#[derive(Clone, Debug, Default)]
+struct Memo {
+    people: People,
+    /// The word, the custom emoji count and what was found.
+    last: Option<(String, usize, Vec<Suggestion>)>,
+}
+
+impl Memo {
+    fn suggestions(&mut self, workspace: &WorkspaceState, word: &str) -> Vec<Suggestion> {
+        if self.people.version != People::version_of(workspace) {
+            self.people = People::build(workspace);
+            self.last = None;
+        }
+        let custom = workspace.emoji.custom_names().count();
+        if let Some((last, count, found)) = &self.last
+            && last == word
+            && *count == custom
+        {
+            return found.clone();
+        }
+        let found = suggest(&self.people, workspace, word);
+        self.last = Some((word.to_owned(), custom, found.clone()));
+        found
+    }
+}
+
+#[cfg(test)]
 fn suggestions(workspace: &WorkspaceState, word: &str) -> Vec<Suggestion> {
+    suggest(&People::build(workspace), workspace, word)
+}
+
+fn suggest(people: &People, workspace: &WorkspaceState, word: &str) -> Vec<Suggestion> {
     if let Some(query) = word.strip_prefix('@') {
         let query = query.to_lowercase();
         let mut out: Vec<Suggestion> = ["here", "channel", "everyone"]
@@ -66,33 +156,22 @@ fn suggestions(workspace: &WorkspaceState, word: &str) -> Vec<Suggestion> {
             .filter(|name| !query.is_empty() && name.starts_with(&query))
             .map(Suggestion::Special)
             .collect();
-        let mut users: Vec<_> = workspace
-            .users
-            .values()
-            .filter(|u| !u.deleted)
-            .filter(|u| {
-                query.is_empty()
-                    || u.name.to_lowercase().contains(&query)
-                    || u.real_name.to_lowercase().contains(&query)
-                    || u.display_name.to_lowercase().contains(&query)
-            })
+        let mut users: Vec<&Person> = people
+            .people
+            .iter()
+            .filter(|p| query.is_empty() || p.names.iter().any(|n| n.contains(&query)))
             .collect();
-        users.sort_by_key(|u| {
-            (
-                u.is_bot,
-                !u.label().to_lowercase().starts_with(&query),
-                u.label().to_lowercase(),
-            )
+        users.sort_by(|a, b| {
+            let key = |p: &Person| (p.is_bot, !p.label_lower.starts_with(&query));
+            key(a)
+                .cmp(&key(b))
+                .then_with(|| a.label_lower.cmp(&b.label_lower))
         });
-        out.extend(users.into_iter().take(8).map(|u| Suggestion::User {
-            id: u.id.clone(),
-            label: u.label().to_owned(),
-            detail: if u.real_name.is_empty() || u.real_name == u.label() {
-                u.name.clone()
-            } else {
-                u.real_name.clone()
-            },
-            avatar: u.avatar.clone(),
+        out.extend(users.into_iter().take(8).map(|p| Suggestion::User {
+            id: p.id.clone(),
+            label: p.label.clone(),
+            detail: p.detail.clone(),
+            avatar: p.avatar.clone(),
         }));
         return out;
     }
@@ -150,7 +229,13 @@ pub fn show(
         draft.dismissed = None;
     }
     let mut found = match &word {
-        Some((_, w)) if draft.dismissed.is_none() => suggestions(composer.workspace, w),
+        Some((_, w)) if draft.dismissed.is_none() => {
+            let memo_id = id.with("suggestions");
+            let mut memo: Memo = ui.data_mut(|d| d.remove_temp(memo_id)).unwrap_or_default();
+            let found = memo.suggestions(composer.workspace, w);
+            ui.data_mut(|d| d.insert_temp(memo_id, memo));
+            found
+        }
         _ => Vec::new(),
     };
     if draft.selected >= found.len() {
@@ -500,6 +585,28 @@ mod tests {
         // A bare @ lists people, not broadcasts.
         assert_eq!(suggestions(&w, "@").len(), 3);
         assert!(suggestions(&w, "plain").is_empty());
+    }
+
+    #[test]
+    fn remembered_suggestions_follow_new_people() {
+        let mut w = workspace();
+        let mut memo = Memo::default();
+        assert_eq!(
+            labels(&memo.suggestions(&w, "@an")),
+            ["Ann", "Joanna Ek", "anbot"]
+        );
+        assert_eq!(memo.suggestions(&w, "@an"), suggestions(&w, "@an"));
+        let andy = crate::model::User {
+            id: "U5".into(),
+            name: "andy".into(),
+            ..Default::default()
+        };
+        w.users.insert(andy.id.clone(), andy);
+        assert_eq!(
+            labels(&memo.suggestions(&w, "@an")),
+            ["andy", "Ann", "Joanna Ek", "anbot"]
+        );
+        assert_eq!(memo.suggestions(&w, ":ta"), suggestions(&w, ":ta"));
     }
 
     #[test]
