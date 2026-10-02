@@ -25,6 +25,14 @@ pub struct Desktop {
     /// What the launcher icon last showed, likewise.
     badge: Option<Unread>,
     launcher: Option<Launcher>,
+    /// The tray item, while it is on and the desktop has a tray.
+    tray: Option<crate::tray::Tray>,
+    /// Whether a window exists now.
+    window_open: bool,
+    /// Close the window but keep running: the tray asked to hide it.
+    hide: bool,
+    /// Requests from later launches (show the window, open a link).
+    launches: Option<std::sync::mpsc::Receiver<crate::single_instance::Request>>,
 }
 
 impl Desktop {
@@ -212,6 +220,11 @@ impl App {
                     .send(crate::backend::Command::FetchDnd { team });
             }
         }
+        self.tray_requests();
+        self.launch_requests();
+        if let Some(tray) = &mut self.desktop.tray {
+            tray.set_unread(unread(&self.workspaces));
+        }
         if self.desktop.launcher.is_some() {
             let now = unread(&self.workspaces);
             if self.desktop.badge != Some(now) {
@@ -225,6 +238,9 @@ impl App {
 
     /// Passes the desktop's requests to the window.
     pub(super) fn desktop_window(&mut self, ctx: &egui::Context) {
+        if self.quit || self.desktop.hide {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         let now = unread(&self.workspaces);
         if self.desktop.title != Some(now) {
             self.desktop.title = Some(now);
@@ -241,6 +257,128 @@ impl App {
                 egui::UserAttentionType::Informational,
             ));
         }
+    }
+
+    /// Shows the tray item if the settings want one. Not in the demo: its
+    /// item would sit in the real desktop's tray.
+    pub(super) fn start_tray(&mut self) {
+        if self.demo || !self.settings.desktop.tray || self.desktop.tray.is_some() {
+            return;
+        }
+        let waker = self.waker.clone();
+        self.desktop.tray = crate::tray::Tray::spawn(move || waker.wake());
+        if self.desktop.window_open
+            && let Some(tray) = &mut self.desktop.tray
+        {
+            tray.attach();
+        }
+    }
+
+    /// Turns the tray item on or off. On macOS a menu-bar item stays until
+    /// NoSlacking quits.
+    pub fn set_tray(&mut self, on: bool) {
+        self.settings.desktop.tray = on;
+        if on {
+            self.start_tray();
+        } else {
+            self.desktop.tray = None;
+        }
+        self.save_settings();
+    }
+
+    /// Whether the desktop showed a tray item, so the window can close
+    /// into it.
+    pub fn has_tray(&self) -> bool {
+        self.desktop.tray.is_some()
+    }
+
+    /// Hands over the requests later launches send (see
+    /// [`crate::single_instance`]), which arrive with or without a window.
+    pub fn listen_for_launches(
+        &mut self,
+        launches: std::sync::mpsc::Receiver<crate::single_instance::Request>,
+    ) {
+        self.desktop.launches = Some(launches);
+    }
+
+    fn launch_requests(&mut self) {
+        let requests: Vec<_> = self
+            .desktop
+            .launches
+            .as_ref()
+            .map(|r| r.try_iter().collect())
+            .unwrap_or_default();
+        for request in requests {
+            if let crate::single_instance::Request::Open(link) = request {
+                self.backend.send(crate::backend::Command::Callback(link));
+            }
+            self.desktop.raise = true;
+        }
+    }
+
+    fn tray_requests(&mut self) {
+        use crate::tray::Request;
+        let requests = self
+            .desktop
+            .tray
+            .as_ref()
+            .map(crate::tray::Tray::requests)
+            .unwrap_or_default();
+        for request in requests {
+            match request {
+                Request::Toggle if self.desktop.window_open => self.desktop.hide = true,
+                Request::Toggle | Request::Show => {
+                    self.desktop.hide = false;
+                    self.desktop.raise = true;
+                }
+                Request::Quit => self.quit = true,
+            }
+            self.waker.wake();
+        }
+    }
+
+    /// A window was made.
+    pub(super) fn window_made(&mut self) {
+        self.desktop.window_open = true;
+        if let Some(tray) = &mut self.desktop.tray {
+            tray.attach();
+        }
+    }
+
+    /// The window is gone and the app runs on without one.
+    pub(super) fn window_left(&mut self) {
+        self.desktop.window_open = false;
+        self.desktop.hide = false;
+        self.desktop.title = None;
+        self.window_focused = false;
+    }
+
+    /// What closing the window means: quit, or keep running in the tray
+    /// when there is one and you asked for that (in the settings, or by
+    /// hiding the window from the tray).
+    pub(super) fn closed_action(&self) -> fastframe_shell::Closed {
+        if !self.quit
+            && self.desktop.tray.is_some()
+            && (self.settings.desktop.close_to_tray || self.desktop.hide)
+        {
+            fastframe_shell::Closed::Hide
+        } else {
+            fastframe_shell::Closed::Quit
+        }
+    }
+
+    /// Whether the window should come back while none is open.
+    pub(super) fn wants_window(&self) -> bool {
+        self.desktop.raise
+    }
+
+    /// Whether a launch asking to start hidden (at login) may: only with
+    /// the tray to come back through. macOS makes its menu-bar item with
+    /// the first window, so it always opens one.
+    pub(super) fn can_start_hidden(&self) -> bool {
+        cfg!(not(target_os = "macos"))
+            && self.desktop.tray.is_some()
+            && self.settings.desktop.close_to_tray
     }
 
     /// Slack's Do Not Disturb state for a workspace.

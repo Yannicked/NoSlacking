@@ -35,6 +35,8 @@ allow = [
     "MIT",
     "MPL-2.0",
     "Unicode-3.0",
+    # ksni, the Linux tray item under fastframe-tray: public domain.
+    "Unlicense",
     "Zlib",
     # The fonts bundled by egui (Ubuntu, Hack, Noto) and fastframe-fonts.
     "OFL-1.1",
