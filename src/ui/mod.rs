@@ -8,6 +8,7 @@ mod login;
 mod message;
 mod overlays;
 mod rich;
+mod rows;
 mod settings;
 mod sidebar;
 mod thread;
