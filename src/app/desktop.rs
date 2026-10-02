@@ -5,19 +5,46 @@
 //! small hooks in the main loop.
 
 use crate::backend::Waker;
+use crate::badge::{self, Launcher, Unread};
 use crate::model::{ConversationKind, Message};
 use crate::notify::{self, Level, Note, Notifier};
 
 use super::{App, WorkspaceState};
 
-/// What the window should do for the desktop on its next frame.
+/// The desktop's side of the window.
 #[derive(Debug, Default)]
-pub struct WindowRequests {
+pub struct Desktop {
     /// Come forward: a notification was clicked.
     raise: bool,
     /// Ask for attention (flash the taskbar entry, bounce the Dock icon): a
     /// notification arrived while the window was in the background.
     attention: bool,
+    /// What the window title last said, to change it only when it changes.
+    title: Option<Unread>,
+    /// What the launcher icon last showed, likewise.
+    badge: Option<Unread>,
+    launcher: Option<Launcher>,
+}
+
+impl Desktop {
+    /// The desktop side of a new app. The demo leaves the real desktop's
+    /// launcher alone.
+    pub(super) fn new(demo: bool) -> Self {
+        Self {
+            launcher: if demo { None } else { Launcher::spawn() },
+            ..Self::default()
+        }
+    }
+}
+
+/// What is waiting across `workspaces`, for the title and the badge.
+pub(super) fn unread(workspaces: &[WorkspaceState]) -> Unread {
+    let mut total = Unread::default();
+    for conversation in workspaces.iter().flat_map(|w| &w.conversations) {
+        total.mentions = total.mentions.saturating_add(conversation.mentions);
+        total.unread |= conversation.has_unread();
+    }
+    total
 }
 
 /// The notification thread, except in the demo, whose pretend messages
@@ -127,7 +154,7 @@ impl App {
         if let Some(notifier) = &self.notifier {
             notifier.show(note);
             if !self.window_focused {
-                self.window_requests.attention = true;
+                self.desktop.attention = true;
                 self.waker.wake();
             }
         }
@@ -149,19 +176,33 @@ impl App {
                 self.select_workspace(click.team.clone());
             }
             self.open_conversation(&click.channel);
-            self.window_requests.raise = true;
+            self.desktop.raise = true;
+        }
+        if self.desktop.launcher.is_some() {
+            let now = unread(&self.workspaces);
+            if self.desktop.badge != Some(now) {
+                self.desktop.badge = Some(now);
+                if let Some(launcher) = &self.desktop.launcher {
+                    launcher.set(now);
+                }
+            }
         }
     }
 
     /// Passes the desktop's requests to the window.
     pub(super) fn desktop_window(&mut self, ctx: &egui::Context) {
-        if std::mem::take(&mut self.window_requests.raise) {
+        let now = unread(&self.workspaces);
+        if self.desktop.title != Some(now) {
+            self.desktop.title = Some(now);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(badge::window_title(now)));
+        }
+        if std::mem::take(&mut self.desktop.raise) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            self.window_requests.attention = false;
+            self.desktop.attention = false;
         }
-        if std::mem::take(&mut self.window_requests.attention) && !self.window_focused {
+        if std::mem::take(&mut self.desktop.attention) && !self.window_focused {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                 egui::UserAttentionType::Informational,
             ));
@@ -185,6 +226,53 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unread_adds_up_every_workspace() {
+        let mut one = WorkspaceState::new(crate::model::Workspace {
+            team_id: "T1".into(),
+            name: "One".into(),
+            domain: String::new(),
+            icon: None,
+            user_id: "U1".into(),
+        });
+        let mut two = WorkspaceState::new(crate::model::Workspace {
+            team_id: "T2".into(),
+            ..one.info.clone()
+        });
+        assert_eq!(unread(&[]), Unread::default());
+        let quiet = crate::model::Conversation {
+            id: "C1".into(),
+            name: "general".into(),
+            kind: ConversationKind::Channel,
+            user: None,
+            topic: String::new(),
+            purpose: String::new(),
+            members: None,
+            archived: false,
+            last_read: None,
+            latest: None,
+            unread: 0,
+            mentions: 0,
+        };
+        one.conversations.push(crate::model::Conversation {
+            mentions: 2,
+            unread: 2,
+            ..quiet.clone()
+        });
+        two.conversations.push(crate::model::Conversation {
+            mentions: 1,
+            ..quiet.clone()
+        });
+        two.conversations.push(quiet);
+        assert_eq!(
+            unread(&[one, two]),
+            Unread {
+                mentions: 3,
+                unread: true
+            }
+        );
+    }
 
     #[test]
     fn unknown_direct_messages_are_recognised_by_their_id() {

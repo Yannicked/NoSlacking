@@ -2899,6 +2899,7 @@ dependencies = [
  "urlencoding",
  "windows-native-keyring-store",
  "winresource",
+ "zbus",
  "zbus-secret-service-keyring-store",
 ]
 

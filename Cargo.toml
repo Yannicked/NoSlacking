@@ -81,6 +81,9 @@ apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
 windows-native-keyring-store = { version = "1.1", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# The unread count on the launcher icon (the LauncherEntry signal). Already
+# in the tree for the keyring and accessibility; same version.
+zbus = { version = "5.19", default-features = false, features = ["blocking-api"] }
 zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-tokio-crypto-rust"] }
 
 [build-dependencies]
