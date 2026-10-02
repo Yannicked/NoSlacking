@@ -4,9 +4,12 @@
 //! for everything special: `<@U123>` mentions, `<#C123|general>` channels,
 //! `<!here>`, `<https://x.y|label>` links. Inside text, `*bold*`,
 //! `_italic_`, `~strike~` and `` `code` `` style runs, and ```` ``` ````
-//! fences preformatted blocks. Lines starting with `>` are quotes.
+//! fences preformatted blocks. Lines starting with `>` are quotes, and a
+//! fence opened on a quoted line stays in its quote.
 //!
 //! [`parse`] never fails: anything it does not recognise stays text.
+
+use std::collections::HashMap;
 
 /// How a run of text is styled.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -81,6 +84,7 @@ pub fn escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Parses a message's text into blocks.
 pub fn parse(text: &str) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut rest = text;
@@ -91,10 +95,19 @@ pub fn parse(text: &str) -> Vec<Block> {
                 let after = &after[3..];
                 match after.find("```") {
                     Some(end) => {
-                        lines(before, &mut blocks);
-                        let code = after[..end].trim_matches('\n');
-                        blocks.push(Block::Preformatted(unescape(code)));
-                        rest = after[end + 3..].trim_start_matches('\n');
+                        let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+                        rest = match quote_marker(&before[line_start..]) {
+                            Some(lead) => {
+                                lines(&before[..line_start], &mut blocks);
+                                quoted_fence(lead, &after[..end], &after[end + 3..], &mut blocks)
+                            }
+                            None => {
+                                lines(before, &mut blocks);
+                                let code = after[..end].trim_matches('\n');
+                                blocks.push(Block::Preformatted(unescape(code)));
+                                after[end + 3..].trim_start_matches('\n')
+                            }
+                        };
                     }
                     None => {
                         lines(rest, &mut blocks);
@@ -108,7 +121,70 @@ pub fn parse(text: &str) -> Vec<Block> {
             }
         }
     }
-    blocks
+    join_quotes(blocks)
+}
+
+/// A line's text after its quote marker, if it is quoted.
+fn quote_marker(line: &str) -> Option<&str> {
+    line.strip_prefix("&gt; ")
+        .or_else(|| line.strip_prefix("&gt;"))
+        .or_else(|| line.strip_prefix("> "))
+}
+
+/// A fence opened on a quoted line (`> ```code```  `): the code stays in
+/// the quote, a line of code at a time, instead of the quote being lost.
+/// `lead` is the quoted text before the fence, `code` what the fence holds
+/// and `after` the text after it. Returns what is left to parse.
+fn quoted_fence<'a>(lead: &str, code: &str, after: &'a str, blocks: &mut Vec<Block>) -> &'a str {
+    let mut quote = Vec::new();
+    inline(lead, Style::default(), &mut quote);
+    // Each line of a quoted block carries its own marker after the first.
+    let code: Vec<&str> = code
+        .split('\n')
+        .map(|line| quote_marker(line).unwrap_or(line))
+        .collect();
+    let first = code
+        .iter()
+        .position(|l| !l.is_empty())
+        .unwrap_or(code.len());
+    let last = code
+        .iter()
+        .rposition(|l| !l.is_empty())
+        .map_or(first, |l| l + 1);
+    for line in &code[first..last] {
+        if !quote.is_empty() {
+            quote.push(Inline::Newline);
+        }
+        if !line.is_empty() {
+            quote.push(Inline::Code(unescape(line)));
+        }
+    }
+    // Text after the fence on the same line is still quoted.
+    let (tail, rest) = after.split_once('\n').unwrap_or((after, ""));
+    if !tail.trim().is_empty() {
+        quote.push(Inline::Newline);
+        inline(tail.trim_start(), Style::default(), &mut quote);
+    }
+    if !quote.is_empty() {
+        blocks.push(Block::Quote(quote));
+    }
+    rest
+}
+
+/// Joins quotes that follow each other, which only a quoted fence leaves
+/// apart: the lines before it, the fence and the lines after are one quote.
+fn join_quotes(blocks: Vec<Block>) -> Vec<Block> {
+    let mut joined: Vec<Block> = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        match (joined.last_mut(), block) {
+            (Some(Block::Quote(previous)), Block::Quote(next)) => {
+                previous.push(Inline::Newline);
+                previous.extend(next);
+            }
+            (_, block) => joined.push(block),
+        }
+    }
+    joined
 }
 
 /// Groups lines into paragraphs and quotes.
@@ -120,10 +196,7 @@ fn lines(text: &str, blocks: &mut Vec<Block>) {
     let mut paragraph: Vec<Inline> = Vec::new();
     let mut quote: Vec<Inline> = Vec::new();
     for line in text.split('\n') {
-        let quoted = line
-            .strip_prefix("&gt; ")
-            .or_else(|| line.strip_prefix("&gt;"))
-            .or_else(|| line.strip_prefix("> "));
+        let quoted = quote_marker(line);
         match quoted {
             Some(inner) => {
                 if !paragraph.is_empty() {
@@ -175,8 +248,32 @@ fn push_text(out: &mut Vec<Inline>, text: &str, style: Style) {
     out.push(Inline::Text(text, style));
 }
 
+/// Whether a style marker next to `c` stands at the edge of a word: the
+/// line's ends, spaces, and anything that is not a letter or digit in any
+/// script, so `“*bold*”` and `「*太字*」` work as `"*bold*"` does.
+/// Combining accents belong to the letter before them.
 fn is_boundary(c: Option<char>) -> bool {
-    c.is_none_or(|c| c.is_whitespace() || c.is_ascii_punctuation())
+    c.is_none_or(|c| c.is_whitespace() || !(c.is_alphanumeric() || is_combining(c)))
+}
+
+/// The common blocks of combining marks, which are not alphanumeric but
+/// are part of a word.
+fn is_combining(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0300}'..='\u{036F}'
+            | '\u{1AB0}'..='\u{1AFF}'
+            | '\u{1DC0}'..='\u{1DFF}'
+            | '\u{20D0}'..='\u{20FF}'
+            | '\u{FE20}'..='\u{FE2F}'
+    )
+}
+
+/// Whether an emoji code may touch `c`: not glued to a Latin letter or a
+/// digit, so the `:30:` in `10:30:00` stays text. Other scripts write no
+/// spaces between words, so emoji may follow them directly.
+fn emoji_edge(c: Option<char>) -> bool {
+    c.is_none_or(|c| !c.is_ascii_alphanumeric())
 }
 
 /// Where one line's markup characters are, found in a single pass. Every
@@ -190,6 +287,8 @@ struct Marks {
     closes: Vec<usize>,
     /// Backticks.
     ticks: Vec<usize>,
+    /// Where each run of two or more backticks starts, by its length.
+    runs: HashMap<usize, Vec<usize>>,
     /// For `*`, `_` and `~`, the places that can close a styled run: the
     /// marker hugs the text before it and a word boundary follows.
     closers: [Vec<usize>; 3],
@@ -201,15 +300,28 @@ impl Marks {
             opens: Vec::new(),
             closes: Vec::new(),
             ticks: Vec::new(),
+            runs: HashMap::new(),
             closers: [Vec::new(), Vec::new(), Vec::new()],
         };
         let mut previous: Option<char> = None;
+        // The ticks seen in a row so far.
+        let mut run = 0;
         let mut chars = text.char_indices().peekable();
         while let Some((at, c)) = chars.next() {
             match c {
                 '<' | '\n' => marks.opens.push(at),
                 '>' => marks.closes.push(at),
-                '`' => marks.ticks.push(at),
+                '`' => {
+                    marks.ticks.push(at);
+                    run += 1;
+                    // The run's last tick records where it started.
+                    if chars.peek().is_none_or(|&(_, next)| next != '`') {
+                        if run > 1 {
+                            marks.runs.entry(run).or_default().push(at + 1 - run);
+                        }
+                        run = 0;
+                    }
+                }
                 '*' | '_' | '~' => {
                     let hugs = previous.is_some_and(|p| !p.is_whitespace());
                     if hugs && is_boundary(chars.peek().map(|&(_, next)| next)) {
@@ -259,13 +371,20 @@ fn inline(text: &str, style: Style, out: &mut Vec<Inline>) {
                     plain_start = i;
                     special(&text[i + 1..end], style, out).then_some(end + 1 - i)
                 }),
-            b'`' => next_at(&marks.ticks, i + 1)
-                .filter(|&end| end > i + 1)
-                .map(|end| {
+            b'`' => match code(text, i, &marks) {
+                Code::Span { inner, len } => {
                     flush(out, text, plain_start, i, style);
-                    out.push(Inline::Code(unescape(&text[i + 1..end])));
-                    end + 1 - i
-                }),
+                    out.push(Inline::Code(unescape(inner)));
+                    Some(len)
+                }
+                Code::Text { len } => {
+                    // A run of backticks with nothing to close it is text,
+                    // all of it: its second tick must not open a span.
+                    i += len;
+                    continue;
+                }
+                Code::None => None,
+            },
             b'*' | b'_' | b'~' if is_boundary(before) => {
                 styled(text, i, &marks, style).map(|(inner, inner_style, len)| {
                     flush(out, text, plain_start, i, style);
@@ -273,11 +392,13 @@ fn inline(text: &str, style: Style, out: &mut Vec<Inline>) {
                     len
                 })
             }
-            b':' => emoji(&text[i..]).map(|(name, len)| {
-                flush(out, text, plain_start, i, style);
-                out.push(Inline::Emoji(name.to_owned()));
-                len
-            }),
+            b':' if emoji_edge(before) => emoji(&text[i..])
+                .filter(|&(_, len)| emoji_edge(text[i + len..].chars().next()))
+                .map(|(name, len)| {
+                    flush(out, text, plain_start, i, style);
+                    out.push(Inline::Emoji(name.to_owned()));
+                    len
+                }),
             _ => None,
         };
         match consumed {
@@ -303,8 +424,9 @@ fn special(inner: &str, style: Style, out: &mut Vec<Inline>) -> bool {
     if inner.is_empty() {
         return false;
     }
+    // An empty label (`<@U1|>`) is no label: the name is looked up instead.
     let (target, label) = match inner.split_once('|') {
-        Some((target, label)) => (target, Some(unescape(label))),
+        Some((target, label)) => (target, Some(unescape(label)).filter(|l| !l.is_empty())),
         None => (inner, None),
     };
     let item = if let Some(id) = target.strip_prefix('@') {
@@ -318,40 +440,98 @@ fn special(inner: &str, style: Style, out: &mut Vec<Inline>) -> bool {
             label,
         }
     } else if let Some(command) = target.strip_prefix('!') {
-        if let Some(id) = command.strip_prefix("subteam^") {
-            Inline::Group {
+        let name = command.split('^').next().unwrap_or(command);
+        match (name, command.strip_prefix("subteam^")) {
+            (_, Some(id)) => Inline::Group {
                 id: id.to_owned(),
                 label,
+            },
+            // Only these notify a whole channel; drawing anything else
+            // (`<!foo>`) as a broadcast would claim a ping that never was.
+            ("here" | "channel" | "everyone", _) => Inline::Broadcast(name.to_owned()),
+            // A date (`<!date^1700000000^{date}|Nov 14>`) and commands this
+            // client does not know show their fallback text; with none,
+            // what was written stays as it is.
+            _ => {
+                let Some(label) = label else {
+                    return false;
+                };
+                push_plain(out, label, style);
+                return true;
             }
-        } else if command.starts_with("date^") {
-            Inline::Text(label.unwrap_or_default(), style)
-        } else {
-            Inline::Broadcast(command.split('^').next().unwrap_or(command).to_owned())
         }
     } else if target.contains(':') {
         let url = unescape(target);
         if !is_openable(&url) {
             // A `file:`, `smb:` or drive path would run whatever it names
             // when clicked; show what was written instead of a link.
-            let text = label.filter(|l| !l.is_empty()).unwrap_or(url);
-            match out.last_mut() {
-                Some(Inline::Text(previous, previous_style)) if *previous_style == style => {
-                    previous.push_str(&text)
-                }
-                _ => out.push(Inline::Text(text, style)),
-            }
+            push_plain(out, label.unwrap_or(url), style);
             return true;
         }
-        Inline::Link {
-            url,
-            label: label.filter(|l| !l.is_empty()),
-            style,
-        }
+        Inline::Link { url, label, style }
     } else {
         return false;
     };
     out.push(item);
     true
+}
+
+/// Text that is already unescaped, merged into the run before it when the
+/// style matches.
+fn push_plain(out: &mut Vec<Inline>, text: String, style: Style) {
+    match out.last_mut() {
+        Some(Inline::Text(previous, previous_style)) if *previous_style == style => {
+            previous.push_str(&text);
+        }
+        _ => out.push(Inline::Text(text, style)),
+    }
+}
+
+/// What a backtick starts.
+enum Code<'a> {
+    /// A code span: what it holds, and the bytes it takes with its ticks.
+    Span { inner: &'a str, len: usize },
+    /// A run of `len` ticks that nothing closes.
+    Text { len: usize },
+    /// A single tick that nothing closes.
+    None,
+}
+
+/// The code span opened by the backticks at `text[at]`.
+fn code<'a>(text: &'a str, at: usize, marks: &Marks) -> Code<'a> {
+    let run = text.as_bytes()[at..]
+        .iter()
+        .take_while(|&&b| b == b'`')
+        .count();
+    if run == 1 {
+        // One tick closes at the next tick, whatever follows it.
+        return match next_at(&marks.ticks, at + 1) {
+            Some(end) => Code::Span {
+                inner: &text[at + 1..end],
+                len: end + 1 - at,
+            },
+            None => Code::None,
+        };
+    }
+    // ``code with a ` inside`` closes at a run as long as its opener.
+    let close = marks
+        .runs
+        .get(&run)
+        .and_then(|starts| next_at(starts, at + run));
+    let Some(end) = close else {
+        return Code::Text { len: run };
+    };
+    let inner = &text[at + run..end];
+    // One space may pad each side, so a span can start or end with a tick:
+    // `` `x` `` is `x` in backticks.
+    let inner = match inner.strip_prefix(' ').and_then(|s| s.strip_suffix(' ')) {
+        Some(padded) if !padded.trim().is_empty() => padded,
+        _ => inner,
+    };
+    Code::Span {
+        inner,
+        len: end + run - at,
+    }
 }
 
 /// A styled run opened by the marker at `text[at]`: the inner text, its
@@ -656,6 +836,8 @@ mod tests {
             ("tones", repeat(":a::skin-tone-")),
             ("quotes", repeat("&gt; *a\n")),
             ("fences", repeat("``` *a ")),
+            ("quoted fences", repeat("&gt; ```a\n")),
+            ("tick runs", repeat("`` ```a ")),
         ]
     }
 
@@ -670,6 +852,292 @@ mod tests {
             let took = start.elapsed();
             assert!(!blocks.is_empty(), "{name}");
             assert!(took < budget, "{name}: {took:?} for {} bytes", text.len());
+        }
+    }
+
+    fn paragraph(text: &str) -> Vec<Inline> {
+        match parse(text).as_slice() {
+            [Block::Paragraph(inlines)] => inlines.clone(),
+            other => panic!("one paragraph from {text:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_known_broadcasts_are_broadcasts() {
+        assert_eq!(
+            paragraph("<!here> <!channel> <!everyone|everyone>"),
+            [
+                Inline::Broadcast("here".into()),
+                text(" "),
+                Inline::Broadcast("channel".into()),
+                text(" "),
+                Inline::Broadcast("everyone".into()),
+            ]
+        );
+        assert_eq!(paragraph("hi <!foo>"), [text("hi <!foo>")]);
+        assert_eq!(paragraph("hi <!foo|bar>!"), [text("hi bar!")]);
+    }
+
+    #[test]
+    fn groups_dates_and_unclosed_brackets() {
+        assert_eq!(
+            paragraph("<!subteam^S1|@design> and <!subteam^S2>"),
+            [
+                Inline::Group {
+                    id: "S1".into(),
+                    label: Some("@design".into())
+                },
+                text(" and "),
+                Inline::Group {
+                    id: "S2".into(),
+                    label: None
+                },
+            ]
+        );
+        assert_eq!(
+            paragraph("due <!date^1700000000^{date_short}|Nov 14, 2023> ok"),
+            [text("due Nov 14, 2023 ok")]
+        );
+        for unclosed in ["a <@U1", "<", "a <b <@U1>", "<<<", "x <#C1|gen"] {
+            let inlines = paragraph(unclosed);
+            assert!(
+                inlines
+                    .iter()
+                    .all(|i| matches!(i, Inline::Text(..) | Inline::User { .. })),
+                "{unclosed:?}: {inlines:?}"
+            );
+        }
+        assert_eq!(paragraph("a <@U1"), [text("a <@U1")]);
+        assert_eq!(
+            paragraph("a <b <@U1>"),
+            [
+                text("a <b "),
+                Inline::User {
+                    id: "U1".into(),
+                    label: None
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn user_and_channel_labels() {
+        assert_eq!(
+            paragraph("<@U1|ann> <@U2|> <#C1|> <!subteam^S1|>"),
+            [
+                Inline::User {
+                    id: "U1".into(),
+                    label: Some("ann".into())
+                },
+                text(" "),
+                Inline::User {
+                    id: "U2".into(),
+                    label: None
+                },
+                text(" "),
+                Inline::Channel {
+                    id: "C1".into(),
+                    label: None
+                },
+                text(" "),
+                Inline::Group {
+                    id: "S1".into(),
+                    label: None
+                },
+            ]
+        );
+        assert_eq!(
+            paragraph("<@U1|a &amp; b>"),
+            [Inline::User {
+                id: "U1".into(),
+                label: Some("a & b".into())
+            }]
+        );
+    }
+
+    #[test]
+    fn word_boundaries_know_other_scripts() {
+        assert_eq!(paragraph("“*bold*”"), [text("“"), bold("bold"), text("”")]);
+        assert_eq!(
+            paragraph("「*太字*」です"),
+            [text("「"), bold("太字"), text("」です")]
+        );
+        assert_eq!(paragraph("日本*太字*です"), [text("日本*太字*です")]);
+        // An accent written as a combining mark is part of its letter.
+        assert_eq!(paragraph("cafe\u{301}*x*"), [text("cafe\u{301}*x*")]);
+        assert_eq!(paragraph("naïve_word_here"), [text("naïve_word_here")]);
+    }
+
+    #[test]
+    fn double_backticks_hold_single_ones() {
+        assert_eq!(
+            paragraph("run ``a ` b`` now"),
+            [text("run "), Inline::Code("a ` b".into()), text(" now")]
+        );
+        assert_eq!(paragraph("`` `x` ``"), [Inline::Code("`x`".into())]);
+        assert_eq!(paragraph("``unclosed"), [text("``unclosed")]);
+        assert_eq!(paragraph("``a`b"), [text("``a`b")]);
+    }
+
+    #[test]
+    fn a_quoted_fence_stays_quoted() {
+        assert_eq!(
+            parse("&gt; ```let x = 1;```"),
+            [Block::Quote(vec![Inline::Code("let x = 1;".into())])]
+        );
+        assert_eq!(
+            parse("&gt; look\n&gt; ```\n&gt; a\n&gt; b\n&gt; ```\n&gt; after\nplain"),
+            [
+                Block::Quote(vec![
+                    text("look"),
+                    Inline::Newline,
+                    Inline::Code("a".into()),
+                    Inline::Newline,
+                    Inline::Code("b".into()),
+                    Inline::Newline,
+                    text("after"),
+                ]),
+                Block::Paragraph(vec![text("plain")]),
+            ]
+        );
+        assert_eq!(
+            parse("&gt; see ```x``` there"),
+            [Block::Quote(vec![
+                text("see "),
+                Inline::Newline,
+                Inline::Code("x".into()),
+                Inline::Newline,
+                text("there"),
+            ])]
+        );
+        // An unquoted fence after a quote still ends it.
+        assert_eq!(
+            parse("&gt; q\n```x```"),
+            [
+                Block::Quote(vec![text("q")]),
+                Block::Preformatted("x".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn emoji_need_their_own_word() {
+        assert_eq!(paragraph("at 10:30:00 ok"), [text("at 10:30:00 ok")]);
+        assert_eq!(paragraph("key:value:x"), [text("key:value:x")]);
+        assert_eq!(
+            paragraph("ok:tada: (:tada:) すごい:tada:"),
+            [
+                text("ok:tada: ("),
+                Inline::Emoji("tada".into()),
+                text(") すごい"),
+                Inline::Emoji("tada".into()),
+            ]
+        );
+        assert_eq!(
+            paragraph(":tada::tada:"),
+            [Inline::Emoji("tada".into()), Inline::Emoji("tada".into())]
+        );
+    }
+
+    /// Pieces that trip parsers: every kind of marker, half-open forms,
+    /// escapes, and characters wider than a byte.
+    const FRAGMENTS: &[&str] = &[
+        "*",
+        "_",
+        "~",
+        "`",
+        "``",
+        "```",
+        "<",
+        ">",
+        "|",
+        "@",
+        "#",
+        "!",
+        ":",
+        "^",
+        "&",
+        ";",
+        "&gt;",
+        "&gt; ",
+        "&lt;",
+        "&amp;",
+        "&am",
+        "> ",
+        " ",
+        "\n",
+        "\t",
+        "a",
+        "Z",
+        "9",
+        "10:30",
+        "é",
+        "e\u{301}",
+        "日本",
+        "「",
+        "」",
+        "“",
+        "”",
+        "。",
+        "😀",
+        "👍🏽",
+        "\u{200d}",
+        "<@U1>",
+        "<@U1|>",
+        "<@",
+        "<#C1|gen>",
+        "<#",
+        "<!here>",
+        "<!foo>",
+        "<!",
+        "<!subteam^S1|@x>",
+        "<!subteam^",
+        "<!date^1^{date}|d>",
+        "<!date^",
+        "<https://x.y|l>",
+        "<https://",
+        "<file:///x>",
+        "<mailto:a@b.c>",
+        ":tada:",
+        ":+1::skin-tone-2:",
+        "::skin-tone-",
+        ":a:",
+    ];
+
+    /// A small deterministic generator (xorshift), so a failure always
+    /// reproduces.
+    fn generated(count: usize) -> impl Iterator<Item = String> {
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        (0..count).map(move |_| {
+            let pieces = next() % 24;
+            (0..pieces)
+                .map(|_| FRAGMENTS[(next() % FRAGMENTS.len() as u64) as usize])
+                .collect()
+        })
+    }
+
+    #[test]
+    fn parsing_never_panics() {
+        for input in generated(50_000) {
+            let blocks = parse(&input);
+            let _ = only_emoji(&blocks);
+            let _ = plain(&input, |_| Some("@someone".into()));
+            for block in &blocks {
+                if let Block::Paragraph(inlines) | Block::Quote(inlines) = block {
+                    assert!(
+                        !inlines
+                            .iter()
+                            .any(|i| matches!(i, Inline::Text(t, _) if t.is_empty())),
+                        "no empty runs from {input:?}"
+                    );
+                }
+            }
         }
     }
 
