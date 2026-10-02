@@ -26,28 +26,55 @@ impl Ts {
         self.0.starts_with("local-")
     }
 
-    /// Seconds and microseconds, for ordering. Local and malformed values
-    /// sort last.
-    fn key(&self) -> (u64, u64) {
-        let mut parts = self.0.splitn(2, '.');
-        let secs = parts.next().and_then(|s| s.parse().ok());
-        let micros = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        match secs {
-            Some(secs) => (secs, micros),
-            None => (u64::MAX, 0),
+    /// What orders timestamps: real ones by time, then local ones by their
+    /// counter (so `local-10` comes after `local-9`), then anything
+    /// malformed.
+    fn key(&self) -> Key {
+        if let Some(counter) = self.0.strip_prefix("local-") {
+            return match counter.parse() {
+                Ok(counter) => Key::Local(counter),
+                Err(_) => Key::Malformed,
+            };
         }
+        let (secs, fraction) = self.0.split_once('.').unwrap_or((&self.0, ""));
+        let Ok(secs) = secs.parse() else {
+            return Key::Malformed;
+        };
+        if !fraction.bytes().all(|b| b.is_ascii_digit()) {
+            return Key::Malformed;
+        }
+        // Slack always writes six digits, but read "1.5" as half a second
+        // rather than five microseconds.
+        let micros = fraction
+            .bytes()
+            .chain(std::iter::repeat(b'0'))
+            .take(6)
+            .fold(0, |micros, digit| micros * 10 + u64::from(digit - b'0'));
+        Key::Real(secs, micros)
     }
 
     /// Seconds since the epoch.
     pub fn seconds(&self) -> Option<i64> {
-        let (secs, _) = self.key();
-        (secs != u64::MAX).then(|| i64::try_from(secs).unwrap_or(i64::MAX))
+        match self.key() {
+            Key::Real(secs, _) => Some(i64::try_from(secs).unwrap_or(i64::MAX)),
+            _ => None,
+        }
     }
 
     pub fn zoned(&self) -> Option<jiff::Zoned> {
         let ts = jiff::Timestamp::from_second(self.seconds()?).ok()?;
         Some(ts.to_zoned(jiff::tz::TimeZone::system()))
     }
+}
+
+/// A [`Ts`] taken apart for ordering; the variants sort in this order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Key {
+    /// Seconds and microseconds.
+    Real(u64, u64),
+    /// The counter of an optimistic message.
+    Local(u64),
+    Malformed,
 }
 
 impl PartialOrd for Ts {
@@ -446,12 +473,20 @@ impl Timeline {
     /// Inserts or replaces a message, keeping the order.
     pub fn upsert(&mut self, message: Message) {
         if let Some(existing) = self.messages.iter_mut().find(|m| m.ts == message.ts) {
-            // Keep thread counters a bare edit event leaves out.
+            // A message that says nothing about a thread (no `thread_ts`,
+            // no replies) may be a trimmed copy, as some API answers are:
+            // keep the counters already known. One
+            // that is marked as a thread parent carries Slack's real
+            // counters, and a count of zero then means its replies are gone.
             let mut message = message;
-            if message.reply_count == 0 && existing.reply_count > 0 {
+            let silent_on_thread = message.thread_ts.is_none()
+                && message.reply_count == 0
+                && message.latest_reply.is_none();
+            if silent_on_thread && existing.reply_count > 0 {
                 message.reply_count = existing.reply_count;
                 message.reply_users = std::mem::take(&mut existing.reply_users);
                 message.latest_reply = existing.latest_reply.take();
+                message.thread_ts = existing.thread_ts.take();
             }
             *existing = message;
             return;
@@ -624,6 +659,34 @@ mod tests {
     }
 
     #[test]
+    fn local_and_malformed_timestamps_sort_last() {
+        assert!(Ts::new("local-10") > Ts::new("local-9"));
+        assert!(Ts::new("local-9") > Ts::new("9999999999.999999"));
+        assert!(Ts::new("garbage") > Ts::new("local-10"));
+        assert!(Ts::new("1.x") > Ts::new("local-1"));
+        assert!(Ts::new("local-x") > Ts::new("local-1"));
+        assert!(
+            Ts::new("1.5") > Ts::new("1.000009"),
+            "a short fraction is tenths"
+        );
+        assert!(Ts::new("2") > Ts::new("1.999999"));
+        assert_eq!(Ts::new("1700000000.000100").seconds(), Some(1_700_000_000));
+        assert_eq!(Ts::new("local-3").seconds(), None);
+        assert_eq!(Ts::new("").seconds(), None);
+        assert_eq!(Ts::new("-1.0").seconds(), None);
+        let mut sorted = [
+            Ts::new("local-10"),
+            Ts::new("bad"),
+            Ts::new("2.0"),
+            Ts::new("local-9"),
+            Ts::new("1.0"),
+        ];
+        sorted.sort();
+        let order: Vec<&str> = sorted.iter().map(Ts::as_str).collect();
+        assert_eq!(order, ["1.0", "2.0", "local-9", "local-10", "bad"]);
+    }
+
+    #[test]
     fn upserts_keep_order_and_local_messages_last() {
         let mut timeline = Timeline::default();
         timeline.upsert(message("2.0"));
@@ -646,6 +709,26 @@ mod tests {
         timeline.upsert(edited);
         assert_eq!(timeline.messages[0].reply_count, 3);
         assert_eq!(timeline.messages[0].text, "edited");
+    }
+
+    #[test]
+    fn a_parent_reporting_no_replies_clears_its_counters() {
+        let mut timeline = Timeline::default();
+        let mut parent = message("1.0");
+        parent.thread_ts = Some(Ts::new("1.0"));
+        parent.reply_count = 1;
+        parent.reply_users = vec!["U1".into()];
+        parent.latest_reply = Some(Ts::new("2.0"));
+        timeline.upsert(parent);
+        // Slack's copy after the last reply was deleted: still a thread
+        // parent, with nothing in it.
+        let mut emptied = message("1.0");
+        emptied.thread_ts = Some(Ts::new("1.0"));
+        timeline.upsert(emptied);
+        let parent = &timeline.messages[0];
+        assert_eq!(parent.reply_count, 0);
+        assert!(parent.reply_users.is_empty());
+        assert_eq!(parent.latest_reply, None);
     }
 
     #[test]
