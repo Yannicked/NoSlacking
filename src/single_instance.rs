@@ -15,7 +15,7 @@ use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use rand::RngCore as _;
+use rand::Rng as _;
 
 /// What a later launch asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]

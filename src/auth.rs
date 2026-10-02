@@ -12,7 +12,7 @@
 //!    `oauth.v2.access`.
 
 use base64::Engine as _;
-use rand::RngCore as _;
+use rand::Rng as _;
 use sha2::Digest as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
