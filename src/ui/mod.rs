@@ -20,6 +20,12 @@ use egui::{Color32, CornerRadius, Rect, Sense, Vec2};
 use crate::app::{App, Page};
 use crate::theme::{self, Palette};
 
+/// Where [`show`] leaves [`App::channels_with_drafts`] for the sidebar's
+/// rows.
+pub fn drafts_id() -> egui::Id {
+    egui::Id::new("channels-with-drafts")
+}
+
 /// Where [`show`] leaves [`App::quick_reactions`] for the message
 /// toolbars to read, which are drawn far from the settings.
 pub fn quick_reactions_id() -> egui::Id {
@@ -29,6 +35,12 @@ pub fn quick_reactions_id() -> egui::Id {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let quick = std::sync::Arc::new(app.quick_reactions());
     ui.data_mut(|d| d.insert_temp(quick_reactions_id(), quick));
+    let drafts = std::sync::Arc::new(
+        app.active_team()
+            .map(|team| app.channels_with_drafts(&team))
+            .unwrap_or_default(),
+    );
+    ui.data_mut(|d| d.insert_temp(drafts_id(), drafts));
     // First, so Esc leaves a selected message before it closes the thread.
     selection::keys(app, ui.ctx());
     keys::global(app, ui.ctx());

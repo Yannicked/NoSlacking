@@ -779,3 +779,6 @@ msgstr "Middeldonkere huidskleur"
 
 msgid "Dark skin tone"
 msgstr "Donkere huidskleur"
+
+msgid "{name}, draft"
+msgstr "{name}, concept"
