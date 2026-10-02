@@ -43,6 +43,9 @@ pub enum Command {
     /// Signs in with the `slack://` link Slack's browser sign-in hands to
     /// you (see [`crate::slack::magic`]).
     SignInLink(String),
+    /// Opens Slack's sign-in page in the browser and, for a while, accepts
+    /// the `slack://` link it hands back through the desktop.
+    StartBrowserSignIn,
     SignOut(String),
     /// The conversation on screen, for polling when Socket Mode is down.
     Focus {
@@ -152,6 +155,7 @@ impl std::fmt::Debug for Command {
             Self::Callback(_) => f.debug_tuple("Callback").field(&REDACTED).finish(),
             Self::PasteToken(_) => f.debug_tuple("PasteToken").field(&REDACTED).finish(),
             Self::SignInLink(_) => f.debug_tuple("SignInLink").field(&REDACTED).finish(),
+            Self::StartBrowserSignIn => f.write_str("StartBrowserSignIn"),
             Self::SignInSession { workspace_url, .. } => f
                 .debug_struct("SignInSession")
                 .field("cookie", &REDACTED)

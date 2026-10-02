@@ -1934,6 +1934,10 @@ impl App {
                     workspace_url: self.setup.session_workspace.trim().to_owned(),
                 });
             }
+            Action::StartBrowserSignIn => {
+                self.sign_in = None;
+                self.backend.send(Command::StartBrowserSignIn);
+            }
             Action::SignInLink => {
                 self.sign_in = None;
                 // The link is a one-time secret: read it once, then forget it.

@@ -21,6 +21,11 @@ use crate::settings::Redirect;
 use crate::slack::{SlackError, Token, client, types};
 
 pub const SCHEME: &str = "noslacking";
+/// Slack's own scheme: its browser sign-in finishes with a
+/// `slack://` link, and "Open in Slack" links use it too.
+pub const SLACK_SCHEME: &str = "slack";
+/// Every scheme NoSlacking registers itself for.
+const SCHEMES: [&str; 2] = [SCHEME, SLACK_SCHEME];
 pub const SCHEME_REDIRECT: &str = "noslacking://oauth/callback";
 
 /// Everything NoSlacking reads and does, as you. Keep in step with
@@ -245,10 +250,10 @@ pub async fn loopback(port: u16, state: &str) -> std::io::Result<String> {
     }
 }
 
-/// Registers `noslacking://` with the desktop so the browser can hand the
-/// redirect back. Linux writes a desktop file for this executable; Windows
-/// writes the per-user URL protocol keys. macOS needs an app bundle, which
-/// declares the scheme in its Info.plist.
+/// Registers `noslacking://` and `slack://` with the desktop so the browser
+/// can hand sign-in links back. Linux writes a desktop file for this
+/// executable; Windows writes the per-user URL protocol keys. macOS needs an
+/// app bundle, which declares the schemes in its Info.plist.
 pub fn register_scheme() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     register_scheme_for(&exe)
@@ -271,7 +276,11 @@ fn register_scheme_for(exe: &std::path::Path) -> Result<(), String> {
     let entry = format!(
         "[Desktop Entry]\nType=Application\nName=NoSlacking\nComment=A native Slack client\n\
          Exec=\"{quoted}\" %u\nIcon={APP_ID}\nTerminal=false\nCategories=Network;InstantMessaging;Chat;\n\
-         MimeType=x-scheme-handler/{SCHEME};\nStartupWMClass={APP_ID}\n"
+         MimeType={mime}\nStartupWMClass={APP_ID}\n",
+        mime = SCHEMES
+            .iter()
+            .map(|scheme| format!("x-scheme-handler/{scheme};"))
+            .collect::<String>(),
     );
     let current = std::fs::read_to_string(&file).unwrap_or_default();
     if current != entry {
@@ -280,12 +289,14 @@ fn register_scheme_for(exe: &std::path::Path) -> Result<(), String> {
             .arg(&applications)
             .status();
     }
+    let mut args = vec!["default".to_owned(), format!("{APP_ID}.desktop")];
+    args.extend(
+        SCHEMES
+            .iter()
+            .map(|scheme| format!("x-scheme-handler/{scheme}")),
+    );
     std::process::Command::new("xdg-mime")
-        .args([
-            "default",
-            &format!("{APP_ID}.desktop"),
-            &format!("x-scheme-handler/{SCHEME}"),
-        ])
+        .args(&args)
         .status()
         .map_err(|e| format!("xdg-mime: {e}"))
         .and_then(|status| {
@@ -299,16 +310,19 @@ fn register_scheme_for(exe: &std::path::Path) -> Result<(), String> {
 
 #[cfg(windows)]
 fn register_scheme_for(exe: &std::path::Path) -> Result<(), String> {
-    let key = format!(r"HKCU\Software\Classes\{SCHEME}");
     let command = format!("\"{}\" \"%1\"", exe.display());
-    for args in [
-        vec!["add", &key, "/ve", "/d", "URL:NoSlacking", "/f"],
-        vec!["add", &key, "/v", "URL Protocol", "/d", "", "/f"],
-    ] {
-        run_reg(&args)?;
+    for scheme in SCHEMES {
+        let key = format!(r"HKCU\Software\Classes\{scheme}");
+        for args in [
+            vec!["add", &key, "/ve", "/d", "URL:NoSlacking", "/f"],
+            vec!["add", &key, "/v", "URL Protocol", "/d", "", "/f"],
+        ] {
+            run_reg(&args)?;
+        }
+        let command_key = format!(r"{key}\shell\open\command");
+        run_reg(&["add", &command_key, "/ve", "/d", &command, "/f"])?;
     }
-    let command_key = format!(r"{key}\shell\open\command");
-    run_reg(&["add", &command_key, "/ve", "/d", &command, "/f"])
+    Ok(())
 }
 
 #[cfg(windows)]

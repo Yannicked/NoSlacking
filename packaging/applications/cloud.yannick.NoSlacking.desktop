@@ -8,6 +8,6 @@ Icon=cloud.yannick.NoSlacking
 Terminal=false
 Categories=Network;InstantMessaging;Chat;
 Keywords=slack;chat;messaging;
-MimeType=x-scheme-handler/noslacking;
+MimeType=x-scheme-handler/noslacking;x-scheme-handler/slack;
 StartupNotify=true
 StartupWMClass=cloud.yannick.NoSlacking

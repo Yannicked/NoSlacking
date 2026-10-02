@@ -40,6 +40,8 @@ const SECTION_PAGES: usize = 10;
 /// `stars.list`, 200 stars a page.
 const STAR_PAGES: usize = 20;
 const MAX_UPLOAD: u64 = 1024 * 1024 * 1024;
+/// How long after "Sign in with your browser" a handed-over link is used.
+const BROWSER_SIGN_IN_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// Why a command for a workspace the worker does not have cannot run.
 const NOT_SIGNED_IN: &str = "that workspace is not signed in";
 
@@ -140,6 +142,11 @@ pub struct Worker {
     app: Option<AppCredentials>,
     teams: HashMap<String, Team>,
     flow: Option<Flow>,
+    /// When the user started a browser sign-in: until it is
+    /// [`BROWSER_SIGN_IN_WINDOW`] old, a `slack://` sign-in link handed over
+    /// by the desktop is used. Any other time such a link is not ours to act
+    /// on, so it is ignored.
+    browser_sign_in: Option<std::time::Instant>,
     listener: Option<tokio::task::JoinHandle<()>>,
     /// The Socket Mode connection, which serves every workspace signed in
     /// through the app.
@@ -182,6 +189,7 @@ impl Worker {
             app: None,
             teams: HashMap::new(),
             flow: None,
+            browser_sign_in: None,
             listener: None,
             socket: None,
             rtm: HashMap::new(),
@@ -504,6 +512,7 @@ impl Worker {
                 workspace_url,
             } => self.sign_in_session(cookie, &workspace_url),
             Command::SignInLink(link) => self.sign_in_link(&link),
+            Command::StartBrowserSignIn => self.start_browser_sign_in(),
             Command::SignOut(team) => self.sign_out(&team),
             Command::Focus { team, channel } => {
                 self.focus = Some((team, channel));
@@ -640,6 +649,25 @@ impl Worker {
                 .map_err(|e| describe(&e));
             let _ = internal.send(Internal::SignedIn(result));
         });
+    }
+
+    /// Opens Slack's sign-in page in the browser and starts
+    /// accepting the link it hands back.
+    fn start_browser_sign_in(&mut self) {
+        self.browser_sign_in = Some(std::time::Instant::now());
+        if let Err(error) = open::that_detached(crate::slack::magic::SIGN_IN_URL) {
+            log::warn!("could not open the browser: {error}");
+            self.sink.send(Event::SignIn(SignIn::Failed(
+                "Could not open the browser. Open app.slack.com/ssb/signin yourself.".into(),
+            )));
+        }
+    }
+
+    /// Whether a browser sign-in the user started is still waiting for its
+    /// link.
+    fn browser_sign_in_pending(&self) -> bool {
+        self.browser_sign_in
+            .is_some_and(|started| started.elapsed() < BROWSER_SIGN_IN_WINDOW)
     }
 
     /// Signs in to every workspace a pasted `slack://` sign-in link names:
@@ -1121,6 +1149,17 @@ impl Worker {
     }
 
     fn callback(&mut self, url: String) {
+        if url.starts_with("slack:") {
+            // Only the link of a sign-in the user started here counts; any
+            // other slack:// link handed over is not a sign-in for us.
+            if self.browser_sign_in_pending() && crate::slack::magic::parse_link(&url).is_some() {
+                self.browser_sign_in = None;
+                self.sign_in_link(&url);
+            } else {
+                log::info!("ignoring a slack:// link with no browser sign-in in progress");
+            }
+            return;
+        }
         let Some(flow) = self.flow.clone() else {
             log::info!("ignoring a sign-in link with no sign-in in progress");
             return;
@@ -2746,6 +2785,28 @@ mod tests {
         assert!(worker.users_requested.is_empty());
         assert!(worth_retrying(&SlackError::RateLimited));
         assert!(!worth_retrying(&SlackError::Api("user_not_found".into())));
+    }
+
+    #[tokio::test]
+    async fn slack_links_count_only_during_a_browser_sign_in() {
+        let link = "slack://T0123ABCD/magic-login/abc?host=acme.slack.com";
+        let (mut worker, events) = worker();
+        worker.waiting = None;
+        // Nothing started here: a handed-over link is not ours to use.
+        worker.command(Command::Callback(link.into()));
+        assert!(events.try_iter().next().is_none());
+        // Started too long ago: still ignored.
+        worker.browser_sign_in = std::time::Instant::now().checked_sub(BROWSER_SIGN_IN_WINDOW);
+        assert!(!worker.browser_sign_in_pending());
+        worker.command(Command::Callback(link.into()));
+        assert!(events.try_iter().next().is_none());
+        // Just started: pending, and a link that is not a sign-in link is
+        // still ignored without ending the wait.
+        worker.browser_sign_in = Some(std::time::Instant::now());
+        assert!(worker.browser_sign_in_pending());
+        worker.command(Command::Callback("slack://channel?team=T1&id=C1".into()));
+        assert!(events.try_iter().next().is_none());
+        assert!(worker.browser_sign_in_pending());
     }
 
     #[tokio::test]

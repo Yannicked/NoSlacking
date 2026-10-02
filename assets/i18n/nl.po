@@ -660,5 +660,5 @@ msgstr "Inloggen met je browser"
 msgid "Sign-in link"
 msgstr "Inloglink"
 
-msgid "Sign in there as usual. When the page offers to open the Slack app, cancel that and copy its link instead (right-click the Open Slack button → Copy link). It starts with slack://."
-msgstr "Log daar zoals gewoonlijk in. Als de pagina aanbiedt de Slack-app te openen, annuleer dat en kopieer in plaats daarvan de link (klik met rechts op de knop Slack openen → Link kopiëren). Die begint met slack://."
+msgid "Sign in there as usual; NoSlacking finishes by itself. If your browser asks, let it open NoSlacking. If nothing happens, paste the slack:// link from the page here (open the page source with Ctrl+U and search for magic-login)."
+msgstr "Log daar zoals gewoonlijk in; NoSlacking rondt het daarna zelf af. Als je browser het vraagt, laat hem NoSlacking openen. Gebeurt er niets, plak dan hier de slack://-link van de pagina (open de paginabron met Ctrl+U en zoek naar magic-login)."

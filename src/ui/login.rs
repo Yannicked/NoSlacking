@@ -210,18 +210,17 @@ fn session_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     });
 }
 
-/// Signing in through the browser, which then
-/// offers a `slack://` link to paste here.
+/// Signing in through the browser, as msga does: Slack's page hands
+/// its `slack://` link back through the desktop, or offers it to paste here.
 fn browser_sign_in(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     ui.horizontal(|ui| {
         if theme::secondary_button(ui, palette, &t("Sign in with your browser")).clicked() {
-            app.actions
-                .push(Action::OpenUrl(crate::slack::magic::SIGN_IN_URL.to_owned()));
+            app.actions.push(Action::StartBrowserSignIn);
         }
     });
     ui.label(
         RichText::new(t(
-            "Sign in there as usual. When the page offers to open the Slack app, cancel that and copy its link instead (right-click the Open Slack button → Copy link). It starts with slack://.",
+            "Sign in there as usual; NoSlacking finishes by itself. If your browser asks, let it open NoSlacking. If nothing happens, paste the slack:// link from the page here (open the page source with Ctrl+U and search for magic-login).",
         ))
         .font(theme::regular(13.0))
         .color(palette.secondary),
