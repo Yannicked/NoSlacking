@@ -85,8 +85,12 @@ fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2", f
 winresource = { version = "0.1", default-features = false }
 
 [features]
+default = ["highlight"]
 # Sample data and the screenshot flag; never part of a release build.
 demo = []
+# Colours code blocks that name their language (```` ```rust ````). Our own
+# small lexer, a few kilobytes; turn it off for plain code blocks.
+highlight = []
 
 [lints.rust]
 unsafe_code = "forbid"
