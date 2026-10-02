@@ -650,30 +650,38 @@ impl Worker {
                     let name = path
                         .file_name()
                         .map_or_else(|| "file".to_owned(), |n| n.to_string_lossy().into_owned());
-                    let size = tokio::fs::metadata(&path)
-                        .await
-                        .map(|m| m.len())
-                        .unwrap_or(0);
+                    // The size comes from the open file, so it is the size
+                    // of what gets streamed, not of whatever the path named
+                    // a moment earlier.
+                    let opened = match tokio::fs::File::open(&path).await {
+                        Ok(file) => file.metadata().await.map(|meta| (file, meta)),
+                        Err(error) => Err(error),
+                    };
+                    let (file, size) = match opened {
+                        Ok((_, meta)) if !meta.is_file() => {
+                            sink.send(Event::Error(format!("{name} is not a file.")));
+                            return;
+                        }
+                        Ok((file, meta)) => (file, meta.len()),
+                        Err(error) => {
+                            sink.send(Event::Error(format!("Could not read {name}: {error}")));
+                            return;
+                        }
+                    };
                     if size > MAX_UPLOAD {
                         sink.send(Event::Error(format!(
                             "{name} is larger than Slack's 1 GB limit."
                         )));
                         return;
                     }
-                    let bytes = match tokio::fs::read(&path).await {
-                        Ok(bytes) => bytes,
-                        Err(error) => {
-                            sink.send(Event::Error(format!("Could not read {name}: {error}")));
-                            return;
-                        }
-                    };
                     sink.send(Event::Notice(format!("Uploading {name}…")));
                     match client
                         .upload(
                             &channel,
                             thread.as_ref().map(Ts::as_str),
                             &name,
-                            bytes,
+                            file,
+                            size,
                             &comment,
                         )
                         .await
@@ -697,19 +705,9 @@ impl Worker {
                 };
                 let sink = self.sink.clone();
                 tokio::spawn(async move {
-                    match client.get_bytes(&url, MAX_UPLOAD as usize).await {
-                        Ok(bytes) => match save_download(&name, &bytes) {
-                            Ok(path) => {
-                                sink.send(Event::Notice(format!("Saved {}", path.display())))
-                            }
-                            Err(error) => {
-                                sink.send(Event::Error(format!("Could not save {name}: {error}")))
-                            }
-                        },
-                        Err(error) => sink.send(Event::Error(format!(
-                            "Could not download {name}: {}",
-                            describe(&error)
-                        ))),
+                    match download(&client, &url, &name).await {
+                        Ok(path) => sink.send(Event::Notice(format!("Saved {}", path.display()))),
+                        Err(error) => sink.send(Event::Error(error)),
                     }
                 });
             }
@@ -1667,49 +1665,186 @@ async fn thread(client: Client, team: String, channel: String, ts: Ts, sink: Sin
     });
 }
 
-fn save_download(name: &str, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
-    let dir = directories::UserDirs::new()
-        .and_then(|dirs| dirs.download_dir().map(std::path::Path::to_path_buf))
-        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))
-        .ok_or_else(|| std::io::Error::other("no downloads folder"))?;
+/// Saves the file at `url` in the downloads folder as `name`, or says in
+/// a sentence why not.
+///
+/// The body streams into a hidden temporary file next to its final place,
+/// which is renamed once complete, so a large file never sits in memory
+/// and a failed download never appears under the real name.
+async fn download(client: &Client, url: &str, name: &str) -> Result<std::path::PathBuf, String> {
+    use tokio::io::AsyncWriteExt as _;
+    let mut response = client
+        .download(url)
+        .await
+        .map_err(|e| format!("Could not download {name}: {}", describe(&e)))?;
+    let saving = |error: std::io::Error| format!("Could not save {name}: {error}");
+    // Finding the folder can read a config file; keep it off the runtime.
+    let dir = tokio::task::spawn_blocking(downloads_dir)
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| saving(std::io::Error::other("no downloads folder")))?;
     let safe = safe_name(name);
-    let path = std::path::Path::new(&safe);
-    let stem = path
-        .file_stem()
-        .map_or_else(|| safe.clone(), |s| s.to_string_lossy().into_owned());
-    let extension = path.extension().map(|e| e.to_string_lossy().into_owned());
-    let mut candidate = dir.join(&safe);
-    let mut n = 1;
-    while candidate.exists() {
-        let name = match &extension {
-            Some(ext) => format!("{stem} ({n}).{ext}"),
-            None => format!("{stem} ({n})"),
-        };
-        candidate = dir.join(name);
-        n += 1;
+    let (part, mut file) = create_unique(&dir, |n| format!(".{}.part", numbered(&safe, n)))
+        .await
+        .map_err(saving)?;
+    let written: Result<(), String> = async {
+        let mut size = 0u64;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| format!("Could not download {name}: {}", SlackError::from(e)))?
+        {
+            size += chunk.len() as u64;
+            if size > MAX_UPLOAD {
+                return Err(format!("{name} is larger than Slack's 1 GB limit."));
+            }
+            file.write_all(&chunk).await.map_err(saving)?;
+        }
+        file.flush().await.map_err(saving)?;
+        file.sync_all().await.map_err(saving)
     }
-    std::fs::write(&candidate, bytes)?;
-    Ok(candidate)
+    .await;
+    drop(file);
+    if let Err(error) = written {
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(error);
+    }
+    // Claim the final name with create_new, so no other file can take it
+    // between the check and the rename, then move the download onto it.
+    let claimed = create_unique(&dir, |n| numbered(&safe, n)).await;
+    let renamed = match claimed {
+        Ok((path, reserved)) => {
+            drop(reserved);
+            match tokio::fs::rename(&part, &path).await {
+                Ok(()) => Ok(path),
+                Err(error) => {
+                    let _ = tokio::fs::remove_file(&path).await;
+                    Err(error)
+                }
+            }
+        }
+        Err(error) => Err(error),
+    };
+    if renamed.is_err() {
+        let _ = tokio::fs::remove_file(&part).await;
+    }
+    renamed.map_err(saving)
 }
 
-/// A file name that cannot climb out of the downloads folder or hide.
+fn downloads_dir() -> Option<std::path::PathBuf> {
+    directories::UserDirs::new()
+        .and_then(|dirs| dirs.download_dir().map(std::path::Path::to_path_buf))
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))
+}
+
+/// Creates the first of `name(0)`, `name(1)`, … that does not exist yet in
+/// `dir`. `create_new` makes taking the name and creating the file one
+/// step, so two downloads of the same name cannot both get it.
+async fn create_unique(
+    dir: &std::path::Path,
+    name: impl Fn(u32) -> String,
+) -> std::io::Result<(std::path::PathBuf, tokio::fs::File)> {
+    for n in 0..10_000 {
+        let path = dir.join(name(n));
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other("too many files with that name"))
+}
+
+/// The longest file name written, in bytes: room under the 255 most file
+/// systems allow for " (n)" and the temporary ".part".
+const MAX_NAME: usize = 200;
+
+/// An extension worth keeping when a name is cut short: short and real.
+fn split_extension(name: &str) -> (&str, Option<&str>) {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() && ext.len() <= 16 => {
+            (stem, Some(ext))
+        }
+        _ => (name, None),
+    }
+}
+
+/// `name`, or for `n > 0` the same with " (n)" before its extension.
+fn numbered(name: &str, n: u32) -> String {
+    if n == 0 {
+        return name.to_owned();
+    }
+    match split_extension(name) {
+        (stem, Some(ext)) => format!("{stem} ({n}).{ext}"),
+        (stem, None) => format!("{stem} ({n})"),
+    }
+}
+
+/// Cuts `name` to at most `max` bytes on a character boundary, keeping
+/// its extension.
+fn truncate_name(name: &str, max: usize) -> String {
+    if name.len() <= max {
+        return name.to_owned();
+    }
+    let (stem, ext) = split_extension(name);
+    let room = max.saturating_sub(ext.map_or(0, |ext| ext.len() + 1));
+    let mut end = room.min(stem.len());
+    while !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    let stem = stem[..end].trim_end_matches(['.', ' ']);
+    match ext {
+        Some(ext) => format!("{stem}.{ext}"),
+        None => stem.to_owned(),
+    }
+}
+
+/// Names Windows keeps for devices, whatever the extension: `nul.txt`
+/// opens the null device, not a file.
+fn is_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    let upper = stem.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ((upper.starts_with("COM") || upper.starts_with("LPT"))
+        && upper.len() == 4
+        && upper[3..].chars().all(|c| matches!(c, '1'..='9')))
+}
+
+/// A file name that cannot climb out of the downloads folder, hide, or
+/// break on any of the systems the app runs on: no separators or
+/// characters Windows refuses, no control characters, no leading dots,
+/// no trailing dots or spaces (Windows drops them), no device names, and
+/// not too long.
 fn safe_name(name: &str) -> String {
-    let safe: String = name
+    let replaced: String = name
         .chars()
         .map(|c| {
-            if matches!(c, '/' | '\\' | ':' | '\0') {
+            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
                 '_'
             } else {
                 c
             }
         })
         .collect();
-    let safe = safe.trim_start_matches('.').to_owned();
+    let trimmed = replaced
+        .trim_start_matches(['.', ' '])
+        .trim_end_matches(['.', ' ']);
+    let mut safe = truncate_name(trimmed, MAX_NAME);
     if safe.is_empty() {
-        "download".to_owned()
-    } else {
-        safe
+        return "download".to_owned();
     }
+    if is_reserved(&safe) {
+        safe.insert(0, '_');
+    }
+    safe
 }
 
 /// What one Socket Mode event means here. Short-lived, so its size does
@@ -2116,5 +2251,65 @@ mod tests {
         assert_eq!(safe_name("../../.bashrc"), "_.._.bashrc");
         assert_eq!(safe_name("report.pdf"), "report.pdf");
         assert_eq!(safe_name(".."), "download");
+        assert_eq!(safe_name("C:\\Windows\\x.exe"), "C__Windows_x.exe");
+    }
+
+    #[test]
+    fn download_names_work_on_windows() {
+        assert_eq!(safe_name("a<b>c:d\"e|f?g*h.txt"), "a_b_c_d_e_f_g_h.txt");
+        assert_eq!(safe_name("tab\there\u{7}.txt"), "tab_here_.txt");
+        assert_eq!(safe_name("notes. . ."), "notes");
+        assert_eq!(safe_name("  spaced  "), "spaced");
+        for reserved in [
+            "CON",
+            "nul.txt",
+            "Com1.log",
+            "LPT9",
+            "aux.tar.gz",
+            "conout$",
+        ] {
+            assert_eq!(safe_name(reserved), format!("_{reserved}"), "{reserved}");
+        }
+        for fine in ["console.txt", "COM10", "COM0", "nullish", "lpt.txt"] {
+            assert_eq!(safe_name(fine), fine, "{fine}");
+        }
+    }
+
+    #[test]
+    fn long_download_names_keep_their_extension() {
+        let long = format!("{}.pdf", "a".repeat(300));
+        let safe = safe_name(&long);
+        assert_eq!(safe.len(), MAX_NAME);
+        assert!(safe.ends_with("a.pdf"));
+        // Cut on a character boundary, never inside one.
+        let wide = format!("{}.txt", "é".repeat(150));
+        let safe = safe_name(&wide);
+        assert!(safe.len() <= MAX_NAME && safe.ends_with(".txt"), "{safe}");
+        // No real extension: cut the whole name.
+        assert_eq!(safe_name(&"b".repeat(300)).len(), MAX_NAME);
+    }
+
+    #[tokio::test]
+    async fn a_taken_name_is_never_reused() {
+        let dir = std::env::temp_dir().join(format!("noslacking-names-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let first = create_unique(&dir, |n| numbered("a.txt", n))
+            .await
+            .expect("first");
+        let second = create_unique(&dir, |n| numbered("a.txt", n))
+            .await
+            .expect("second");
+        assert_eq!(first.0, dir.join("a.txt"));
+        assert_eq!(second.0, dir.join("a (1).txt"));
+        drop((first, second));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn taken_names_get_a_number_before_the_extension() {
+        assert_eq!(numbered("report.pdf", 0), "report.pdf");
+        assert_eq!(numbered("report.pdf", 2), "report (2).pdf");
+        assert_eq!(numbered("archive.tar.gz", 1), "archive.tar (1).gz");
+        assert_eq!(numbered("README", 3), "README (3)");
     }
 }
