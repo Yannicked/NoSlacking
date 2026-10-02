@@ -65,14 +65,15 @@ pub fn rail(app: &mut App, ui: &mut egui::Ui) {
                     if mentions > 0 && !selected {
                         let dot = egui::Rect::from_center_size(
                             rect.right_bottom() - Vec2::splat(2.0),
-                            Vec2::splat(16.0),
+                            // "9+" needs a pill rather than a dot.
+                            Vec2::new(if mentions > 9 { 22.0 } else { 16.0 }, 16.0),
                         );
                         ui.painter()
                             .rect_filled(dot, CornerRadius::same(8), palette.badge);
                         ui.painter().text(
                             dot.center(),
                             egui::Align2::CENTER_CENTER,
-                            mentions.min(9).to_string(),
+                            rail_count(mentions),
                             theme::bold(10.0),
                             egui::Color32::WHITE,
                         );
@@ -130,6 +131,16 @@ pub fn rail(app: &mut App, ui: &mut egui::Ui) {
         });
 }
 
+/// The mention count on a workspace icon. The dot fits one digit, and
+/// "9" for twelve mentions would undercount.
+fn rail_count(mentions: u32) -> String {
+    if mentions > 9 {
+        "9+".to_owned()
+    } else {
+        mentions.to_string()
+    }
+}
+
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let width = app.settings.sidebar_width;
@@ -142,11 +153,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         socket,
         ..
     } = app;
-    let Some(workspace) = workspaces
-        .iter()
-        .find(|w| Some(&w.info.team_id) == settings.active_workspace.as_ref())
-        .or_else(|| workspaces.first())
-    else {
+    let Some(workspace) = crate::app::active_in(workspaces, settings) else {
         return;
     };
     let response = egui::Panel::left("sidebar")
@@ -243,7 +250,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ui.add(
                         egui::TextEdit::singleline(sidebar_filter)
                             .id(egui::Id::new("sidebar-filter"))
-                            .hint_text(format!("{} (Ctrl+K)", t("Find a conversation")))
+                            // No shortcut here: Ctrl+K opens the switcher.
+                            .hint_text(t("Find a conversation"))
                             .desired_width(f32::INFINITY)
                             .margin(Margin::symmetric(8, 5)),
                     );
@@ -635,4 +643,16 @@ fn row(
         actions.push(Action::OpenConversation(conversation.id.clone()));
     }
     row_menu(&response, workspace, conversation, section, actions);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rail_counts_say_when_there_are_more() {
+        assert_eq!(rail_count(3), "3");
+        assert_eq!(rail_count(9), "9");
+        assert_eq!(rail_count(12), "9+");
+    }
 }

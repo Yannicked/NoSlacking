@@ -16,6 +16,10 @@ pub struct Row<'a> {
     pub workspace: &'a WorkspaceState,
     pub channel: &'a str,
     pub in_thread: bool,
+    /// Whether Enter saves an edit (else Ctrl+Enter), as in the composer.
+    pub enter_sends: bool,
+    /// Whether a dialog is open over the list, which then owns Esc.
+    pub overlay: bool,
 }
 
 /// How a message relates to the one before it.
@@ -62,9 +66,9 @@ pub fn show(
         return;
     }
     let background = ui.painter().add(egui::Shape::Noop);
-    let is_editing = editing
-        .as_ref()
-        .is_some_and(|e| e.ts == message.ts && e.channel == row.channel);
+    let is_editing = editing.as_ref().is_some_and(|e| {
+        e.ts == message.ts && e.channel == row.channel && e.in_thread == row.in_thread
+    });
     let top = if lead == Lead::Full { 8 } else { 2 };
     let response = egui::Frame::new()
         .inner_margin(Margin {
@@ -84,7 +88,7 @@ pub fn show(
                         header(ui, row, message, actions);
                     }
                     if is_editing {
-                        edit(ui, palette, editing, actions);
+                        edit(ui, row, editing, actions);
                     } else {
                         body(ui, row, message, actions);
                     }
@@ -299,24 +303,42 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
     }
 }
 
+/// The edit field's id: one per message and panel, since a thread's parent
+/// shows in both the conversation and the thread.
+pub fn edit_id(editing: &Editing) -> egui::Id {
+    egui::Id::new((
+        "edit",
+        editing.channel.as_str(),
+        editing.ts.as_str(),
+        editing.in_thread,
+    ))
+}
+
 fn edit(
     ui: &mut egui::Ui,
-    palette: &Palette,
+    row: &Row<'_>,
     editing: &mut Option<Editing>,
     actions: &mut Vec<Action>,
 ) {
+    let palette = row.palette;
     let Some(current) = editing.as_mut() else {
         return;
     };
-    let id = egui::Id::new(("edit", current.ts.as_str()));
+    let id = edit_id(current);
     // Read focus before taking the input lock: egui guards input and memory
     // with one context lock, so asking for memory inside `input_mut`
     // deadlocks the interface.
     let focused = ui.memory(|m| m.has_focus(id));
+    let save_with = if row.enter_sends {
+        egui::Modifiers::NONE
+    } else {
+        egui::Modifiers::COMMAND
+    };
     let (save, cancel) = ui.input_mut(|input| {
         (
-            focused && input.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
-            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+            focused && input.consume_key(save_with, egui::Key::Enter),
+            // An open dialog takes Esc for itself.
+            focused && !row.overlay && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
         )
     });
     egui::Frame::new()
@@ -333,7 +355,7 @@ fn edit(
                     .desired_width(f32::INFINITY)
                     .font(theme::regular(14.5)),
             );
-            if !response.has_focus() && !response.lost_focus() {
+            if std::mem::take(&mut current.focus) {
                 response.request_focus();
             }
         });
@@ -349,8 +371,13 @@ fn edit(
                 text: current.text.clone(),
             });
         }
+        let hint = if row.enter_sends {
+            t("Enter to save, Esc to cancel")
+        } else {
+            t("Ctrl+Enter to save, Esc to cancel")
+        };
         ui.label(
-            RichText::new(t("Enter to save, Esc to cancel"))
+            RichText::new(hint)
                 .font(theme::regular(12.0))
                 .color(palette.dim),
         );
@@ -1011,9 +1038,12 @@ fn toolbar(
         }
         if me {
             if theme::icon_button(ui, palette, Icon::Pencil, 16.0, &t("Edit message")).clicked() {
-                actions.push(Action::StartEdit {
-                    channel: row.channel.to_owned(),
-                    ts: message.ts.clone(),
+                let channel = row.channel.to_owned();
+                let ts = message.ts.clone();
+                actions.push(if row.in_thread {
+                    Action::StartEditInThread { channel, ts }
+                } else {
+                    Action::StartEdit { channel, ts }
                 });
             }
             if theme::icon_button(ui, palette, Icon::Trash, 16.0, &t("Delete message")).clicked() {

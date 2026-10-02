@@ -579,6 +579,12 @@ pub enum Action {
         channel: String,
         ts: Ts,
     },
+    /// Like `StartEdit`, in the thread panel: a thread's parent shows in
+    /// both panels, and only one of them gets the edit field.
+    StartEditInThread {
+        channel: String,
+        ts: Ts,
+    },
     CancelEdit,
     /// Edits your newest message in the open conversation.
     EditLast,
@@ -622,6 +628,20 @@ pub enum Action {
     SignOut(String),
     Reconnect,
     DismissError,
+    // Sign-in. These carry no secrets: the app reads the typed cookie,
+    // token and credentials from its form, so they never sit in an action
+    // that might be printed.
+    /// Signs in with the session cookie and workspace from the form.
+    SignInSession,
+    /// Signs in with the user token from the form.
+    PasteToken,
+    /// Saves the Slack app's credentials from the form.
+    SaveApp,
+    /// Starts OAuth in the browser with the saved app.
+    StartSignIn,
+    CancelSignIn,
+    /// Opens a folder in the system's file manager.
+    OpenFolder(PathBuf),
 }
 
 #[cfg(test)]

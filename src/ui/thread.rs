@@ -20,7 +20,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     };
     let key = App::draft_key(&team, &channel, Some(&ts));
     let mut draft: Draft = app.drafts.remove(&key).unwrap_or_default();
+    let to_bottom = app.scroll_to_bottom.remove(&key);
     let width = app.settings.thread_width;
+    let overlay = app.overlay_open();
     let App {
         workspaces,
         settings,
@@ -28,11 +30,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         editing,
         ..
     } = app;
-    let Some(workspace) = workspaces
-        .iter()
-        .find(|w| Some(&w.info.team_id) == settings.active_workspace.as_ref())
-        .or_else(|| workspaces.first())
-    else {
+    let Some(workspace) = crate::app::active_in(workspaces, settings) else {
+        // Put the draft back: it was taken out to be edited.
+        app.drafts.insert(key, draft);
         return;
     };
     let channel_name = workspace
@@ -129,6 +129,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         workspace,
                         channel: &channel,
                         in_thread: true,
+                        enter_sends: settings.enter_sends,
+                        overlay,
                     };
                     egui::ScrollArea::vertical()
                         .id_salt(("thread", &channel, ts.as_str()))
@@ -180,6 +182,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                 previous = Some(reply);
                             }
                             ui.add_space(12.0);
+                            if to_bottom {
+                                // Your own reply: show it even when reading
+                                // further up.
+                                ui.scroll_to_cursor(Some(Align::BOTTOM));
+                            }
                         });
                 });
         });

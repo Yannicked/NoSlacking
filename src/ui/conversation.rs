@@ -55,11 +55,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
         socket,
         ..
     } = app;
-    let Some(workspace) = workspaces
-        .iter()
-        .find(|w| Some(&w.info.team_id) == settings.active_workspace.as_ref())
-        .or_else(|| workspaces.first())
-    else {
+    let Some(workspace) = crate::app::active_in(workspaces, settings) else {
         return;
     };
     let Some(conversation) = workspace.conversation(channel) else {
@@ -196,11 +192,9 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         actions,
         ..
     } = app;
-    let Some(workspace) = workspaces
-        .iter()
-        .find(|w| Some(&w.info.team_id) == settings.active_workspace.as_ref())
-        .or_else(|| workspaces.first())
-    else {
+    let Some(workspace) = crate::app::active_in(workspaces, settings) else {
+        // Put the draft back: it was taken out to be edited.
+        app.drafts.insert(key, draft);
         return;
     };
     let Some(conversation) = workspace.conversation(channel) else {
@@ -249,11 +243,13 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
 fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     let palette = app.palette;
     let scroll_key = format!("{team}/{channel}");
-    let to_bottom = std::mem::take(&mut app.scroll_to_bottom);
+    let to_bottom = app.scroll_to_bottom.remove(&scroll_key);
+    let overlay = app.overlay_open();
+    // An anchor for another list is stale by now: drop it either way.
     let prepended = app
         .prepended
-        .take_if(|(key, _)| *key == scroll_key)
-        .is_some();
+        .take()
+        .is_some_and(|(key, _)| key == scroll_key);
     let App {
         workspaces,
         settings,
@@ -262,11 +258,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         read_line,
         ..
     } = app;
-    let Some(workspace) = workspaces
-        .iter()
-        .find(|w| Some(&w.info.team_id) == settings.active_workspace.as_ref())
-        .or_else(|| workspaces.first())
-    else {
+    let Some(workspace) = crate::app::active_in(workspaces, settings) else {
         return;
     };
     let Some(conversation) = workspace.conversation(channel) else {
@@ -325,6 +317,8 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
             workspace,
             channel,
             in_thread: false,
+            enter_sends: settings.enter_sends,
+            overlay,
         };
         let mut previous = None;
         let mut previous_day: Option<jiff::civil::Date> = None;

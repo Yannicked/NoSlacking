@@ -122,6 +122,11 @@ fn suggestions(workspace: &WorkspaceState, word: &str) -> Vec<Suggestion> {
     Vec::new()
 }
 
+/// The text field of the composer for the draft `key`.
+pub fn field_id(key: &str) -> egui::Id {
+    egui::Id::new(("composer", key))
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     composer: &Composer<'_>,
@@ -129,7 +134,7 @@ pub fn show(
     actions: &mut Vec<Action>,
 ) {
     let palette = composer.palette;
-    let id = egui::Id::new(("composer", &composer.key));
+    let id = field_id(&composer.key);
     let focused = ui.memory(|m| m.has_focus(id));
     let state = egui::TextEdit::load_state(ui.ctx(), id);
     let cursor = state
@@ -141,10 +146,13 @@ pub fn show(
     } else {
         None
     };
-    let found = word
-        .as_ref()
-        .map(|(_, w)| suggestions(composer.workspace, w))
-        .unwrap_or_default();
+    if draft.dismissed != word {
+        draft.dismissed = None;
+    }
+    let mut found = match &word {
+        Some((_, w)) if draft.dismissed.is_none() => suggestions(composer.workspace, w),
+        _ => Vec::new(),
+    };
     if draft.selected >= found.len() {
         draft.selected = 0;
     }
@@ -154,6 +162,11 @@ pub fn show(
     let mut send = false;
     if focused {
         ui.input_mut(|input| {
+            // Esc closes the suggestions, so "@chan" can be sent as typed.
+            if !found.is_empty() && input.consume_key(Modifiers::NONE, Key::Escape) {
+                draft.dismissed = word.clone();
+                found.clear();
+            }
             if !found.is_empty() {
                 if input.consume_key(Modifiers::NONE, Key::ArrowDown) {
                     draft.selected = (draft.selected + 1) % found.len();
@@ -182,6 +195,7 @@ pub fn show(
         });
     }
 
+    draft.suggesting = !found.is_empty();
     if !found.is_empty() {
         suggestion_list(ui, palette, &found, draft.selected, &mut accept);
     }
@@ -197,7 +211,9 @@ pub fn show(
         text.extend(&chars[end..]);
         draft.text = text;
         if let Suggestion::User { id, label, .. } = &suggestion {
-            draft.mentions.push((format!("@{label}"), id.clone()));
+            draft
+                .mentions
+                .push((format!("@{label}"), format!("<@{id}>")));
         }
         let at = start + insert.chars().count();
         if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {
@@ -425,5 +441,78 @@ mod tests {
         assert_eq!(current_word("hi @an", 2), Some((0, "hi".into())));
         assert_eq!(current_word("hi ", 3), None);
         assert_eq!(current_word("ünï :ta", 7), Some((4, ":ta".into())));
+        assert_eq!(current_word("çà @Zoë", 7), Some((3, "@Zoë".into())));
+    }
+
+    fn workspace() -> WorkspaceState {
+        let mut w = WorkspaceState::new(crate::model::Workspace {
+            team_id: "T1".into(),
+            name: "Acme".into(),
+            domain: "acme".into(),
+            icon: None,
+            user_id: "U0".into(),
+        });
+        let user =
+            |id: &str, name: &str, real: &str, display: &str, bot: bool| crate::model::User {
+                id: id.into(),
+                name: name.into(),
+                real_name: real.into(),
+                display_name: display.into(),
+                is_bot: bot,
+                ..Default::default()
+            };
+        for u in [
+            user("U1", "joanna", "Joanna Ek", "", false),
+            user("U2", "ann", "Ann Lee", "Ann", false),
+            user("U3", "anbot", "", "", true),
+            user("U4", "old", "Anders", "", false),
+        ] {
+            w.users.insert(u.id.clone(), u);
+        }
+        w.users.get_mut("U4").expect("U4").deleted = true;
+        w.emoji = crate::emoji::EmojiSet::new(
+            [("tacocat".to_owned(), "https://x.y/t.png".to_owned())].into(),
+        );
+        w
+    }
+
+    fn labels(found: &[Suggestion]) -> Vec<String> {
+        found
+            .iter()
+            .map(|s| match s {
+                Suggestion::User { label, .. } => label.clone(),
+                Suggestion::Emoji { name } => format!(":{name}:"),
+                Suggestion::Special(name) => format!("@{name}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn people_rank_by_prefix_and_bots_last() {
+        let w = workspace();
+        // "Ann" starts with the query, "Joanna Ek" only contains it, the bot
+        // comes last and the deleted account not at all.
+        assert_eq!(
+            labels(&suggestions(&w, "@an")),
+            ["Ann", "Joanna Ek", "anbot"]
+        );
+        assert_eq!(labels(&suggestions(&w, "@ch")), ["@channel"]);
+        // A bare @ lists people, not broadcasts.
+        assert_eq!(suggestions(&w, "@").len(), 3);
+        assert!(suggestions(&w, "plain").is_empty());
+    }
+
+    #[test]
+    fn emoji_need_two_letters_and_custom_ones_come_first() {
+        let w = workspace();
+        assert!(suggestions(&w, ":t").is_empty());
+        assert!(suggestions(&w, ":ta:").is_empty());
+        let found = labels(&suggestions(&w, ":ta"));
+        assert_eq!(found.first().map(String::as_str), Some(":tacocat:"));
+        // Standard emoji starting with the query come before the rest.
+        let standard = &found[1..];
+        let starts = standard.iter().take_while(|n| n.starts_with(":ta")).count();
+        assert!(starts > 0);
+        assert!(standard[starts..].iter().all(|n| !n.starts_with(":ta")));
     }
 }
