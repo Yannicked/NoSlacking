@@ -154,8 +154,20 @@ impl ImageLoader {
         write(&self.inner.clients).insert(team.to_owned(), client);
     }
 
+    /// Stops fetching `team`'s files and deletes the ones already fetched,
+    /// from memory and from disk: they are private to the workspace.
     pub fn remove_client(&self, team: &str) {
         write(&self.inner.clients).remove(team);
+        let prefix = authed(team, "");
+        lock(&self.inner.entries).retain(|uri, _| !uri.starts_with(&prefix));
+        let dir = self.inner.private_dir(team);
+        self.inner.runtime.spawn(async move {
+            match tokio::fs::remove_dir_all(&dir).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => log::warn!("could not delete a workspace's cached files: {error}"),
+            }
+        });
     }
 }
 
@@ -181,8 +193,24 @@ fn cache_name(url: &str) -> String {
 }
 
 impl Inner {
+    /// Where `team`'s private files are cached, apart from public images so
+    /// signing out can delete them all.
+    fn private_dir(&self, team: &str) -> PathBuf {
+        // Team ids are `T` and alphanumerics; anything else is hashed so it
+        // can never name a path outside the cache.
+        let name = if !team.is_empty() && team.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            team.to_owned()
+        } else {
+            cache_name(team)
+        };
+        self.cache_dir.join("private").join(name)
+    }
+
     async fn fetch(&self, team: Option<&str>, url: &str) -> Result<Vec<u8>, String> {
-        let path = self.cache_dir.join(cache_name(url));
+        let path = match team {
+            Some(team) => self.private_dir(team).join(cache_name(url)),
+            None => self.cache_dir.join(cache_name(url)),
+        };
         if let Ok(bytes) = tokio::fs::read(&path).await
             && !bytes.is_empty()
         {
