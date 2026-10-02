@@ -5,7 +5,9 @@
 //!
 //! - `app`: the Slack app's client id, client secret and app-level token;
 //! - `workspace:<team id>`: that workspace's user token, and its refresh
-//!   token when the app rotates tokens.
+//!   token when the app rotates tokens;
+//! - `cache-key`: the random key the offline cache is encrypted with (see
+//!   [`crate::offline`]).
 //!
 //! Keyring calls can block (an unlock prompt, a slow D-Bus), so they all run
 //! in order on one thread of their own and answer through oneshot channels.
@@ -238,6 +240,22 @@ impl Credentials {
         self.write_json(format!("workspace:{team}"), token).await
     }
 
+    /// The offline cache's key, made and stored on first use. A stored
+    /// key of the wrong length is replaced, which only costs the cache.
+    pub async fn cache_key(&self) -> Result<crate::offline::CacheKey, Error> {
+        self.run(|store| {
+            if let Some(bytes) = store.read("cache-key")?
+                && let Ok(key) = <[u8; 32]>::try_from(bytes.as_slice())
+            {
+                return Ok(crate::offline::CacheKey(key));
+            }
+            let key = crate::offline::CacheKey::random();
+            store.write("cache-key", &key.0)?;
+            Ok(key)
+        })
+        .await
+    }
+
     pub async fn delete_token(&self, team: &str) -> Result<(), Error> {
         let key = format!("workspace:{team}");
         self.run(move |store| store.delete(&key)).await
@@ -247,6 +265,13 @@ impl Credentials {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_cache_key_is_made_once() {
+        let credentials = Credentials::memory();
+        let first = credentials.cache_key().await.expect("made");
+        assert_eq!(credentials.cache_key().await, Ok(first));
+    }
 
     #[tokio::test]
     async fn secrets_round_trip_through_the_thread() {

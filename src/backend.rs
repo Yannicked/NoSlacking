@@ -516,6 +516,15 @@ pub enum Event {
         cursor: Option<String>,
         older: bool,
     },
+    /// The newest page of a conversation as the offline cache kept it, to
+    /// show until [`Event::History`] brings Slack's own.
+    CachedHistory {
+        team: String,
+        channel: String,
+        messages: Vec<Message>,
+        has_more: bool,
+        cursor: Option<String>,
+    },
     HistoryFailed {
         team: String,
         channel: String,

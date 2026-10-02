@@ -479,6 +479,9 @@ pub struct Timeline {
     /// The message whose surroundings are on their way, after a jump to
     /// it: they replace the list when they arrive.
     pub around: Option<Ts>,
+    /// Whether the list is the offline cache's copy of the newest page,
+    /// which the first page from Slack replaces.
+    pub cached: bool,
 }
 
 impl Timeline {
