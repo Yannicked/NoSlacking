@@ -707,6 +707,21 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
         },
     });
     sink.send(Event::Socket(Socket::Connected));
+    // Ana keeps typing in her direct message, as Slack repeats it.
+    let typing = sink.clone();
+    tokio::spawn(async move {
+        loop {
+            typing.send(Event::People {
+                team: TEAM.into(),
+                event: crate::people::Event::Typing {
+                    channel: "D01".into(),
+                    thread: None,
+                    user: "U01".into(),
+                },
+            });
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    });
     let mut sent = 0;
     let mut uploads: HashMap<u64, tokio::task::AbortHandle> = HashMap::new();
     while let Some(command) = commands.recv().await {
