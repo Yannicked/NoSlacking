@@ -1022,11 +1022,11 @@ impl Worker {
 
 /// A user-facing description of an API failure.
 pub fn describe(error: &SlackError) -> String {
+    if error.is_auth() {
+        return "the sign-in is no longer valid; sign in again".into();
+    }
     match error {
         SlackError::Api(code) => match code.as_str() {
-            "invalid_auth" | "not_authed" | "token_revoked" => {
-                "the sign-in is no longer valid; sign in again".into()
-            }
             "missing_scope" => {
                 "the Slack app lacks a permission; reinstall it from the manifest".into()
             }
@@ -1969,6 +1969,26 @@ mod tests {
             worker.socket.as_ref().map(|s| s.status.clone()),
             Some(Socket::Connected)
         );
+    }
+
+    #[test]
+    fn failures_read_as_plain_sentences() {
+        for code in crate::slack::client::AUTH_ERRORS {
+            assert_eq!(
+                describe(&SlackError::Api((*code).to_owned())),
+                "the sign-in is no longer valid; sign in again",
+                "{code}"
+            );
+        }
+        assert_eq!(
+            describe(&SlackError::Api("channel_not_found".into())),
+            "the conversation no longer exists"
+        );
+        assert_eq!(
+            describe(&SlackError::Api("some_new_code".into())),
+            "some new code"
+        );
+        assert_eq!(describe(&SlackError::Http(502)), "HTTP 502");
     }
 
     #[test]
