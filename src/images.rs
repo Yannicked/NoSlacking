@@ -193,7 +193,6 @@ fn retry_delay(failure: &Failure, failures: u32) -> Option<Duration> {
 struct Inner {
     entries: Mutex<HashMap<String, Entry>>,
     clients: RwLock<HashMap<String, slack::Client>>,
-    http: reqwest::Client,
     runtime: tokio::runtime::Handle,
     cache_dir: PathBuf,
 }
@@ -207,7 +206,7 @@ pub struct ImageLoader {
 impl ImageLoader {
     /// A loader caching on disk in `cache_dir`. Trims that folder to
     /// [`DISK_BYTES`] in the background first.
-    pub fn new(http: reqwest::Client, runtime: tokio::runtime::Handle, cache_dir: PathBuf) -> Self {
+    pub fn new(runtime: tokio::runtime::Handle, cache_dir: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(&cache_dir);
         let dir = cache_dir.clone();
         runtime.spawn_blocking(move || prune_disk(&dir, DISK_BYTES));
@@ -215,7 +214,6 @@ impl ImageLoader {
             inner: Arc::new(Inner {
                 entries: Mutex::new(HashMap::new()),
                 clients: RwLock::new(HashMap::new()),
-                http,
                 runtime,
                 cache_dir,
             }),
@@ -311,7 +309,11 @@ impl Inner {
                 let client = client.ok_or(Failure::SignedOut)?;
                 client.get_bytes(url, MAX_IMAGE_BYTES).await
             }
-            None => slack::client::get_bytes(&self.http, url, None, None, MAX_IMAGE_BYTES).await,
+            // The shared client, taken now so it follows the proxy setting.
+            None => {
+                let http = slack::net::api();
+                slack::client::get_bytes(&http, url, None, None, MAX_IMAGE_BYTES).await
+            }
         }
         .map_err(failure_for)?;
         check_decoded_size(&bytes).map_err(Failure::Refused)?;

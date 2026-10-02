@@ -211,7 +211,7 @@ pub async fn redeem(set: &TokenSet) -> Result<Redeemed, SlackError> {
         );
     }
     let jar = Arc::new(Jar::default());
-    let http = reqwest::Client::builder()
+    let http = super::net::builder()
         .user_agent(DESKTOP_UA)
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(60))

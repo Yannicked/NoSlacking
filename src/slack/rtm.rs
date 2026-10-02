@@ -164,7 +164,7 @@ async fn connection(client: &Client, sink: &(impl Fn(RtmEvent) + Send + Sync)) -
     {
         request.headers_mut().insert(COOKIE, value);
     }
-    let (mut socket, _) = match tokio_tungstenite::connect_async(request).await {
+    let (mut socket, _) = match super::net::websocket(request).await {
         Ok(socket) => socket,
         // Slack answered the handshake with an HTTP error: a refusal.
         Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {

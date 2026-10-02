@@ -90,6 +90,8 @@ pub struct Settings {
     /// The emoji you used lately, newest first, by name without a tone;
     /// at most [`crate::emoji::RECENT_MAX`].
     pub recent_emoji: Vec<String>,
+    /// Which proxy every connection goes through (Settings → Network).
+    pub proxy: crate::slack::net::ProxySettings,
 }
 
 impl Default for Settings {
@@ -112,6 +114,7 @@ impl Default for Settings {
             desktop: crate::desktop::DesktopSettings::default(),
             skin_tone: 0,
             recent_emoji: Vec::new(),
+            proxy: crate::slack::net::ProxySettings::default(),
         }
     }
 }
@@ -204,6 +207,7 @@ impl Settings {
             desktop,
             skin_tone,
             recent_emoji,
+            proxy,
         );
         // One damaged workspace must not sign you out of the others, so
         // these are read entry by entry.

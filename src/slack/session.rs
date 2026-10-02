@@ -110,7 +110,7 @@ fn seeded_client(cookie: &str) -> Result<reqwest::Client, SlackError> {
         .parse::<reqwest::Url>()
         .map_err(|e| SlackError::Network(e.to_string()))?;
     jar.add_cookie_str(&format!("d={cookie}; Domain=.slack.com; Path=/"), &url);
-    reqwest::Client::builder()
+    super::net::builder()
         .user_agent(BROWSER_UA)
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(60))

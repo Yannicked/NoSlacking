@@ -671,6 +671,8 @@ pub enum Action {
     AddWorkspace,
     SignOut(String),
     Reconnect,
+    /// Uses the proxy now in the settings and restarts the connections.
+    ApplyProxy,
     DismissError,
     // Sign-in. These carry no secrets: the app reads the typed cookie,
     // token and credentials from its form, so they never sit in an action
