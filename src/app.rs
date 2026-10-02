@@ -157,6 +157,40 @@ impl WorkspaceState {
         self.conversations.iter_mut().find(|c| c.id == id)
     }
 
+    /// Every list a message of `channel` can be in: the conversation's own
+    /// and its loaded threads, since a thread's parent and a reply also
+    /// sent to the channel show in both.
+    pub fn timelines_for<'s, 'c>(
+        &'s self,
+        channel: &'c str,
+    ) -> impl Iterator<Item = &'s Timeline> + use<'s, 'c> {
+        self.timelines.get(channel).into_iter().chain(
+            self.threads
+                .iter()
+                .filter(move |((c, _), _)| c == channel)
+                .map(|(_, t)| t),
+        )
+    }
+
+    /// [`Self::timelines_for`], to change them.
+    pub fn timelines_for_mut<'s, 'c>(
+        &'s mut self,
+        channel: &'c str,
+    ) -> impl Iterator<Item = &'s mut Timeline> + use<'s, 'c> {
+        self.timelines.get_mut(channel).into_iter().chain(
+            self.threads
+                .iter_mut()
+                .filter(move |((c, _), _)| c == channel)
+                .map(|(_, t)| t),
+        )
+    }
+
+    /// A message of `channel`, wherever it is loaded.
+    pub fn find_message(&self, channel: &str, ts: &Ts) -> Option<&Message> {
+        self.timelines_for(channel)
+            .find_map(|t| t.messages.iter().find(|m| m.ts == *ts))
+    }
+
     pub fn user(&self, id: &str) -> Option<&User> {
         self.users.get(id)
     }
@@ -269,14 +303,9 @@ impl WorkspaceState {
                 let message = timeline.messages.iter().find(|m| m.ts == *ts)?;
                 message.thread_ts.clone().filter(|_| message.is_reply())
             });
-        if let Some(timeline) = self.timelines.get_mut(channel) {
-            timeline.remove(ts);
-        }
         self.threads.remove(&(channel.to_owned(), ts.clone()));
-        for ((thread_channel, _), timeline) in &mut self.threads {
-            if thread_channel == channel {
-                timeline.remove(ts);
-            }
+        for timeline in self.timelines_for_mut(channel) {
+            timeline.remove(ts);
         }
         // Optimistic replies were never counted.
         let Some(parent) = parent.filter(|_| !ts.is_local()) else {
@@ -308,6 +337,20 @@ impl WorkspaceState {
 
 /// Where a file goes: the team, the channel and the thread, if any.
 type UploadTarget = (String, String, Option<Ts>);
+
+/// The workspace on screen: the one chosen in `settings`, else the first.
+/// Views that borrow [`App`]'s fields apart call this instead of
+/// [`App::active_workspace`].
+pub fn active_in<'a>(
+    workspaces: &'a [WorkspaceState],
+    settings: &Settings,
+) -> Option<&'a WorkspaceState> {
+    let id = settings.active_workspace.as_deref();
+    workspaces
+        .iter()
+        .find(|w| Some(w.info.team_id.as_str()) == id)
+        .or_else(|| workspaces.first())
+}
 
 /// A file chosen in the picker, and where it goes.
 type PickedFile = (UploadTarget, PathBuf);
@@ -499,11 +542,7 @@ impl App {
     }
 
     pub fn active_workspace(&self) -> Option<&WorkspaceState> {
-        let id = self.settings.active_workspace.as_deref();
-        self.workspaces
-            .iter()
-            .find(|w| Some(w.info.team_id.as_str()) == id)
-            .or_else(|| self.workspaces.first())
+        active_in(&self.workspaces, &self.settings)
     }
 
     pub fn active_workspace_mut(&mut self) -> Option<&mut WorkspaceState> {
@@ -865,17 +904,8 @@ impl App {
                 added,
             } => {
                 if let Some(workspace) = self.workspace_mut(&team) {
-                    if let Some(message) = workspace
-                        .timelines
-                        .get_mut(&channel)
-                        .and_then(|t| t.find_mut(&ts))
-                    {
-                        message.toggle_reaction(&name, &user, added);
-                    }
-                    for ((thread_channel, _), timeline) in &mut workspace.threads {
-                        if *thread_channel == channel
-                            && let Some(message) = timeline.find_mut(&ts)
-                        {
+                    for timeline in workspace.timelines_for_mut(&channel) {
+                        if let Some(message) = timeline.find_mut(&ts) {
                             message.toggle_reaction(&name, &user, added);
                         }
                     }
@@ -1117,17 +1147,8 @@ impl App {
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
-        let mut timelines: Vec<&mut Timeline> = Vec::new();
-        if let Some(t) = workspace.timelines.get_mut(channel) {
-            timelines.push(t);
-        }
-        for ((thread_channel, _), t) in &mut workspace.threads {
-            if thread_channel == channel {
-                timelines.push(t);
-            }
-        }
         let error = result.as_ref().err().cloned();
-        for timeline in timelines {
+        for timeline in workspace.timelines_for_mut(channel) {
             let Some(position) = timeline.messages.iter().position(|m| &m.ts == local) else {
                 continue;
             };
@@ -1416,16 +1437,7 @@ impl App {
             return;
         };
         let mut found = None;
-        let mut timelines: Vec<&mut Timeline> =
-            workspace.timelines.get_mut(channel).into_iter().collect();
-        timelines.extend(
-            workspace
-                .threads
-                .iter_mut()
-                .filter(|((c, _), _)| c == channel)
-                .map(|(_, t)| t),
-        );
-        for timeline in timelines {
+        for timeline in workspace.timelines_for_mut(channel) {
             if let Some(message) = timeline.find_mut(local) {
                 message.delivery = Delivery::Sending;
                 found = Some((
@@ -1456,16 +1468,7 @@ impl App {
         };
         let me = workspace.info.user_id.clone();
         let mut add = None;
-        let mut timelines: Vec<&mut Timeline> =
-            workspace.timelines.get_mut(channel).into_iter().collect();
-        timelines.extend(
-            workspace
-                .threads
-                .iter_mut()
-                .filter(|((c, _), _)| c == channel)
-                .map(|(_, t)| t),
-        );
-        for timeline in timelines {
+        for timeline in workspace.timelines_for_mut(channel) {
             if let Some(message) = timeline.find_mut(ts) {
                 let adding = *add.get_or_insert_with(|| {
                     !message
@@ -1588,10 +1591,7 @@ impl App {
                     .unwrap_or_default();
                 let wire = to_wire(&text, &mentions);
                 if let Some(workspace) = self.workspace_mut(&team) {
-                    let mut timelines: Vec<&mut Timeline> =
-                        workspace.timelines.get_mut(&channel).into_iter().collect();
-                    timelines.extend(workspace.threads.values_mut());
-                    for timeline in timelines {
+                    for timeline in workspace.timelines_for_mut(&channel) {
                         if let Some(message) = timeline.find_mut(&ts) {
                             message.text = wire.clone();
                             message.edited = true;
@@ -1776,17 +1776,9 @@ impl App {
     }
 
     fn start_edit(&mut self, channel: String, ts: Ts, in_thread: bool) {
-        let found = self.active_workspace().and_then(|w| {
-            w.timelines
-                .get(&channel)
-                .and_then(|t| t.messages.iter().find(|m| m.ts == ts))
-                .or_else(|| {
-                    w.threads
-                        .values()
-                        .find_map(|t| t.messages.iter().find(|m| m.ts == ts))
-                })
-                .map(|m| w.editable(&m.text))
-        });
+        let found = self
+            .active_workspace()
+            .and_then(|w| w.find_message(&channel, &ts).map(|m| w.editable(&m.text)));
         if let Some((text, mentions)) = found {
             self.editing = Some(Editing {
                 channel,
@@ -2337,6 +2329,19 @@ mod tests {
         // A plain message has no parent to change.
         w.remove_message("C1", &Ts::new("5.0"));
         assert_eq!(count(&w.timelines["C1"]), 1);
+    }
+
+    #[test]
+    fn a_channels_timelines_are_its_own_and_its_threads() {
+        let mut w = workspace_with_thread();
+        w.threads
+            .entry(("C2".into(), Ts::new("2.0")))
+            .or_default()
+            .upsert(message("2.0", Some("2.0")));
+        assert_eq!(w.timelines_for("C1").count(), 2);
+        assert_eq!(w.timelines_for("C2").count(), 1);
+        assert!(w.find_message("C1", &Ts::new("3.0")).is_some());
+        assert!(w.find_message("C2", &Ts::new("3.0")).is_none());
     }
 
     #[test]

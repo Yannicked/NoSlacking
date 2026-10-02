@@ -153,11 +153,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         socket,
         ..
     } = app;
-    let Some(workspace) = workspaces
-        .iter()
-        .find(|w| Some(&w.info.team_id) == settings.active_workspace.as_ref())
-        .or_else(|| workspaces.first())
-    else {
+    let Some(workspace) = crate::app::active_in(workspaces, settings) else {
         return;
     };
     let response = egui::Panel::left("sidebar")
