@@ -441,5 +441,78 @@ mod tests {
         assert_eq!(current_word("hi @an", 2), Some((0, "hi".into())));
         assert_eq!(current_word("hi ", 3), None);
         assert_eq!(current_word("ünï :ta", 7), Some((4, ":ta".into())));
+        assert_eq!(current_word("çà @Zoë", 7), Some((3, "@Zoë".into())));
+    }
+
+    fn workspace() -> WorkspaceState {
+        let mut w = WorkspaceState::new(crate::model::Workspace {
+            team_id: "T1".into(),
+            name: "Acme".into(),
+            domain: "acme".into(),
+            icon: None,
+            user_id: "U0".into(),
+        });
+        let user =
+            |id: &str, name: &str, real: &str, display: &str, bot: bool| crate::model::User {
+                id: id.into(),
+                name: name.into(),
+                real_name: real.into(),
+                display_name: display.into(),
+                is_bot: bot,
+                ..Default::default()
+            };
+        for u in [
+            user("U1", "joanna", "Joanna Ek", "", false),
+            user("U2", "ann", "Ann Lee", "Ann", false),
+            user("U3", "anbot", "", "", true),
+            user("U4", "old", "Anders", "", false),
+        ] {
+            w.users.insert(u.id.clone(), u);
+        }
+        w.users.get_mut("U4").expect("U4").deleted = true;
+        w.emoji = crate::emoji::EmojiSet::new(
+            [("tacocat".to_owned(), "https://x.y/t.png".to_owned())].into(),
+        );
+        w
+    }
+
+    fn labels(found: &[Suggestion]) -> Vec<String> {
+        found
+            .iter()
+            .map(|s| match s {
+                Suggestion::User { label, .. } => label.clone(),
+                Suggestion::Emoji { name } => format!(":{name}:"),
+                Suggestion::Special(name) => format!("@{name}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn people_rank_by_prefix_and_bots_last() {
+        let w = workspace();
+        // "Ann" starts with the query, "Joanna Ek" only contains it, the bot
+        // comes last and the deleted account not at all.
+        assert_eq!(
+            labels(&suggestions(&w, "@an")),
+            ["Ann", "Joanna Ek", "anbot"]
+        );
+        assert_eq!(labels(&suggestions(&w, "@ch")), ["@channel"]);
+        // A bare @ lists people, not broadcasts.
+        assert_eq!(suggestions(&w, "@").len(), 3);
+        assert!(suggestions(&w, "plain").is_empty());
+    }
+
+    #[test]
+    fn emoji_need_two_letters_and_custom_ones_come_first() {
+        let w = workspace();
+        assert!(suggestions(&w, ":t").is_empty());
+        assert!(suggestions(&w, ":ta:").is_empty());
+        let found = labels(&suggestions(&w, ":ta"));
+        assert_eq!(found.first().map(String::as_str), Some(":tacocat:"));
+        // Standard emoji starting with the query come before the rest.
+        let standard = &found[1..];
+        let starts = standard.iter().take_while(|n| n.starts_with(":ta")).count();
+        assert!(starts > 0);
+        assert!(standard[starts..].iter().all(|n| !n.starts_with(":ta")));
     }
 }

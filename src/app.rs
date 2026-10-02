@@ -130,7 +130,8 @@ pub struct WorkspaceState {
 }
 
 impl WorkspaceState {
-    fn new(info: Workspace) -> Self {
+    /// A workspace with nothing loaded yet.
+    pub(crate) fn new(info: Workspace) -> Self {
         Self {
             info,
             conversations: Vec::new(),
@@ -2501,6 +2502,164 @@ mod tests {
         w.remove_message("C1", &Ts::new("1.0"));
         assert!(w.threads.is_empty());
         assert_eq!(w.timelines["C1"].messages.len(), 1);
+    }
+
+    /// A workspace with #general (C1) open on an empty history.
+    fn workspace_in_general() -> WorkspaceState {
+        let mut w = workspace();
+        w.conversations.push(conversation("1.0", "1.0", 0, 0));
+        let timeline = w.timelines.entry("C1".into()).or_default();
+        timeline.loaded = true;
+        w
+    }
+
+    fn sending(w: &mut WorkspaceState, local: &str, text: &str, thread: Option<&str>) {
+        let thread = thread.map(Ts::new);
+        w.add_local(
+            "C1",
+            local_message("U1", &Ts::new(local), text, &thread, false),
+        );
+    }
+
+    fn texts(timeline: &Timeline) -> Vec<(&str, &str)> {
+        timeline
+            .messages
+            .iter()
+            .map(|m| (m.ts.as_str(), m.text.as_str()))
+            .collect()
+    }
+
+    fn mine(ts: &str, text: &str) -> Message {
+        Message {
+            text: text.into(),
+            ..message(ts, None)
+        }
+    }
+
+    #[test]
+    fn a_sent_message_replaces_its_local_copy() {
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "hi", None);
+        assert_eq!(w.timelines["C1"].messages[0].delivery, Delivery::Sending);
+        w.sent("C1", &Ts::new("local-1"), &Ok(mine("5.0", "hi")));
+        // Then Socket Mode echoes it: still one copy.
+        w.message_arrived("C1", mine("5.0", "hi"), true);
+        assert_eq!(texts(&w.timelines["C1"]), [("5.0", "hi")]);
+        let c = w.conversation("C1").expect("C1");
+        assert_eq!(c.latest, Some(Ts::new("5.0")));
+        assert_eq!(c.last_read, Some(Ts::new("5.0")));
+    }
+
+    #[test]
+    fn an_echo_before_the_answer_also_replaces_the_local_copy() {
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "one", None);
+        sending(&mut w, "local-2", "two", None);
+        w.message_arrived("C1", mine("5.0", "two"), true);
+        assert_eq!(
+            texts(&w.timelines["C1"]),
+            [("5.0", "two"), ("local-1", "one")]
+        );
+        w.sent("C1", &Ts::new("local-2"), &Ok(mine("5.0", "two")));
+        assert_eq!(
+            texts(&w.timelines["C1"]),
+            [("5.0", "two"), ("local-1", "one")]
+        );
+        // Someone else saying the same is not our echo.
+        let mut theirs = mine("6.0", "one");
+        theirs.user = Some("U2".into());
+        w.message_arrived("C1", theirs, true);
+        assert!(w.timelines["C1"].messages.iter().any(|m| m.ts.is_local()));
+    }
+
+    #[test]
+    fn a_failed_send_can_be_retried() {
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "hi", None);
+        w.sent("C1", &Ts::new("local-1"), &Err("ratelimited".into()));
+        let failed = &w.timelines["C1"].messages[0];
+        assert_eq!(failed.delivery, Delivery::Failed("ratelimited".into()));
+        assert_eq!(
+            w.retry_local("C1", &Ts::new("local-1")),
+            Some(("hi".to_owned(), None, false))
+        );
+        assert_eq!(w.timelines["C1"].messages[0].delivery, Delivery::Sending);
+        assert_eq!(w.retry_local("C1", &Ts::new("local-9")), None);
+    }
+
+    #[test]
+    fn a_reply_counts_once_on_its_parent() {
+        let mut w = workspace_with_thread();
+        w.conversations.push(conversation("1.0", "5.0", 0, 0));
+        let reply = || message("4.0", Some("1.0"));
+        w.message_arrived("C1", reply(), true);
+        w.message_arrived("C1", reply(), true);
+        let parent = &w.timelines["C1"].messages[0];
+        assert_eq!(parent.reply_count, 3);
+        assert_eq!(parent.latest_reply, Some(Ts::new("4.0")));
+        // Replies stay out of the channel's own list.
+        assert_eq!(w.timelines["C1"].messages.len(), 2);
+    }
+
+    #[test]
+    fn mentions_count_only_when_not_looking() {
+        let mut w = workspace_in_general();
+        let mut ping = message("5.0", None);
+        ping.user = Some("U2".into());
+        ping.text = "hey <@U1>".into();
+        w.message_arrived("C1", ping.clone(), true);
+        assert_eq!(w.conversation("C1").map(|c| c.mentions), Some(0));
+        ping.ts = Ts::new("6.0");
+        w.message_arrived("C1", ping, false);
+        assert_eq!(w.conversation("C1").map(|c| c.mentions), Some(1));
+        // Writing there yourself means you have read it.
+        w.message_arrived("C1", mine("7.0", "on it"), false);
+        let c = w.conversation("C1").expect("C1");
+        assert_eq!((c.mentions, c.last_read.clone()), (0, Some(Ts::new("7.0"))));
+    }
+
+    #[test]
+    fn messages_in_unknown_conversations_fetch_it_once() {
+        let mut w = workspace_in_general();
+        let (arrived, fetch) = w.message_arrived("C9", message("5.0", None), false);
+        assert!(fetch);
+        // Its details name the people; they are not fetched one by one.
+        assert!(arrived.users.is_empty());
+        let (_, fetch) = w.message_arrived("C9", message("6.0", None), false);
+        assert!(!fetch);
+    }
+
+    #[test]
+    fn read_events_arrive_in_any_order() {
+        let mut w = workspace_in_general();
+        w.conversations[0] = conversation("1.0", "9.0", 3, 1);
+        w.read_elsewhere("C1", Ts::new("9.0"));
+        w.read_elsewhere("C1", Ts::new("4.0"));
+        let c = w.conversation("C1").expect("C1");
+        assert_eq!(c.last_read, Some(Ts::new("9.0")));
+        assert_eq!((c.unread, c.mentions), (0, 0));
+    }
+
+    #[test]
+    fn my_reaction_toggles_everywhere_the_message_shows() {
+        let mut w = workspace_with_thread();
+        assert_eq!(
+            w.toggle_my_reaction("C1", &Ts::new("1.0"), "tada"),
+            Some(true)
+        );
+        let count = |w: &WorkspaceState| {
+            w.timelines_for("C1")
+                .filter_map(|t| t.messages.iter().find(|m| m.ts == Ts::new("1.0")))
+                .map(|m| m.reactions.len())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(count(&w), [1, 1]);
+        assert_eq!(
+            w.toggle_my_reaction("C1", &Ts::new("1.0"), "tada"),
+            Some(false)
+        );
+        assert_eq!(count(&w), [0, 0]);
+        assert_eq!(w.toggle_my_reaction("C1", &Ts::new("8.0"), "tada"), None);
     }
 
     #[test]
