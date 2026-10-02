@@ -21,8 +21,8 @@ use crate::settings::Redirect;
 use crate::slack::{SlackError, Token, client, types};
 
 pub const SCHEME: &str = "noslacking";
-/// Slack's own scheme: its browser sign-in finishes with a
-/// `slack://` link, and "Open in Slack" links use it too.
+/// Slack's own scheme: its browser sign-in finishes with a `slack://`
+/// link, and "Open in Slack" links use it too.
 pub const SLACK_SCHEME: &str = "slack";
 /// Every scheme NoSlacking registers itself for.
 const SCHEMES: [&str; 2] = [SCHEME, SLACK_SCHEME];

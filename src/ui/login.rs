@@ -1,9 +1,9 @@
 //! First run and "add a workspace".
 //!
-//! The quick path reuses your logged-in Slack browser session: paste the
-//! workspace address and the `d` cookie, as wee-slack and msga do. The
-//! advanced path registers your own Slack app for official OAuth and live
-//! Socket Mode updates.
+//! The quick path reuses your Slack browser session, as wee-slack and msga
+//! do: sign in through the browser, or paste the workspace address and the
+//! `d` cookie. The advanced path registers your own Slack app for official
+//! OAuth and live Socket Mode updates.
 
 use egui::{CornerRadius, Margin, RichText, Stroke};
 
@@ -210,8 +210,8 @@ fn session_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     });
 }
 
-/// Signing in through the browser, as msga does: Slack's page hands
-/// its `slack://` link back through the desktop, or offers it to paste here.
+/// Signing in through the browser, as msga does: Slack's page hands its
+/// `slack://` link back through the desktop, or offers it to paste here.
 fn browser_sign_in(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     ui.horizontal(|ui| {
         if theme::secondary_button(ui, palette, &t("Sign in with your browser")).clicked() {

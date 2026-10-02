@@ -44,8 +44,8 @@ pub enum Command {
         cookie: String,
         workspace_url: String,
     },
-    /// Signs in with the `slack://` link Slack's browser sign-in hands to
-    /// you (see [`crate::slack::magic`]).
+    /// Signs in with the `slack://` link Slack's browser sign-in hands over
+    /// (see [`crate::slack::magic`]).
     SignInLink(String),
     /// Opens Slack's sign-in page in the browser and, for a while, accepts
     /// the `slack://` link it hands back through the desktop.
