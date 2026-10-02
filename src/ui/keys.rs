@@ -3,6 +3,8 @@
 //! - Ctrl+K (⌘K): jump to a conversation
 //! - Alt+↑ / Alt+↓: previous / next conversation in the sidebar
 //! - Alt+Shift+↑ / ↓: previous / next unread conversation
+//!
+//!   Both leave a text field with text in it alone.
 //! - Ctrl+, : settings
 //! - Ctrl+= / Ctrl+- / Ctrl+0: zoom
 //! - Esc: close the thread or the open overlay
@@ -24,16 +26,19 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
         .visible_drafts()
         .iter()
         .any(|key| app.drafts.get(key).is_some_and(|d| d.suggesting));
+    // Alt+↑/↓ also move through text (by paragraph on macOS): a field with
+    // text in it keeps them. An empty composer has nothing to move through.
+    let arrows = !ctx.text_edit_focused() || in_empty_composer(app, ctx);
     let (switch, settings, unread_up, unread_down, up, down, escape, zoom_in, zoom_out, zoom_reset) =
         ctx.input_mut(|input| {
             (
                 input.consume_key(Modifiers::COMMAND, Key::K),
                 input.consume_key(Modifiers::COMMAND, Key::Comma),
                 // With Shift first, so plain Alt does not swallow them.
-                input.consume_key(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowUp),
-                input.consume_key(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowDown),
-                input.consume_key(Modifiers::ALT, Key::ArrowUp),
-                input.consume_key(Modifiers::ALT, Key::ArrowDown),
+                arrows && input.consume_key(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowUp),
+                arrows && input.consume_key(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowDown),
+                arrows && input.consume_key(Modifiers::ALT, Key::ArrowUp),
+                arrows && input.consume_key(Modifiers::ALT, Key::ArrowDown),
                 !overlay && !editing && !suggesting && input.key_pressed(Key::Escape),
                 input.consume_key(Modifiers::COMMAND, Key::Equals)
                     || input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Equals)
@@ -84,6 +89,17 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
             app.actions.push(Action::OpenConversation(next));
         }
     }
+}
+
+/// Whether the focused field is a composer on screen with nothing typed.
+fn in_empty_composer(app: &App, ctx: &egui::Context) -> bool {
+    let Some(focused) = ctx.memory(|m| m.focused()) else {
+        return false;
+    };
+    app.visible_drafts().iter().any(|key| {
+        super::composer::field_id(key) == focused
+            && app.drafts.get(key).is_none_or(|d| d.text.is_empty())
+    })
 }
 
 /// The conversation before or after the open one, in sidebar order.
