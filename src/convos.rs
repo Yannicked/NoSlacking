@@ -780,7 +780,7 @@ impl State {
 
 /// Asks for the people among `ids` the workspace does not know yet, so
 /// lists of them show names rather than ids.
-fn fetch_unknown(app: &App, team: &str, ids: &[String]) {
+pub(crate) fn fetch_unknown(app: &App, team: &str, ids: &[String]) {
     if app.demo {
         return;
     }

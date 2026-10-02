@@ -9,6 +9,7 @@ mod around;
 pub mod convos;
 pub mod desktop;
 mod search;
+pub mod views;
 pub mod worker;
 
 use std::collections::HashMap;
@@ -198,6 +199,12 @@ pub enum Command {
     Convos {
         team: String,
         command: crate::convos::Command,
+    },
+    /// Loads or changes what a view at the top of the sidebar lists (see
+    /// [`crate::views`]).
+    Views {
+        team: String,
+        command: crate::views::Command,
     },
 }
 
@@ -417,6 +424,11 @@ impl std::fmt::Debug for Command {
                 .field("team", team)
                 .field("command", command)
                 .finish(),
+            Self::Views { team, command } => f
+                .debug_struct("Views")
+                .field("team", team)
+                .field("command", command)
+                .finish(),
         }
     }
 }
@@ -631,6 +643,12 @@ pub enum Event {
     Convos {
         team: String,
         event: crate::convos::Event,
+    },
+    /// An answer for a view at the top of the sidebar (see
+    /// [`crate::views`]).
+    Views {
+        team: String,
+        event: crate::views::Event,
     },
 }
 

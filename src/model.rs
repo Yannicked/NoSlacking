@@ -706,6 +706,9 @@ pub enum Action {
     },
     /// Starts, finds or looks after a conversation (see [`crate::convos`]).
     Convos(crate::convos::Action),
+    /// Opens or works a view at the top of the sidebar (see
+    /// [`crate::views`]).
+    Views(crate::views::Action),
 }
 
 #[cfg(test)]

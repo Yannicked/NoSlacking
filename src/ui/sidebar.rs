@@ -187,6 +187,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         actions,
         sidebar_filter,
         socket,
+        views,
         ..
     } = app;
     let Some(workspace) = crate::app::active_in(workspaces, settings) else {
@@ -316,6 +317,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 1.0;
+                    if sidebar_filter.trim().is_empty() {
+                        super::views::entries(ui, &palette, workspace, views, actions);
+                    }
                     list(
                         ui,
                         &palette,
@@ -639,7 +643,11 @@ fn row(
     section: &sidebar::Shown<'_>,
     actions: &mut Vec<Action>,
 ) {
-    let selected = workspace.active.as_deref() == Some(conversation.id.as_str());
+    // A view in place of the conversation leaves no row selected.
+    let covered = ui
+        .data(|d| d.get_temp::<bool>(super::views::open_id()))
+        .unwrap_or(false);
+    let selected = !covered && workspace.active.as_deref() == Some(conversation.id.as_str());
     let unread = workspace.is_unread(conversation) && !selected;
     let muted = workspace.desktop.is_muted(&conversation.id);
     let (outer, response) =

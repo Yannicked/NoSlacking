@@ -528,6 +528,12 @@ impl DemoSetup {
                     tab,
                 }));
             }
+            // The views at the top of the sidebar.
+            Some("activity") => app
+                .actions
+                .push(Action::Views(noslacking::views::Action::Open(
+                    noslacking::views::View::Activity,
+                ))),
             Some("browse") => app
                 .actions
                 .push(Action::Convos(noslacking::convos::Action::Browse)),

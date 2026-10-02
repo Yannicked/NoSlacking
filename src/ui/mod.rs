@@ -18,6 +18,7 @@ mod selection;
 mod settings;
 mod sidebar;
 mod thread;
+mod views;
 
 use egui::{Color32, CornerRadius, Rect, Sense, Vec2};
 
@@ -45,10 +46,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .unwrap_or_default(),
     );
     ui.data_mut(|d| d.insert_temp(drafts_id(), drafts));
+    let view_open = app.views.open.is_some();
+    ui.data_mut(|d| d.insert_temp(views::open_id(), view_open));
     // First, so Esc leaves a selected message before it closes the thread.
     selection::keys(app, ui.ctx());
     keys::global(app, ui.ctx());
     browse::keys(app, ui.ctx());
+    views::keys(app, ui.ctx());
     match app.page {
         Page::SignIn => login::show(app, ui),
         Page::Settings => {
@@ -60,10 +64,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             sidebar::show(app, ui);
             if app.thread.is_some() {
                 thread::show(app, ui);
-            } else if app.convos.details.is_some() {
+            } else if app.convos.details.is_some() && app.views.open.is_none() {
                 details::show(app, ui);
             }
-            conversation::show(app, ui);
+            if app.views.open.is_some() {
+                views::show(app, ui);
+            } else {
+                conversation::show(app, ui);
+            }
         }
     }
     overlays::show(app, ui.ctx());
