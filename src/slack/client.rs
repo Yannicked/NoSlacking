@@ -1,0 +1,532 @@
+//! The Slack Web API over reqwest: bearer auth, rate limits, token refresh.
+//!
+//! Every method is a form POST to `https://slack.com/api/<method>` that
+//! answers `{"ok": true, ...}` or `{"ok": false, "error": "<code>"}`. A 429
+//! carries `Retry-After`; this client waits it out and tries again, a few
+//! times, without ever spinning. At most six calls per workspace are in
+//! flight at once, so a burst of sidebar refreshes cannot starve a send.
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use serde::de::DeserializeOwned;
+use tokio::sync::Semaphore;
+
+use super::types;
+
+pub const API: &str = "https://slack.com/api/";
+const MAX_IN_FLIGHT: usize = 6;
+const MAX_ATTEMPTS: u32 = 4;
+/// Refresh a rotating token this long before it expires.
+const REFRESH_MARGIN: i64 = 300;
+
+#[derive(Clone, Debug, thiserror::Error, PartialEq)]
+pub enum SlackError {
+    /// Slack answered `ok: false` with this code.
+    #[error("Slack said: {0}")]
+    Api(String),
+    #[error("Slack is rate limiting requests; try again shortly")]
+    RateLimited,
+    #[error("HTTP {0}")]
+    Http(u16),
+    #[error("network: {0}")]
+    Network(String),
+    #[error("unexpected response: {0}")]
+    Decode(String),
+}
+
+impl SlackError {
+    /// Whether the token no longer works and the workspace needs signing in
+    /// again.
+    pub fn is_auth(&self) -> bool {
+        matches!(
+            self,
+            Self::Api(code) if matches!(
+                code.as_str(),
+                "invalid_auth" | "not_authed" | "token_revoked" | "account_inactive" | "token_expired"
+            )
+        )
+    }
+
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Self::Api(code) => Some(code),
+            _ => None,
+        }
+    }
+}
+
+/// A workspace's user token and, when the app rotates tokens, what renews it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Token {
+    pub access: String,
+    #[serde(default)]
+    pub refresh: Option<String>,
+    /// Unix seconds; `None` for a token that never expires.
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    /// The `d` session cookie (value already `xoxd-…`), for a workspace
+    /// signed in through the browser session rather than OAuth. When set,
+    /// `access` is an `xoxc-` token and it is sent with this cookie; it
+    /// never rotates.
+    #[serde(default)]
+    pub cookie: Option<String>,
+    /// The workspace URL (`https://team.slack.com`), kept so the `xoxc`
+    /// token can be derived again from a fresh cookie.
+    #[serde(default)]
+    pub workspace_url: Option<String>,
+}
+
+impl Token {
+    pub fn plain(access: impl Into<String>) -> Self {
+        Self {
+            access: access.into(),
+            refresh: None,
+            expires_at: None,
+            cookie: None,
+            workspace_url: None,
+        }
+    }
+
+    /// A browser-session token: an `xoxc-` token plus its `d` cookie.
+    pub fn session(
+        access: impl Into<String>,
+        cookie: impl Into<String>,
+        workspace_url: impl Into<String>,
+    ) -> Self {
+        Self {
+            access: access.into(),
+            refresh: None,
+            expires_at: None,
+            cookie: Some(cookie.into()),
+            workspace_url: Some(workspace_url.into()),
+        }
+    }
+
+    pub fn is_session(&self) -> bool {
+        self.cookie.is_some()
+    }
+
+    fn needs_refresh(&self, now: i64) -> bool {
+        self.refresh.is_some() && self.expires_at.is_some_and(|at| now >= at - REFRESH_MARGIN)
+    }
+}
+
+/// The app's OAuth credentials, for refreshing rotating tokens.
+#[derive(Clone, Debug)]
+pub struct OauthApp {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+type OnRefresh = Arc<dyn Fn(&Token) + Send + Sync>;
+
+/// One workspace's API access.
+#[derive(Clone)]
+pub struct Client {
+    http: reqwest::Client,
+    token: Arc<Mutex<Token>>,
+    refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    app: Option<OauthApp>,
+    on_refresh: Option<OnRefresh>,
+    limit: Arc<Semaphore>,
+    base: String,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client").finish_non_exhaustive()
+    }
+}
+
+/// The shared HTTP client: rustls, gzip, a sane timeout, an honest agent.
+pub fn http() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(concat!("NoSlacking/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .unwrap_or_else(|error| {
+            log::error!("HTTP client setup failed, using defaults: {error}");
+            reqwest::Client::new()
+        })
+}
+
+pub fn now() -> i64 {
+    jiff::Timestamp::now().as_second()
+}
+
+impl Client {
+    pub fn new(http: reqwest::Client, token: Token) -> Self {
+        Self {
+            http,
+            token: Arc::new(Mutex::new(token)),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            app: None,
+            on_refresh: None,
+            limit: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            base: API.to_owned(),
+        }
+    }
+
+    /// Renews a rotating token with `app`, reporting each new token.
+    pub fn with_refresh(
+        mut self,
+        app: Option<OauthApp>,
+        on_refresh: impl Fn(&Token) + Send + Sync + 'static,
+    ) -> Self {
+        self.app = app;
+        self.on_refresh = Some(Arc::new(on_refresh));
+        self
+    }
+
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    pub fn token(&self) -> Token {
+        lock(&self.token).clone()
+    }
+
+    fn cookie(&self) -> Option<String> {
+        lock(&self.token).cookie.clone()
+    }
+
+    async fn access_token(&self) -> Result<String, SlackError> {
+        let token = self.token();
+        if !token.needs_refresh(now()) {
+            return Ok(token.access);
+        }
+        let _guard = self.refresh_lock.lock().await;
+        // Another call may have refreshed while this one waited.
+        let token = self.token();
+        if !token.needs_refresh(now()) {
+            return Ok(token.access);
+        }
+        let (Some(app), Some(refresh)) = (&self.app, &token.refresh) else {
+            return Ok(token.access);
+        };
+        let renewed = refresh_token(&self.http, &self.base, app, refresh).await?;
+        *lock(&self.token) = renewed.clone();
+        if let Some(on_refresh) = &self.on_refresh {
+            on_refresh(&renewed);
+        }
+        log::info!("renewed a rotating Slack token");
+        Ok(renewed.access)
+    }
+
+    /// Calls a read method; network failures are retried.
+    pub async fn call<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: &[(&str, String)],
+    ) -> Result<T, SlackError> {
+        self.request(method, params, true).await
+    }
+
+    /// Calls a method that changes something; only rate limits are retried,
+    /// because a network failure may have happened after Slack acted.
+    pub async fn act<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: &[(&str, String)],
+    ) -> Result<T, SlackError> {
+        self.request(method, params, false).await
+    }
+
+    async fn request<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: &[(&str, String)],
+        idempotent: bool,
+    ) -> Result<T, SlackError> {
+        let _permit = self
+            .limit
+            .acquire()
+            .await
+            .map_err(|_| SlackError::Network("client closed".into()))?;
+        let url = format!("{}{method}", self.base);
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let token = self.access_token().await?;
+            let mut request = self.http.post(&url).bearer_auth(&token).form(params);
+            if let Some(cookie) = self.cookie() {
+                request = request.header(reqwest::header::COOKIE, format!("d={cookie}"));
+            }
+            let sent = request.send().await;
+            let response = match sent {
+                Ok(response) => response,
+                Err(error) if idempotent && attempt < MAX_ATTEMPTS => {
+                    log::debug!("{method}: {error}; retrying");
+                    tokio::time::sleep(backoff(attempt)).await;
+                    continue;
+                }
+                Err(error) => return Err(SlackError::Network(error.without_url().to_string())),
+            };
+            let status = response.status().as_u16();
+            if let Some(wait) = retry_after(status, response.headers().get("retry-after")) {
+                if attempt >= MAX_ATTEMPTS {
+                    return Err(SlackError::RateLimited);
+                }
+                log::debug!("{method}: rate limited for {wait:?}");
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+            if status >= 500 && idempotent && attempt < MAX_ATTEMPTS {
+                tokio::time::sleep(backoff(attempt)).await;
+                continue;
+            }
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
+            if !(200..300).contains(&status) && bytes.is_empty() {
+                return Err(SlackError::Http(status));
+            }
+            return decode(&bytes);
+        }
+    }
+
+    /// Downloads a file that needs the token (`url_private`).
+    pub async fn get_bytes(&self, url: &str, max: usize) -> Result<Vec<u8>, SlackError> {
+        let token = self.access_token().await?;
+        get_bytes(&self.http, url, Some(&token), self.cookie().as_deref(), max).await
+    }
+
+    /// Uploads a file with Slack's two-step external upload.
+    pub async fn upload(
+        &self,
+        channel: &str,
+        thread: Option<&str>,
+        name: &str,
+        bytes: Vec<u8>,
+        comment: &str,
+    ) -> Result<(), SlackError> {
+        let target: types::UploadUrl = self
+            .act(
+                "files.getUploadURLExternal",
+                &[
+                    ("filename", name.to_owned()),
+                    ("length", bytes.len().to_string()),
+                ],
+            )
+            .await?;
+        let part = reqwest::multipart::Part::bytes(bytes).file_name(name.to_owned());
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let response = self
+            .http
+            .post(&target.upload_url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
+        if !response.status().is_success() {
+            return Err(SlackError::Http(response.status().as_u16()));
+        }
+        let files = serde_json::json!([{ "id": target.file_id, "title": name }]).to_string();
+        let mut params = vec![("files", files), ("channel_id", channel.to_owned())];
+        if let Some(thread) = thread {
+            params.push(("thread_ts", thread.to_owned()));
+        }
+        if !comment.is_empty() {
+            params.push(("initial_comment", comment.to_owned()));
+        }
+        let _: serde_json::Value = self.act("files.completeUploadExternal", &params).await?;
+        Ok(())
+    }
+}
+
+/// Decodes a Web API answer, turning `ok: false` into [`SlackError::Api`].
+pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, SlackError> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| SlackError::Decode(e.to_string()))?;
+    if value.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        let code = value
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown_error");
+        return Err(SlackError::Api(code.to_owned()));
+    }
+    if let Some(warning) = value.get("warning").and_then(serde_json::Value::as_str) {
+        log::debug!("Slack warning: {warning}");
+    }
+    serde_json::from_value(value).map_err(|e| SlackError::Decode(e.to_string()))
+}
+
+/// How long to wait before retrying, when Slack asks for it.
+pub fn retry_after(status: u16, header: Option<&reqwest::header::HeaderValue>) -> Option<Duration> {
+    if status != 429 {
+        return None;
+    }
+    let seconds = header
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(5);
+    Some(Duration::from_secs(seconds.clamp(1, 120)))
+}
+
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_millis(500 * 2u64.pow(attempt.min(5)))
+}
+
+/// Fetches `url`, with the token when given, refusing more than `max` bytes
+/// and HTML (Slack answers a bad token on a file with its sign-in page).
+pub async fn get_bytes(
+    http: &reqwest::Client,
+    url: &str,
+    token: Option<&str>,
+    cookie: Option<&str>,
+    max: usize,
+) -> Result<Vec<u8>, SlackError> {
+    let mut request = http.get(url);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    if let Some(cookie) = cookie {
+        request = request.header(reqwest::header::COOKIE, format!("d={cookie}"));
+    }
+    let mut response = request
+        .send()
+        .await
+        .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
+    if !response.status().is_success() {
+        return Err(SlackError::Http(response.status().as_u16()));
+    }
+    let html = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/html"));
+    if html {
+        return Err(SlackError::Api("file_needs_sign_in".into()));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| SlackError::Network(e.without_url().to_string()))?
+    {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() > max {
+            return Err(SlackError::Decode("file too large".into()));
+        }
+    }
+    Ok(bytes)
+}
+
+/// Exchanges a refresh token for a new access token.
+pub async fn refresh_token(
+    http: &reqwest::Client,
+    base: &str,
+    app: &OauthApp,
+    refresh: &str,
+) -> Result<Token, SlackError> {
+    let response = http
+        .post(format!("{base}oauth.v2.access"))
+        .form(&[
+            ("client_id", app.client_id.as_str()),
+            ("client_secret", app.client_secret.as_str()),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh),
+        ])
+        .send()
+        .await
+        .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
+    let access: types::OauthAccess = decode(&bytes)?;
+    token_from(access).ok_or_else(|| SlackError::Decode("no user token in refresh".into()))
+}
+
+/// The user token in an `oauth.v2.access` answer.
+pub fn token_from(access: types::OauthAccess) -> Option<Token> {
+    let now = now();
+    if let Some(token) = access.authed_user.access_token {
+        return Some(Token {
+            access: token,
+            refresh: access.authed_user.refresh_token,
+            expires_at: access.authed_user.expires_in.map(|s| now + s),
+            cookie: None,
+            workspace_url: None,
+        });
+    }
+    access.access_token.map(|token| Token {
+        access: token,
+        refresh: access.refresh_token,
+        expires_at: access.expires_in.map(|s| now + s),
+        cookie: None,
+        workspace_url: None,
+    })
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errors_decode_with_their_code() {
+        let error = decode::<serde_json::Value>(br#"{"ok":false,"error":"invalid_auth"}"#)
+            .expect_err("fails");
+        assert_eq!(error, SlackError::Api("invalid_auth".into()));
+        assert!(error.is_auth());
+        assert!(!SlackError::Api("channel_not_found".into()).is_auth());
+        assert!(!SlackError::Api("missing_scope".into()).is_auth());
+        assert!(decode::<serde_json::Value>(b"<html>").is_err());
+    }
+
+    #[test]
+    fn rate_limits_wait_as_told_within_bounds() {
+        let header = reqwest::header::HeaderValue::from_static("30");
+        assert_eq!(
+            retry_after(429, Some(&header)),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(retry_after(429, None), Some(Duration::from_secs(5)));
+        let huge = reqwest::header::HeaderValue::from_static("100000");
+        assert_eq!(
+            retry_after(429, Some(&huge)),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(retry_after(200, Some(&header)), None);
+    }
+
+    #[test]
+    fn rotating_tokens_refresh_before_they_expire() {
+        let token = Token {
+            access: "xoxe.xoxp-1".into(),
+            refresh: Some("xoxe-1".into()),
+            expires_at: Some(1_000),
+            cookie: None,
+            workspace_url: None,
+        };
+        assert!(!token.needs_refresh(600));
+        assert!(token.needs_refresh(701));
+        // A session token never refreshes.
+        assert!(!Token::session("xoxc-1", "xoxd-1", "https://x.slack.com").needs_refresh(i64::MAX));
+        assert!(!Token::plain("xoxp-1").needs_refresh(i64::MAX));
+    }
+
+    #[test]
+    fn user_tokens_come_from_either_shape() {
+        let exchange: types::OauthAccess = serde_json::from_str(
+            r#"{"ok":true,"authed_user":{"id":"U1","access_token":"xoxp-1","refresh_token":"r","expires_in":43200},"team":{"id":"T1"}}"#,
+        )
+        .expect("parses");
+        let token = token_from(exchange).expect("token");
+        assert_eq!(token.access, "xoxp-1");
+        assert!(token.expires_at.is_some());
+        let refresh: types::OauthAccess =
+            serde_json::from_str(r#"{"ok":true,"access_token":"xoxe.xoxp-2","refresh_token":"r2","expires_in":43200,"token_type":"user"}"#)
+                .expect("parses");
+        assert_eq!(token_from(refresh).expect("token").access, "xoxe.xoxp-2");
+    }
+}
