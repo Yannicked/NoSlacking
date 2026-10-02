@@ -96,3 +96,9 @@ Each archive also carries `LICENSE` and `README.md`.
 Interface strings go through `t("…")` / `tn(…)` (`src/i18n.rs`). Catalogs are
 `assets/i18n/<tag>.po`, compiled at build time. Add a language by adding its
 `.po` and a `Locale` variant.
+
+Translate whole sentences: a name, a count or an error goes in through a
+`{name}` placeholder with `tf("Signed in to {name}.", &[("name", name)])`,
+never by gluing a translated piece to it. A test scans `src` for every
+`t`, `tf` and `tn` literal and fails when `nl.po` lacks one or a
+translation drops a placeholder.
