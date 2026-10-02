@@ -110,9 +110,9 @@ fn main() -> eframe::Result<()> {
         .file(dirs.log_file())
         .panic_log(dirs.panic_log())
         .panic_message(fastframe_log::PanicMessage::Redacted(
-            fastframe_log::redact::links,
+            noslacking::redact::panic_message,
         ))
-        .redact(redact_tokens)
+        .redact(noslacking::redact::log_record)
         .init();
 
     let waker = Waker::default();
@@ -184,23 +184,6 @@ fn main() -> eframe::Result<()> {
             }),
         )
     })
-}
-
-/// Tokens never reach the log, whatever logs them.
-fn redact_tokens(
-    _record: &log::Record<'_>,
-    message: &str,
-) -> Option<std::borrow::Cow<'static, str>> {
-    const PREFIXES: [&str; 6] = ["xoxp-", "xoxb-", "xoxe", "xapp-", "xoxc-", "xoxd-"];
-    PREFIXES
-        .iter()
-        .any(|prefix| message.contains(prefix))
-        .then(|| {
-            fastframe_log::redact::words(message, |word| {
-                PREFIXES.iter().any(|prefix| word.contains(prefix))
-            })
-            .into()
-        })
 }
 
 fn native_options(cli: &Cli) -> eframe::NativeOptions {

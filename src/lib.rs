@@ -16,6 +16,7 @@ pub mod images;
 pub mod model;
 pub mod mrkdwn;
 pub mod paths;
+pub mod redact;
 pub mod settings;
 pub mod sidebar;
 pub mod single_instance;
