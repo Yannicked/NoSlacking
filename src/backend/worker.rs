@@ -2521,6 +2521,18 @@ fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> {
         | "channel_sections_channels_removed"
         | "star_added"
         | "star_removed" => out.push(Translated::RefreshSections),
+        // Read on another device (or in another window): the read marker
+        // moves, so unread counts here follow. The interface only ever moves
+        // a marker forward, so an older mark arriving late changes nothing.
+        "channel_marked" | "group_marked" | "im_marked" | "mpim_marked" => {
+            if let (Some(channel), Some(ts)) = (channel, str_of(event, "ts")) {
+                out.push(Translated::Event(Event::Read {
+                    team,
+                    channel,
+                    ts: Ts::new(ts),
+                }));
+            }
+        }
         _ => log::debug!("unhandled event {kind}"),
     }
     out
@@ -2532,6 +2544,21 @@ mod tests {
 
     fn events(value: &str) -> Vec<Translated> {
         translate("T1", "U1", &serde_json::from_str(value).expect("json"))
+    }
+
+    #[test]
+    fn reads_on_other_devices_move_the_read_marker() {
+        for kind in ["channel_marked", "group_marked", "im_marked", "mpim_marked"] {
+            let read = events(&format!(
+                r#"{{"type":"{kind}","channel":"C1","ts":"1700000000.000200"}}"#
+            ));
+            assert!(
+                matches!(&read[..], [Translated::Event(Event::Read { team, channel, ts })]
+                    if team == "T1" && channel == "C1" && ts.0 == "1700000000.000200"),
+                "{kind}"
+            );
+        }
+        assert!(events(r#"{"type":"channel_marked","channel":"C1"}"#).is_empty());
     }
 
     #[test]
