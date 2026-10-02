@@ -239,6 +239,17 @@ impl ImageLoader {
         });
     }
 
+    /// Where a file of `team`'s at `url` is kept to be opened in another
+    /// app (a video, a sound): with the workspace's other private files,
+    /// so signing out deletes it and the cache's size limit covers it,
+    /// in a folder of its own so it keeps its real name for the player.
+    pub fn open_dir(&self, team: &str, url: &str) -> PathBuf {
+        self.inner
+            .private_dir(team)
+            .join("open")
+            .join(cache_name(url))
+    }
+
     /// Stops fetching `team`'s files and deletes the ones already fetched,
     /// from memory and from disk: they are private to the workspace.
     pub fn remove_client(&self, team: &str) {

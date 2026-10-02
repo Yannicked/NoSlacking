@@ -647,6 +647,7 @@ impl Worker {
                 self.sink.send(Event::UploadDone { id });
             }
             Command::Download { team, url, name } => self.download(&team, url, name),
+            Command::OpenFile { team, url, name } => self.open_file(&team, url, name),
             Command::Mark { team, channel, ts } => self.mark(&team, channel, ts),
             Command::FetchUsers { team, ids } => self.fetch_users(team, ids),
             Command::FetchBots { team, ids } => self.fetch_bots(team, ids),
@@ -1003,6 +1004,19 @@ impl Worker {
             match download(&client, &url, &name).await {
                 Ok(path) => sink.send(Event::Notice(format!("Saved {}", path.display()))),
                 Err(error) => sink.send(Event::Error(error)),
+            }
+        });
+    }
+
+    fn open_file(&self, team: &str, url: String, name: String) {
+        let Some((client, sink)) = self.team(team) else {
+            self.not_signed_in(&format!("open {name}"));
+            return;
+        };
+        let dir = self.images.open_dir(team, &url);
+        tokio::spawn(async move {
+            if let Err(error) = open_file(&client, dir, &url, &name).await {
+                sink.send(Event::Error(error));
             }
         });
     }
@@ -2457,11 +2471,6 @@ async fn upload(
 }
 
 async fn download(client: &Client, url: &str, name: &str) -> Result<std::path::PathBuf, String> {
-    use tokio::io::AsyncWriteExt as _;
-    let mut response = client
-        .download(url)
-        .await
-        .map_err(|e| format!("Could not download {name}: {}", describe(&e)))?;
     let saving = |error: std::io::Error| format!("Could not save {name}: {error}");
     // Finding the folder can read a config file; keep it off the runtime.
     let dir = tokio::task::spawn_blocking(downloads_dir)
@@ -2469,6 +2478,60 @@ async fn download(client: &Client, url: &str, name: &str) -> Result<std::path::P
         .ok()
         .flatten()
         .ok_or_else(|| saving(std::io::Error::other("no downloads folder")))?;
+    save(client, url, name, &dir).await
+}
+
+/// Downloads a file into the private cache (see [`ImageLoader::open_dir`])
+/// and opens it in the system's app for it. A file fetched before is
+/// opened again without fetching.
+async fn open_file(
+    client: &Client,
+    dir: std::path::PathBuf,
+    url: &str,
+    name: &str,
+) -> Result<(), String> {
+    // The system opens a file by its name, and a name is whatever the
+    // sender chose: only Slack's own files with a player's extension are
+    // opened, so "clip.mp4.exe" can never be run.
+    if !crate::slack::client::is_slack_file_url(url) || !plays_safely(&safe_name(name)) {
+        return Err(format!(
+            "{name} cannot be opened here; download it instead."
+        ));
+    }
+    let saved = dir.join(safe_name(name));
+    let have = tokio::fs::metadata(&saved)
+        .await
+        .is_ok_and(|meta| meta.is_file() && meta.len() > 0);
+    let path = if have {
+        saved
+    } else {
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|error| format!("Could not save {name}: {error}"))?;
+        save(client, url, name, &dir).await?
+    };
+    tokio::task::spawn_blocking(move || open::that_detached(&path))
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|opened| opened.map_err(|error| error.to_string()))
+        .map_err(|error| format!("Could not open {name}: {error}"))
+}
+
+/// Streams `url` into a new file named after `name` in `dir`, numbered if
+/// the name is taken, and returns where it went.
+async fn save(
+    client: &Client,
+    url: &str,
+    name: &str,
+    dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    use tokio::io::AsyncWriteExt as _;
+    let mut response = client
+        .download(url)
+        .await
+        .map_err(|e| format!("Could not download {name}: {}", describe(&e)))?;
+    let saving = |error: std::io::Error| format!("Could not save {name}: {error}");
+    let dir = dir.to_path_buf();
     let safe = safe_name(name);
     let (part, mut file) = create_unique(&dir, |n| format!(".{}.part", numbered(&safe, n)))
         .await
@@ -2608,6 +2671,20 @@ fn is_reserved(name: &str) -> bool {
 /// characters Windows refuses, no control characters, no leading dots,
 /// no trailing dots or spaces (Windows drops them), no device names, and
 /// not too long.
+/// Whether a file named `name` opens in a player or viewer, never as a
+/// program: its extension is one of a known list of videos, sounds and
+/// PDFs.
+fn plays_safely(name: &str) -> bool {
+    const PLAYABLE: &[&str] = &[
+        "mp4", "m4v", "mov", "webm", "mkv", "avi", "mpg", "mpeg", "3gp", "ogv", "mp3", "m4a",
+        "aac", "wav", "flac", "ogg", "oga", "opus", "weba", "pdf",
+    ];
+    match split_extension(name) {
+        (_, Some(ext)) => PLAYABLE.iter().any(|p| p.eq_ignore_ascii_case(ext)),
+        (_, None) => false,
+    }
+}
+
 fn safe_name(name: &str) -> String {
     let replaced: String = name
         .chars()
@@ -3343,6 +3420,19 @@ mod tests {
             "some new code"
         );
         assert_eq!(describe(&SlackError::Http(502)), "HTTP 502");
+    }
+
+    #[test]
+    fn only_players_open_files() {
+        assert!(plays_safely("clip.MP4"));
+        assert!(plays_safely("memo.m4a"));
+        assert!(plays_safely("plan.pdf"));
+        assert!(!plays_safely("clip.mp4.exe"));
+        assert!(!plays_safely("run.sh"));
+        assert!(!plays_safely("app.desktop"));
+        assert!(!plays_safely("mp4"));
+        // As saved: trailing dots go, and what is left must still play.
+        assert!(!plays_safely(&safe_name("evil.exe.")));
     }
 
     #[test]
