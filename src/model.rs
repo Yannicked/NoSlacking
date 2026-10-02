@@ -371,6 +371,9 @@ pub struct Message {
     /// Set on replies and on a thread's parent.
     pub thread_ts: Option<Ts>,
     pub reply_count: u32,
+    /// Whether Slack said how many replies there are (even none). A copy
+    /// that does not, such as some edits, keeps the counters already known.
+    pub replies_known: bool,
     pub reply_users: Vec<String>,
     pub latest_reply: Option<Ts>,
     pub reactions: Vec<Reaction>,
@@ -473,20 +476,19 @@ impl Timeline {
     /// Inserts or replaces a message, keeping the order.
     pub fn upsert(&mut self, message: Message) {
         if let Some(existing) = self.messages.iter_mut().find(|m| m.ts == message.ts) {
-            // A message that says nothing about a thread (no `thread_ts`,
-            // no replies) may be a trimmed copy, as some API answers are:
-            // keep the counters already known. One
-            // that is marked as a thread parent carries Slack's real
-            // counters, and a count of zero then means its replies are gone.
+            // A copy that gives no reply count may be trimmed, as some
+            // edits and API answers are: keep the thread counters already
+            // known. One that gives a count, even zero, carries Slack's
+            // real counters, and zero then means the replies are gone.
             let mut message = message;
-            let silent_on_thread = message.thread_ts.is_none()
-                && message.reply_count == 0
-                && message.latest_reply.is_none();
-            if silent_on_thread && existing.reply_count > 0 {
+            if !message.replies_known {
                 message.reply_count = existing.reply_count;
+                message.replies_known = existing.replies_known;
                 message.reply_users = std::mem::take(&mut existing.reply_users);
                 message.latest_reply = existing.latest_reply.take();
-                message.thread_ts = existing.thread_ts.take();
+                if message.thread_ts.is_none() {
+                    message.thread_ts = existing.thread_ts.take();
+                }
             }
             *existing = message;
             return;
@@ -658,6 +660,7 @@ mod tests {
             text: ts.to_owned(),
             thread_ts: None,
             reply_count: 0,
+            replies_known: false,
             reply_users: Vec::new(),
             latest_reply: None,
             reactions: Vec::new(),
@@ -744,6 +747,7 @@ mod tests {
         // parent, with nothing in it.
         let mut emptied = message("1.0");
         emptied.thread_ts = Some(Ts::new("1.0"));
+        emptied.replies_known = true;
         timeline.upsert(emptied);
         let parent = &timeline.messages[0];
         assert_eq!(parent.reply_count, 0);
