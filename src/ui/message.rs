@@ -10,6 +10,7 @@ use crate::model::{
     Accessory, Action, Attachment, Button, ContextItem, Delivery, Field, File, KitBlock, Media,
     Message,
 };
+use crate::settings::Density;
 use crate::theme::{self, Icon, Palette};
 
 pub struct Row<'a> {
@@ -23,7 +24,42 @@ pub struct Row<'a> {
     pub overlay: bool,
     /// The message picked with the keyboard, when it is in this list.
     pub selected: Option<&'a Selected>,
+    pub look: Look,
 }
+
+/// How messages are drawn, from the settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Look {
+    pub density: Density,
+    /// Whether pictures and previews show at once, or wait for a click.
+    pub inline_media: bool,
+}
+
+impl Look {
+    pub fn of(settings: &crate::settings::Settings) -> Self {
+        Self {
+            density: settings.density,
+            inline_media: settings.inline_media,
+        }
+    }
+
+    /// Tells measured row heights apart by the look they were drawn in,
+    /// for [`super::rows::Heights::for_layout`].
+    pub fn key(self) -> u64 {
+        egui::Id::new(self).value()
+    }
+
+    fn compact(self) -> bool {
+        self.density == Density::Compact
+    }
+}
+
+/// The width of the time in a compact row.
+const COMPACT_TIME: f32 = 40.0;
+/// The width of the name in a compact row, so the text lines up.
+const COMPACT_NAME: f32 = 112.0;
+/// How tall a picture waiting for a click is.
+const PLACEHOLDER: f32 = 30.0;
 
 /// The id of a message's row, which holds keyboard focus while the message
 /// is selected.
@@ -79,28 +115,42 @@ const GUTTER: f32 = 44.0;
 /// About how tall a message will be before it is first drawn, for placing
 /// it in a long list: close enough that the scroll bar does not lurch when
 /// it is drawn and measured.
-pub fn guess_height(message: &Message, lead: Lead) -> f32 {
+pub fn guess_height(message: &Message, lead: Lead, look: Look) -> f32 {
     if message.is_system() {
-        return 26.0;
+        return if look.compact() { 22.0 } else { 26.0 };
     }
-    let mut height = if lead == Lead::Full { 56.0 } else { 26.0 };
-    // About a line per hundred characters.
+    let mut height = match (look.compact(), lead) {
+        (true, _) => 22.0,
+        (false, Lead::Full) => 56.0,
+        (false, Lead::Compact) => 26.0,
+    };
+    // About a line per hundred characters (fewer fit beside a compact
+    // row's name, but its lines are shorter).
     height += (message.text.len() / 100) as f32 * 20.0;
+    // As `file_view` and `attachment_view` size their pictures, before
+    // they have loaded; a picture waiting for a click is a short bar.
+    let picture = |size: f32| {
+        if look.inline_media {
+            size
+        } else {
+            PLACEHOLDER + 4.0
+        }
+    };
     for file in &message.files {
         height += match file.thumb_size {
-            // As `file_view` sizes the picture, before it has loaded.
             Some([w, h]) if file.is_image() && w > 0.0 && h > 0.0 => {
                 let scale = (420.0 / w).min(320.0 / h).min(1.0);
-                (h * scale).max(24.0) + 4.0
+                picture((h * scale).max(24.0) + 4.0)
             }
-            _ if file.is_image() => 244.0,
-            // A still above the card, as `file_view` sizes it.
-            _ if file.poster.is_some() => poster_size(file, 420.0).y + 4.0 + 64.0,
+            _ if file.is_image() => picture(244.0),
+            // A still above the card.
+            _ if file.poster.is_some() => picture(poster_size(file, 420.0).y + 4.0) + 64.0,
             _ => 64.0,
         };
     }
     for attachment in &message.attachments {
-        height += 90.0 + attachment_media(attachment, 560.0).map_or(0.0, |(_, size)| size.y + 4.0);
+        height += 90.0
+            + attachment_media(attachment, 560.0).map_or(0.0, |(_, size)| picture(size.y + 4.0));
     }
     height += message.blocks.len() as f32 * 30.0;
     if !message.reactions.is_empty() {
@@ -132,16 +182,40 @@ pub fn show(
         e.ts == message.ts && e.channel == row.channel && e.in_thread == row.in_thread
     });
     let selected = row.selected.filter(|s| s.ts == message.ts);
-    let top = if lead == Lead::Full { 8 } else { 2 };
+    let compact = row.look.compact();
+    let (top, bottom) = match (compact, lead) {
+        (true, Lead::Full) => (3, 1),
+        (true, Lead::Compact) => (1, 1),
+        (false, Lead::Full) => (8, 3),
+        (false, Lead::Compact) => (2, 3),
+    };
     let response = egui::Frame::new()
         .inner_margin(Margin {
             left: 16,
             right: 16,
             top,
-            bottom: 3,
+            bottom,
         })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            if compact {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    compact_lead(ui, row, message, lead, actions);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        if is_editing {
+                            edit(ui, row, editing, actions);
+                        } else {
+                            body(ui, row, message, actions);
+                            if selected.is_some() {
+                                keys_hint(ui, row, message);
+                            }
+                        }
+                    });
+                });
+                return;
+            }
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 gutter(ui, row, message, lead, actions);
@@ -176,7 +250,7 @@ pub fn show(
                 palette.surface.gamma_multiply(0.6),
             ),
         );
-        if lead == Lead::Compact {
+        if lead == Lead::Compact && !compact {
             let time = super::short_time(&message.ts);
             ui.painter().text(
                 egui::pos2(rect.left() + 16.0 + GUTTER / 2.0 - 4.0, rect.top() + 12.0),
@@ -284,6 +358,63 @@ fn gutter(
     {
         actions.push(Action::OpenProfile(user.clone()));
     }
+}
+
+/// A compact row's start, IRC style: the time, then the name in a column
+/// of its own so every message's text starts at the same place. A
+/// message that continues the one before shows its name dimmed.
+fn compact_lead(
+    ui: &mut egui::Ui,
+    row: &Row<'_>,
+    message: &Message,
+    lead: Lead,
+    actions: &mut Vec<Action>,
+) {
+    let palette = row.palette;
+    // Line the time and name up with the text's first line.
+    let line = 20.0;
+    let (rect, time) = ui.allocate_exact_size(Vec2::new(COMPACT_TIME, line), Sense::hover());
+    ui.painter().text(
+        egui::pos2(rect.left(), rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        super::short_time(&message.ts),
+        theme::regular(12.0),
+        palette.dim,
+    );
+    if message.ts.seconds().is_some() {
+        time.on_hover_ui(|ui| {
+            if let Some(full) = super::full_time(&message.ts) {
+                ui.label(full);
+            }
+        });
+    }
+    let name = row.workspace.author(message);
+    let color = if lead == Lead::Full {
+        palette.text
+    } else {
+        palette.dim
+    };
+    let mut column = ui.new_child(
+        UiBuilder::new()
+            .max_rect(egui::Rect::from_min_size(
+                ui.cursor().min,
+                Vec2::new(COMPACT_NAME, line),
+            ))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    let response = column
+        .add(
+            egui::Label::new(RichText::new(&name).font(theme::bold(13.5)).color(color))
+                .truncate()
+                .sense(Sense::click()),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if response.clicked()
+        && let Some(user) = &message.user
+    {
+        actions.push(Action::OpenProfile(user.clone()));
+    }
+    ui.allocate_exact_size(Vec2::new(COMPACT_NAME, line), Sense::hover());
 }
 
 fn header(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<Action>) {
@@ -535,6 +666,10 @@ fn file_view(
         let scale = (max.x / w).min(max.y / h).min(1.0);
         let size = Vec2::new(w * scale, h * scale).max(Vec2::splat(24.0));
         let uri = super::image_uri(team, thumb);
+        if !shows(ui, row, &uri) {
+            placeholder(ui, row, &uri, &file.name);
+            return;
+        }
         let response = ui
             .add(
                 egui::Image::new(uri.clone())
@@ -568,9 +703,16 @@ fn file_view(
         .url_private
         .clone()
         .or_else(|| file.download_url.clone());
-    if let Some(poster) = &file.poster {
+    let poster = file
+        .poster
+        .as_deref()
+        .map(|poster| super::image_uri(team, poster));
+    if let Some(uri) = &poster
+        && !shows(ui, row, uri)
+    {
+        placeholder(ui, row, uri, &file.name);
+    } else if let Some(uri) = poster {
         let size = poster_size(file, ui.available_width());
-        let uri = super::image_uri(team, poster);
         let response = ui
             .add(
                 egui::Image::new(uri)
@@ -658,6 +800,67 @@ fn file_view(
             url,
             name: file.name.clone(),
         });
+    }
+}
+
+/// Where it is remembered that a held-back picture was asked for.
+fn reveal_id(uri: &str) -> egui::Id {
+    egui::Id::new(("show-picture", uri))
+}
+
+/// Whether the picture at `uri` shows: always, unless pictures are held
+/// back and this one has not been clicked yet.
+fn shows(ui: &egui::Ui, row: &Row<'_>, uri: &str) -> bool {
+    row.look.inline_media || ui.data(|d| d.get_temp::<bool>(reveal_id(uri)).unwrap_or(false))
+}
+
+/// A short bar standing in for a held-back picture; clicking it shows the
+/// picture (and only then is it fetched).
+fn placeholder(ui: &mut egui::Ui, row: &Row<'_>, uri: &str, name: &str) {
+    let palette = row.palette;
+    let width = ui.available_width().min(360.0);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, PLACEHOLDER), Sense::click());
+    let fill = if response.hovered() {
+        palette.surface_hover
+    } else {
+        palette.surface
+    };
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(theme::RADIUS),
+        Stroke::new(1.0, palette.outline),
+        egui::StrokeKind::Inside,
+    );
+    let icon = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 18.0, rect.center().y),
+        Vec2::splat(15.0),
+    );
+    Icon::Image
+        .image(palette.secondary, 15.0)
+        .paint_at(ui, icon);
+    let label = if name.trim().is_empty() {
+        t("Show the picture").into_owned()
+    } else {
+        tf("Show the picture: {name}", &[("name", name)])
+    };
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.clone(), theme::regular(13.0), palette.secondary);
+    // One line: a long name is cut at the bar's end.
+    ui.painter().with_clip_rect(rect.shrink(6.0)).galley(
+        egui::pos2(rect.left() + 34.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        palette.secondary,
+    );
+    theme::focus_ring(ui, &response, palette, theme::RADIUS);
+    theme::describe(&response, egui::WidgetType::Button, &label);
+    if response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+    {
+        ui.data_mut(|d| d.insert_temp(reveal_id(uri), true));
     }
 }
 
@@ -857,10 +1060,12 @@ fn attachment_view(
     const THUMB: f32 = 64.0;
     // A video shows its thumbnail large; anything else keeps it small at
     // the side.
+    // With pictures held back it is left out: too small to be worth a
+    // button of its own.
     let side_thumb = attachment
         .thumb
         .as_deref()
-        .filter(|_| attachment.video.is_none());
+        .filter(|_| attachment.video.is_none() && row.look.inline_media);
     let response = egui::Frame::new()
         .inner_margin(Margin {
             left: 12,
@@ -952,50 +1157,66 @@ fn attachment_view(
                         blocks_view(ui, row, &attachment.blocks, actions);
                     }
                     let name = attachment.title.as_deref().unwrap_or_default();
-                    match attachment_media(attachment, ui.available_width()) {
-                        Some((CardMedia::Video { thumb, link }, size)) => {
-                            let response = ui
-                                .add(
-                                    egui::Image::new(super::image_uri(team, thumb))
-                                        .fit_to_exact_size(size)
-                                        .corner_radius(CornerRadius::same(theme::RADIUS_SMALL))
-                                        .show_loading_spinner(true)
-                                        .sense(Sense::click()),
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
-                            play_badge(ui, response.rect.center(), response.hovered());
-                            let tip = t("Play in the browser");
-                            theme::describe(&response, egui::WidgetType::Button, &tip);
-                            if response.on_hover_text(&*tip).clicked() {
-                                actions.push(Action::OpenUrl(link.to_owned()));
+                    let picture = attachment
+                        .video
+                        .as_ref()
+                        .and(attachment.thumb.as_deref())
+                        .or(attachment.image.as_deref())
+                        .map(|url| super::image_uri(team, url));
+                    if let Some(uri) = &picture
+                        && !shows(ui, row, uri)
+                    {
+                        let label = attachment.service.as_deref().unwrap_or(name);
+                        placeholder(ui, row, uri, label);
+                    } else {
+                        match attachment_media(attachment, ui.available_width()) {
+                            Some((CardMedia::Video { thumb, link }, size)) => {
+                                let response = ui
+                                    .add(
+                                        egui::Image::new(super::image_uri(team, thumb))
+                                            .fit_to_exact_size(size)
+                                            .corner_radius(CornerRadius::same(theme::RADIUS_SMALL))
+                                            .show_loading_spinner(true)
+                                            .sense(Sense::click()),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                play_badge(ui, response.rect.center(), response.hovered());
+                                let tip = t("Play in the browser");
+                                theme::describe(&response, egui::WidgetType::Button, &tip);
+                                if response.on_hover_text(&*tip).clicked() {
+                                    actions.push(Action::OpenUrl(link.to_owned()));
+                                }
                             }
-                        }
-                        Some((CardMedia::Image(image), size)) => {
-                            let uri = super::image_uri(team, image);
-                            let response = ui
-                                .add(
-                                    egui::Image::new(uri.clone())
-                                        .fit_to_exact_size(size)
-                                        .corner_radius(CornerRadius::same(theme::RADIUS_SMALL))
-                                        .show_loading_spinner(true)
-                                        .sense(Sense::click()),
-                                )
-                                .on_hover_cursor(egui::CursorIcon::ZoomIn);
-                            if response.clicked() {
-                                actions.push(Action::Preview {
-                                    uri,
-                                    name: name.to_owned(),
-                                });
+                            Some((CardMedia::Image(image), size)) => {
+                                let uri = super::image_uri(team, image);
+                                let response = ui
+                                    .add(
+                                        egui::Image::new(uri.clone())
+                                            .fit_to_exact_size(size)
+                                            .corner_radius(CornerRadius::same(theme::RADIUS_SMALL))
+                                            .show_loading_spinner(true)
+                                            .sense(Sense::click()),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::ZoomIn);
+                                if response.clicked() {
+                                    actions.push(Action::Preview {
+                                        uri,
+                                        name: name.to_owned(),
+                                    });
+                                }
                             }
-                        }
-                        None => {
-                            if let Some(image) = &attachment.image {
-                                ui.add(
-                                    egui::Image::new(super::image_uri(team, image))
-                                        .fit_to_original_size(1.0)
-                                        .max_size(Vec2::new(ui.available_width().min(400.0), 300.0))
-                                        .corner_radius(CornerRadius::same(theme::RADIUS_SMALL)),
-                                );
+                            None => {
+                                if let Some(image) = &attachment.image {
+                                    ui.add(
+                                        egui::Image::new(super::image_uri(team, image))
+                                            .fit_to_original_size(1.0)
+                                            .max_size(Vec2::new(
+                                                ui.available_width().min(400.0),
+                                                300.0,
+                                            ))
+                                            .corner_radius(CornerRadius::same(theme::RADIUS_SMALL)),
+                                    );
+                                }
                             }
                         }
                     }
@@ -1209,6 +1430,10 @@ fn blocks_view(ui: &mut egui::Ui, row: &Row<'_>, blocks: &[KitBlock], actions: &
                         rich::show(ui, &rich, title, false, actions);
                     }
                     let uri = super::image_uri(team, url);
+                    if !shows(ui, row, &uri) {
+                        placeholder(ui, row, &uri, alt);
+                        continue;
+                    }
                     let response = ui
                         .add(
                             egui::Image::new(uri.clone())

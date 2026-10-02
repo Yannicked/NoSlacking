@@ -8,7 +8,7 @@ use crate::backend::Socket;
 use crate::credentials::AppCredentials;
 use crate::i18n::{Locale, t, tf};
 use crate::model::Action;
-use crate::settings::{Appearance, Redirect};
+use crate::settings::{Appearance, Density, Redirect};
 use crate::theme::{self, Palette};
 
 pub(super) fn group(
@@ -204,6 +204,47 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         );
         if enter != app.settings.enter_sends {
             app.settings.enter_sends = enter;
+            app.settings_changed();
+        }
+        let mut density = app.settings.density;
+        row(
+            ui,
+            palette,
+            &t("Message density"),
+            &t("Compact puts the time, name and text of each message on one line."),
+            |ui, name| {
+                let label = |density: Density| match density {
+                    Density::Comfortable => t("Comfortable"),
+                    Density::Compact => t("Compact"),
+                };
+                egui::ComboBox::from_id_salt("density")
+                    .selected_text(label(density))
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        for option in [Density::Comfortable, Density::Compact] {
+                            ui.selectable_value(&mut density, option, label(option));
+                        }
+                    })
+                    .response
+                    .labelled_by(name);
+            },
+        );
+        if density != app.settings.density {
+            app.settings.density = density;
+            app.settings_changed();
+        }
+        let mut inline = app.settings.inline_media;
+        row(
+            ui,
+            palette,
+            &t("Show images and previews inline"),
+            &t("Off: pictures and link previews wait for a click, and are not fetched before."),
+            |ui, name| {
+                ui.checkbox(&mut inline, "").labelled_by(name);
+            },
+        );
+        if inline != app.settings.inline_media {
+            app.settings.inline_media = inline;
             app.settings_changed();
         }
         let mut sort = app.settings.sidebar_sort;

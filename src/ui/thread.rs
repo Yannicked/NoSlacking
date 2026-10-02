@@ -137,12 +137,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                 .get(&channel)
                                 .and_then(|t| t.messages.iter().find(|m| m.ts == ts))
                         });
+                    let look = message::Look::of(settings);
                     let row = Row {
                         palette: &palette,
                         workspace,
                         channel: &channel,
                         in_thread: true,
                         enter_sends: settings.enter_sends,
+                        look,
                         overlay,
                         selected: selected
                             .as_ref()
@@ -154,6 +156,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     let mut heights: rows::Heights = ui
                         .data_mut(|d| d.remove_temp(heights_id))
                         .unwrap_or_default();
+                    heights.for_layout(look.key());
                     let output = egui::ScrollArea::vertical()
                         .id_salt(("thread", &channel, ts.as_str()))
                         .auto_shrink([false, false])
@@ -168,7 +171,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             let mut leads = Vec::with_capacity(replies.len());
                             let mut entries = vec![rows::Entry {
                                 key: egui::Id::new("parent").value(),
-                                guess: parent.map_or(0.0, |p| message::guess_height(p, Lead::Full))
+                                guess: parent
+                                    .map_or(0.0, |p| message::guess_height(p, Lead::Full, look))
                                     + 40.0,
                             }];
                             let mut previous = None;
@@ -181,7 +185,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                 leads.push(lead);
                                 entries.push(rows::Entry {
                                     key: egui::Id::new(reply.ts.as_str()).value(),
-                                    guess: message::guess_height(reply, lead),
+                                    guess: message::guess_height(reply, lead, look),
                                 });
                                 previous = Some(*reply);
                             }

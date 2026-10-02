@@ -48,7 +48,8 @@ struct Cli {
     demo_hover: Option<String>,
 
     /// Open a view before the screenshot: thread, settings, sign-in,
-    /// switcher, picker, profile, upload, drafts, lightbox or media.
+    /// switcher, picker, profile, upload, drafts, lightbox, media, compact
+    /// or held-media.
     #[cfg(feature = "demo")]
     #[arg(long, value_name = "VIEW")]
     demo_view: Option<String>,
@@ -498,6 +499,13 @@ impl DemoSetup {
             Some("dm") => app.actions.push(Action::OpenConversation("D01".into())),
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             Some("general") => app.actions.push(Action::OpenConversation("C01".into())),
+            // #engineering in IRC-style rows.
+            Some("compact") => app.settings.density = settings::Density::Compact,
+            // The media of #design held back until clicked.
+            Some("held-media") => {
+                app.settings.inline_media = false;
+                app.actions.push(Action::OpenConversation("C03".into()));
+            }
             // Link previews, a video, a sound and a PDF.
             Some("media") => app.actions.push(Action::OpenConversation("C03".into())),
             // Search results, with a second page to scroll to.
