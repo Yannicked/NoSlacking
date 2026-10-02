@@ -99,9 +99,9 @@ fn main() -> eframe::Result<()> {
     } else {
         AppDirs::discover()
     };
-    if let Err(error) = dirs.ensure() {
-        log::error!("could not create the app's folders: {error}");
-    }
+    // The log file lives in these folders, so they come first; a failure
+    // is logged once the logger is up, or it would go nowhere.
+    let folders = dirs.ensure();
     let filter = if cli.verbose {
         "noslacking=debug,info".to_owned()
     } else {
@@ -116,6 +116,9 @@ fn main() -> eframe::Result<()> {
         ))
         .redact(noslacking::redact::log_record)
         .init();
+    if let Err(error) = folders {
+        log::error!("could not create the app's folders: {error}");
+    }
 
     let waker = Waker::default();
     let (requests, incoming) = mpsc::channel::<Request>();
