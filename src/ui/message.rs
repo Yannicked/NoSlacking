@@ -467,6 +467,12 @@ fn file_view(ui: &mut egui::Ui, row: &Row<'_>, file: &File, actions: &mut Vec<Ac
         .interact(Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(t("Download"));
+    theme::focus_ring(ui, &response, palette, theme::RADIUS);
+    theme::describe(
+        &response,
+        egui::WidgetType::Button,
+        &tf("Download {name}", &[("name", &file.name)]),
+    );
     if response.clicked()
         && let Some(url) = file
             .download_url
@@ -852,6 +858,16 @@ fn reactions(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
                     }
                 })
                 .collect();
+            let spoken = crate::i18n::fill(
+                &tn(
+                    "{count} reaction with :{emoji}:",
+                    "{count} reactions with :{emoji}:",
+                    reaction.count,
+                ),
+                &[("emoji", &reaction.name)],
+            );
+            theme::focus_ring(ui, &response, palette, 12);
+            theme::describe_selected(&response, egui::WidgetType::Button, mine, &spoken);
             let response = response.on_hover_text(tf(
                 "{names} reacted with :{emoji}:",
                 &[("names", &names.join(", ")), ("emoji", &reaction.name)],
@@ -878,6 +894,8 @@ fn reactions(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
             .interact(Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(t("Add reaction"));
+        theme::focus_ring(ui, &add, palette, 12);
+        theme::describe(&add, egui::WidgetType::Button, &t("Add reaction"));
         if add.clicked() {
             actions.push(Action::PickReaction {
                 channel: row.channel.to_owned(),
@@ -929,6 +947,12 @@ fn thread_summary(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: 
             egui::StrokeKind::Inside,
         );
     }
+    theme::focus_ring(ui, &response, palette, theme::RADIUS_SMALL);
+    theme::describe(
+        &response,
+        egui::WidgetType::Button,
+        &tn("{count} reply", "{count} replies", message.reply_count),
+    );
     if response.clicked() {
         actions.push(Action::OpenThread {
             channel: row.channel.to_owned(),
@@ -991,6 +1015,12 @@ fn toolbar(
                     .layout(Layout::centered_and_justified(egui::Direction::LeftToRight)),
             );
             rich::emoji(&mut inner, &rich, name, 13.0);
+            theme::focus_ring(ui, &response, palette, theme::RADIUS_SMALL);
+            theme::describe(
+                &response,
+                egui::WidgetType::Button,
+                &tf("React with :{emoji}:", &[("emoji", name)]),
+            );
             if response
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text(format!(":{name}:"))

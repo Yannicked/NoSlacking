@@ -333,6 +333,8 @@ pub fn show(
                         &[("shortcut", &super::keys::command("Enter"))],
                     )
                 };
+                theme::focus_ring(ui, &response, palette, theme::RADIUS_SMALL);
+                theme::describe(&response, egui::WidgetType::Button, &tip);
                 if response
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .on_hover_text(tip)
@@ -433,6 +435,12 @@ fn suggestion_list(
                         );
                     }
                 }
+                theme::describe_selected(
+                    &response,
+                    egui::WidgetType::SelectableLabel,
+                    index == selected,
+                    &suggestion.insert(),
+                );
                 if response
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
