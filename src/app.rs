@@ -1774,6 +1774,8 @@ impl App {
         if wire.trim().is_empty() {
             return;
         }
+        let wire = crate::emoji::tone_shortcodes(&wire, self.settings.skin_tone);
+        self.used_emoji(&crate::emoji::used_in(&wire));
         let local = self.next_local();
         let Some(workspace) = self.workspace_mut(&team) else {
             return;
@@ -1817,6 +1819,9 @@ impl App {
         let add = self
             .workspace_mut(&team)
             .and_then(|w| w.toggle_my_reaction(channel, ts, name));
+        if add == Some(true) {
+            self.used_emoji(&[name.to_owned()]);
+        }
         if let Some(add) = add {
             self.backend.send(Command::React {
                 team,
@@ -1826,6 +1831,34 @@ impl App {
                 add,
             });
         }
+    }
+
+    /// Puts emoji just sent or reacted with at the front of the picker's
+    /// "Recently used".
+    fn used_emoji(&mut self, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        let before = self.settings.recent_emoji.clone();
+        crate::emoji::remember(&mut self.settings.recent_emoji, names);
+        if self.settings.recent_emoji != before {
+            self.save_settings();
+        }
+    }
+
+    /// The reactions offered first on a message's toolbar: your five most
+    /// recent emoji at your skin tone, or Slack's usual two before you
+    /// have used any.
+    pub fn quick_reactions(&self) -> Vec<String> {
+        let recent = &self.settings.recent_emoji;
+        if recent.is_empty() {
+            return vec!["white_check_mark".to_owned(), "eyes".to_owned()];
+        }
+        recent
+            .iter()
+            .take(5)
+            .map(|name| crate::emoji::toned(name, self.settings.skin_tone))
+            .collect()
     }
 
     fn edit(&mut self, channel: String, ts: Ts, text: String) {
@@ -1838,7 +1871,8 @@ impl App {
             .filter(|e| e.ts == ts && e.channel == channel)
             .map(|e| e.mentions)
             .unwrap_or_default();
-        let wire = to_wire(&text, &mentions);
+        let wire =
+            crate::emoji::tone_shortcodes(&to_wire(&text, &mentions), self.settings.skin_tone);
         let before = self
             .workspace_mut(&team)
             .and_then(|w| w.edit_locally(&channel, &ts, &wire));

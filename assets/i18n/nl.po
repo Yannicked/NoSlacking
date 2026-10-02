@@ -755,3 +755,27 @@ msgstr "{command} werkt alleen als je inlogt met je browser"
 
 msgid "{command} failed: {error}"
 msgstr "{command} mislukt: {error}"
+
+msgid "Recently used"
+msgstr "Recent gebruikt"
+
+msgid "Skin tone"
+msgstr "Huidskleur"
+
+msgid "Default skin tone"
+msgstr "Standaard huidskleur"
+
+msgid "Light skin tone"
+msgstr "Lichte huidskleur"
+
+msgid "Medium-light skin tone"
+msgstr "Middellichte huidskleur"
+
+msgid "Medium skin tone"
+msgstr "Middelste huidskleur"
+
+msgid "Medium-dark skin tone"
+msgstr "Middeldonkere huidskleur"
+
+msgid "Dark skin tone"
+msgstr "Donkere huidskleur"
