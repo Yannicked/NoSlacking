@@ -55,6 +55,49 @@ pub fn header_buttons(
     }
 }
 
+/// Someone's time of day in their time zone, and how far it is from
+/// yours: "14:03 local time, 2 hours ahead of you".
+pub fn local_time(tz: &str) -> Option<String> {
+    let zone = jiff::tz::TimeZone::get(tz).ok()?;
+    let now = jiff::Timestamp::now();
+    let theirs = now.to_zoned(zone);
+    let mine = now.to_zoned(jiff::tz::TimeZone::system());
+    let time = theirs.strftime("%H:%M").to_string();
+    let difference =
+        crate::convos::zone_difference(theirs.offset().seconds(), mine.offset().seconds());
+    Some(match difference {
+        None => tf("{time} local time", &[("time", &time)]),
+        Some(difference) => {
+            let gap = if difference.minutes == 0 {
+                if difference.ahead {
+                    crate::i18n::tn(
+                        "{count} hour ahead of you",
+                        "{count} hours ahead of you",
+                        difference.hours,
+                    )
+                } else {
+                    crate::i18n::tn(
+                        "{count} hour behind you",
+                        "{count} hours behind you",
+                        difference.hours,
+                    )
+                }
+            } else {
+                let span = format!("{}:{:02}", difference.hours, difference.minutes);
+                if difference.ahead {
+                    tf("{time} hours ahead of you", &[("time", &span)])
+                } else {
+                    tf("{time} hours behind you", &[("time", &span)])
+                }
+            };
+            tf(
+                "{time} local time, {difference}",
+                &[("time", &time), ("difference", &gap)],
+            )
+        }
+    })
+}
+
 /// The action that shows a conversation's details on `tab`.
 pub fn details(channel: &str, tab: crate::convos::Tab) -> Action {
     Action::Convos(Convos::Details {

@@ -852,3 +852,25 @@ msgstr "Het bericht kon niet worden vastgezet: {error}"
 
 msgid "Could not unpin the message: {error}"
 msgstr "Het bericht kon niet worden losgemaakt: {error}"
+
+msgid "This account is deactivated."
+msgstr "Dit account is gedeactiveerd."
+
+msgid "{count} hour ahead of you"
+msgid_plural "{count} hours ahead of you"
+msgstr[0] "{count} uur voor op jou"
+msgstr[1] "{count} uur voor op jou"
+
+msgid "{count} hour behind you"
+msgid_plural "{count} hours behind you"
+msgstr[0] "{count} uur achter op jou"
+msgstr[1] "{count} uur achter op jou"
+
+msgid "{time} hours ahead of you"
+msgstr "{time} uur voor op jou"
+
+msgid "{time} hours behind you"
+msgstr "{time} uur achter op jou"
+
+msgid "{time} local time, {difference}"
+msgstr "{time} lokale tijd, {difference}"
