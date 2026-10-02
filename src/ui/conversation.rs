@@ -124,6 +124,8 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                     && let Some(user) = &conversation.user
                 {
                     actions.push(Action::OpenProfile(user.clone()));
+                } else if name.clicked() {
+                    actions.push(super::browse::details(&conversation.id, crate::convos::Tab::About));
                 }
                 if !conversation.topic.is_empty() {
                     ui.add_space(8.0);
@@ -141,6 +143,11 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                     let tip = tf("Jump to… ({shortcut})", &[("shortcut", &super::keys::command("K"))]);
                     if theme::icon_button(ui, &palette, Icon::Search, 17.0, &tip).clicked() {
                         actions.push(Action::OpenSwitcher);
+                    }
+                    if conversation.kind != ConversationKind::Direct
+                        && theme::icon_button(ui, &palette, Icon::Info, 17.0, &t("Details")).clicked()
+                    {
+                        actions.push(super::browse::details(&conversation.id, crate::convos::Tab::About));
                     }
                     match socket {
                         Socket::Connected => {}
@@ -171,11 +178,19 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                     if let Some(members) = conversation.members
                         && !conversation.kind.is_dm()
                     {
-                        ui.label(
-                            RichText::new(crate::i18n::tn("{count} member", "{count} members", members))
-                                .font(theme::regular(12.5))
-                                .color(palette.dim),
-                        );
+                        let count = ui
+                            .add(
+                                egui::Label::new(
+                                    RichText::new(crate::i18n::tn("{count} member", "{count} members", members))
+                                        .font(theme::regular(12.5))
+                                        .color(palette.dim),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if count.clicked() {
+                            actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Members));
+                        }
                     }
                 });
             });

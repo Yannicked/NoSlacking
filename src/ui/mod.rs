@@ -4,6 +4,7 @@
 mod browse;
 mod composer;
 mod conversation;
+mod details;
 mod keys;
 mod login;
 mod message;
@@ -36,6 +37,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             sidebar::show(app, ui);
             if app.thread.is_some() {
                 thread::show(app, ui);
+            } else if app.convos.details.is_some() {
+                details::show(app, ui);
             }
             conversation::show(app, ui);
         }

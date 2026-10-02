@@ -768,3 +768,51 @@ msgstr "Je kunt later weer deelnemen via het kanalenoverzicht."
 
 msgid "Leave"
 msgstr "Verlaten"
+
+msgid "Could not set the topic: {error}"
+msgstr "Het onderwerp kon niet worden ingesteld: {error}"
+
+msgid "Could not set the description: {error}"
+msgstr "De beschrijving kon niet worden ingesteld: {error}"
+
+msgid "Details"
+msgstr "Details"
+
+msgid "Close details"
+msgstr "Details sluiten"
+
+msgid "Members"
+msgstr "Leden"
+
+msgid "Members ({count})"
+msgstr "Leden ({count})"
+
+msgid "About"
+msgstr "Over"
+
+msgid "Topic"
+msgstr "Onderwerp"
+
+msgid "Description"
+msgstr "Beschrijving"
+
+msgid "Created"
+msgstr "Aangemaakt"
+
+msgid "By {name} on {date}"
+msgstr "Door {name} op {date}"
+
+msgid "By {name}"
+msgstr "Door {name}"
+
+msgid "Edit"
+msgstr "Bewerken"
+
+msgid "None yet"
+msgstr "Nog niets"
+
+msgid "Try again"
+msgstr "Opnieuw proberen"
+
+msgid "No files shared here yet."
+msgstr "Hier zijn nog geen bestanden gedeeld."

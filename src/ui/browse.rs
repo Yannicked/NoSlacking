@@ -55,6 +55,14 @@ pub fn header_buttons(
     }
 }
 
+/// The action that shows a conversation's details on `tab`.
+pub fn details(channel: &str, tab: crate::convos::Tab) -> Action {
+    Action::Convos(Convos::Details {
+        channel: channel.to_owned(),
+        tab,
+    })
+}
+
 /// "Leave channel" in a conversation's context menu, for the channels one
 /// can leave; `below` puts a line between it and the entries above.
 pub fn leave_item(

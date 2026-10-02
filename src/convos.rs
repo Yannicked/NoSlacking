@@ -1,18 +1,19 @@
-//! Starting and finding conversations: a new direct message with one or
-//! more people, the channel browser, joining, leaving and creating
-//! channels.
+//! Starting, finding and looking after conversations: a new direct message
+//! with one or more people, the channel browser, joining, leaving and
+//! creating channels, and a channel's details (topic, purpose, members and
+//! files).
 //!
 //! Views push [`Action`]s (wrapped in [`crate::model::Action::Convos`]);
 //! [`apply`] turns them into [`Command`]s for the worker, whose answers come
 //! back as [`Event`]s for [`handle`]. What the dialogs hold lives in
 //! [`State`], kept on [`App`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::app::{App, WorkspaceState};
 use crate::backend;
 use crate::i18n::tf;
-use crate::model::{ConversationKind, User};
+use crate::model::{ConversationKind, File, User};
 
 /// The most people a group message can have besides you: Slack's limit.
 pub const MAX_PEOPLE: usize = 8;
@@ -27,19 +28,43 @@ pub enum Action {
     /// Shows the "New message" dialog.
     NewMessage,
     /// Opens (or starts) the direct message with these people.
-    Open { users: Vec<String> },
+    Open {
+        users: Vec<String>,
+    },
     /// Shows the channel browser and lists the public channels.
     Browse,
     /// Joins a public channel and opens it.
-    Join { channel: String },
+    Join {
+        channel: String,
+    },
     /// Asks whether to leave a channel.
-    AskLeave { channel: String },
+    AskLeave {
+        channel: String,
+    },
     /// Leaves a channel.
-    Leave { channel: String },
+    Leave {
+        channel: String,
+    },
     /// Shows the "Create a channel" dialog.
     NewChannel,
     /// Creates a channel with this (already checked) name and opens it.
-    Create { name: String, private: bool },
+    Create {
+        name: String,
+        private: bool,
+    },
+    /// Shows a conversation's details beside it, on `tab`, loading what
+    /// the tab needs.
+    Details {
+        channel: String,
+        tab: Tab,
+    },
+    CloseDetails,
+    /// Sets a conversation's topic or purpose.
+    Describe {
+        channel: String,
+        field: Field,
+        text: String,
+    },
 }
 
 /// What the interface asks the worker to do for one workspace.
@@ -55,6 +80,18 @@ pub enum Command {
     Leave { channel: String },
     /// `conversations.create`, then opens the new channel.
     Create { name: String, private: bool },
+    /// When and by whom a conversation was made (`conversations.info`).
+    About { channel: String },
+    /// Who is in a conversation (`conversations.members`).
+    Members { channel: String },
+    /// The files shared in a conversation (`files.list`).
+    Files { channel: String },
+    /// `conversations.setTopic` or `conversations.setPurpose`.
+    Describe {
+        channel: String,
+        field: Field,
+        text: String,
+    },
 }
 
 impl Command {
@@ -66,6 +103,15 @@ impl Command {
             Self::Join { .. } => Failure::Join,
             Self::Leave { .. } => Failure::Leave,
             Self::Create { .. } => Failure::Create,
+            Self::About { channel } | Self::Members { channel } | Self::Files { channel } => {
+                Failure::Load {
+                    channel: channel.clone(),
+                }
+            }
+            Self::Describe { channel, field, .. } => Failure::Describe {
+                channel: channel.clone(),
+                field: *field,
+            },
         }
     }
 }
@@ -78,18 +124,117 @@ pub enum Event {
     Opened { channel: String },
     /// A page of public channels you could join; `done` on the last.
     Browsed { channels: Vec<Listed>, done: bool },
+    About {
+        channel: String,
+        result: Result<About, String>,
+    },
+    Members {
+        channel: String,
+        result: Result<Vec<String>, String>,
+    },
+    Files {
+        channel: String,
+        result: Result<Vec<SharedFile>, String>,
+    },
     /// Slack refused, or could not be reached.
     Failed { what: Failure, error: String },
 }
 
 /// Which request failed, so the interface can say so in its own words.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
     Open,
     Browse,
     Join,
     Leave,
     Create,
+    /// Loading a part of the details. Slack's refusals come in the part's
+    /// own event; this is for when the request could not be made at all.
+    Load {
+        channel: String,
+    },
+    /// Setting a topic or purpose; the one shown is fetched again.
+    Describe {
+        channel: String,
+        field: Field,
+    },
+}
+
+/// A conversation's text that its members can change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    Topic,
+    Purpose,
+}
+
+/// A tab of the details panel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tab {
+    #[default]
+    About,
+    Members,
+    Files,
+}
+
+/// Something the details panel fetches when it is first shown.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Loaded<T> {
+    #[default]
+    Idle,
+    Loading,
+    Ready(T),
+    Failed(String),
+}
+
+impl<T> Loaded<T> {
+    /// Whether it should be asked for: never yet, or it failed.
+    pub fn wanted(&self) -> bool {
+        matches!(self, Self::Idle | Self::Failed(_))
+    }
+}
+
+impl<T> From<Result<T, String>> for Loaded<T> {
+    fn from(result: Result<T, String>) -> Self {
+        match result {
+            Ok(value) => Self::Ready(value),
+            Err(error) => Self::Failed(error),
+        }
+    }
+}
+
+/// When and by whom a conversation was made.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct About {
+    /// Seconds since the epoch.
+    pub created: Option<i64>,
+    pub creator: Option<String>,
+}
+
+/// A file shared in a conversation, as its Files tab lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedFile {
+    pub file: File,
+    /// Who shared it.
+    pub user: Option<String>,
+    /// Seconds since the epoch.
+    pub created: Option<i64>,
+}
+
+/// What the details panel has loaded for one conversation.
+#[derive(Clone, Debug, Default)]
+pub struct ChannelData {
+    pub about: Loaded<About>,
+    pub members: Loaded<Vec<String>>,
+    pub files: Loaded<Vec<SharedFile>>,
+}
+
+/// The details panel beside a conversation.
+#[derive(Clone, Debug, Default)]
+pub struct Details {
+    pub channel: String,
+    pub tab: Tab,
+    /// The topic or purpose being edited, and the text so far.
+    pub editing: Option<(Field, String)>,
 }
 
 /// A public channel the browser lists.
@@ -207,6 +352,10 @@ pub struct State {
     pub new_channel: Option<NewChannel>,
     /// A channel waiting for "Leave?" to be answered.
     pub leave: Option<String>,
+    pub details: Option<Details>,
+    /// What the details panel loaded, by team and conversation. Kept while
+    /// the app runs, so going back to a channel shows it at once.
+    pub data: HashMap<(String, String), ChannelData>,
 }
 
 impl State {
@@ -397,6 +546,118 @@ pub fn apply(app: &mut App, action: Action) {
             }
             send(app, team, Command::Create { name, private });
         }
+        Action::Details { channel, tab } => details(app, team, channel, tab),
+        Action::CloseDetails => app.convos.details = None,
+        Action::Describe {
+            channel,
+            field,
+            text,
+        } => {
+            if let Some(details) = &mut app.convos.details {
+                details.editing = None;
+            }
+            // Shown at once; Slack's refusal fetches the real one back.
+            if let Some(conversation) = app
+                .active_workspace_mut()
+                .and_then(|w| w.conversation_mut(&channel))
+            {
+                match field {
+                    Field::Topic => conversation.topic.clone_from(&text),
+                    Field::Purpose => conversation.purpose.clone_from(&text),
+                }
+            }
+            send(
+                app,
+                team,
+                Command::Describe {
+                    channel,
+                    field,
+                    text,
+                },
+            );
+        }
+    }
+}
+
+/// Opens the details panel on `tab`, in place of a thread, and asks for
+/// what the tab shows unless it is loaded already.
+fn details(app: &mut App, team: String, channel: String, tab: Tab) {
+    app.thread = None;
+    let editing = app
+        .convos
+        .details
+        .take()
+        .filter(|d| d.channel == channel)
+        .and_then(|d| d.editing);
+    app.convos.details = Some(Details {
+        channel: channel.clone(),
+        tab,
+        editing,
+    });
+    let data = app
+        .convos
+        .data
+        .entry((team.clone(), channel.clone()))
+        .or_default();
+    let mut commands = Vec::new();
+    // About shows the members' count too, and is cheap: always fresh.
+    if data.about.wanted() || tab == Tab::About {
+        data.about = Loaded::Loading;
+        commands.push(Command::About {
+            channel: channel.clone(),
+        });
+    }
+    match tab {
+        Tab::Members if data.members.wanted() => {
+            data.members = Loaded::Loading;
+            commands.push(Command::Members { channel });
+        }
+        Tab::Files if data.files.wanted() => {
+            data.files = Loaded::Loading;
+            commands.push(Command::Files { channel });
+        }
+        _ => {}
+    }
+    for command in commands {
+        send(app, team.clone(), command);
+    }
+}
+
+impl State {
+    /// What is loaded for a conversation, made empty when nothing is.
+    pub fn data_mut(&mut self, team: &str, channel: &str) -> &mut ChannelData {
+        self.data
+            .entry((team.to_owned(), channel.to_owned()))
+            .or_default()
+    }
+
+    /// What is loaded for a conversation, if anything.
+    pub fn data(&self, team: &str, channel: &str) -> Option<&ChannelData> {
+        self.data.get(&(team.to_owned(), channel.to_owned()))
+    }
+}
+
+/// Asks for the people among `ids` the workspace does not know yet, so
+/// lists of them show names rather than ids.
+fn fetch_unknown(app: &App, team: &str, ids: &[String]) {
+    if app.demo {
+        return;
+    }
+    let Some(workspace) = app.workspaces.iter().find(|w| w.info.team_id == team) else {
+        return;
+    };
+    let mut unknown: Vec<String> = ids
+        .iter()
+        .filter(|id| !workspace.users.contains_key(*id))
+        .cloned()
+        .collect();
+    unknown.sort();
+    unknown.dedup();
+    if !unknown.is_empty() {
+        app.backend.send(backend::Command::FetchUsers {
+            team: team.to_owned(),
+            ids: unknown,
+        });
     }
 }
 
@@ -444,6 +705,22 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                 browse.done = done;
             }
         }
+        Event::About { channel, result } => {
+            app.convos.data_mut(team, &channel).about = result.into();
+        }
+        Event::Members { channel, result } => {
+            if let Ok(members) = &result {
+                fetch_unknown(app, team, members);
+            }
+            app.convos.data_mut(team, &channel).members = result.into();
+        }
+        Event::Files { channel, result } => {
+            if let Ok(files) = &result {
+                let people: Vec<String> = files.iter().filter_map(|f| f.user.clone()).collect();
+                fetch_unknown(app, team, &people);
+            }
+            app.convos.data_mut(team, &channel).files = result.into();
+        }
         Event::Failed { what, error } => {
             let text = match what {
                 Failure::Open => {
@@ -477,6 +754,36 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                         "Could not create the channel: {error}",
                         &[("error", &error)],
                     )
+                }
+                Failure::Load { channel } => {
+                    // The panel shows it where the list would be.
+                    let data = app.convos.data_mut(team, &channel);
+                    if data.about == Loaded::Loading {
+                        data.about = Loaded::Failed(error.clone());
+                    }
+                    if data.members == Loaded::Loading {
+                        data.members = Loaded::Failed(error.clone());
+                    }
+                    if data.files == Loaded::Loading {
+                        data.files = Loaded::Failed(error.clone());
+                    }
+                    return;
+                }
+                Failure::Describe { channel, field } => {
+                    // Put back what Slack really has.
+                    app.backend.send(backend::Command::FetchConversation {
+                        team: team.to_owned(),
+                        channel,
+                    });
+                    match field {
+                        Field::Topic => {
+                            tf("Could not set the topic: {error}", &[("error", &error)])
+                        }
+                        Field::Purpose => tf(
+                            "Could not set the description: {error}",
+                            &[("error", &error)],
+                        ),
+                    }
                 }
             };
             app.toast(text, true);
