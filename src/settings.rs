@@ -91,6 +91,12 @@ pub struct Settings {
     pub enter_sends: bool,
     /// How channels are ordered in their sidebar sections.
     pub sidebar_sort: crate::sidebar::Sort,
+    /// Your skin tone for emoji that have them, as Slack counts: 2 (light)
+    /// to 6 (dark), anything else the default yellow.
+    pub skin_tone: u8,
+    /// The emoji you used lately, newest first, by name without a tone;
+    /// at most [`crate::emoji::RECENT_MAX`].
+    pub recent_emoji: Vec<String>,
 }
 
 impl Default for Settings {
@@ -110,6 +116,8 @@ impl Default for Settings {
             zoom: 1.0,
             enter_sends: true,
             sidebar_sort: crate::sidebar::Sort::Name,
+            skin_tone: 0,
+            recent_emoji: Vec::new(),
         }
     }
 }
@@ -199,6 +207,8 @@ impl Settings {
             zoom,
             enter_sends,
             sidebar_sort,
+            skin_tone,
+            recent_emoji,
         );
         // One damaged workspace must not sign you out of the others, so
         // these are read entry by entry.

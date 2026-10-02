@@ -281,6 +281,8 @@ struct Group {
 struct Found {
     needle: String,
     custom_count: usize,
+    /// The recently used emoji it was made with.
+    recent: Vec<String>,
     groups: Vec<Group>,
     /// What Enter picks: the first match of what was typed.
     first: Option<String>,
@@ -303,14 +305,33 @@ impl PickerRow<'_> {
 }
 
 impl Found {
-    fn new(workspace: &crate::app::WorkspaceState, needle: &str) -> Self {
+    fn new(workspace: &crate::app::WorkspaceState, needle: &str, recent: &[String]) -> Self {
+        let mut groups = Vec::new();
+        // What you used lately comes first, while nothing is searched for.
+        if needle.is_empty() {
+            let cells: Vec<Cell> = recent
+                .iter()
+                .filter_map(|name| match workspace.emoji.resolve(name) {
+                    crate::emoji::Resolved::Image(url) => Some(Cell::Custom {
+                        name: name.clone(),
+                        url,
+                    }),
+                    _ => crate::emoji::standard(name).map(Cell::Standard),
+                })
+                .collect();
+            if !cells.is_empty() {
+                groups.push(Group {
+                    label: t("Recently used").into_owned(),
+                    cells,
+                });
+            }
+        }
         let mut custom: Vec<(&str, &str)> = workspace
             .emoji
             .custom_names()
             .filter(|(name, _)| needle.is_empty() || name.contains(needle))
             .collect();
         custom.sort();
-        let mut groups = Vec::new();
         if !custom.is_empty() {
             groups.push(Group {
                 label: workspace.info.name.clone(),
@@ -354,6 +375,7 @@ impl Found {
         Self {
             needle: needle.to_owned(),
             custom_count: workspace.emoji.custom_names().count(),
+            recent: recent.to_vec(),
             groups,
             first,
         }
@@ -389,11 +411,15 @@ fn picker(app: &mut App, ctx: &egui::Context) {
     // most of the picker's cost.
     let found_id = egui::Id::new("emoji-picker-found");
     let custom_count = workspace.emoji.custom_names().count();
+    let recent = &app.settings.recent_emoji;
+    let mut tone = app.settings.skin_tone;
     let found = ctx
         .data(|d| d.get_temp::<std::sync::Arc<Found>>(found_id))
-        .filter(|found| found.needle == needle && found.custom_count == custom_count)
+        .filter(|found| {
+            found.needle == needle && found.custom_count == custom_count && found.recent == *recent
+        })
         .unwrap_or_else(|| {
-            let found = std::sync::Arc::new(Found::new(workspace, &needle));
+            let found = std::sync::Arc::new(Found::new(workspace, &needle, recent));
             ctx.data_mut(|d| d.insert_temp(found_id, found.clone()));
             found
         });
@@ -424,6 +450,7 @@ fn picker(app: &mut App, ctx: &egui::Context) {
             if focus {
                 field.request_focus();
             }
+            tone_picker(ui, &palette, &mut tone);
             // Enter picks the first match of what you searched for; with
             // nothing typed there is no match, only the whole list.
             if !needle.is_empty() && ui.input(|i| i.key_pressed(Key::Enter)) {
@@ -493,13 +520,14 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                                             ui.painter().text(
                                                 rect.center(),
                                                 egui::Align2::CENTER_CENTER,
-                                                emoji.as_str(),
+                                                crate::emoji::with_tone(emoji, tone),
                                                 theme::regular(22.0),
                                                 palette.text,
                                             );
                                             emoji.shortcode().unwrap_or_default()
                                         }
                                     };
+                                    let code = crate::emoji::toned(code, tone);
                                     // Screen readers get the name of the cells
                                     // drawn; sighted users only while hovered.
                                     theme::describe(
@@ -519,9 +547,15 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                     }
                 });
         });
+    if tone != app.settings.skin_tone {
+        app.settings.skin_tone = tone;
+        app.settings_changed();
+    }
     if close || response.should_close() {
         app.picker = None;
     }
+    // What Enter picks gets your tone like a click would.
+    let chosen = chosen.map(|name| crate::emoji::toned(&name, tone));
     if let Some(name) = chosen {
         match target {
             PickerTarget::Reaction { channel, ts } => {
@@ -541,6 +575,60 @@ fn picker(app: &mut App, ctx: &egui::Context) {
     if app.picker.is_some() {
         app.picker_query = query;
     }
+}
+
+/// The skin tones to choose from, as a waving hand in each: the default
+/// yellow, then Slack's tones 2 (light) to 6 (dark).
+fn tone_picker(ui: &mut egui::Ui, palette: &crate::theme::Palette, tone: &mut u8) {
+    let Some(hand) = emojis::get("✋") else {
+        return;
+    };
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(t("Skin tone"))
+                .font(theme::regular(12.5))
+                .color(palette.secondary),
+        );
+        for choice in [0, 2, 3, 4, 5, 6] {
+            let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+            let current = crate::emoji::valid_tone(*tone).unwrap_or(0) == choice;
+            if current || response.hovered() {
+                ui.painter().rect_filled(
+                    rect,
+                    CornerRadius::same(6),
+                    if current {
+                        palette.accent.gamma_multiply(0.25)
+                    } else {
+                        palette.surface_hover
+                    },
+                );
+            }
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                crate::emoji::with_tone(hand, choice),
+                theme::regular(17.0),
+                palette.text,
+            );
+            let name = match choice {
+                0 => t("Default skin tone"),
+                2 => t("Light skin tone"),
+                3 => t("Medium-light skin tone"),
+                4 => t("Medium skin tone"),
+                5 => t("Medium-dark skin tone"),
+                _ => t("Dark skin tone"),
+            };
+            theme::describe_selected(&response, egui::WidgetType::RadioButton, current, &name);
+            if response
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(name.as_ref())
+                .clicked()
+            {
+                *tone = choice;
+            }
+        }
+    });
 }
 
 fn profile(app: &mut App, ctx: &egui::Context) {
@@ -799,7 +887,7 @@ mod tests {
     #[test]
     fn the_picker_lists_matches_in_rows_under_their_headings() {
         let w = workspace();
-        let all = Found::new(&w, "");
+        let all = Found::new(&w, "", &[]);
         assert_eq!(all.groups[0].label, "Acme");
         assert_eq!(
             all.groups[0].cells[0],
@@ -830,10 +918,30 @@ mod tests {
     #[test]
     fn enter_picks_the_first_match() {
         let w = workspace();
-        assert_eq!(Found::new(&w, "taco").first.as_deref(), Some("tacocat"));
-        let rocket = Found::new(&w, "rocket");
+        assert_eq!(
+            Found::new(&w, "taco", &[]).first.as_deref(),
+            Some("tacocat")
+        );
+        let rocket = Found::new(&w, "rocket", &[]);
         assert_eq!(rocket.first.as_deref(), Some("rocket"));
         assert!(rocket.groups.iter().all(|g| g.label != "Acme"));
-        assert!(Found::new(&w, "no-such-emoji-at-all").groups.is_empty());
+        assert!(
+            Found::new(&w, "no-such-emoji-at-all", &[])
+                .groups
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn recently_used_emoji_lead_until_you_search() {
+        let w = workspace();
+        let recent = ["tacocat".to_owned(), "+1".to_owned(), "gone-now".to_owned()];
+        let found = Found::new(&w, "", &recent);
+        assert_eq!(found.groups[0].label, "Recently used");
+        assert_eq!(found.groups[0].cells.len(), 2, "unknown names drop out");
+        assert!(matches!(found.groups[0].cells[0], Cell::Custom { .. }));
+        assert!(matches!(found.groups[0].cells[1], Cell::Standard(_)));
+        let searched = Found::new(&w, "taco", &recent);
+        assert!(searched.groups.iter().all(|g| g.label != "Recently used"));
     }
 }

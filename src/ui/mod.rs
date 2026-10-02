@@ -20,7 +20,15 @@ use egui::{Color32, CornerRadius, Rect, Sense, Vec2};
 use crate::app::{App, Page};
 use crate::theme::{self, Palette};
 
+/// Where [`show`] leaves [`App::quick_reactions`] for the message
+/// toolbars to read, which are drawn far from the settings.
+pub fn quick_reactions_id() -> egui::Id {
+    egui::Id::new("quick-reactions")
+}
+
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    let quick = std::sync::Arc::new(app.quick_reactions());
+    ui.data_mut(|d| d.insert_temp(quick_reactions_id(), quick));
     // First, so Esc leaves a selected message before it closes the thread.
     selection::keys(app, ui.ctx());
     keys::global(app, ui.ctx());
