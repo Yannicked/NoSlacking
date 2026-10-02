@@ -125,6 +125,16 @@ fn shift(sections: &[SidebarSection], at: usize, up: bool) -> Option<(usize, usi
     }
 }
 
+/// Whether the section `id` can move one place up (or down): whether a
+/// shown section sits on that side of it. The same rule as [`plan`] and
+/// [`apply`] follow, so the menu never offers a move that does nothing.
+pub fn can_shift(sections: &[SidebarSection], id: &str, up: bool) -> bool {
+    sections
+        .iter()
+        .position(|s| s.id == id)
+        .is_some_and(|at| shift(sections, at, up).is_some())
+}
+
 /// The Slack calls an edit needs, worked out from the sections before it.
 ///
 /// Sections made here have no Slack id until the next fetch, so calls that
@@ -1007,8 +1017,13 @@ mod tests {
             up: true,
         };
         assert_eq!(plan(&top, &edit), []);
+        assert!(!can_shift(&top, "S2", true));
+        assert!(!can_shift(&top, "S2", false));
         apply(&mut top, &edit);
         assert_eq!(top[1].id, "S2");
+        assert!(can_shift(&sections, "S1", true));
+        assert!(!can_shift(&sections, "S1", false), "only hidden S2 below");
+        assert!(!can_shift(&sections, "S9", true));
     }
 
     #[test]
