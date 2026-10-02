@@ -10,11 +10,13 @@ pub mod backend;
 pub mod credentials;
 #[cfg(feature = "demo")]
 pub mod demo;
+pub mod desktop;
 pub mod emoji;
 pub mod i18n;
 pub mod images;
 pub mod model;
 pub mod mrkdwn;
+pub mod notify;
 pub mod paths;
 pub mod redact;
 pub mod settings;

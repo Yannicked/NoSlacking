@@ -69,6 +69,11 @@ jiff = "0.2"
 # The native file picker for uploads.
 rfd = "0.17.2"
 
+# Desktop notifications: D-Bus on Linux and the BSDs, the notification
+# center on macOS, toasts on Windows. Elsewhere there are none.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly", target_os = "macos", windows))'.dependencies]
+notify-rust = "4.18"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
 

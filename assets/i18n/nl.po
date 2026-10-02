@@ -662,3 +662,49 @@ msgstr "Inloglink"
 
 msgid "Sign in there as usual; NoSlacking finishes by itself. If your browser asks, let it open NoSlacking. If nothing happens, paste the slack:// link from the page here (open the page source with Ctrl+U and search for magic-login)."
 msgstr "Log daar zoals gewoonlijk in; NoSlacking rondt het daarna zelf af. Als je browser het vraagt, laat hem NoSlacking openen. Gebeurt er niets, plak dan hier de slack://-link van de pagina (open de paginabron met Ctrl+U en zoek naar magic-login)."
+
+# Desktop integration: notifications.
+msgid "All new messages"
+msgstr "Alle nieuwe berichten"
+
+msgid "Mentions and keywords"
+msgstr "Vermeldingen en trefwoorden"
+
+msgid "Nothing"
+msgstr "Niets"
+
+msgid "{author}: {text}"
+msgstr "{author}: {text}"
+
+msgid "{author} in {place}"
+msgstr "{author} in {place}"
+
+msgid "Shared {name}"
+msgstr "Deelde {name}"
+
+msgid "Notifications"
+msgstr "Meldingen"
+
+msgid "Desktop notifications"
+msgstr "Bureaubladmeldingen"
+
+msgid "For direct messages, mentions and your keywords, while you are not looking."
+msgstr "Voor directe berichten, vermeldingen en je trefwoorden, als je niet kijkt."
+
+msgid "Play a sound"
+msgstr "Geluid afspelen"
+
+msgid "Keywords"
+msgstr "Trefwoorden"
+
+msgid "deploy, outage, your nickname"
+msgstr "deploy, storing, je bijnaam"
+
+msgid "Separated by commas. Each notifies like a mention, in any conversation that is not set to Nothing."
+msgstr "Gescheiden door komma's. Elk trefwoord geeft een melding zoals een vermelding, in elk gesprek dat niet op Niets staat."
+
+msgid "Notify me about"
+msgstr "Meldingen voor"
+
+msgid "Default ({level})"
+msgstr "Standaard ({level})"

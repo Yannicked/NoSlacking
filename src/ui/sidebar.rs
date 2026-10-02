@@ -597,6 +597,8 @@ fn row_menu(
                 ui.close();
             }
         }
+        ui.separator();
+        super::desktop::conversation_menu(ui, workspace, conversation, actions);
     });
 }
 
@@ -705,6 +707,12 @@ fn row(
         actions.push(Action::OpenConversation(conversation.id.clone()));
     }
     row_menu(&response, workspace, conversation, section, actions);
+    if workspace.sections.is_none() {
+        // Without Slack's sections there is no section menu to add to.
+        response.context_menu(|ui| {
+            super::desktop::conversation_menu(ui, workspace, conversation, actions);
+        });
+    }
 }
 
 #[cfg(test)]
