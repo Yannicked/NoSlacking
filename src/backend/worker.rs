@@ -88,6 +88,8 @@ pub struct Worker {
     focus: Option<(String, Option<String>)>,
     /// The status last sent to the interface, so it hears only changes.
     reported: Option<Socket>,
+    /// The poll of the open conversation that is still running, if any.
+    polling: Option<tokio::task::JoinHandle<()>>,
     users_requested: HashSet<(String, String)>,
     bots_requested: HashSet<(String, String)>,
     internal: mpsc::UnboundedSender<Internal>,
@@ -118,6 +120,7 @@ impl Worker {
             next_generation: 0,
             focus: None,
             reported: None,
+            polling: None,
             users_requested: HashSet::new(),
             bots_requested: HashSet::new(),
             internal,
@@ -987,7 +990,18 @@ impl Worker {
 
     /// Without a live socket for its workspace, the open conversation is
     /// fetched again now and then, so new messages still show up.
-    fn poll(&self) {
+    ///
+    /// Only one poll runs at a time: under a rate limit one call can take
+    /// longer than the poll interval, and stacking more on top would only
+    /// deepen the limit.
+    fn poll(&mut self) {
+        if self
+            .polling
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
+            return;
+        }
         let Some((team, Some(channel))) = &self.focus else {
             return;
         };
@@ -995,13 +1009,13 @@ impl Worker {
             return;
         }
         if let Some(client) = self.client(team) {
-            tokio::spawn(history(
+            self.polling = Some(tokio::spawn(history(
                 client,
                 team.clone(),
                 channel.clone(),
                 None,
                 self.sink.clone(),
-            ));
+            )));
         }
     }
 }
