@@ -1,21 +1,21 @@
-//! Signing in through the browser, without a browser
-//! window of our own.
+//! Signing in through the browser, without a browser window of our own.
 //!
-//! [`SIGN_IN_URL`] opens in the user's browser. Once they
-//! have signed in there (password, emailed code or SSO), Slack's page hands
-//! the browser a `slack://` link carrying one-time "magic" tokens, in one
-//! of two shapes:
+//! [`SIGN_IN_URL`] opens in the user's browser. Once they have signed in
+//! there (password, emailed code or SSO), Slack's page hands the browser a
+//! `slack://` link carrying one-time "magic" tokens, in one of two shapes:
 //!
 //! - `slack://T0123/magic-login/<token>?host=acme.slack.com`, one per team;
 //! - `slack://login-v2?0.host=acme.slack.com&0.tokens=a_b&1.host=…`, sets of
 //!   tokens per host, each possibly marked `dpop=1`.
 //!
-//! [`parse_link`] reads both. [`redeem`] then
-//! calls `auth.loginMagicBulk` on each host, which answers with the teams
-//! signed in to and sets the account's `d` session cookie. From there it is
-//! the ordinary session sign-in ([`super::session::derive`]).
+//! [`parse_link`] reads both. [`redeem`] then calls `auth.loginMagicBulk` on
+//! each host, which answers with the teams signed in to and sets the
+//! account's `d` session cookie. From there it is the ordinary session
+//! sign-in ([`super::session::derive`]).
 //!
-//! None of this is documented; it may change at any time.
+//! The idea of signing in through the browser and catching Slack's hand-off
+//! comes from Make Slack Great Again (msga). None of these endpoints are
+//! documented; they may change at any time.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,8 +27,8 @@ use super::client::SlackError;
 /// Where the browser sign-in starts.
 pub const SIGN_IN_URL: &str = "https://app.slack.com/ssb/signin";
 
-/// The user agent Slack's sign-in pages and
-/// `auth.loginMagicBulk` expect: a browser agent ending in `Slack_SSB/<ver>`.
+/// The user agent Slack's sign-in pages and `auth.loginMagicBulk` expect: a
+/// browser agent ending in `Slack_SSB/<ver>`.
 const DESKTOP_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Sonic Slack_SSB/4.52.162";
 
 /// The host a link names when it names none.
@@ -95,8 +95,8 @@ pub fn parse_link(link: &str) -> Option<Vec<TokenSet>> {
         return (!sets.is_empty()).then_some(sets);
     }
     // `slack://T0123/magic-login/abc`: the team is the URL's host and the
-    // token its last path segment; one link may also carry several
-    // `T…/magic-login/…` runs in one link.
+    // token its last path segment; one link may carry several
+    // `T…/magic-login/…` runs.
     let text = url.as_str().strip_prefix("slack://")?;
     let mut tokens = Vec::new();
     for (i, _) in text.match_indices("/magic-login/") {
@@ -201,8 +201,8 @@ fn d_cookie(header: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// Redeems one host's tokens with `auth.loginMagicBulk`,
-/// keeping the session cookie Slack sets.
+/// Redeems one host's tokens with `auth.loginMagicBulk`, keeping the session
+/// cookie Slack sets.
 pub async fn redeem(set: &TokenSet) -> Result<Redeemed, SlackError> {
     if set.dpop {
         log::info!(

@@ -3,7 +3,7 @@
 //! and events into [`Event`]s.
 //!
 //! Its loop only dispatches. Anything that waits on the network runs as a
-//! task of its own and reports back through [`Internal`] or straight to the
+//! task of its own and reports back through `Internal` or straight to the
 //! interface, so one slow call never holds up another.
 
 use std::collections::{HashMap, HashSet};

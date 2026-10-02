@@ -1,6 +1,6 @@
 //! NoSlacking: a native Slack client built on egui and fastframe.
 //!
-//! The interface ([`ui`], [`app`]) runs on the main thread; Slack's Web API
+//! The interface (`ui`, [`app`]) runs on the main thread; Slack's Web API
 //! and Socket Mode run on a small tokio runtime in [`backend`]. The two
 //! talk through commands and events only.
 

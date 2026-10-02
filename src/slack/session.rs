@@ -3,7 +3,7 @@
 //!
 //! Slack's web client authenticates with a per-session `xoxc-` token that is
 //! embedded in each workspace's boot page, plus the account-wide `d` cookie
-//! (`xoxd-…`). Given the cookie and a workspace URL, [`derive`] fetches the
+//! (`xoxd-…`). Given the cookie and a workspace URL, [`derive()`] fetches the
 //! boot page and reads the token out of it, then checks it with `auth.test`.
 //!
 //! One `d` cookie covers every workspace the account is signed in to. It

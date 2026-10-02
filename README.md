@@ -11,33 +11,49 @@ It is built on [egui](https://github.com/emilk/egui) and the
 
 ## What it does
 
-- Channels, private channels, direct messages and group DMs, in one workspace
-  rail across several workspaces.
-- Message history that scrolls back, day separators and an unread line.
-- Threads in a side panel, with "also send to the channel".
-- Emoji reactions, a picker, and your workspace's custom emoji.
-- Inline image previews, file cards that download, and uploads.
-- Slack's markup: bold, italic, code, quotes, mentions, channel links.
-- Desktop themes (dark, light, your own palettes, and Omarchy on Linux),
-  `@mention` and `:emoji:` autocomplete, a Ctrl+K quick switcher, and keyboard
-  navigation.
+- **Workspaces:** channels, private channels, direct messages and group DMs,
+  in one workspace rail across several workspaces, with your Slack sidebar
+  sections.
+- **Messages:** history that scrolls back, day separators, an unread line,
+  and "jump to unread" and "jump to newest".
+- **Threads:** a side panel, with "also send to the channel".
+- **Search:** messages and files, with Slack's `from:`, `in:`, `before:`
+  and `has:` filters, and jumping to a result in context.
+- **Conversations:** start direct and group messages; browse, join, leave
+  and create channels; channel details, pins and bookmarks.
+- **Composer:** `@mention`, `#channel` and `:emoji:` autocomplete, slash
+  commands, formatting shortcuts, drafts kept across restarts, and
+  uploading pasted images and dropped files.
+- **Rendering:** reactions with skin tones, your workspace's custom emoji,
+  inline images, file cards, highlighted code blocks, and Slack's markup.
+- **Notifications:** for DMs, mentions and your own keywords, with mute,
+  per-conversation levels and Do Not Disturb.
+- **Desktop:** the unread count in the title and launcher, a tray icon,
+  start at login, themes (dark, light, your own palettes, and Omarchy on
+  Linux), and a Ctrl+K quick switcher.
+- **Accessibility:** keyboard navigation of messages, screen reader labels,
+  and an English and Dutch interface.
 
 ## Signing in
 
-Two ways, chosen on the sign-in screen:
+Three ways, chosen on the sign-in screen. The first two reuse your own
+Slack session; neither needs anything registered.
 
-- **Your Slack session (quick).** Paste your workspace address and the `d`
-  cookie from a browser where you are logged in to Slack. NoSlacking reuses
-  that session the way [wee-slack](https://github.com/wee-slack/wee-slack) and
-  [Make Slack Great Again](https://github.com/punarinta/make-slack-great-again)
-  do, and gets live messages over Slack's session socket. Nothing to register.
-  The sign-in page explains where to find the cookie. This uses undocumented
-  endpoints, so treat it as best-effort.
+- **Sign in with your browser.** NoSlacking opens Slack's sign-in page in
+  your browser. Sign in as usual (password, emailed code or SSO); when Slack
+  hands the sign-in back, the browser passes it to NoSlacking, which
+  registers itself for `slack://` links for this. If your browser does not
+  pass it on, paste the `slack://` link from the page instead.
+- **Paste your session cookie.** Paste your workspace address and the `d`
+  cookie from a browser where you are logged in to Slack. The sign-in page
+  explains where to find it.
 - **Your own Slack app (advanced).** Create a free Slack app from the bundled
-  manifest, paste its credentials, and sign in. This is the sanctioned route,
-  with live Socket Mode updates; a workspace admin may need to approve the app.
+  manifest, paste its credentials, and sign in. This is the route Slack
+  documents and supports, with live Socket Mode updates; a workspace admin
+  may need to approve the app.
 
-Tokens are stored only in your operating system's keyring (Secret Service on
+Session sign-ins get live messages over Slack's session socket. Tokens and
+cookies are stored only in your operating system's keyring (Secret Service on
 Linux, the Keychain on macOS, the Credential Manager on Windows), never in a
 file, and never written to the log.
 
@@ -61,12 +77,43 @@ NoSlacking keeps settings and themes in your config directory, logs and read
 state in your state directory, and the image cache in your cache directory.
 Open them from **Settings → Files**.
 
-## Disclaimer
+## Use at your own risk
 
-NoSlacking is an independent client and is not affiliated with or endorsed by
-Slack Technologies. "Slack" is a trademark of Salesforce. Session sign-in uses
-endpoints Slack does not document; use it with your own account and at your own
-risk.
+NoSlacking is an independent, unofficial client. It is not made, endorsed,
+supported or reviewed by Slack Technologies or Salesforce. "Slack" is a
+trademark of Salesforce, Inc., used here only to say which service this
+client works with.
+
+Before you use it, know that:
+
+- **Session sign-in is unsupported.** Both browser sign-in and the pasted
+  cookie use endpoints that Slack does not document. Slack can change or
+  remove them at any time, and NoSlacking may stop working without warning.
+- **It may break your workspace's rules or Slack's terms.** Slack's terms
+  limit third-party clients, and your workspace may only allow approved
+  apps. Slack or a workspace admin may sign out or suspend an account that
+  uses an unofficial client. Check with your workspace's admins if you are
+  unsure, and do not use it where it is not allowed.
+- **Your session is as powerful as your password.** The `d` cookie and the
+  session tokens give full access to your account. NoSlacking keeps them in
+  the OS keyring and sends them only to Slack's own hosts, but treat them
+  like a password and sign out (or revoke the session in Slack) on a
+  computer you stop using.
+- **There is no warranty.** The software is provided as is; see the
+  [license](LICENSE).
+
+Use NoSlacking only with your own account, and use your own Slack app (the
+documented route) where your workspace requires it.
+
+## Thanks
+
+NoSlacking owes its approach to two other unofficial clients:
+
+- [Make Slack Great Again](https://github.com/punarinta/make-slack-great-again)
+  (msga), which inspired session sign-in and signing in through the browser
+  by catching Slack's hand-off.
+- [wee-slack](https://github.com/wee-slack/wee-slack), which has reused the
+  browser session for years.
 
 ## License
 

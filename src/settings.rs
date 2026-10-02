@@ -126,7 +126,7 @@ impl Default for Settings {
 }
 
 impl<'de> serde::Deserialize<'de> for Settings {
-    /// Never fails on a field: see [`Settings::from_json`].
+    /// Never fails on a field: see `Settings::from_json`.
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
         Ok(Self::from_json(value).0)
