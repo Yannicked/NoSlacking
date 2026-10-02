@@ -160,6 +160,20 @@ enum Entry {
     },
 }
 
+/// What a failed download means for asking again: a client error (a file
+/// that is gone, 404, or not ours to see, 403) answers the same next time,
+/// while timeouts, rate limits and server trouble may pass.
+fn failure_for(error: slack::SlackError) -> Failure {
+    match error {
+        slack::SlackError::Http(status)
+            if (400..500).contains(&status) && status != 408 && status != 429 =>
+        {
+            Failure::Refused(error.to_string())
+        }
+        error => Failure::Fetch(error.to_string()),
+    }
+}
+
 /// How long after its `failures`-th failure in a row an image is asked for
 /// again, or `None` for never: from 5 seconds, doubling, up to 10 minutes.
 fn retry_delay(failure: &Failure, failures: u32) -> Option<Duration> {
@@ -299,7 +313,7 @@ impl Inner {
             }
             None => slack::client::get_bytes(&self.http, url, None, None, MAX_IMAGE_BYTES).await,
         }
-        .map_err(|e| Failure::Fetch(e.to_string()))?;
+        .map_err(failure_for)?;
         check_decoded_size(&bytes).map_err(Failure::Refused)?;
         if let Err(error) = crate::paths::write_atomic(&path, &bytes) {
             log::debug!("image not cached: {error}");
@@ -602,6 +616,17 @@ mod tests {
             Some(Duration::from_secs(600))
         );
         assert_eq!(retry_delay(&Failure::Refused("too large".into()), 1), None);
+        // A missing or forbidden file is not asked for again; a rate limit,
+        // a timeout or a server error is.
+        for gone in [404, 403, 410] {
+            let failure = failure_for(slack::SlackError::Http(gone));
+            assert_eq!(retry_delay(&failure, 1), None, "{gone}");
+        }
+        for passing in [429, 408, 500, 503] {
+            let failure = failure_for(slack::SlackError::Http(passing));
+            assert!(retry_delay(&failure, 1).is_some(), "{passing}");
+        }
+        assert!(retry_delay(&failure_for(slack::SlackError::RateLimited), 1).is_some());
         assert_eq!(retry_delay(&Failure::SignedOut, 1), None);
     }
 
