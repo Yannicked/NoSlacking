@@ -2,7 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- The NoSlacking.app Info.plist. packaging/macos/bundle.sh fills in
      @VERSION@. CFBundleURLTypes is what lets macOS route noslacking://
-     links (the "your own app" sign-in redirect) to the app. -->
+     and slack:// links to the app. The app cannot receive them yet: macOS
+     delivers them as an open-URL Apple event that nothing in the app
+     handles (see CONTRIBUTING.md, Packaging, macOS). -->
 <plist version="1.0">
 <dict>
   <key>CFBundleDevelopmentRegion</key>
