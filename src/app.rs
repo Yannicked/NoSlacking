@@ -497,7 +497,12 @@ impl App {
     /// Everything that must happen whether or not a window is open.
     pub fn background_frame(&mut self, ctx: &egui::Context) {
         while let Some(event) = self.backend.try_recv() {
+            let signed_out = matches!(event, Event::SignedOut { reason: None, .. });
             self.handle(event);
+            if signed_out {
+                // egui holds decoded copies of the workspace's private files.
+                ctx.forget_all_images();
+            }
         }
         while let Ok((thread, path)) = self.uploads.1.try_recv() {
             self.upload(thread, path, String::new());
@@ -515,7 +520,6 @@ impl App {
             self.settings_dirty = false;
             self.settings.save(&self.dirs.settings_file());
         }
-        let _ = ctx;
     }
 
     pub fn frame_ui(&mut self, ui: &mut egui::Ui) {
