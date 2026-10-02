@@ -248,7 +248,10 @@ fn standard_emoji() -> &'static [(emojis::Group, Vec<&'static emojis::Emoji>)] {
     GROUPS.get_or_init(|| {
         emojis::Group::iter()
             .map(|group| {
-                let list = group.emojis().filter(|e| e.shortcode().is_some()).collect();
+                let list = group
+                    .emojis()
+                    .filter(|e| crate::emoji::shortcode(e).is_some())
+                    .collect();
                 (group, list)
             })
             .collect()
@@ -350,6 +353,9 @@ impl Found {
                 .iter()
                 .filter(|e| {
                     needle.is_empty()
+                        || crate::emoji::names(e)
+                            .iter()
+                            .any(|code| code.contains(needle))
                         || e.shortcodes().any(|code| code.contains(needle))
                         || e.name().contains(needle)
                 })
@@ -369,7 +375,7 @@ impl Found {
                 standard_emoji()
                     .iter()
                     .flat_map(|(_, list)| list.iter())
-                    .filter_map(|e| e.shortcode())
+                    .filter_map(|e| crate::emoji::shortcode(e))
                     .find(|code| code.contains(needle))
                     .map(str::to_owned)
             });
@@ -525,7 +531,7 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                                                 theme::regular(22.0),
                                                 palette.text,
                                             );
-                                            emoji.shortcode().unwrap_or_default()
+                                            crate::emoji::shortcode(emoji).unwrap_or_default()
                                         }
                                     };
                                     let code = crate::emoji::toned(code, tone);
