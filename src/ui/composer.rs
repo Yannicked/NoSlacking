@@ -260,8 +260,8 @@ fn suggest(people: &People, workspace: &WorkspaceState, word: &str) -> Vec<Sugge
             .filter(|name| name.contains(&query))
             .take(4)
             .collect();
-        let mut standard: Vec<&str> = emojis::iter()
-            .flat_map(|e| e.shortcodes())
+        // Slack's own names, which are what other Slack clients render.
+        let mut standard: Vec<&str> = crate::emoji::all_names()
             .filter(|code| code.contains(&query))
             .collect();
         standard.sort_by_key(|code| (!code.starts_with(&query), code.len()));

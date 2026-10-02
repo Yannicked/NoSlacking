@@ -12,16 +12,13 @@ pub enum Resolved {
     Unknown,
 }
 
-/// Slack's names for emoji that GitHub's gemoji table (which `emojis`
-/// follows) spells differently.
-/// Names the two tables share are looked up directly and need no entry.
+include!("emoji_table.rs");
+
+/// Slack's own aliases that are in neither table, to the names they mean.
 const SLACK_NAMES: &[(&str, &str)] = &[
     ("simple_smile", "slightly_smiling_face"),
     ("thumbsup_all", "+1"),
     ("slack", "speech_balloon"),
-    ("white_frowning_face", "frowning_face"),
-    ("face_with_rolling_eyes", "roll_eyes"),
-    ("hugging_face", "hugs"),
     ("party_popper", "tada"),
 ];
 
@@ -71,10 +68,56 @@ fn split_tone(name: &str) -> (&str, Option<u8>) {
     }
 }
 
-/// The Unicode for a standard shortcode.
+/// The Unicode for a standard shortcode. An emoji newer than the `emojis`
+/// crate still shows, without its skin tones.
 pub fn unicode(name: &str, tone: Option<u8>) -> Option<String> {
-    let emoji = standard(name)?;
-    Some(with_tone(emoji, tone.unwrap_or(0)).to_owned())
+    match standard(name) {
+        Some(emoji) => Some(with_tone(emoji, tone.unwrap_or(0)).to_owned()),
+        None => slack_emoji(alias(name)).map(str::to_owned),
+    }
+}
+
+/// `name`, or what a Slack-only alias of it means.
+fn alias(name: &str) -> &str {
+    SLACK_NAMES
+        .iter()
+        .find(|(slack, _)| *slack == name)
+        .map_or(name, |(_, meant)| meant)
+}
+
+/// The emoji Slack's table gives `name`.
+fn slack_emoji(name: &str) -> Option<&'static str> {
+    NAMES
+        .binary_search_by(|(n, _)| (*n).cmp(name))
+        .ok()
+        .map(|i| NAMES[i].1)
+}
+
+/// Slack's names for `emoji`, the one Slack writes first; empty for an
+/// emoji Slack's table lacks.
+pub fn names(emoji: &emojis::Emoji) -> &'static [&'static str] {
+    // Skin tones and variation selectors are not part of the name.
+    let key: String = emoji
+        .with_skin_tone(emojis::SkinTone::Default)
+        .unwrap_or(emoji)
+        .as_str()
+        .chars()
+        .filter(|&c| c != '\u{fe0f}')
+        .collect();
+    BY_EMOJI
+        .binary_search_by(|(e, _)| (*e).cmp(key.as_str()))
+        .map_or(&[], |i| BY_EMOJI[i].1)
+}
+
+/// The shortcode to send for `emoji`: Slack's own name when it has one,
+/// since other Slack clients only know those, else GitHub's.
+pub fn shortcode(emoji: &'static emojis::Emoji) -> Option<&'static str> {
+    names(emoji).first().copied().or_else(|| emoji.shortcode())
+}
+
+/// Every Slack shortcode, for autocomplete.
+pub fn all_names() -> impl Iterator<Item = &'static str> {
+    NAMES.iter().map(|(name, _)| *name)
 }
 
 /// How many emoji the picker's "Recently used" row remembers.
@@ -98,13 +141,13 @@ fn skin_tone(tone: u8) -> Option<emojis::SkinTone> {
     })
 }
 
-/// The standard emoji a shortcode names, through Slack's own spellings.
+/// The standard emoji a shortcode names: Slack's table first, then
+/// GitHub's names (which `emojis` follows) for the ones Slack spells alike.
 pub fn standard(name: &str) -> Option<&'static emojis::Emoji> {
-    let name = SLACK_NAMES
-        .iter()
-        .find(|(slack, _)| *slack == name)
-        .map_or(name, |(_, gemoji)| gemoji);
-    emojis::get_by_shortcode(name)
+    let name = alias(name);
+    slack_emoji(name)
+        .and_then(emojis::get)
+        .or_else(|| emojis::get_by_shortcode(name))
 }
 
 /// Whether the emoji comes in skin tones (`:+1:` does, `:tada:` not).
@@ -223,6 +266,29 @@ pub fn group_name(group: emojis::Group) -> std::borrow::Cow<'static, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slack_names_resolve_and_are_what_we_send() {
+        // Slack's name, which GitHub's table spells `green_circle`.
+        assert_eq!(unicode("large_green_circle", None).as_deref(), Some("🟢"));
+        assert_eq!(unicode("thumbsup", Some(3)).as_deref(), Some("👍🏼"));
+        // GitHub-only spellings still read, and Slack-only aliases too.
+        assert_eq!(unicode("green_circle", None).as_deref(), Some("🟢"));
+        assert_eq!(unicode("simple_smile", None).as_deref(), Some("🙂"));
+        let circle = emojis::get("🟢").expect("in emojis");
+        assert_eq!(shortcode(circle), Some("large_green_circle"));
+        let heart = emojis::get("❤️").expect("in emojis");
+        assert_eq!(shortcode(heart), Some("heart"));
+        let thumbs = emojis::get("👍🏽").expect("toned");
+        assert_eq!(names(thumbs), ["+1", "thumbsup"]);
+        assert!(all_names().any(|n| n == "large_green_circle"));
+    }
+
+    #[test]
+    fn the_name_table_is_sorted_for_lookup() {
+        assert!(NAMES.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(BY_EMOJI.windows(2).all(|w| w[0].0 < w[1].0));
+    }
 
     #[test]
     fn standard_names_tones_and_slack_spellings() {
