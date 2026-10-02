@@ -1733,6 +1733,44 @@ impl App {
                 self.backend.send(Command::SignOut(team));
             }
             Action::Reconnect => self.backend.send(Command::Reconnect),
+            Action::SignInSession => {
+                self.sign_in = None;
+                self.backend.send(Command::SignInSession {
+                    cookie: self.setup.session_cookie.trim().to_owned(),
+                    workspace_url: self.setup.session_workspace.trim().to_owned(),
+                });
+            }
+            Action::PasteToken => {
+                let token = self.setup.user_token.trim().to_owned();
+                self.backend.send(Command::PasteToken(token));
+            }
+            Action::SaveApp => {
+                let form = AppCredentials {
+                    client_id: self.setup.client_id.trim().to_owned(),
+                    client_secret: self.setup.client_secret.trim().to_owned(),
+                    app_token: self.setup.app_token.trim().to_owned(),
+                };
+                if form.can_sign_in() {
+                    self.backend.send(Command::SaveApp(form.clone()));
+                    self.app_credentials = Some(form);
+                }
+            }
+            Action::StartSignIn => {
+                self.sign_in = None;
+                self.backend.send(Command::StartSignIn {
+                    redirect: self.settings.redirect,
+                    port: self.settings.loopback_port,
+                });
+            }
+            Action::CancelSignIn => {
+                self.backend.send(Command::CancelSignIn);
+                self.sign_in = None;
+            }
+            Action::OpenFolder(path) => {
+                if let Err(error) = open::that_detached(&path) {
+                    self.toast(format!("{}: {error}", t("Could not open the folder")), true);
+                }
+            }
             Action::DismissError => self.toasts.clear(),
         }
     }
