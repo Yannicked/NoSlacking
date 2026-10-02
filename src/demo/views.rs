@@ -3,7 +3,7 @@
 use super::{ME, NOW, history, message, thread, ts};
 use crate::backend::Event;
 use crate::model::Message;
-use crate::views::{self, Activity, Command, Reason};
+use crate::views::{self, Activity, Command, Followed, Reason};
 
 /// The demo's answers to one command.
 pub fn answer(team: &str, command: Command) -> Vec<Event> {
@@ -22,6 +22,11 @@ pub fn answer(team: &str, command: Command) -> Vec<Event> {
             )),
             channel,
         },
+        Command::Threads { .. } => views::Event::Threads {
+            result: Ok(threads()),
+            searched: false,
+        },
+        Command::ReadThread { .. } => views::Event::Nothing,
     };
     vec![Event::Views {
         team: team.to_owned(),
@@ -76,4 +81,38 @@ fn activity() -> Vec<Activity> {
     .into_iter()
     .filter(|a| a.message.user.as_deref() != Some(ME))
     .collect()
+}
+
+/// The threads the demo's you follow: #engineering's release thread, with
+/// replies you have not read, and a quiet one in #design.
+fn threads() -> Vec<Followed> {
+    let mut release = thread();
+    let parent = release.remove(0);
+    let reply = |seconds, user, text| Message {
+        thread_ts: Some(ts(NOW - 9500)),
+        ..message(seconds, user, text)
+    };
+    let design_parent = Message {
+        thread_ts: Some(ts(NOW - 9500)),
+        reply_count: 2,
+        replies_known: true,
+        ..message(NOW - 9500, ME, "Which icon set should the new views use?")
+    };
+    vec![
+        Followed {
+            channel: "C02".into(),
+            parent,
+            replies: release,
+            unread: 2,
+        },
+        Followed {
+            channel: "C03".into(),
+            parent: design_parent,
+            replies: vec![
+                reply(NOW - 9400, "U01", "Lucide, like the rest of the app."),
+                reply(NOW - 9300, ME, "Lucide it is :+1:"),
+            ],
+            unread: 0,
+        },
+    ]
 }

@@ -1243,3 +1243,27 @@ msgstr "Gesprek openen"
 
 msgid "Mark as read"
 msgstr "Als gelezen markeren"
+msgid "Threads"
+msgstr "Threads"
+
+msgid "Threads you replied in, found by searching."
+msgstr "Threads waarin je reageerde, gevonden door te zoeken."
+
+msgid "No threads yet. Reply in one to follow it."
+msgstr "Nog geen threads. Reageer in een thread om die te volgen."
+
+msgid "{count} new reply"
+msgid_plural "{count} new replies"
+msgstr[0] "{count} nieuwe reactie"
+msgstr[1] "{count} nieuwe reacties"
+
+msgid "Reply"
+msgstr "Antwoorden"
+
+msgid "See all {count} reply"
+msgid_plural "See all {count} replies"
+msgstr[0] "Bekijk {count} reactie"
+msgstr[1] "Bekijk alle {count} reacties"
+
+msgid "Open the thread"
+msgstr "Thread openen"
