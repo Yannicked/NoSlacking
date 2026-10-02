@@ -291,6 +291,74 @@ pub async fn set_away(client: &Client, away: bool) -> Result<(), SlackError> {
         .map(|_| ())
 }
 
+/// Reads a huddle's room, as Slack sends it on `huddle_thread` messages
+/// and `sh_room_*` events: the conversations it is in, and the huddle,
+/// or `None` once it has ended or emptied.
+fn room(room: &Value) -> Option<(Vec<String>, Option<people::Huddle>)> {
+    let id = room.get("id").and_then(Value::as_str)?.to_owned();
+    let strings = |key: &str| -> Vec<String> {
+        room.get(key)
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let participants = strings("participants");
+    let ended = room.get("has_ended").and_then(Value::as_bool) == Some(true)
+        || room
+            .get("date_end")
+            .and_then(Value::as_i64)
+            .is_some_and(|end| end > 0)
+        || participants.is_empty();
+    let huddle = (!ended).then_some(people::Huddle {
+        room: id,
+        participants,
+    });
+    Some((strings("channels"), huddle))
+}
+
+/// The huddle a message stands for, live: a new `huddle_thread` message,
+/// or a change to one (someone joined, left, or it ended).
+pub fn huddle_in_message(event: &Value) -> Option<people::Event> {
+    if event.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    let channel = event.get("channel").and_then(Value::as_str)?;
+    let message = match event.get("subtype").and_then(Value::as_str) {
+        Some("message_changed") => event.get("message")?,
+        _ => event,
+    };
+    if message.get("subtype").and_then(Value::as_str) != Some("huddle_thread") {
+        return None;
+    }
+    let (_, huddle) = room(message.get("room")?)?;
+    Some(people::Event::Huddles {
+        changes: vec![(channel.to_owned(), huddle)],
+    })
+}
+
+/// Whether a huddle goes on in a conversation, from its newest messages:
+/// the newest `huddle_thread` message among them decides. Without one the
+/// page says nothing, since a busy huddle can push its message further
+/// back than one page.
+pub fn huddle_in_history(
+    channel: &str,
+    messages: &[crate::slack::types::Message],
+) -> Option<people::Event> {
+    // Slack lists history newest first.
+    let newest = messages
+        .iter()
+        .find(|m| m.subtype.as_deref() == Some("huddle_thread"))?;
+    let (_, huddle) = room(newest.room.as_ref()?)?;
+    Some(people::Event::Huddles {
+        changes: vec![(channel.to_owned(), huddle)],
+    })
+}
+
 /// Reads a real-time event about people, if it is one.
 pub fn translate(event: &Value) -> Option<people::Event> {
     let kind = event.get("type").and_then(Value::as_str)?;
@@ -317,6 +385,14 @@ pub fn translate(event: &Value) -> Option<people::Event> {
                 users: users.into_iter().map(|u| (u, presence)).collect(),
             })
         }
+        // A huddle started, someone joined or left, or it ended (browser
+        // sessions, over RTM).
+        kind if kind.starts_with("sh_room_") => {
+            let (channels, huddle) = room(event.get("huddle").or_else(|| event.get("room"))?)?;
+            (!channels.is_empty()).then(|| people::Event::Huddles {
+                changes: channels.into_iter().map(|c| (c, huddle.clone())).collect(),
+            })
+        }
         // You set yourself away or active, here or in another client.
         "manual_presence_change" => Some(people::Event::ManualPresence {
             away: event.get("presence")?.as_str()? == "away",
@@ -332,6 +408,23 @@ pub fn translate(event: &Value) -> Option<people::Event> {
             user: event.get("user")?.as_str()?.to_owned(),
         }),
         _ => None,
+    }
+}
+
+/// The demo's huddle: Ana and Carla, in #design.
+#[cfg(feature = "demo")]
+pub fn demo_huddle(team: &str) -> Event {
+    Event::People {
+        team: team.to_owned(),
+        event: people::Event::Huddles {
+            changes: vec![(
+                "C03".into(),
+                Some(people::Huddle {
+                    room: "R01".into(),
+                    participants: vec!["U01".into(), "U03".into()],
+                }),
+            )],
+        },
     }
 }
 
@@ -428,6 +521,101 @@ mod tests {
             None
         );
         assert_eq!(translate(&json!({"type": "hello"})), None);
+    }
+
+    #[test]
+    fn huddles_come_from_rooms_and_their_messages() {
+        let going = json!({
+            "type": "sh_room_join",
+            "user": "U2",
+            "huddle": {"id": "R1", "channels": ["C1"], "participants": ["U1", "U2"], "date_end": 0}
+        });
+        let huddle = people::Huddle {
+            room: "R1".into(),
+            participants: vec!["U1".into(), "U2".into()],
+        };
+        assert_eq!(
+            translate(&going),
+            Some(people::Event::Huddles {
+                changes: vec![("C1".into(), Some(huddle.clone()))]
+            })
+        );
+        let emptied = json!({
+            "type": "sh_room_leave",
+            "huddle": {"id": "R1", "channels": ["C1"], "participants": []}
+        });
+        assert_eq!(
+            translate(&emptied),
+            Some(people::Event::Huddles {
+                changes: vec![("C1".into(), None)]
+            })
+        );
+        let started = json!({
+            "type": "message",
+            "subtype": "huddle_thread",
+            "channel": "C1",
+            "ts": "1.0",
+            "room": {"id": "R1", "participants": ["U1", "U2"], "has_ended": false}
+        });
+        assert_eq!(
+            huddle_in_message(&started),
+            Some(people::Event::Huddles {
+                changes: vec![("C1".into(), Some(huddle))]
+            })
+        );
+        let ended = json!({
+            "type": "message",
+            "subtype": "message_changed",
+            "channel": "C1",
+            "message": {
+                "subtype": "huddle_thread",
+                "ts": "1.0",
+                "room": {"id": "R1", "participants": [], "has_ended": true}
+            }
+        });
+        assert_eq!(
+            huddle_in_message(&ended),
+            Some(people::Event::Huddles {
+                changes: vec![("C1".into(), None)]
+            })
+        );
+        let plain = json!({"type": "message", "channel": "C1", "ts": "2.0", "text": "hi"});
+        assert_eq!(huddle_in_message(&plain), None);
+    }
+
+    #[test]
+    fn history_says_whether_a_huddle_goes_on() {
+        let page: crate::slack::types::HistoryPage = serde_json::from_value(json!({
+            "messages": [
+                {"ts": "3.0", "text": "after"},
+                {"ts": "2.0", "subtype": "huddle_thread", "room": {
+                    "id": "R2", "participants": ["U3"], "has_ended": false
+                }},
+                {"ts": "1.0", "subtype": "huddle_thread", "room": {
+                    "id": "R1", "participants": [], "has_ended": true
+                }}
+            ]
+        }))
+        .expect("a page");
+        assert_eq!(
+            huddle_in_history("C1", &page.messages),
+            Some(people::Event::Huddles {
+                changes: vec![(
+                    "C1".into(),
+                    Some(people::Huddle {
+                        room: "R2".into(),
+                        participants: vec!["U3".into()]
+                    })
+                )]
+            })
+        );
+        assert_eq!(
+            huddle_in_history("C1", &page.messages[2..]),
+            Some(people::Event::Huddles {
+                changes: vec![("C1".into(), None)]
+            })
+        );
+        assert_eq!(huddle_in_history("C1", &page.messages[..1]), None);
     }
 
     #[test]

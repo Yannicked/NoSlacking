@@ -300,6 +300,52 @@ fn save(dialog: &people::StatusDialog) -> Action {
     })
 }
 
+/// The "huddle" button in a conversation's header, while one goes on: who
+/// is in it, and a click to join it in Slack.
+pub fn huddle_button(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    workspace: &crate::app::WorkspaceState,
+    channel: &str,
+    actions: &mut Vec<Action>,
+) {
+    let Some(huddle) = workspace.people.huddles.get(channel) else {
+        return;
+    };
+    let names: Vec<String> = huddle
+        .participants
+        .iter()
+        .map(|u| workspace.user_label(u))
+        .collect();
+    let label = crate::i18n::tn(
+        "Huddle · {count} person",
+        "Huddle · {count} people",
+        huddle.participants.len() as u32,
+    );
+    let button = egui::Button::image_and_text(
+        theme::Icon::Headphones.image(ACTIVE, 14.0),
+        RichText::new(label)
+            .font(theme::semibold(12.5))
+            .color(palette.text),
+    )
+    .stroke(Stroke::new(1.0, ACTIVE))
+    .corner_radius(egui::CornerRadius::same(theme::RADIUS_SMALL + 2));
+    let tip = crate::i18n::tf(
+        "Join the huddle in Slack: {names}",
+        &[("names", &names.join(", "))],
+    );
+    let response = ui
+        .add(button)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(&tip);
+    if response.clicked() {
+        actions.push(Action::OpenUrl(people::huddle_url(
+            &workspace.info.team_id,
+            channel,
+        )));
+    }
+}
+
 /// The word for a presence, for tooltips and screen readers.
 pub fn word(presence: Presence) -> std::borrow::Cow<'static, str> {
     match presence {

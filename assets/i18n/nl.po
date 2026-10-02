@@ -1274,3 +1274,11 @@ msgstr "Bijvoorbeeld"
 
 msgid "Clear after"
 msgstr "Wissen na"
+
+msgid "Huddle · {count} person"
+msgid_plural "Huddle · {count} people"
+msgstr[0] "Huddle · {count} persoon"
+msgstr[1] "Huddle · {count} personen"
+
+msgid "Join the huddle in Slack: {names}"
+msgstr "Neem deel aan de huddle in Slack: {names}"
