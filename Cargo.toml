@@ -80,6 +80,9 @@ zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-tokio-c
 
 [build-dependencies]
 fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2", features = ["build"] }
+# The .exe's icon and version info (build.rs; it does nothing for other
+# targets). Without the toml feature it pulls in no parser.
+winresource = { version = "0.1", default-features = false }
 
 [features]
 # Sample data and the screenshot flag; never part of a release build.

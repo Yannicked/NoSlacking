@@ -51,6 +51,30 @@ desktop-file-validate packaging/applications/cloud.yannick.NoSlacking.desktop
 appstreamcli validate --no-net packaging/metainfo/cloud.yannick.NoSlacking.metainfo.xml
 ```
 
+### macOS
+
+`macos/bundle.sh` wraps a binary in `NoSlacking.app`, with
+`macos/Info.plist` (which declares the `noslacking://` scheme), an `.icns`
+made from the 512 px icon, and an ad-hoc signature:
+
+```
+cargo build --release
+packaging/macos/bundle.sh target/release/noslacking 0.1.0 dist
+```
+
+For a universal binary, build `aarch64-apple-darwin` and
+`x86_64-apple-darwin` and `lipo -create` them first. The bundle is not notarized, so Gatekeeper asks on first launch. The
+app does not yet handle macOS's open-URL event, so sign-in there keeps the
+loopback redirect even inside the bundle.
+
+### Windows
+
+`build.rs` embeds `windows/noslacking.ico` and the version info in
+`noslacking.exe` through `winresource`, using the Windows SDK's `rc.exe`
+(or `llvm-rc` when cross-compiling). Without one the build still succeeds,
+with a warning and no icon. The `.exe` registers `noslacking://` for the
+current user on first sign-in, so it needs no installer.
+
 ## Translations
 
 Interface strings go through `t("…")` / `tn(…)` (`src/i18n.rs`). Catalogs are
