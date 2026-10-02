@@ -8,6 +8,7 @@ mod login;
 mod message;
 mod overlays;
 mod rich;
+mod selection;
 mod settings;
 mod sidebar;
 mod thread;
@@ -18,6 +19,8 @@ use crate::app::{App, Page};
 use crate::theme::{self, Palette};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    // First, so Esc leaves a selected message before it closes the thread.
+    selection::keys(app, ui.ctx());
     keys::global(app, ui.ctx());
     match app.page {
         Page::SignIn => login::show(app, ui),

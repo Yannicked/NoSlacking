@@ -4,7 +4,7 @@
 use egui::{Align, CornerRadius, Layout, Margin, RichText, Sense, Stroke, UiBuilder, Vec2};
 
 use super::rich::{self, Rich};
-use crate::app::{Editing, WorkspaceState};
+use crate::app::{Editing, Selected, WorkspaceState};
 use crate::i18n::{t, tf, tn};
 use crate::model::{
     Accessory, Action, Attachment, Button, ContextItem, Delivery, Field, File, KitBlock, Message,
@@ -20,6 +20,31 @@ pub struct Row<'a> {
     pub enter_sends: bool,
     /// Whether a dialog is open over the list, which then owns Esc.
     pub overlay: bool,
+    /// The message picked with the keyboard, when it is in this list.
+    pub selected: Option<&'a Selected>,
+}
+
+/// The id of a message's row, which holds keyboard focus while the message
+/// is selected.
+pub fn row_id(channel: &str, ts: &crate::model::Ts, in_thread: bool) -> egui::Id {
+    egui::Id::new(("message-row", channel, ts.as_str(), in_thread))
+}
+
+/// A message's text as plain words, with people and channels by name, for
+/// the clipboard and screen readers.
+pub fn plain_text(workspace: &WorkspaceState, message: &Message) -> String {
+    crate::mrkdwn::plain(&message.text, |inline| match inline {
+        crate::mrkdwn::Inline::User { id, .. } => Some(format!("@{}", workspace.user_label(id))),
+        crate::mrkdwn::Inline::Channel { id, label } => Some(format!(
+            "#{}",
+            workspace
+                .conversation(id)
+                .map(|c| c.name.clone())
+                .or_else(|| label.clone())
+                .unwrap_or_else(|| id.clone())
+        )),
+        _ => None,
+    })
 }
 
 /// How a message relates to the one before it.
@@ -69,6 +94,7 @@ pub fn show(
     let is_editing = editing.as_ref().is_some_and(|e| {
         e.ts == message.ts && e.channel == row.channel && e.in_thread == row.in_thread
     });
+    let selected = row.selected.filter(|s| s.ts == message.ts);
     let top = if lead == Lead::Full { 8 } else { 2 };
     let response = egui::Frame::new()
         .inner_margin(Margin {
@@ -91,13 +117,19 @@ pub fn show(
                         edit(ui, row, editing, actions);
                     } else {
                         body(ui, row, message, actions);
+                        if selected.is_some() {
+                            keys_hint(ui, row, message);
+                        }
                     }
                 });
             });
         })
         .response;
     let rect = response.rect;
-    let hovered = ui.rect_contains_pointer(rect) && !is_editing;
+    if let Some(selected) = selected {
+        keyboard_row(ui, row, message, selected, rect);
+    }
+    let hovered = (ui.rect_contains_pointer(rect) || selected.is_some()) && !is_editing;
     if hovered {
         ui.painter().set(
             background,
@@ -121,6 +153,57 @@ pub fn show(
             toolbar(ui, row, message, me, rect, actions);
         }
     }
+}
+
+/// The selected message: it holds focus so screen readers read it, and
+/// shows an accent bar.
+fn keyboard_row(
+    ui: &mut egui::Ui,
+    row: &Row<'_>,
+    message: &Message,
+    selected: &Selected,
+    rect: egui::Rect,
+) {
+    let palette = row.palette;
+    let id = row_id(row.channel, &message.ts, row.in_thread);
+    let response = ui.interact(rect, id, Sense::focusable_noninteractive());
+    if selected.reveal {
+        response.request_focus();
+        response.scroll_to_me(None);
+    }
+    let author = row.workspace.author(message);
+    let spoken = tf(
+        "{author}, {time}: {text}",
+        &[
+            ("author", &author),
+            ("time", &super::short_time(&message.ts)),
+            ("text", &plain_text(row.workspace, message)),
+        ],
+    );
+    theme::describe(&response, egui::WidgetType::Label, &spoken);
+    ui.painter().rect_filled(
+        egui::Rect::from_min_size(rect.min, Vec2::new(3.0, rect.height())),
+        CornerRadius::ZERO,
+        palette.accent,
+    );
+}
+
+/// The keys that act on the selected message, under it.
+fn keys_hint(ui: &mut egui::Ui, row: &Row<'_>, message: &Message) {
+    let me = message.user.as_deref() == Some(row.workspace.info.user_id.as_str());
+    let hint = match (me, row.in_thread) {
+        (true, false) => {
+            t("↑↓ Move · R React · T Thread · E Edit · Del Delete · C Copy · Esc Back")
+        }
+        (true, true) => t("↑↓ Move · R React · E Edit · Del Delete · C Copy · Esc Back"),
+        (false, false) => t("↑↓ Move · R React · T Thread · C Copy · Esc Back"),
+        (false, true) => t("↑↓ Move · R React · C Copy · Esc Back"),
+    };
+    ui.label(
+        RichText::new(hint)
+            .font(theme::regular(11.5))
+            .color(row.palette.dim),
+    );
 }
 
 fn system(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<Action>) {
@@ -1033,7 +1116,8 @@ fn toolbar(
                 });
             }
         }
-        if theme::icon_button(ui, palette, Icon::SmilePlus, 16.0, &t("Add reaction")).clicked() {
+        if theme::icon_button(ui, palette, Icon::SmilePlus, 16.0, &t("Add reaction (R)")).clicked()
+        {
             actions.push(Action::PickReaction {
                 channel: row.channel.to_owned(),
                 ts: message.ts.clone(),
@@ -1045,7 +1129,7 @@ fn toolbar(
                 palette,
                 Icon::MessageCircle,
                 16.0,
-                &t("Reply in thread"),
+                &t("Reply in thread (T)"),
             )
             .clicked()
         {
@@ -1057,25 +1141,12 @@ fn toolbar(
                     .unwrap_or_else(|| message.ts.clone()),
             });
         }
-        if theme::icon_button(ui, palette, Icon::Copy, 16.0, &t("Copy text")).clicked() {
-            let text = crate::mrkdwn::plain(&message.text, |inline| match inline {
-                crate::mrkdwn::Inline::User { id, .. } => {
-                    Some(format!("@{}", row.workspace.user_label(id)))
-                }
-                crate::mrkdwn::Inline::Channel { id, label } => Some(format!(
-                    "#{}",
-                    row.workspace
-                        .conversation(id)
-                        .map(|c| c.name.clone())
-                        .or_else(|| label.clone())
-                        .unwrap_or_else(|| id.clone())
-                )),
-                _ => None,
-            });
-            actions.push(Action::Copy(text));
+        if theme::icon_button(ui, palette, Icon::Copy, 16.0, &t("Copy text (C)")).clicked() {
+            actions.push(Action::Copy(plain_text(row.workspace, message)));
         }
         if me {
-            if theme::icon_button(ui, palette, Icon::Pencil, 16.0, &t("Edit message")).clicked() {
+            if theme::icon_button(ui, palette, Icon::Pencil, 16.0, &t("Edit message (E)")).clicked()
+            {
                 let channel = row.channel.to_owned();
                 let ts = message.ts.clone();
                 actions.push(if row.in_thread {
@@ -1084,7 +1155,9 @@ fn toolbar(
                     Action::StartEdit { channel, ts }
                 });
             }
-            if theme::icon_button(ui, palette, Icon::Trash, 16.0, &t("Delete message")).clicked() {
+            if theme::icon_button(ui, palette, Icon::Trash, 16.0, &t("Delete message (Del)"))
+                .clicked()
+            {
                 actions.push(Action::AskDelete {
                     channel: row.channel.to_owned(),
                     ts: message.ts.clone(),
