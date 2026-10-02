@@ -1,19 +1,68 @@
-//! Images pasted into the composer.
+//! Images and files pasted into the composer.
 //!
 //! egui hands the app only the clipboard's text, so Ctrl+V on a copied
 //! screenshot does nothing in the text field. This reads the image itself
 //! (through arboard, which egui-winit already uses for text) and writes it
 //! out as a PNG the upload can stream like any other file.
+//!
+//! Files copied in a file manager arrive as text (`file:///…` or plain
+//! paths), which [`pasted_files`] recognises so they upload instead of
+//! landing in the message. On Wayland, where dropping files on the window
+//! does not reach the app, this is how a file gets in without the picker.
 
 use std::path::{Path, PathBuf};
 
-/// The clipboard's image as a PNG file in `dir`, or `None` when the
-/// clipboard holds text (egui pasted that already) or no image at all.
-pub fn clipboard_image(dir: &Path) -> Result<Option<PathBuf>, String> {
+/// The files pasted text names, when it names nothing but files that
+/// exist: one per line, as `file://` addresses (a file manager's copy) or
+/// absolute paths. GNOME's form starts with a `copy` or `cut` line, and
+/// `text/uri-list` allows `#` comments. Anything else is ordinary text.
+pub fn pasted_files(text: &str) -> Option<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for (i, line) in text.lines().map(str::trim).enumerate() {
+        if line.is_empty() || line.starts_with('#') || (i == 0 && matches!(line, "copy" | "cut")) {
+            continue;
+        }
+        let path = match line.strip_prefix("file://") {
+            // `file:///home/…` or `file://localhost/home/…`, percent-encoded.
+            Some(rest) => {
+                let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+                if !rest.starts_with('/') {
+                    return None;
+                }
+                PathBuf::from(urlencoding::decode(rest).ok()?.into_owned())
+            }
+            None => PathBuf::from(line),
+        };
+        if !path.is_absolute() || !path.is_file() {
+            return None;
+        }
+        files.push(path);
+    }
+    (!files.is_empty()).then_some(files)
+}
+
+/// What the clipboard holds to upload: the files it lists, or its image as
+/// a PNG file in `dir`. Empty when it holds text (egui pasted that already,
+/// and copied files come as text: see [`pasted_files`]) or nothing to send.
+pub fn clipboard_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     if clipboard.get_text().is_ok_and(|text| !text.is_empty()) {
-        return Ok(None);
+        return Ok(Vec::new());
     }
+    if let Ok(files) = clipboard.get().file_list()
+        && !files.is_empty()
+    {
+        return Ok(files.into_iter().filter(|path| path.is_file()).collect());
+    }
+    clipboard_image(&mut clipboard, dir).map(|image| image.into_iter().collect())
+}
+
+/// The clipboard's image as a PNG file in `dir`, or `None` when it has no
+/// image.
+fn clipboard_image(
+    clipboard: &mut arboard::Clipboard,
+    dir: &Path,
+) -> Result<Option<PathBuf>, String> {
     let image = match clipboard.get_image() {
         Ok(image) => image,
         Err(arboard::Error::ContentNotAvailable) => return Ok(None),
@@ -79,6 +128,35 @@ mod tests {
             again.file_name().and_then(|n| n.to_str()),
             Some("shot-2.png")
         );
+    }
+
+    #[test]
+    fn copied_files_are_recognised_and_text_is_left_alone() {
+        let dir = TestDir::new("paste-files");
+        let a = dir.0.join("a b.png");
+        let b = dir.0.join("notes.txt");
+        std::fs::write(&a, b"x").expect("written");
+        std::fs::write(&b, b"x").expect("written");
+        let uri = |p: &Path| format!("file://{}", p.display()).replace(' ', "%20");
+        assert_eq!(
+            pasted_files(&format!("{}\r\n{}\n", uri(&a), uri(&b))),
+            Some(vec![a.clone(), b.clone()])
+        );
+        assert_eq!(
+            pasted_files(&format!("copy\n{}", uri(&a))),
+            Some(vec![a.clone()])
+        );
+        assert_eq!(
+            pasted_files(&b.display().to_string()),
+            Some(vec![b.clone()])
+        );
+        // Ordinary text, a missing file, a folder or a relative path stays text.
+        assert_eq!(pasted_files("hello world"), None);
+        assert_eq!(pasted_files(&format!("{} and more", b.display())), None);
+        assert_eq!(pasted_files("file:///no/such/file.png"), None);
+        assert_eq!(pasted_files(&dir.0.display().to_string()), None);
+        assert_eq!(pasted_files("notes.txt"), None);
+        assert_eq!(pasted_files(""), None);
     }
 
     #[test]
