@@ -179,12 +179,8 @@ pub async fn exchange(
             ("code_verifier", flow.verifier.as_str()),
         ])
         .send()
-        .await
-        .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
+        .await?;
+    let bytes = response.bytes().await?;
     let access: types::OauthAccess = client::decode(&bytes)?;
     let team_id = access.team.id.clone();
     let user_id = access.authed_user.id.clone();

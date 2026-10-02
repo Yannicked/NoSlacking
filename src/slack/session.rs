@@ -130,16 +130,9 @@ pub async fn derive(cookie: &str, workspace_url: &str) -> Result<SessionSignIn, 
     let http = seeded_client(&cookie)?;
     // The boot page returns HTTP 403 while still carrying the token, so the
     // body is what matters, not the status.
-    let response = http
-        .get(workspace_url)
-        .send()
-        .await
-        .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
+    let response = http.get(workspace_url).send().await?;
     let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
+    let body = response.text().await?;
     log::debug!(
         "session boot {workspace_url}: HTTP {status}, {} bytes, logged_in={}",
         body.len(),

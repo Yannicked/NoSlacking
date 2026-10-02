@@ -22,6 +22,8 @@ const SILENCE: Duration = Duration::from_secs(90);
 const PING_EVERY: Duration = Duration::from_secs(30);
 /// A connection that lasted this long resets the reconnect backoff.
 const STABLE: Duration = Duration::from_secs(60);
+/// The longest wait between reconnect attempts.
+const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 pub enum SocketEvent {
@@ -87,20 +89,55 @@ pub fn read_frame(text: &str) -> (Option<String>, Meaning) {
     (ack, frame)
 }
 
+/// How one connection ended.
+#[derive(Debug, PartialEq)]
+enum Ended {
+    /// Slack asked for a fresh connection, for this reason.
+    Reconnect(String),
+    /// Slack asked to wait this long before opening another.
+    RateLimited(Duration),
+    Failed(SlackError),
+}
+
 /// Opens a Socket Mode URL with the app-level token.
-async fn open_url(http: &reqwest::Client, app_token: &str) -> Result<String, SlackError> {
+async fn open_url(http: &reqwest::Client, app_token: &str) -> Result<String, Ended> {
+    let network = |e: reqwest::Error| Ended::Failed(e.into());
     let response = http
         .post(format!("{}apps.connections.open", client::API))
         .bearer_auth(app_token)
         .send()
         .await
-        .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| SlackError::Network(e.without_url().to_string()))?;
-    let open: types::ConnectionsOpen = client::decode(&bytes)?;
+        .map_err(network)?;
+    if let Some(wait) = client::retry_after(
+        response.status().as_u16(),
+        response.headers().get("retry-after"),
+    ) {
+        return Err(Ended::RateLimited(wait));
+    }
+    let bytes = response.bytes().await.map_err(network)?;
+    let open: types::ConnectionsOpen = client::decode(&bytes).map_err(Ended::Failed)?;
     Ok(open.url)
+}
+
+/// How long to wait before the next connection, after one that ended as
+/// `ended` having lasted `lasted`; updates the running `backoff`.
+///
+/// Only a routine `disconnect` from a connection that had been up a while
+/// reconnects at once. One that comes straight after connecting backs off
+/// like any failure, so a Slack that keeps asking cannot make a hot loop.
+fn wait_before_next(ended: &Ended, lasted: Duration, backoff: &mut Duration) -> Duration {
+    if lasted > STABLE {
+        *backoff = Duration::from_secs(1);
+        if matches!(ended, Ended::Reconnect(_)) {
+            return Duration::ZERO;
+        }
+    }
+    let wait = match ended {
+        Ended::RateLimited(asked) => (*asked).max(*backoff),
+        _ => *backoff,
+    };
+    *backoff = (*backoff * 2).min(MAX_BACKOFF);
+    wait
 }
 
 /// Keeps a Socket Mode connection open until `stop` changes, reporting
@@ -121,55 +158,75 @@ pub async fn run(
             outcome = connection(&http, &app_token, &sink) => outcome,
             _ = stop.changed() => return,
         };
-        match outcome {
-            Ok(reason) => {
-                log::info!("Socket Mode reconnecting: {reason}");
-                backoff = Duration::from_secs(1);
-                continue;
+        let fatal = match &outcome {
+            Ended::Failed(SlackError::Api(code)) | Ended::Reconnect(code) if is_fatal(code) => {
+                Some(code.clone())
             }
-            Err(SlackError::Api(code)) if is_fatal(&code) => {
-                log::warn!("Socket Mode app token refused: {code}");
-                sink(SocketEvent::Rejected(code));
-                // Wait for a new token (the worker restarts this task).
-                let _ = stop.changed().await;
-                return;
+            _ => None,
+        };
+        if let Some(code) = fatal {
+            log::warn!("Socket Mode refused: {code}");
+            sink(SocketEvent::Rejected(code));
+            // Wait for a new token (the worker restarts this task).
+            let _ = stop.changed().await;
+            return;
+        }
+        match &outcome {
+            Ended::Reconnect(reason) => log::info!("Socket Mode reconnecting: {reason}"),
+            Ended::RateLimited(wait) => {
+                log::warn!("Socket Mode rate limited for {wait:?}");
+                sink(SocketEvent::Disconnected(
+                    SlackError::RateLimited.to_string(),
+                ));
             }
-            Err(error) => {
+            Ended::Failed(error) => {
                 log::warn!("Socket Mode connection lost: {error}");
                 sink(SocketEvent::Disconnected(error.to_string()));
             }
         }
-        if started.elapsed() > STABLE {
-            backoff = Duration::from_secs(1);
-        }
+        let wait = wait_before_next(&outcome, started.elapsed(), &mut backoff);
         tokio::select! {
-            _ = tokio::time::sleep(backoff) => {}
+            _ = tokio::time::sleep(wait) => {}
             _ = stop.changed() => return,
         }
-        backoff = (backoff * 2).min(Duration::from_secs(60));
     }
 }
 
+/// Whether reconnecting cannot help until a new app token is saved: Slack
+/// refused the token (any sign-in error, or not an app-level token at
+/// all), or Socket Mode was turned off for the app (`link_disabled`, sent
+/// as a `disconnect` reason).
 fn is_fatal(code: &str) -> bool {
-    matches!(
-        code,
-        "invalid_auth"
-            | "not_authed"
-            | "token_revoked"
-            | "not_allowed_token_type"
-            | "invalid_token"
-    )
+    client::is_auth_code(code)
+        || matches!(
+            code,
+            "not_allowed_token_type" | "invalid_token" | "link_disabled"
+        )
 }
 
-/// One socket, from open to close. `Ok` carries why Slack asked us to
-/// reconnect.
+/// One socket, from opening its URL to its end.
 async fn connection(
     http: &reqwest::Client,
     app_token: &str,
     sink: &(impl Fn(SocketEvent) + Send + Sync),
+) -> Ended {
+    let url = match open_url(http, app_token).await {
+        Ok(url) => url,
+        Err(ended) => return ended,
+    };
+    match stream(&url, sink).await {
+        Ok(reason) => Ended::Reconnect(reason),
+        Err(error) => Ended::Failed(error),
+    }
+}
+
+/// Reads one open socket until it ends. `Ok` carries why Slack asked us to
+/// reconnect.
+async fn stream(
+    url: &str,
+    sink: &(impl Fn(SocketEvent) + Send + Sync),
 ) -> Result<String, SlackError> {
-    let url = open_url(http, app_token).await?;
-    let (mut socket, _) = tokio_tungstenite::connect_async(url.as_str())
+    let (mut socket, _) = tokio_tungstenite::connect_async(url)
         .await
         .map_err(|e| SlackError::Network(e.to_string()))?;
     let mut ping = tokio::time::interval(PING_EVERY);
@@ -262,6 +319,62 @@ mod tests {
             (None, Meaning::Reconnect("refresh_requested".into()))
         );
         assert_eq!(read_frame("garbage"), (None, Meaning::Ignore));
+    }
+
+    #[test]
+    fn refused_tokens_are_fatal_and_outages_are_not() {
+        for code in [
+            "invalid_auth",
+            "token_revoked",
+            "not_allowed_token_type",
+            "link_disabled",
+        ] {
+            assert!(is_fatal(code), "{code}");
+        }
+        for code in ["ratelimited", "internal_error", "channel_not_found"] {
+            assert!(!is_fatal(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn only_routine_reconnects_skip_the_backoff() {
+        let mut backoff = Duration::from_secs(1);
+        let routine = Ended::Reconnect("refresh_requested".into());
+        // A long-lived connection being refreshed reconnects at once.
+        assert_eq!(
+            wait_before_next(&routine, Duration::from_secs(3600), &mut backoff),
+            Duration::ZERO
+        );
+        assert_eq!(backoff, Duration::from_secs(1));
+        // A disconnect right after connecting backs off, doubling.
+        let quick = Duration::from_secs(2);
+        assert_eq!(
+            wait_before_next(&routine, quick, &mut backoff),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            wait_before_next(&routine, quick, &mut backoff),
+            Duration::from_secs(2)
+        );
+        for _ in 0..10 {
+            wait_before_next(&routine, quick, &mut backoff);
+        }
+        assert_eq!(backoff, MAX_BACKOFF);
+    }
+
+    #[test]
+    fn rate_limits_wait_at_least_as_long_as_asked() {
+        let mut backoff = Duration::from_secs(1);
+        let limited = Ended::RateLimited(Duration::from_secs(30));
+        assert_eq!(
+            wait_before_next(&limited, Duration::ZERO, &mut backoff),
+            Duration::from_secs(30)
+        );
+        let failed = Ended::Failed(SlackError::Network("down".into()));
+        assert_eq!(
+            wait_before_next(&failed, Duration::from_secs(600), &mut backoff),
+            Duration::from_secs(1)
+        );
     }
 
     #[test]
