@@ -1238,3 +1238,21 @@ msgstr "De proxy-URL moet beginnen met http://, socks5:// of socks5h://."
 
 msgid "A proxy password cannot be saved; leave it out of the URL."
 msgstr "Een proxywachtwoord kan niet worden bewaard; laat het weg uit de URL."
+
+msgid "Spelling"
+msgstr "Spelling"
+
+msgid "Check spelling as you type"
+msgstr "Spelling controleren tijdens het typen"
+
+msgid "Right-click a marked word for spellings."
+msgstr "Klik met rechts op een gemarkeerd woord voor spellingen."
+
+msgid "No dictionaries found. Install Hunspell dictionaries (such as hunspell-en-us) or put a .aff and .dic pair in {folder}."
+msgstr "Geen woordenboeken gevonden. Installeer Hunspell-woordenboeken (zoals hunspell-nl) of zet een .aff- en .dic-bestand in {folder}."
+
+msgid "Automatic"
+msgstr "Automatisch"
+
+msgid "No spellings found"
+msgstr "Geen spellingen gevonden"

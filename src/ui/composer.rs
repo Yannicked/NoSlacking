@@ -10,6 +10,8 @@ use crate::i18n::{t, tf};
 use crate::model::{Action, Ts};
 use crate::theme::{self, Icon, Palette};
 
+mod spelling;
+
 pub struct Composer<'a> {
     pub palette: &'a Palette,
     pub workspace: &'a WorkspaceState,
@@ -445,20 +447,21 @@ pub fn show(
             .max_height(220.0)
             .stick_to_bottom(true)
             .show(ui, |ui| {
-                let response = ui.add(
-                    egui::TextEdit::multiline(&mut draft.text)
-                        .id(id)
-                        .frame(egui::Frame::NONE)
-                        .hint_text(
-                            RichText::new(&composer.placeholder)
-                                .font(theme::regular(14.5))
-                                .color(palette.dim),
-                        )
-                        .desired_rows(1)
-                        .desired_width(f32::INFINITY)
-                        .font(theme::regular(14.5))
-                        .lock_focus(true),
-                );
+                let output = (egui::TextEdit::multiline(&mut draft.text)
+                    .id(id)
+                    .frame(egui::Frame::NONE)
+                    .hint_text(
+                        RichText::new(&composer.placeholder)
+                            .font(theme::regular(14.5))
+                            .color(palette.dim),
+                    )
+                    .desired_rows(1)
+                    .desired_width(f32::INFINITY)
+                    .font(theme::regular(14.5))
+                    .lock_focus(true))
+                .show(ui);
+                spelling::show(ui, &output, id, draft, palette);
+                let response = output.response.response;
                 if composer.focus {
                     response.request_focus();
                 }

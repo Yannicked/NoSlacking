@@ -676,6 +676,9 @@ pub enum Action {
     Reconnect,
     /// Uses the proxy now in the settings and restarts the connections.
     ApplyProxy,
+    /// Loads the spelling dictionary now in the settings, or stops
+    /// checking.
+    ApplySpelling,
     DismissError,
     // Sign-in. These carry no secrets: the app reads the typed cookie,
     // token and credentials from its form, so they never sit in an action

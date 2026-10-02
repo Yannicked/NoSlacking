@@ -1086,6 +1086,7 @@ impl App {
         if let Err(error) = crate::slack::net::configure(&settings.proxy) {
             log::warn!("ignoring the saved proxy setting: {error}");
         }
+        crate::spell::configure(&settings.spelling, &dirs.config);
         let backend = backend::spawn(waker, source, dirs.images());
         let mut catalog = Catalog::default();
         if !options.demo {
@@ -2469,6 +2470,9 @@ impl App {
             }
             Action::SignOut(team) => self.backend.send(Command::SignOut(team)),
             Action::Reconnect => self.backend.send(Command::Reconnect),
+            Action::ApplySpelling => {
+                crate::spell::configure(&self.settings.spelling, &self.dirs.config);
+            }
             Action::ApplyProxy => self
                 .backend
                 .send(Command::SetProxy(self.settings.proxy.clone())),

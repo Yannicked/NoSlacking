@@ -92,6 +92,8 @@ pub struct Settings {
     pub recent_emoji: Vec<String>,
     /// Which proxy every connection goes through (Settings → Network).
     pub proxy: crate::slack::net::ProxySettings,
+    /// Spell checking in the composer.
+    pub spelling: crate::spell::SpellSettings,
 }
 
 impl Default for Settings {
@@ -115,6 +117,7 @@ impl Default for Settings {
             skin_tone: 0,
             recent_emoji: Vec::new(),
             proxy: crate::slack::net::ProxySettings::default(),
+            spelling: crate::spell::SpellSettings::default(),
         }
     }
 }
@@ -208,6 +211,7 @@ impl Settings {
             skin_tone,
             recent_emoji,
             proxy,
+            spelling,
         );
         // One damaged workspace must not sign you out of the others, so
         // these are read entry by entry.
