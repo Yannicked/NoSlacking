@@ -304,14 +304,14 @@ fn app_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 }
             });
             ui.label(
-                RichText::new(t("After creating it, add a redirect URL under OAuth & Permissions that matches the one below, and generate an app-level token with connections:write on Basic Information."))
+                RichText::new(t("After creating it, generate an app-level token with connections:write on Basic Information. The manifest already allows the sign-in redirect http://localhost:53682/callback; to come back through noslacking:// links instead, add noslacking://oauth/callback under OAuth & Permissions yourself and pick it in Settings."))
                     .font(theme::regular(12.5))
                     .color(palette.dim),
             );
             ui.separator();
             step(ui, palette, 2, &t("Paste the app's credentials"), saved);
             field(ui, palette, &t("Client ID"), &mut app.setup.client_id, "1234567890.1234567890", false);
-            field(ui, palette, &t("Client secret"), &mut app.setup.client_secret, "", true);
+            field(ui, palette, &t("Client secret (optional)"), &mut app.setup.client_secret, &t("Not needed: sign-in uses PKCE"), true);
             field(ui, palette, &t("App-level token"), &mut app.setup.app_token, "xapp-1-…", true);
             let form = AppCredentials {
                 client_id: app.setup.client_id.trim().to_owned(),
@@ -403,6 +403,19 @@ mod tests {
         assert_eq!(scopes, crate::auth::USER_SCOPES);
         assert!(manifest["oauth_config"]["scopes"].get("bot").is_none());
         assert_eq!(manifest["settings"]["socket_mode_enabled"], true);
+        // Slack takes a non-https redirect only from a PKCE app, and then
+        // always rotates its tokens.
+        assert_eq!(manifest["oauth_config"]["pkce_enabled"], true);
+        assert_eq!(manifest["settings"]["token_rotation_enabled"], true);
+        let port = crate::settings::Settings::default().loopback_port;
+        assert_eq!(
+            manifest["oauth_config"]["redirect_urls"],
+            serde_json::json!([crate::auth::loopback_redirect(port)])
+        );
+        assert_eq!(
+            crate::settings::Redirect::default(),
+            crate::settings::Redirect::Loopback
+        );
         assert!(
             manifest_url().starts_with("https://api.slack.com/apps?new_app=1&manifest_json=%7B")
         );

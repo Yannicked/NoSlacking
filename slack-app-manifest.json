@@ -9,6 +9,10 @@
     "background_color": "#1a1d21"
   },
   "oauth_config": {
+    "redirect_urls": [
+      "http://localhost:53682/callback"
+    ],
+    "pkce_enabled": true,
     "scopes": {
       "user": [
         "channels:history",
@@ -68,6 +72,6 @@
     },
     "org_deploy_enabled": false,
     "socket_mode_enabled": true,
-    "token_rotation_enabled": false
+    "token_rotation_enabled": true
   }
 }
