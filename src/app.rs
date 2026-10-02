@@ -952,6 +952,8 @@ pub struct App {
     /// Focus the field of the dialog or picker just opened, once: asking
     /// every frame would keep Tab from reaching its buttons.
     pub focus_overlay: bool,
+    /// The search window and its results.
+    pub search: crate::search::Search,
     /// Messages being brought into view, at most one per list.
     pub jumps: Vec<crate::jump::Jump>,
     local_counter: u64,
@@ -1053,6 +1055,7 @@ impl App {
             focus_composer: true,
             focus_overlay: false,
             jumps: Vec::new(),
+            search: crate::search::Search::default(),
             local_counter: 0,
             uploads: mpsc::channel(),
             marks: HashMap::new(),
@@ -1385,6 +1388,15 @@ impl App {
                 }
                 // An anchor kept for the list as it was is stale now.
                 self.prepended = None;
+            }
+            Event::Search {
+                team,
+                request,
+                result,
+            } => {
+                if self.search.query.as_ref().is_some_and(|q| q.team == team) {
+                    self.search.arrived(request, result);
+                }
             }
             Event::Newer {
                 team,
@@ -2051,6 +2063,26 @@ impl App {
                 self.switcher = Some((String::new(), 0));
             }
             Action::OpenProfile(user) => self.profile = Some(user),
+            Action::OpenSearch => self.open_search(),
+            Action::RunSearch => {
+                let started = self.active_team().and_then(|team| self.search.start(&team));
+                if let Some((query, request)) = started {
+                    self.backend.send(Command::Search {
+                        query,
+                        page: 1,
+                        request,
+                    });
+                }
+            }
+            Action::SearchMore => {
+                if let Some((query, page, request)) = self.search.more() {
+                    self.backend.send(Command::Search {
+                        query,
+                        page,
+                        request,
+                    });
+                }
+            }
             Action::DismissError => self.toasts.clear(),
             // Leaving the app: links, folders and the clipboard.
             Action::OpenUrl(url) => self.open_url(&url),
@@ -2194,6 +2226,27 @@ impl App {
             self.prepended = None;
             self.ensure_loaded(team, channel);
         }
+    }
+
+    /// Opens the search window, as it was left: results for another
+    /// workspace than the one on screen are dropped.
+    fn open_search(&mut self) {
+        let team = self.active_team();
+        if self
+            .search
+            .query
+            .as_ref()
+            .is_some_and(|q| Some(&q.team) != team.as_ref())
+        {
+            self.search = crate::search::Search {
+                text: std::mem::take(&mut self.search.text),
+                scope: self.search.scope,
+                sort: self.search.sort,
+                ..crate::search::Search::default()
+            };
+        }
+        self.search.open = true;
+        self.search.focus = true;
     }
 
     /// Asks for the page after the newest message of the open list, when
@@ -2426,6 +2479,7 @@ impl App {
             || self.preview.is_some()
             || self.confirm_delete.is_some()
             || self.section_dialog.is_some()
+            || self.search.open
     }
 
     /// Changes the sidebar at once, and in Slack, which then sends back the

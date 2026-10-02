@@ -619,6 +619,12 @@ pub enum Action {
         name: String,
     },
     OpenSwitcher,
+    /// Opens the search window.
+    OpenSearch,
+    /// Searches for what is typed in the search window.
+    RunSearch,
+    /// Reads the next page of the search results.
+    SearchMore,
     /// Changes the sidebar here and in Slack.
     Sidebar(crate::sidebar::SidebarEdit),
     /// Asks for a section name: a new section (taking `channel` along), or

@@ -531,6 +531,20 @@ impl Worker {
                 }
                 None => self.history_unavailable(team, channel),
             },
+            Command::Search {
+                query,
+                page,
+                request,
+            } => match self.team(&query.team) {
+                Some((client, sink)) => {
+                    tokio::spawn(super::search::search(client, query, page, request, sink));
+                }
+                None => self.sink.send(Event::Search {
+                    team: query.team,
+                    request,
+                    result: Err(crate::search::Failure::Other(NOT_SIGNED_IN.to_owned())),
+                }),
+            },
             Command::LoadNewer {
                 team,
                 channel,

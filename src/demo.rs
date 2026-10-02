@@ -495,6 +495,101 @@ fn around(channel: &str, ts: &Ts) -> (Vec<Message>, bool, Option<String>, bool) 
     (all[start..end].to_vec(), start > 0, cursor, end < all.len())
 }
 
+/// Searches the pretend workspace as Slack would: the words of `query`
+/// (its modifiers left out) in every message, matches marked, a page at a
+/// time.
+fn search(query: &crate::search::Query, page: u32) -> crate::search::Page {
+    use crate::search::{FileHit, Hit, MATCH_END, MATCH_START, PAGE_SIZE, Page, Scope, Sort};
+    let words: Vec<String> = query
+        .text
+        .split_whitespace()
+        .filter(|w| !w.contains(':'))
+        .map(str::to_lowercase)
+        .collect();
+    let channels = ["C01", "C02", "C05", "D01"];
+    let mut hits: Vec<Hit> = Vec::new();
+    match query.scope {
+        Scope::Messages => {
+            let replies = thread().into_iter().skip(1).map(|m| ("C02", m));
+            let all = channels
+                .iter()
+                .flat_map(|c| all_history(c).into_iter().map(move |m| (*c, m)))
+                .chain(replies);
+            for (channel, message) in all {
+                let lower = message.text.to_lowercase();
+                if words.is_empty() || !words.iter().all(|w| lower.contains(w.as_str())) {
+                    continue;
+                }
+                // Mark each word where it stands, keeping the text's case.
+                let mut text = String::new();
+                let mut rest = message.text.as_str();
+                while let Some((at, len)) = words
+                    .iter()
+                    .filter_map(|w| rest.to_lowercase().find(w.as_str()).map(|at| (at, w.len())))
+                    .min()
+                {
+                    if !rest.is_char_boundary(at) || !rest.is_char_boundary(at + len) {
+                        break;
+                    }
+                    text.push_str(&rest[..at]);
+                    text.push(MATCH_START);
+                    text.push_str(&rest[at..at + len]);
+                    text.push(MATCH_END);
+                    rest = &rest[at + len..];
+                }
+                text.push_str(rest);
+                hits.push(Hit {
+                    key: format!("{channel}/{}", message.ts.as_str()),
+                    channel: Some(channel.to_owned()),
+                    channel_name: channel.to_owned(),
+                    thread: message.thread_ts.clone().filter(|t| *t != message.ts),
+                    ts: Some(message.ts.clone()),
+                    when: Some(message.ts.clone()),
+                    user: message.user.clone(),
+                    username: message.username.clone(),
+                    text,
+                    file: None,
+                    permalink: None,
+                });
+            }
+        }
+        Scope::Files => hits.push(Hit {
+            key: "F01".into(),
+            channel: Some("C02".into()),
+            channel_name: "engineering".into(),
+            ts: Some(ts(NOW - 2400)),
+            thread: None,
+            when: Some(ts(NOW - 2400)),
+            user: Some("U01".into()),
+            username: None,
+            text: format!("{MATCH_START}sidebar{MATCH_END}-v2.png"),
+            file: Some(FileHit {
+                name: "sidebar-v2.png".into(),
+                title: "sidebar-v2.png".into(),
+                mimetype: "image/png".into(),
+                size: 48_213,
+            }),
+            permalink: None,
+        }),
+    }
+    if query.sort == Sort::Newest {
+        hits.sort_by(|a, b| b.when.cmp(&a.when));
+    }
+    let total = hits.len() as u32;
+    let pages = total.div_ceil(PAGE_SIZE).max(1);
+    let start = ((page.max(1) - 1) * PAGE_SIZE) as usize;
+    Page {
+        hits: hits
+            .into_iter()
+            .skip(start)
+            .take(PAGE_SIZE as usize)
+            .collect(),
+        page,
+        pages,
+        total,
+    }
+}
+
 /// How many messages [`around`] reads either side.
 const SIDE: usize = 15;
 
@@ -652,6 +747,18 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                     channel,
                     messages: all[start..end].to_vec(),
                     has_newer: end < all.len(),
+                });
+            }
+            Command::Search {
+                query,
+                page,
+                request,
+            } => {
+                tokio::time::sleep(LATENCY / 2).await;
+                sink.send(Event::Search {
+                    team: query.team.clone(),
+                    request,
+                    result: Ok(search(&query, page)),
                 });
             }
             Command::LoadHistory { team, channel } => sink.send(Event::History {

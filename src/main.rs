@@ -487,6 +487,12 @@ impl DemoSetup {
             Some("dm") => app.actions.push(Action::OpenConversation("D01".into())),
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             Some("general") => app.actions.push(Action::OpenConversation("C01".into())),
+            // Search results, with a second page to scroll to.
+            Some("search") => {
+                app.search.text = "standup in:#general".into();
+                app.actions.push(Action::OpenSearch);
+                app.actions.push(Action::RunSearch);
+            }
             // An old message of #general, shown in context and lit up.
             Some("jump") => app.actions.push(Action::JumpTo {
                 channel: "C01".into(),

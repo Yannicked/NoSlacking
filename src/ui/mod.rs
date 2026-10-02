@@ -9,6 +9,7 @@ mod message;
 mod overlays;
 mod rich;
 mod rows;
+mod search;
 mod selection;
 mod settings;
 mod sidebar;
@@ -39,6 +40,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
     overlays::show(app, ui.ctx());
+    search::show(app, ui.ctx());
     rich::end_frame();
 }
 
