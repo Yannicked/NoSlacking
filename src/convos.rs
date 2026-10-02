@@ -546,6 +546,30 @@ pub fn new_channel_name(workspace: &WorkspaceState, typed: &str) -> Result<Strin
     Ok(name)
 }
 
+/// How far someone's clock is from yours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ZoneDifference {
+    /// Their clock shows a later time than yours.
+    pub ahead: bool,
+    pub hours: u32,
+    pub minutes: u32,
+}
+
+/// The difference between their offset from UTC and yours, both in
+/// seconds; `None` when the clocks agree.
+pub fn zone_difference(theirs: i32, mine: i32) -> Option<ZoneDifference> {
+    let gap = i64::from(theirs) - i64::from(mine);
+    if gap == 0 {
+        return None;
+    }
+    let minutes = u32::try_from(gap.unsigned_abs() / 60).unwrap_or(u32::MAX);
+    Some(ZoneDifference {
+        ahead: gap > 0,
+        hours: minutes / 60,
+        minutes: minutes % 60,
+    })
+}
+
 /// The direct message you already have with exactly this one person.
 pub fn existing_dm(workspace: &WorkspaceState, users: &[String]) -> Option<String> {
     let [user] = users else {
@@ -1118,6 +1142,27 @@ mod tests {
         assert!(set_pinned(&mut workspace, "C1", &Ts::new("2.0"), true).is_none());
         set_pinned(&mut workspace, "C1", &Ts::new("1.0"), false);
         assert!(workspace.timelines_for("C1").all(|t| !t.messages[0].pinned));
+    }
+
+    #[test]
+    fn clocks_differ_in_hours_and_minutes() {
+        assert_eq!(zone_difference(3600, 3600), None);
+        assert_eq!(
+            zone_difference(5 * 3600 + 1800, 3600),
+            Some(ZoneDifference {
+                ahead: true,
+                hours: 4,
+                minutes: 30
+            })
+        );
+        assert_eq!(
+            zone_difference(-7 * 3600, 2 * 3600),
+            Some(ZoneDifference {
+                ahead: false,
+                hours: 9,
+                minutes: 0
+            })
+        );
     }
 
     #[test]
