@@ -78,3 +78,30 @@ msgstr "Vandaag"
 
 msgid "Yesterday"
 msgstr "Gisteren"
+
+msgid "Smileys & Emotion"
+msgstr "Smileys & emoties"
+
+msgid "People & Body"
+msgstr "Mensen & lichaam"
+
+msgid "Animals & Nature"
+msgstr "Dieren & natuur"
+
+msgid "Food & Drink"
+msgstr "Eten & drinken"
+
+msgid "Travel & Places"
+msgstr "Reizen & plaatsen"
+
+msgid "Activities"
+msgstr "Activiteiten"
+
+msgid "Objects"
+msgstr "Voorwerpen"
+
+msgid "Symbols"
+msgstr "Symbolen"
+
+msgid "Flags"
+msgstr "Vlaggen"

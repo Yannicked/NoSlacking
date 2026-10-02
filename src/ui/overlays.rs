@@ -362,11 +362,7 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                             continue;
                         }
                         ui.add_space(4.0);
-                        super::section_label(
-                            ui,
-                            &palette,
-                            &format!("{group:?}").replace("And", " & "),
-                        );
+                        super::section_label(ui, &palette, &crate::emoji::group_name(*group));
                         for chunk in list.chunks(columns) {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 0.0;
