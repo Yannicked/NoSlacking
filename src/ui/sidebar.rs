@@ -567,6 +567,11 @@ fn row(
     let unread = conversation.has_unread() && !selected;
     let (outer, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+    // A row scrolled out of view keeps its place, but its title, avatar
+    // and badge are not laid out: a big workspace has hundreds of rows.
+    if !ui.is_rect_visible(outer) {
+        return;
+    }
     let rect = outer.shrink2(Vec2::new(8.0, 0.0));
     if selected {
         ui.painter().rect_filled(
