@@ -207,8 +207,14 @@ fn header(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec
                 .font(theme::regular(12.0))
                 .color(palette.dim),
         );
-        if let Some(zoned) = message.ts.zoned() {
-            time.on_hover_text(zoned.strftime("%A, %B %-d, %Y at %H:%M:%S").to_string());
+        // The full date only when asked for: formatting it for every
+        // message on every frame was wasted work.
+        if message.ts.seconds().is_some() {
+            time.on_hover_ui(|ui| {
+                if let Some(zoned) = message.ts.zoned() {
+                    ui.label(zoned.strftime("%A, %B %-d, %Y at %H:%M:%S").to_string());
+                }
+            });
         }
     });
 }
