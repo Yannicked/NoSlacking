@@ -89,8 +89,23 @@ pub fn conversation_menu(
     conversation: &Conversation,
     actions: &mut Vec<Action>,
 ) {
+    let muted = workspace.desktop.is_muted(&conversation.id);
+    let label = if muted {
+        t("Unmute conversation")
+    } else {
+        t("Mute conversation")
+    };
+    if ui.button(label).clicked() {
+        actions.push(Action::Mute {
+            channel: conversation.id.clone(),
+            muted: !muted,
+        });
+        ui.close();
+    }
     let chosen = workspace.desktop.chosen(&conversation.id);
-    let default = Level::default_for(conversation.kind);
+    let default = workspace
+        .desktop
+        .default_level(&conversation.id, conversation.kind);
     ui.menu_button(t("Notify me about"), |ui| {
         let mut pick = |ui: &mut egui::Ui, level: Option<Level>, label: String| {
             if ui.radio(chosen == level, label).clicked() {

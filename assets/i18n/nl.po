@@ -745,3 +745,10 @@ msgstr "Meldingen pauzeren"
 
 msgid "Resume notifications"
 msgstr "Meldingen hervatten"
+
+# Desktop integration: muting.
+msgid "Mute conversation"
+msgstr "Gesprek dempen"
+
+msgid "Unmute conversation"
+msgstr "Gesprek niet meer dempen"

@@ -35,7 +35,10 @@ pub fn rail(app: &mut App, ui: &mut egui::Ui) {
                 let active = app.active_team();
                 for workspace in &app.workspaces {
                     let selected = active.as_deref() == Some(workspace.info.team_id.as_str());
-                    let unread = workspace.conversations.iter().any(Conversation::has_unread);
+                    let unread = workspace
+                        .conversations
+                        .iter()
+                        .any(|c| workspace.is_unread(c));
                     let mentions: u32 = workspace.conversations.iter().map(|c| c.mentions).sum();
                     let (rect, response) =
                         ui.allocate_exact_size(Vec2::splat(40.0), Sense::click());
@@ -447,7 +450,9 @@ fn section_view(
     } else {
         // A folded section still shows what is unread or open.
         rows.iter()
-            .filter(|c| c.has_unread() || workspace.active.as_deref() == Some(c.id.as_str()))
+            .filter(|c| {
+                workspace.is_unread(c) || workspace.active.as_deref() == Some(c.id.as_str())
+            })
             .collect()
     };
     for conversation in &rows_to_show {
@@ -612,7 +617,8 @@ fn row(
     actions: &mut Vec<Action>,
 ) {
     let selected = workspace.active.as_deref() == Some(conversation.id.as_str());
-    let unread = conversation.has_unread() && !selected;
+    let unread = workspace.is_unread(conversation) && !selected;
+    let muted = workspace.desktop.is_muted(&conversation.id);
     let (outer, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
     // A row scrolled out of view keeps its place, but its title, avatar
@@ -638,6 +644,9 @@ fn row(
         palette.on_accent
     } else if unread {
         palette.text
+    } else if muted {
+        // Quieter than the rest, as Slack draws muted conversations.
+        palette.dim
     } else {
         palette.secondary
     };

@@ -313,6 +313,13 @@ impl WorkspaceState {
         out
     }
 
+    /// Whether a conversation shows as unread: a muted one only for its
+    /// mentions, as in Slack.
+    pub fn is_unread(&self, conversation: &Conversation) -> bool {
+        conversation.has_unread()
+            && (conversation.mentions > 0 || !self.desktop.is_muted(&conversation.id))
+    }
+
     /// Whether a message mentions you (or everyone).
     pub fn mentions_me(&self, message: &Message) -> bool {
         let me = format!("<@{}", self.info.user_id);
@@ -559,6 +566,8 @@ impl WorkspaceState {
         let known = self.conversation(channel).is_some();
         let from_me = message.user.as_deref() == Some(self.info.user_id.as_str());
         let mentions_me = self.mentions_me(&message);
+        // A muted direct message counts only what mentions you.
+        let counts_all = !self.desktop.is_muted(channel);
         if message.is_reply() {
             let parent_ts = message.thread_ts.clone().unwrap_or_default();
             let key = (channel.to_owned(), parent_ts);
@@ -598,7 +607,7 @@ impl WorkspaceState {
                 if from_me {
                     conversation.last_read = Some(ts);
                     conversation.mentions = 0;
-                } else if !viewing && (mentions_me || conversation.kind.is_dm()) {
+                } else if !viewing && (mentions_me || (conversation.kind.is_dm() && counts_all)) {
                     conversation.mentions += 1;
                 }
             }
@@ -1246,6 +1255,7 @@ impl App {
             Event::Error(error) => self.toast(error, true),
             Event::Notice(text) => self.toast(text, false),
             Event::Dnd { team, dnd } => self.dnd_arrived(&team, dnd),
+            Event::SlackPrefs { team, prefs } => self.prefs_arrived(&team, prefs),
             // A workspace's conversations, people, apps and sidebar.
             Event::Conversations {
                 team,
@@ -1953,6 +1963,7 @@ impl App {
             Action::OpenUrl(url) => self.open_url(&url),
             Action::NotifyLevel { channel, level } => self.set_notify_level(&channel, level),
             Action::Snooze(choice) => self.snooze(choice),
+            Action::Mute { channel, muted } => self.mute(&channel, muted),
             Action::OpenFolder(path) => {
                 if let Err(error) = open::that_detached(&path) {
                     let error = error.to_string();
