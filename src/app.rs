@@ -75,6 +75,12 @@ pub struct Draft {
     pub mentions: Vec<(String, String)>,
     pub broadcast: bool,
     pub selected: usize,
+    /// The word (its start, in chars, and text) whose suggestions Esc
+    /// closed. They stay closed until the word changes, so Enter sends.
+    pub dismissed: Option<(usize, String)>,
+    /// Whether suggestions were showing when last drawn, so Esc closes
+    /// them and not the thread.
+    pub suggesting: bool,
 }
 
 /// The "name this section" dialog.
@@ -530,6 +536,24 @@ impl App {
             Some(ts) => format!("{team}/{channel}/{}", ts.as_str()),
             None => format!("{team}/{channel}"),
         }
+    }
+
+    /// The drafts of the composers on screen: the conversation's and the
+    /// open thread's.
+    pub fn visible_drafts(&self) -> Vec<String> {
+        let Some(workspace) = self.active_workspace() else {
+            return Vec::new();
+        };
+        let team = &workspace.info.team_id;
+        let mut keys: Vec<String> = workspace
+            .active
+            .iter()
+            .map(|channel| Self::draft_key(team, channel, None))
+            .collect();
+        if let Some((channel, ts)) = &self.thread {
+            keys.push(Self::draft_key(team, channel, Some(ts)));
+        }
+        keys
     }
 
     pub fn toast(&mut self, text: impl Into<String>, error: bool) {

@@ -19,6 +19,11 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
         .editing
         .as_ref()
         .is_some_and(|e| ctx.memory(|m| m.has_focus(super::message::edit_id(e))));
+    // Esc closes open suggestions first.
+    let suggesting = app
+        .visible_drafts()
+        .iter()
+        .any(|key| app.drafts.get(key).is_some_and(|d| d.suggesting));
     let (switch, settings, unread_up, unread_down, up, down, escape, zoom_in, zoom_out, zoom_reset) =
         ctx.input_mut(|input| {
             (
@@ -29,7 +34,7 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
                 input.consume_key(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowDown),
                 input.consume_key(Modifiers::ALT, Key::ArrowUp),
                 input.consume_key(Modifiers::ALT, Key::ArrowDown),
-                !overlay && !editing && input.key_pressed(Key::Escape),
+                !overlay && !editing && !suggesting && input.key_pressed(Key::Escape),
                 input.consume_key(Modifiers::COMMAND, Key::Equals)
                     || input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Equals)
                     || input.consume_key(Modifiers::COMMAND, Key::Plus),

@@ -141,10 +141,13 @@ pub fn show(
     } else {
         None
     };
-    let found = word
-        .as_ref()
-        .map(|(_, w)| suggestions(composer.workspace, w))
-        .unwrap_or_default();
+    if draft.dismissed != word {
+        draft.dismissed = None;
+    }
+    let mut found = match &word {
+        Some((_, w)) if draft.dismissed.is_none() => suggestions(composer.workspace, w),
+        _ => Vec::new(),
+    };
     if draft.selected >= found.len() {
         draft.selected = 0;
     }
@@ -154,6 +157,11 @@ pub fn show(
     let mut send = false;
     if focused {
         ui.input_mut(|input| {
+            // Esc closes the suggestions, so "@chan" can be sent as typed.
+            if !found.is_empty() && input.consume_key(Modifiers::NONE, Key::Escape) {
+                draft.dismissed = word.clone();
+                found.clear();
+            }
             if !found.is_empty() {
                 if input.consume_key(Modifiers::NONE, Key::ArrowDown) {
                     draft.selected = (draft.selected + 1) % found.len();
@@ -182,6 +190,7 @@ pub fn show(
         });
     }
 
+    draft.suggesting = !found.is_empty();
     if !found.is_empty() {
         suggestion_list(ui, palette, &found, draft.selected, &mut accept);
     }
