@@ -322,9 +322,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             ui,
             palette,
             &t("Sign-in redirect"),
-            &t(
-                "Must be one of the app's redirect URLs under OAuth & Permissions. The manifest adds the loopback one; add noslacking://oauth/callback there yourself to use it.",
-            ),
+            &t("Must be one of the app's redirect URLs under OAuth & Permissions."),
             |ui, name| {
                 egui::ComboBox::from_id_salt("redirect")
                     .selected_text(match redirect {
@@ -349,6 +347,12 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                     .response
                     .labelled_by(name);
             },
+        );
+        // Under the row: next to the menu it would run beneath it.
+        ui.label(
+            RichText::new(t("The manifest adds the loopback one; add noslacking://oauth/callback there yourself to use it."))
+                .font(theme::regular(12.5))
+                .color(palette.dim),
         );
         if redirect != app.settings.redirect {
             app.settings.redirect = redirect;
