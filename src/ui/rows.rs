@@ -60,9 +60,21 @@ struct Measured {
 #[derive(Clone, Debug, Default)]
 pub struct Heights {
     rows: std::collections::HashMap<u64, Measured>,
+    /// What the heights were measured under (the message density, say).
+    layout: u64,
 }
 
 impl Heights {
+    /// Forgets every height when the rows are now drawn differently than
+    /// when they were measured: a height from the old layout would place
+    /// the rows out of view wrongly until each was drawn again.
+    pub fn for_layout(&mut self, layout: u64) {
+        if self.layout != layout {
+            self.rows.clear();
+            self.layout = layout;
+        }
+    }
+
     /// The height to place `entry` with: as last drawn, else its guess.
     pub fn planned(&mut self, entry: &Entry) -> f32 {
         match self.rows.get_mut(&entry.key) {
@@ -162,6 +174,21 @@ mod tests {
         heights.sweep();
         heights.sweep();
         assert_eq!(heights.planned(&a), 50.0, "gone once not placed");
+    }
+
+    #[test]
+    fn a_new_layout_forgets_old_heights() {
+        let mut heights = Heights::default();
+        let a = Entry {
+            key: 1,
+            guess: 50.0,
+        };
+        heights.for_layout(7);
+        heights.record(&a, 72.0);
+        heights.for_layout(7);
+        assert_eq!(heights.planned(&a), 72.0, "same layout keeps them");
+        heights.for_layout(8);
+        assert_eq!(heights.planned(&a), 50.0, "back to the guess");
     }
 
     #[test]

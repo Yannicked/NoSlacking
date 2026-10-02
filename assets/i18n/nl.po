@@ -1226,3 +1226,27 @@ msgstr "Afspelen in de browser"
 
 msgid "Opening {name}…"
 msgstr "{name} wordt geopend…"
+
+msgid "Message density"
+msgstr "Berichtdichtheid"
+
+msgid "Compact puts the time, name and text of each message on one line."
+msgstr "Compact zet de tijd, naam en tekst van elk bericht op één regel."
+
+msgid "Comfortable"
+msgstr "Ruim"
+
+msgid "Compact"
+msgstr "Compact"
+
+msgid "Show images and previews inline"
+msgstr "Afbeeldingen en voorbeelden direct tonen"
+
+msgid "Off: pictures and link previews wait for a click, and are not fetched before."
+msgstr "Uit: afbeeldingen en linkvoorbeelden wachten op een klik en worden pas dan opgehaald."
+
+msgid "Show the picture"
+msgstr "Afbeelding tonen"
+
+msgid "Show the picture: {name}"
+msgstr "Afbeelding tonen: {name}"
