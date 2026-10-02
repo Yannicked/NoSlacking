@@ -28,6 +28,7 @@ pub mod mrkdwn;
 pub mod notify;
 pub mod paste;
 pub mod paths;
+pub mod people;
 pub mod redact;
 pub mod search;
 pub mod settings;

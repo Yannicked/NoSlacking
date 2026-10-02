@@ -854,6 +854,11 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                     sink.send(event);
                 }
             }
+            Command::People { team, command } => {
+                for event in crate::backend::people::demo(&team, command) {
+                    sink.send(event);
+                }
+            }
             _ => {}
         }
     }

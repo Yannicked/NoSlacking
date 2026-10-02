@@ -641,6 +641,7 @@ fn profile(app: &mut App, ctx: &egui::Context) {
         return;
     };
     let user = workspace.user(&user_id).cloned();
+    let presence = workspace.people.presence(&user_id);
     let dm = app.direct_message(&user_id);
     let mut close = false;
     let response = egui::Modal::new(egui::Id::new("profile"))
@@ -651,12 +652,19 @@ fn profile(app: &mut App, ctx: &egui::Context) {
                 .as_ref()
                 .map_or_else(|| user_id.clone(), |u| u.label().to_owned());
             ui.horizontal(|ui| {
-                super::avatar(
+                let avatar = super::avatar(
                     ui,
                     user.as_ref().and_then(|u| u.avatar.as_deref()),
                     &name,
                     &user_id,
                     72.0,
+                );
+                super::people::dot(
+                    ui.painter(),
+                    &palette,
+                    avatar.rect,
+                    presence,
+                    palette.overlay,
                 );
                 ui.vertical(|ui| {
                     ui.label(
@@ -664,6 +672,17 @@ fn profile(app: &mut App, ctx: &egui::Context) {
                             .font(theme::bold(18.0))
                             .color(palette.text),
                     );
+                    if let Some(presence) = presence {
+                        let color = match presence {
+                            crate::people::Presence::Active => super::people::ACTIVE,
+                            crate::people::Presence::Away => palette.dim,
+                        };
+                        ui.label(
+                            RichText::new(super::people::word(presence))
+                                .font(theme::regular(13.0))
+                                .color(color),
+                        );
+                    }
                     if let Some(user) = &user {
                         if !user.real_name.is_empty() && user.real_name != name {
                             ui.label(RichText::new(&user.real_name).color(palette.secondary));

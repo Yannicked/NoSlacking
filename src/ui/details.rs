@@ -394,6 +394,18 @@ fn members(
                     &name,
                     id,
                 );
+                let behind = if row.hovered() {
+                    palette.surface_hover
+                } else {
+                    palette.window
+                };
+                super::people::dot(
+                    ui.painter(),
+                    palette,
+                    picture,
+                    workspace.people.presence(id),
+                    behind,
+                );
                 let label = ui.painter().text(
                     egui::pos2(rect.left() + 42.0, rect.center().y),
                     egui::Align2::LEFT_CENTER,
