@@ -24,6 +24,12 @@ const HELD_BYTES: usize = 96 * 1024 * 1024;
 /// The largest single image fetched.
 const MAX_IMAGE_BYTES: usize = 24 * 1024 * 1024;
 const PREFIX: &str = "nsauth:";
+/// The widest or tallest image decoded.
+const MAX_SIDE: u32 = 16_384;
+/// The most pixels in one decoded frame (about 160 MB as RGBA).
+const MAX_PIXELS: u64 = 40_000_000;
+/// The most memory every frame of an animation may decode to, as RGBA.
+const MAX_DECODED_BYTES: u64 = 256 * 1024 * 1024;
 
 /// The URI of an image that needs `team`'s token.
 pub fn authed(team: &str, url: &str) -> String {
@@ -37,6 +43,76 @@ fn split(uri: &str) -> Option<(Option<&str>, &str)> {
         return url.starts_with("https://").then_some((Some(team), url));
     }
     (uri.starts_with("https://") || uri.starts_with("http://")).then_some((None, uri))
+}
+
+/// Refuses an image that would decode to far more memory than its download
+/// size suggests (a "decompression bomb"): egui decodes whatever it is
+/// handed, and every frame of a GIF at once. Reading the header and
+/// walking a GIF's blocks costs no decoding.
+fn check_decoded_size(bytes: &[u8]) -> Result<(), String> {
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let format = reader.format();
+    let Ok((width, height)) = reader.into_dimensions() else {
+        // Not a raster format `image` knows (an SVG, say); egui's own
+        // loaders decide.
+        return Ok(());
+    };
+    let pixels = u64::from(width) * u64::from(height);
+    if width > MAX_SIDE || height > MAX_SIDE || pixels > MAX_PIXELS {
+        return Err(format!("image too large to show ({width}×{height})"));
+    }
+    if format == Some(image::ImageFormat::Gif) {
+        let frames = gif_frames(bytes).ok_or_else(|| "damaged GIF".to_owned())?;
+        if frames.saturating_mul(pixels).saturating_mul(4) > MAX_DECODED_BYTES {
+            return Err(format!("animation too large to show ({frames} frames)"));
+        }
+    }
+    Ok(())
+}
+
+/// The number of frames in a GIF, from its block structure alone, or `None`
+/// when the file is cut short or malformed.
+fn gif_frames(bytes: &[u8]) -> Option<u64> {
+    /// Skips a chain of data sub-blocks, ending at the zero-length one.
+    fn sub_blocks(bytes: &[u8], mut at: usize) -> Option<usize> {
+        loop {
+            let size = usize::from(*bytes.get(at)?);
+            at += 1 + size;
+            if size == 0 {
+                return Some(at);
+            }
+        }
+    }
+    fn color_table(flags: u8) -> usize {
+        if flags & 0x80 == 0 {
+            0
+        } else {
+            3 << ((flags & 0x07) + 1)
+        }
+    }
+    if !bytes.starts_with(b"GIF") {
+        return None;
+    }
+    let mut at = 13 + color_table(*bytes.get(10)?);
+    let mut frames = 0;
+    loop {
+        match *bytes.get(at)? {
+            // Trailer.
+            0x3B => return Some(frames),
+            // Extension: a label, then sub-blocks.
+            0x21 => at = sub_blocks(bytes, at + 2)?,
+            // Image: a 9-byte descriptor, a local color table, the LZW code
+            // size, then sub-blocks.
+            0x2C => {
+                let flags = *bytes.get(at + 9)?;
+                at = sub_blocks(bytes, at + 10 + color_table(flags) + 1)?;
+                frames += 1;
+            }
+            _ => return None,
+        }
+    }
 }
 
 enum Entry {
@@ -110,6 +186,7 @@ impl Inner {
         if let Ok(bytes) = tokio::fs::read(&path).await
             && !bytes.is_empty()
         {
+            check_decoded_size(&bytes)?;
             return Ok(bytes);
         }
         let bytes = match team {
@@ -121,6 +198,7 @@ impl Inner {
             None => slack::client::get_bytes(&self.http, url, None, None, MAX_IMAGE_BYTES).await,
         }
         .map_err(|e| e.to_string())?;
+        check_decoded_size(&bytes)?;
         if let Err(error) = crate::paths::write_atomic(&path, &bytes) {
             log::debug!("image not cached: {error}");
         }
@@ -264,6 +342,44 @@ mod tests {
         );
         assert_eq!(split("nsauth:T01:file:///etc/passwd"), None);
         assert_eq!(split("bytes://icon.svg"), None);
+    }
+
+    /// A GIF of `frames` 1×1 frames, with a `width`×`height` screen.
+    fn gif(width: u16, height: u16, frames: usize) -> Vec<u8> {
+        let mut bytes = b"GIF89a".to_vec();
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        // A two-color global table.
+        bytes.extend_from_slice(&[0x80, 0, 0, 0, 0, 0, 255, 255, 255]);
+        // A comment extension, to be skipped.
+        bytes.extend_from_slice(&[0x21, 0xFE, 2, b'h', b'i', 0]);
+        for _ in 0..frames {
+            bytes.extend_from_slice(&[0x2C, 0, 0, 0, 0, 1, 0, 1, 0, 0]);
+            bytes.extend_from_slice(&[2, 2, 0x4C, 0x01, 0]);
+        }
+        bytes.push(0x3B);
+        bytes
+    }
+
+    #[test]
+    fn gif_frames_are_counted_without_decoding() {
+        assert_eq!(gif_frames(&gif(1, 1, 3)), Some(3));
+        assert_eq!(gif_frames(&gif(1, 1, 0)), Some(0));
+        let mut cut = gif(1, 1, 2);
+        cut.truncate(cut.len() - 4);
+        assert_eq!(gif_frames(&cut), None);
+        assert_eq!(gif_frames(b"PNG"), None);
+    }
+
+    #[test]
+    fn decompression_bombs_are_refused() {
+        assert_eq!(check_decoded_size(&gif(16, 16, 10)), Ok(()));
+        // 4000×4000 RGBA is 64 MB a frame: five frames are over budget.
+        assert!(check_decoded_size(&gif(4000, 4000, 5)).is_err());
+        assert!(check_decoded_size(&gif(20_000, 1, 1)).is_err());
+        assert!(check_decoded_size(&gif(8000, 8000, 1)).is_err());
+        // Something `image` cannot size is left to egui.
+        assert_eq!(check_decoded_size(b"<svg/>"), Ok(()));
     }
 
     #[test]
