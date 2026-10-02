@@ -4,9 +4,9 @@ Findings from a code review at `684c148`. Line numbers are as of that
 commit. When this review was written, `cargo fmt`, clippy (`-D warnings`)
 and all 59 tests passed.
 
-Status on 2026-10-02: every review finding (P0 to P3) is fixed on `main`,
-which now has 282 tests. Most features are done; the rest are in progress
-(batch B) and are marked so below.
+Status on 2026-10-02: every review finding (P0 to P3) and every feature
+below is done on `main`, which has 366 tests. What is left are known limits
+and things to test, under "Follow-ups".
 
 ## P0: Security
 
@@ -193,8 +193,8 @@ which now has 282 tests. Most features are done; the rest are in progress
       - `users.list` stops at 40 pages
 
       Follow the cursors, or log when a cap is hit.
-      *Done, except section `channel_ids_page` cursors, which are only
-      logged so far (in progress, batch B).*
+      *Done. Section `channel_ids_page` cursors have no call to follow; see
+      the follow-ups.*
 - [x] **`users_requested` and `bots_requested` are never cleared**, so a
       transient failure means that user is never fetched again
       (`worker.rs:615,648`).
@@ -324,9 +324,10 @@ which now has 282 tests. Most features are done; the rest are in progress
       none.
 - [x] **Bump `sha1`, `sha2` and `rand`** to the versions the transitive
       deps use, to reduce duplicate crates.
-- [ ] **Consider not embedding 12.6 MB of emoji fonts**: load them from
+- [x] **Consider not embedding 12.6 MB of emoji fonts**: load them from
       the system, or compress them.
-      *In progress (batch B): bundle per platform.*
+      *Done: nothing on macOS, flags only on Windows, and the full font on
+      Linux behind the `bundled-emoji` feature.*
 - [x] **Packaging:**
       - The `.desktop` file has `Icon=cloud.yannick.NoSlacking`, but the
         icons are named `noslacking-*.png`.
@@ -351,13 +352,12 @@ sections. Nothing below exists yet.
       `from:`/`in:`/`before:` filters and jump-to-message with context.
 - [x] **Start conversations**: open a DM or group DM (`conversations.open`),
       browse and join or leave channels, create a channel.
-- [ ] **Presence and typing**: green dots, `user_typing` over RTM and Socket
+- [x] **Presence and typing**: green dots, `user_typing` over RTM and Socket
       Mode, and setting yourself away.
-      *In progress (batch B).*
-- [ ] **Your own status and DND**: set the status emoji, text and expiry,
+      *Typing is for browser sign-ins only; Socket Mode sends no typing
+      events.*
+- [x] **Your own status and DND**: set the status emoji, text and expiry,
       and snooze notifications (`dnd.setSnooze`).
-      *DND and snooze are done; setting your status is in progress
-      (batch B).*
 - [x] **Mute and unmute channels**, honouring Slack's muted list so muted
       channels don't count as unread.
 - [x] **Persistent drafts** per conversation and thread across restarts,
@@ -368,21 +368,16 @@ sections. Nothing below exists yet.
 
 ### Productivity views
 
-- [ ] **Activity / Mentions**: one list of mentions and replies across
+- [x] **Activity / Mentions**: one list of mentions and replies across
       channels.
-      *In progress (batch B).*
-- [ ] **All unreads**: one list of every unread message.
-      *In progress (batch B).*
-- [ ] **Threads**: a list of threads you follow, with unread replies.
-      *In progress (batch B).*
-- [ ] **Saved for later and reminders** (`reminders.add`, or the newer
+- [x] **All unreads**: one list of every unread message.
+- [x] **Threads**: a list of threads you follow, with unread replies.
+- [x] **Saved for later and reminders** (`reminders.add`, or the newer
       saved-items API on session tokens).
-      *In progress (batch B).*
 - [x] **Pins and bookmarks** in a channel header panel (`pins.list`,
       `bookmarks.list`).
-- [ ] **Scheduled messages** (`chat.scheduleMessage`) and "send later" in
+- [x] **Scheduled messages** (`chat.scheduleMessage`) and "send later" in
       the composer.
-      *In progress (batch B).*
 - [x] **Channel details**: topic, purpose, members, files, and editing the
       topic.
 - [x] **Profile card** on clicking a name: local time, title, status, and
@@ -398,18 +393,17 @@ sections. Nothing below exists yet.
 - [x] **Paste images** from the clipboard and drag-and-drop files in the
       composer, with upload progress and cancel.
       *Done. On Wayland the clipboard is read through XWayland.*
-- [ ] **Spell checking** (system spellchecker, or `hunspell` behind a
+- [x] **Spell checking** (system spellchecker, or `hunspell` behind a
       feature).
-      *In progress (batch B).*
+      *Uses the system's Hunspell dictionaries through `spellbook` (MPL-2.0).*
 - [x] **Slash commands** (`/remind`, `/status`, `/invite`) and `#channel`
       autocomplete.
       *`/remind` and app commands need the browser sign-in (`chat.command`).*
-- [ ] **Rich unfurls** for link previews, video and audio file playback or
+- [x] **Rich unfurls** for link previews, video and audio file playback or
       a "play externally" option, and PDF thumbnails.
-      *In progress (batch B).*
-- [ ] **Image viewer**: a full-size lightbox with zoom and arrow-key
+      *Video and audio open in the system player, not in the app.*
+- [x] **Image viewer**: a full-size lightbox with zoom and arrow-key
       navigation through the channel's images.
-      *In progress (batch B).*
 - [x] **Emoji**: skin tones, recently used, and a frequent-reactions row.
 
 ### Desktop integration
@@ -417,29 +411,26 @@ sections. Nothing below exists yet.
 - [x] **System tray** with an unread indicator and close-to-tray, and
       start on login.
 - [x] **`slack://` URL handler** registration so links open in NoSlacking.
-- [ ] **Offline cache**: keep recent history on disk so start-up is instant
+- [x] **Offline cache**: keep recent history on disk so start-up is instant
       and the client works read-only offline. Keep the cache encrypted, or
       at least per-team and wiped on sign-out.
-      *In progress (batch B).*
-- [ ] **Proxy settings** (HTTP or SOCKS) for corporate networks.
-      *In progress (batch B).*
-- [ ] **Multi-window**: pop a conversation out into its own window.
-      *In progress (batch B).*
-- [ ] **Compact / IRC-style density**, and an option to hide avatars and
+- [x] **Proxy settings** (HTTP or SOCKS) for corporate networks.
+- [x] **Multi-window**: pop a conversation out into its own window.
+- [x] **Compact / IRC-style density**, and an option to hide avatars and
       images.
-      *In progress (batch B).*
 
 ### Bigger bets
 
-- [ ] **Enterprise Grid / Slack Connect**: shared channels, external user
+- [x] **Enterprise Grid / Slack Connect**: shared channels, external user
       badges, and org-level sign-in.
-      *In progress (batch B).*
-- [ ] **Huddles and calls**: probably out of scope. At least show "huddle
+- [x] **Huddles and calls**: probably out of scope. At least show "huddle
       in progress" and open it in the browser.
-      *In progress (batch B).*
-- [ ] **Plugins or scripting hooks** for keyword alerts and auto-replies,
+      *Shows a huddle in progress and opens it in the browser; no calls in
+      the app.*
+- [x] **Plugins or scripting hooks** for keyword alerts and auto-replies,
       in the spirit of wee-slack.
-      *In progress (batch B).*
+      *Opt-in hooks that run a program with the message as JSON; see the
+      README.*
 
 ## Follow-ups found along the way
 
@@ -453,17 +444,18 @@ sections. Nothing below exists yet.
 - [x] **Images answering 404 or 403 were retried**: they now fail for good.
 - [x] **`channel_marked` was ignored**: reads on other devices now move the
       read marker here.
-- [ ] **Sidebar sections show only their first channels** when Slack sends
-      a `channel_ids_page` cursor. *In progress (batch B).*
-- [ ] **Your own Slack app sign-in needs PKCE**: `pkce_enabled` in the
-      manifest, an `http://localhost` redirect, no client secret. *In
-      progress (batch B).*
+- [x] **Sidebar sections show only their first channels** when Slack sends
+      a `channel_ids_page` cursor. *Slack has no call for the rest; the
+      left-out channels show under Channels or Direct messages, and it is
+      logged once.*
+- [x] **Your own Slack app sign-in needs PKCE**: `pkce_enabled` in the
+      manifest, an `http://localhost` redirect, no client secret.
 - [ ] **macOS never receives `slack://` or `noslacking://` links**: the
-      bundle declares them, but the open-URL event isn't handled. *In
-      progress (batch B).*
-- [ ] **Close DMs** (`conversations.close`). *In progress (batch B).*
-- [ ] **The new-message icon touches the sidebar edge.** *In progress
-      (batch B).*
+      bundle declares them, but the open-URL event isn't handled. *It needs
+      `unsafe` Objective-C (an app delegate); see CONTRIBUTING.md. The fix
+      belongs in fastframe-macos.*
+- [x] **Close DMs** (`conversations.close`).
+- [x] **The new-message icon touches the sidebar edge.**
 - [ ] **DND for your-own-app sign-ins** needs the `dnd:read` and
       `dnd:write` scopes. Adding them breaks apps made from the old
       manifest, so DND is local only for those sign-ins for now.
@@ -473,3 +465,14 @@ sections. Nothing below exists yet.
 - [ ] **Cancelling an upload during its last step** may still post it.
 - [ ] **Test on macOS and Windows**: the platform code is only compiled on
       Linux so far.
+- [x] **Right-click menu on messages**, pictures and links, with Copy image.
+- [x] **Files wait in the composer** until the message is sent.
+- [x] **Slack's emoji names** (`:large_green_circle:` and the like).
+- [ ] **Drag and drop on Wayland**: winit 0.30 only delivers dropped files
+      on X11, Windows and macOS. Pasting a copied file works; real drops need
+      a patch to the winit fork.
+- [ ] **`conversations.info` answers `fatal_error`** for one conversation
+      in a real workspace; check which kind it is.
+- [ ] **Test the batch B features against a real workspace**: presence,
+      typing, huddles, the Activity, Threads and Later views (internal
+      methods), the proxy and the pop-out window.
