@@ -2264,6 +2264,7 @@ fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> {
                             team,
                             channel,
                             message,
+                            changed: true,
                         }));
                     }
                 }
@@ -2282,6 +2283,7 @@ fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> {
                             team,
                             channel: channel.clone(),
                             message,
+                            changed: false,
                         }));
                     }
                     out.push(Translated::Refresh(channel));
@@ -2292,6 +2294,7 @@ fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> {
                             team,
                             channel,
                             message,
+                            changed: false,
                         }));
                     }
                 }
@@ -2386,7 +2389,10 @@ mod tests {
         {
             [
                 Translated::Event(Event::Message {
-                    channel, message, ..
+                    channel,
+                    message,
+                    changed: false,
+                    ..
                 }),
             ] => {
                 assert_eq!(channel, "C1");
@@ -2398,7 +2404,11 @@ mod tests {
             r#"{"type":"message","subtype":"message_changed","channel":"C1","message":{"user":"U2","text":"edited","ts":"1.0","edited":{"user":"U2","ts":"2.0"}}}"#,
         )[..]
         {
-            [Translated::Event(Event::Message { message, .. })] => assert!(message.edited),
+            [
+                Translated::Event(Event::Message {
+                    message, changed, ..
+                }),
+            ] => assert!(message.edited && *changed),
             other => panic!("{other:?}"),
         }
         match &events(
