@@ -75,6 +75,39 @@ struct ListedFile {
     created: Option<i64>,
 }
 
+/// `pins.list`'s answer.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct PinsPage {
+    items: Vec<PinItem>,
+}
+
+/// One pinned item; only messages are shown.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct PinItem {
+    #[serde(rename = "type")]
+    kind: String,
+    created_by: Option<String>,
+    message: Option<types::Message>,
+}
+
+/// `bookmarks.list`'s answer.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct BookmarksPage {
+    bookmarks: Vec<BookmarkItem>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct BookmarkItem {
+    id: String,
+    title: String,
+    link: String,
+    emoji: Option<String>,
+}
+
 /// Runs one command and reports back. Every failure is answered, so a
 /// dialog waiting on it never waits for ever.
 pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
@@ -105,10 +138,101 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
             field,
             text,
         } => describe_channel(&client, &team, &channel, field, text, &sink).await,
+        Command::Pins { channel } => {
+            let result = client
+                .call::<PinsPage>("pins.list", &[("channel", channel.clone())])
+                .await
+                .map(pins)
+                .map_err(|e| explain(&e));
+            reply(&sink, &team, convos::Event::Pins { channel, result });
+            Ok(())
+        }
+        Command::Bookmarks { channel } => {
+            let result = client
+                .call::<BookmarksPage>("bookmarks.list", &[("channel_id", channel.clone())])
+                .await
+                .map(bookmarks)
+                .map_err(|e| explain(&e));
+            reply(&sink, &team, convos::Event::Bookmarks { channel, result });
+            Ok(())
+        }
+        Command::Pin { channel, ts, pin } => {
+            let method = if pin { "pins.add" } else { "pins.remove" };
+            match client
+                .act::<serde_json::Value>(method, &[("channel", channel), ("timestamp", ts.0)])
+                .await
+            {
+                // Already as asked: nothing to undo.
+                Err(SlackError::Api(code)) if code == "already_pinned" || code == "no_pin" => {
+                    Ok(())
+                }
+                other => other.map(|_| ()),
+            }
+        }
     };
     if let Err(error) = result {
         fail(&sink, team, what, &error);
     }
+}
+
+/// The pinned messages of a `pins.list` answer, newest pin first as Slack
+/// lists them.
+fn pins(page: PinsPage) -> Vec<convos::Pin> {
+    page.items
+        .into_iter()
+        .filter(|item| item.kind == "message")
+        .filter_map(|item| {
+            let mut message = item.message?.into_model()?;
+            message.pinned = true;
+            Some(convos::Pin {
+                message,
+                by: item.created_by.filter(|u| !u.is_empty()),
+            })
+        })
+        .collect()
+}
+
+/// The links of a `bookmarks.list` answer, with their emoji as shortcodes.
+fn bookmarks(page: BookmarksPage) -> Vec<convos::Bookmark> {
+    page.bookmarks
+        .into_iter()
+        .filter(|b| !b.link.is_empty())
+        .map(|b| convos::Bookmark {
+            title: if b.title.is_empty() {
+                b.link.clone()
+            } else {
+                b.title
+            },
+            id: b.id,
+            link: b.link,
+            emoji: b
+                .emoji
+                .map(|e| e.trim_matches(':').to_owned())
+                .filter(|e| !e.is_empty()),
+        })
+        .collect()
+}
+
+/// A `pin_added` or `pin_removed` event, as the interface takes it.
+pub fn pin_event(kind: &str, event: &serde_json::Value) -> Option<convos::Event> {
+    let item = event.get("item")?;
+    if item.get("type").and_then(serde_json::Value::as_str) != Some("message") {
+        return None;
+    }
+    let str_of = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let channel = str_of(event, "channel_id").or_else(|| str_of(item, "channel"))?;
+    let ts = item.get("message").and_then(|m| str_of(m, "ts"))?;
+    Some(convos::Event::Pinned {
+        channel,
+        ts: crate::model::Ts::new(ts),
+        pinned: kind == "pin_added",
+        by: str_of(event, "user"),
+    })
 }
 
 /// Sends one of [`convos::Event`]s.
@@ -516,8 +640,71 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
                 },
             }]
         }
-        // The interface already shows the new text.
-        Command::Describe { .. } => Vec::new(),
+        // The interface already shows the new text, and the pin.
+        Command::Describe { .. } | Command::Pin { .. } => Vec::new(),
+        Command::Pins { channel } => {
+            let mut message = crate::model::Message {
+                ts: crate::model::Ts::new("1790168400.000100"),
+                user: Some("U03".into()),
+                username: None,
+                bot_icon: None,
+                bot_id: None,
+                text: "Release checklist: tag, build, notarize, announce in #general.".into(),
+                thread_ts: None,
+                reply_count: 0,
+                replies_known: true,
+                reply_users: Vec::new(),
+                latest_reply: None,
+                reactions: Vec::new(),
+                files: Vec::new(),
+                attachments: Vec::new(),
+                blocks: Vec::new(),
+                edited: false,
+                subtype: None,
+                delivery: crate::model::Delivery::Sent,
+                broadcast: false,
+                pinned: true,
+            };
+            let first = convos::Pin {
+                message: message.clone(),
+                by: Some("U03".into()),
+            };
+            message.ts = crate::model::Ts::new("1790000000.000100");
+            message.user = Some("U01".into());
+            message.text = "Design review every Thursday at 14:00 :calendar:".into();
+            vec![Event::Convos {
+                team: team.to_owned(),
+                event: convos::Event::Pins {
+                    channel,
+                    result: Ok(vec![
+                        first,
+                        convos::Pin {
+                            message,
+                            by: Some("U00".into()),
+                        },
+                    ]),
+                },
+            }]
+        }
+        Command::Bookmarks { channel } => {
+            let bookmark = |id: &str, title: &str, link: &str, emoji: &str| convos::Bookmark {
+                id: id.into(),
+                title: title.into(),
+                link: link.into(),
+                emoji: Some(emoji.into()),
+            };
+            vec![Event::Convos {
+                team: team.to_owned(),
+                event: convos::Event::Bookmarks {
+                    channel,
+                    result: Ok(vec![
+                        bookmark("Bk1", "Roadmap", "https://example.com/roadmap", "world_map"),
+                        bookmark("Bk2", "CI dashboard", "https://ci.example.com", "rocket"),
+                        bookmark("Bk3", "Style guide", "https://example.com/style", "art"),
+                    ]),
+                },
+            }]
+        }
     }
 }
 
@@ -618,6 +805,55 @@ mod tests {
         .expect("json");
         assert_eq!(made.channel.created, Some(1_600_000_000));
         assert_eq!(made.channel.creator.as_deref(), Some("U9"));
+    }
+
+    #[test]
+    fn pins_keep_only_messages_and_bookmarks_their_links() {
+        let page: PinsPage = serde_json::from_str(
+            r#"{"ok":true,"items":[
+                {"type":"message","created_by":"U2","channel":"C1",
+                 "message":{"type":"message","ts":"1.000100","user":"U1","text":"hi"}},
+                {"type":"file","file":{"id":"F1"}}
+            ]}"#,
+        )
+        .expect("json");
+        let pins = pins(page);
+        assert_eq!(pins.len(), 1);
+        assert!(pins[0].message.pinned);
+        assert_eq!(pins[0].message.text, "hi");
+        assert_eq!(pins[0].by.as_deref(), Some("U2"));
+        let page: BookmarksPage = serde_json::from_str(
+            r#"{"ok":true,"bookmarks":[
+                {"id":"Bk1","title":"","link":"https://a.example","emoji":":rocket:"},
+                {"id":"Bk2","title":"Folder","type":"folder"}
+            ]}"#,
+        )
+        .expect("json");
+        let marks = bookmarks(page);
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].title, "https://a.example");
+        assert_eq!(marks[0].emoji.as_deref(), Some("rocket"));
+    }
+
+    #[test]
+    fn pin_events_name_the_message() {
+        let event: serde_json::Value = serde_json::from_str(
+            r#"{"type":"pin_removed","user":"U3","channel_id":"C1",
+                "item":{"type":"message","channel":"C1","message":{"ts":"5.000100"}}}"#,
+        )
+        .expect("json");
+        assert_eq!(
+            pin_event("pin_removed", &event),
+            Some(convos::Event::Pinned {
+                channel: "C1".into(),
+                ts: crate::model::Ts::new("5.000100"),
+                pinned: false,
+                by: Some("U3".into()),
+            })
+        );
+        let file: serde_json::Value =
+            serde_json::from_str(r#"{"type":"pin_added","item":{"type":"file"}}"#).expect("json");
+        assert_eq!(pin_event("pin_added", &file), None);
     }
 
     #[test]

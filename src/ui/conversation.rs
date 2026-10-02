@@ -149,6 +149,12 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                     {
                         actions.push(super::browse::details(&conversation.id, crate::convos::Tab::About));
                     }
+                    if theme::icon_button(ui, &palette, Icon::Bookmark, 16.0, &t("Bookmarks")).clicked() {
+                        actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Bookmarks));
+                    }
+                    if theme::icon_button(ui, &palette, Icon::Pin, 16.0, &t("Pinned messages")).clicked() {
+                        actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Pins));
+                    }
                     match socket {
                         Socket::Connected => {}
                         Socket::Off => {

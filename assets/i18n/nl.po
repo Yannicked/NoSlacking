@@ -816,3 +816,39 @@ msgstr "Opnieuw proberen"
 
 msgid "No files shared here yet."
 msgstr "Hier zijn nog geen bestanden gedeeld."
+
+msgid "Pinned"
+msgstr "Vastgezet"
+
+msgid "Pinned messages"
+msgstr "Vastgezette berichten"
+
+msgid "Bookmarks"
+msgstr "Bladwijzers"
+
+msgid "Nothing is pinned here yet. Pin a message from its toolbar."
+msgstr "Hier is nog niets vastgezet. Zet een bericht vast via de knoppen erboven."
+
+msgid "Unpin"
+msgstr "Losmaken"
+
+msgid "Pinned by {name}"
+msgstr "Vastgezet door {name}"
+
+msgid "Open in a thread"
+msgstr "In een draad openen"
+
+msgid "No bookmarks here yet."
+msgstr "Hier zijn nog geen bladwijzers."
+
+msgid "Pin to the conversation"
+msgstr "In het gesprek vastzetten"
+
+msgid "Unpin from the conversation"
+msgstr "Uit het gesprek losmaken"
+
+msgid "Could not pin the message: {error}"
+msgstr "Het bericht kon niet worden vastgezet: {error}"
+
+msgid "Could not unpin the message: {error}"
+msgstr "Het bericht kon niet worden losgemaakt: {error}"

@@ -503,6 +503,8 @@ pub struct Message {
     /// Set by Slack on a thread reply also sent to the channel.
     pub root: Option<Value>,
     pub hidden: bool,
+    /// The conversations it is pinned in.
+    pub pinned_to: Vec<String>,
 }
 
 impl Message {
@@ -569,6 +571,7 @@ impl Message {
             subtype: self.subtype,
             delivery: Delivery::Sent,
             broadcast,
+            pinned: !self.pinned_to.is_empty(),
         })
     }
 }

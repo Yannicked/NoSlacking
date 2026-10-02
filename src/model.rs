@@ -388,6 +388,8 @@ pub struct Message {
     pub delivery: Delivery,
     /// A reply also sent to the channel.
     pub broadcast: bool,
+    /// Pinned to its conversation.
+    pub pinned: bool,
 }
 
 impl Message {
@@ -677,6 +679,7 @@ mod tests {
             subtype: None,
             delivery: Delivery::Sent,
             broadcast: false,
+            pinned: false,
         }
     }
 

@@ -217,6 +217,7 @@ fn message(seconds: u64, user: &str, text: &str) -> Message {
         subtype: None,
         delivery: Delivery::Sent,
         broadcast: false,
+        pinned: false,
     }
 }
 
