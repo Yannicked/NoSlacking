@@ -242,6 +242,46 @@ impl WorkspaceState {
         })
     }
 
+    /// Takes a deleted message out of the conversation and its threads.
+    /// A reply lowers its parent's count; a parent takes its thread along.
+    fn remove_message(&mut self, channel: &str, ts: &Ts) {
+        let parent = self
+            .threads
+            .iter()
+            .find(|((c, parent), t)| {
+                c == channel && parent != ts && t.messages.iter().any(|m| m.ts == *ts)
+            })
+            .map(|((_, parent), _)| parent.clone())
+            .or_else(|| {
+                let timeline = self.timelines.get(channel)?;
+                let message = timeline.messages.iter().find(|m| m.ts == *ts)?;
+                message.thread_ts.clone().filter(|_| message.is_reply())
+            });
+        if let Some(timeline) = self.timelines.get_mut(channel) {
+            timeline.remove(ts);
+        }
+        self.threads.remove(&(channel.to_owned(), ts.clone()));
+        for ((thread_channel, _), timeline) in &mut self.threads {
+            if thread_channel == channel {
+                timeline.remove(ts);
+            }
+        }
+        // Optimistic replies were never counted.
+        let Some(parent) = parent.filter(|_| !ts.is_local()) else {
+            return;
+        };
+        let thread = self.threads.get_mut(&(channel.to_owned(), parent.clone()));
+        let copies = self
+            .timelines
+            .get_mut(channel)
+            .and_then(|t| t.find_mut(&parent))
+            .into_iter()
+            .chain(thread.and_then(|t| t.find_mut(&parent)));
+        for message in copies {
+            message.reply_count = message.reply_count.saturating_sub(1);
+        }
+    }
+
     fn unknown_users<'a>(&self, ids: impl Iterator<Item = &'a str>) -> Vec<String> {
         let mut out: Vec<String> = ids
             .filter(|id| !id.is_empty() && !self.users.contains_key(*id))
@@ -679,9 +719,15 @@ impl App {
                 if let Some(workspace) = self.workspace_mut(&team) {
                     workspace.conversations.retain(|c| c.id != channel);
                     workspace.timelines.remove(&channel);
+                    workspace.threads.retain(|(c, _), _| *c != channel);
                     if workspace.active.as_deref() == Some(channel.as_str()) {
                         workspace.active = None;
                     }
+                }
+                if self.active_team().as_deref() == Some(team.as_str())
+                    && self.thread.as_ref().is_some_and(|(c, _)| *c == channel)
+                {
+                    self.thread = None;
                 }
             }
             Event::Users { team, users } => {
@@ -773,18 +819,7 @@ impl App {
                 channel,
                 message,
             } => self.message(&team, &channel, message),
-            Event::Deleted { team, channel, ts } => {
-                if let Some(workspace) = self.workspace_mut(&team) {
-                    if let Some(timeline) = workspace.timelines.get_mut(&channel) {
-                        timeline.remove(&ts);
-                    }
-                    for ((thread_channel, _), timeline) in &mut workspace.threads {
-                        if *thread_channel == channel {
-                            timeline.remove(&ts);
-                        }
-                    }
-                }
-            }
+            Event::Deleted { team, channel, ts } => self.remove_message(&team, &channel, &ts),
             Event::Reaction {
                 team,
                 channel,
@@ -1081,6 +1116,21 @@ impl App {
         }
         if let Some(error) = error {
             self.toast(format!("{}: {error}", t("Message not sent")), true);
+        }
+    }
+
+    /// A message is gone; an open thread it started closes with it.
+    fn remove_message(&mut self, team: &str, channel: &str, ts: &Ts) {
+        if let Some(workspace) = self.workspace_mut(team) {
+            workspace.remove_message(channel, ts);
+        }
+        if self.active_team().as_deref() == Some(team)
+            && self
+                .thread
+                .as_ref()
+                .is_some_and(|(c, parent)| c == channel && parent == ts)
+        {
+            self.thread = None;
         }
     }
 
@@ -1516,14 +1566,7 @@ impl App {
                 let Some(team) = self.active_team() else {
                     return;
                 };
-                if let Some(workspace) = self.workspace_mut(&team) {
-                    if let Some(timeline) = workspace.timelines.get_mut(&channel) {
-                        timeline.remove(&ts);
-                    }
-                    for timeline in workspace.threads.values_mut() {
-                        timeline.remove(&ts);
-                    }
-                }
+                self.remove_message(&team, &channel, &ts);
                 if !ts.is_local() {
                     self.backend.send(Command::Delete { team, channel, ts });
                 }
@@ -2126,6 +2169,79 @@ mod tests {
         merge_conversation(&mut existing, conversation("6.0", "9.0", 3, 0));
         assert_eq!(existing.unread, 3);
         assert_eq!(existing.mentions, 1);
+    }
+
+    fn message(ts: &str, thread: Option<&str>) -> Message {
+        Message {
+            ts: Ts::new(ts),
+            user: Some("U1".into()),
+            username: None,
+            bot_icon: None,
+            bot_id: None,
+            text: format!("text {ts}"),
+            thread_ts: thread.map(Ts::new),
+            reply_count: 0,
+            reply_users: Vec::new(),
+            latest_reply: None,
+            reactions: Vec::new(),
+            files: Vec::new(),
+            attachments: Vec::new(),
+            blocks: Vec::new(),
+            edited: false,
+            subtype: None,
+            delivery: Delivery::Sent,
+            broadcast: false,
+        }
+    }
+
+    fn workspace() -> WorkspaceState {
+        WorkspaceState::new(Workspace {
+            team_id: "T1".into(),
+            name: "Acme".into(),
+            domain: "acme".into(),
+            icon: None,
+            user_id: "U1".into(),
+        })
+    }
+
+    /// A workspace with a parent in C1 and two replies loaded in its thread.
+    fn workspace_with_thread() -> WorkspaceState {
+        let mut w = workspace();
+        let mut parent = message("1.0", Some("1.0"));
+        parent.reply_count = 2;
+        let main = w.timelines.entry("C1".into()).or_default();
+        main.upsert(parent.clone());
+        main.upsert(message("5.0", None));
+        let thread = w.threads.entry(("C1".into(), Ts::new("1.0"))).or_default();
+        thread.upsert(parent);
+        thread.upsert(message("2.0", Some("1.0")));
+        thread.upsert(message("3.0", Some("1.0")));
+        w
+    }
+
+    #[test]
+    fn deleting_a_reply_lowers_the_count() {
+        let mut w = workspace_with_thread();
+        w.remove_message("C1", &Ts::new("2.0"));
+        let count = |t: &Timeline| t.messages[0].reply_count;
+        assert_eq!(count(&w.timelines["C1"]), 1);
+        let thread = &w.threads[&("C1".to_owned(), Ts::new("1.0"))];
+        assert_eq!(count(thread), 1);
+        assert_eq!(thread.messages.len(), 2);
+        // Deleted again (the echo of our own delete): nothing more changes.
+        w.remove_message("C1", &Ts::new("2.0"));
+        assert_eq!(count(&w.timelines["C1"]), 1);
+        // A plain message has no parent to change.
+        w.remove_message("C1", &Ts::new("5.0"));
+        assert_eq!(count(&w.timelines["C1"]), 1);
+    }
+
+    #[test]
+    fn deleting_a_parent_takes_its_thread() {
+        let mut w = workspace_with_thread();
+        w.remove_message("C1", &Ts::new("1.0"));
+        assert!(w.threads.is_empty());
+        assert_eq!(w.timelines["C1"].messages.len(), 1);
     }
 
     #[test]
