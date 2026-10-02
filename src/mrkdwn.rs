@@ -179,8 +179,69 @@ fn is_boundary(c: Option<char>) -> bool {
     c.is_none_or(|c| c.is_whitespace() || c.is_ascii_punctuation())
 }
 
+/// Where one line's markup characters are, found in a single pass. Every
+/// question the parser asks ("where is the next `>`?") is then a binary
+/// search instead of a scan of the rest of the line, which kept a long
+/// line of unclosed markers (`*a *a *a …`) from taking quadratic time.
+struct Marks {
+    /// `<` (and line breaks): a `<…>` form must not contain one.
+    opens: Vec<usize>,
+    /// `>`, which closes a `<…>` form.
+    closes: Vec<usize>,
+    /// Backticks.
+    ticks: Vec<usize>,
+    /// For `*`, `_` and `~`, the places that can close a styled run: the
+    /// marker hugs the text before it and a word boundary follows.
+    closers: [Vec<usize>; 3],
+}
+
+impl Marks {
+    fn new(text: &str) -> Self {
+        let mut marks = Self {
+            opens: Vec::new(),
+            closes: Vec::new(),
+            ticks: Vec::new(),
+            closers: [Vec::new(), Vec::new(), Vec::new()],
+        };
+        let mut previous: Option<char> = None;
+        let mut chars = text.char_indices().peekable();
+        while let Some((at, c)) = chars.next() {
+            match c {
+                '<' | '\n' => marks.opens.push(at),
+                '>' => marks.closes.push(at),
+                '`' => marks.ticks.push(at),
+                '*' | '_' | '~' => {
+                    let hugs = previous.is_some_and(|p| !p.is_whitespace());
+                    if hugs && is_boundary(chars.peek().map(|&(_, next)| next)) {
+                        marks.closers[marker_index(c)].push(at);
+                    }
+                }
+                _ => {}
+            }
+            previous = Some(c);
+        }
+        marks
+    }
+}
+
+/// The first position in a sorted list at or after `from`.
+fn next_at(positions: &[usize], from: usize) -> Option<usize> {
+    positions
+        .get(positions.partition_point(|&p| p < from))
+        .copied()
+}
+
+fn marker_index(marker: char) -> usize {
+    match marker {
+        '*' => 0,
+        '_' => 1,
+        _ => 2,
+    }
+}
+
 /// Parses one line of inline markup into `out`.
 fn inline(text: &str, style: Style, out: &mut Vec<Inline>) {
+    let marks = Marks::new(text);
     let mut plain_start = 0;
     let mut i = 0;
     let bytes = text.as_bytes();
@@ -188,20 +249,25 @@ fn inline(text: &str, style: Style, out: &mut Vec<Inline>) {
         let c = bytes[i];
         let before = text[..i].chars().next_back();
         let consumed = match c {
-            b'<' => {
-                // Adjacent runs of one style merge, so flushing early is
-                // harmless when the bracket turns out to be text.
-                flush(out, text, plain_start, i, style);
-                plain_start = i;
-                special(&text[i..], style, out)
-            }
-            b'`' => text[i + 1..].find('`').filter(|&end| end > 0).map(|end| {
-                flush(out, text, plain_start, i, style);
-                out.push(Inline::Code(unescape(&text[i + 1..i + 1 + end])));
-                end + 2
-            }),
+            b'<' => next_at(&marks.closes, i + 1)
+                // Nothing between the brackets may open another form.
+                .filter(|&end| next_at(&marks.opens, i + 1).is_none_or(|open| open > end))
+                .and_then(|end| {
+                    // Adjacent runs of one style merge, so flushing early is
+                    // harmless when the bracket turns out to be text.
+                    flush(out, text, plain_start, i, style);
+                    plain_start = i;
+                    special(&text[i + 1..end], style, out).then_some(end + 1 - i)
+                }),
+            b'`' => next_at(&marks.ticks, i + 1)
+                .filter(|&end| end > i + 1)
+                .map(|end| {
+                    flush(out, text, plain_start, i, style);
+                    out.push(Inline::Code(unescape(&text[i + 1..end])));
+                    end + 1 - i
+                }),
             b'*' | b'_' | b'~' if is_boundary(before) => {
-                styled(&text[i..], c as char, style).map(|(inner, inner_style, len)| {
+                styled(text, i, &marks, style).map(|(inner, inner_style, len)| {
                     flush(out, text, plain_start, i, style);
                     inline(inner, inner_style, out);
                     len
@@ -231,12 +297,11 @@ fn flush(out: &mut Vec<Inline>, text: &str, start: usize, end: usize, style: Sty
     }
 }
 
-/// `<...>` forms. Returns the bytes consumed.
-fn special(text: &str, style: Style, out: &mut Vec<Inline>) -> Option<usize> {
-    let end = text.find('>')?;
-    let inner = &text[1..end];
-    if inner.is_empty() || inner.contains('<') || inner.contains('\n') {
-        return None;
+/// What is between the brackets of a `<...>` form, which holds no `<` or
+/// line break. Returns whether it was one; if not, it stays text.
+fn special(inner: &str, style: Style, out: &mut Vec<Inline>) -> bool {
+    if inner.is_empty() {
+        return false;
     }
     let (target, label) = match inner.split_once('|') {
         Some((target, label)) => (target, Some(unescape(label))),
@@ -275,7 +340,7 @@ fn special(text: &str, style: Style, out: &mut Vec<Inline>) -> Option<usize> {
                 }
                 _ => out.push(Inline::Text(text, style)),
             }
-            return Some(end + 1);
+            return true;
         }
         Inline::Link {
             url,
@@ -283,37 +348,36 @@ fn special(text: &str, style: Style, out: &mut Vec<Inline>) -> Option<usize> {
             style,
         }
     } else {
-        return None;
+        return false;
     };
     out.push(item);
-    Some(end + 1)
+    true
 }
 
-/// A styled run starting at `text[0] == marker`: the inner text, its style
-/// and the bytes consumed. The closer must hug the text and end at a word
-/// boundary, on the same line.
-fn styled(text: &str, marker: char, style: Style) -> Option<(&str, Style, usize)> {
-    let after = &text[1..];
+/// A styled run opened by the marker at `text[at]`: the inner text, its
+/// style and the bytes consumed. The closer must hug the text and end at a
+/// word boundary, on the same line.
+fn styled<'a>(
+    text: &'a str,
+    at: usize,
+    marks: &Marks,
+    style: Style,
+) -> Option<(&'a str, Style, usize)> {
+    let marker = char::from(text.as_bytes()[at]);
+    let after = &text[at + 1..];
     if after.starts_with(char::is_whitespace) || after.starts_with(marker) {
         return None;
     }
-    let mut search = 0;
-    while let Some(offset) = after[search..].find(marker) {
-        let at = search + offset;
-        let inner = &after[..at];
-        let next = after[at + 1..].chars().next();
-        if !inner.is_empty() && !inner.ends_with(char::is_whitespace) && is_boundary(next) {
-            let mut style = style;
-            match marker {
-                '*' => style.bold = true,
-                '_' => style.italic = true,
-                _ => style.strike = true,
-            }
-            return Some((inner, style, at + 2));
-        }
-        search = at + 1;
+    // The first closer past the opener; it cannot be right after it, as
+    // that was just ruled out, so the inner text is never empty.
+    let close = next_at(&marks.closers[marker_index(marker)], at + 1)?;
+    let mut style = style;
+    match marker {
+        '*' => style.bold = true,
+        '_' => style.italic = true,
+        _ => style.strike = true,
     }
-    None
+    Some((&text[at + 1..close], style, close + 1 - at))
 }
 
 /// `:name:` at the start of `text`: the name and the bytes consumed.
@@ -572,6 +636,41 @@ mod tests {
             )),
             "hi @Ann 🎉 link"
         );
+    }
+
+    /// Long lines of markup that never closes. Each used to make every
+    /// marker scan the rest of the line: 40 KB of `*a ` took about 600 ms
+    /// in a release build.
+    fn pathological() -> Vec<(&'static str, String)> {
+        const SIZE: usize = 40 * 1024;
+        let repeat = |unit: &str| unit.repeat(SIZE / unit.len());
+        vec![
+            ("bold", repeat("*a ")),
+            ("italic", repeat("_a ")),
+            ("strike", repeat("~a ")),
+            ("mixed", repeat("*a _b ~c ")),
+            ("brackets", repeat("<a ")),
+            ("nested brackets", format!("{}>", repeat("<"))),
+            ("ticks", repeat("``a")),
+            ("colons", repeat(":a b")),
+            ("tones", repeat(":a::skin-tone-")),
+            ("quotes", repeat("&gt; *a\n")),
+            ("fences", repeat("``` *a ")),
+        ]
+    }
+
+    #[test]
+    fn long_unclosed_markup_parses_in_linear_time() {
+        // A generous budget for an unoptimized build on a busy machine;
+        // the quadratic parser took many seconds here.
+        let budget = std::time::Duration::from_secs(1);
+        for (name, text) in pathological() {
+            let start = std::time::Instant::now();
+            let blocks = parse(&text);
+            let took = start.elapsed();
+            assert!(!blocks.is_empty(), "{name}");
+            assert!(took < budget, "{name}: {took:?} for {} bytes", text.len());
+        }
     }
 
     #[test]
