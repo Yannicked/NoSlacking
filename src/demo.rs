@@ -84,7 +84,13 @@ fn user(id: &str, name: &str, real: &str, title: &str) -> User {
 fn users() -> Vec<User> {
     vec![
         user(ME, "you", "Yannick Example", "Engineer"),
-        user("U01", "ana", "Ana Lima", "Design lead"),
+        // Someone in another time zone, for the profile card's clock.
+        User {
+            tz: Some("America/Sao_Paulo".into()),
+            status_text: "Reviewing mockups".into(),
+            status_emoji: ":art:".into(),
+            ..user("U01", "ana", "Ana Lima", "Design lead")
+        },
         user("U02", "bob", "Bob Martens", "Backend"),
         user("U03", "carla", "Carla Rossi", "Product"),
         user("U04", "dev", "Dev Patel", "Infrastructure"),
@@ -217,6 +223,7 @@ fn message(seconds: u64, user: &str, text: &str) -> Message {
         subtype: None,
         delivery: Delivery::Sent,
         broadcast: false,
+        pinned: false,
     }
 }
 
@@ -841,6 +848,11 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
             }
             Command::Download { name, .. } => {
                 sink.send(Event::Notice(format!("Demo: would save {name}")));
+            }
+            Command::Convos { team, command } => {
+                for event in crate::backend::convos::demo(&team, command) {
+                    sink.send(event);
+                }
             }
             _ => {}
         }

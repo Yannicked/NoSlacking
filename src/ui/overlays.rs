@@ -4,7 +4,7 @@
 use egui::{CornerRadius, Key, Margin, Modifiers, RichText, Sense, Stroke, Vec2};
 
 use crate::app::{App, PickerTarget};
-use crate::i18n::{t, tf};
+use crate::i18n::t;
 use crate::model::{Action, ConversationKind};
 use crate::theme::{self, Icon};
 
@@ -692,26 +692,30 @@ fn profile(app: &mut App, ctx: &egui::Context) {
                         RichText::new(format!("{shown} {}", user.status_text)).color(palette.text),
                     );
                 }
-                if let Some(tz) = &user.tz
-                    && let Ok(zone) = jiff::tz::TimeZone::get(tz)
-                {
-                    let local = jiff::Timestamp::now().to_zoned(zone);
+                if let Some(line) = user.tz.as_deref().and_then(super::browse::local_time) {
                     ui.label(
-                        RichText::new(tf(
-                            "{time} local time",
-                            &[("time", &local.strftime("%H:%M").to_string())],
-                        ))
-                        .font(theme::regular(13.0))
-                        .color(palette.dim),
+                        RichText::new(line)
+                            .font(theme::regular(13.0))
+                            .color(palette.dim),
+                    );
+                }
+                if user.deleted {
+                    ui.label(
+                        RichText::new(t("This account is deactivated."))
+                            .font(theme::regular(13.0))
+                            .color(palette.warning),
                     );
                 }
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if let Some(dm) = &dm
-                    && theme::primary_button(ui, &palette, &t("Message")).clicked()
-                {
-                    app.actions.push(Action::OpenConversation(dm.clone()));
+                // The DM you have, or a new one: Slack opens either.
+                let can_message = dm.is_some() || user.as_ref().is_some_and(|u| !u.deleted);
+                if can_message && theme::primary_button(ui, &palette, &t("Message")).clicked() {
+                    app.actions
+                        .push(Action::Convos(crate::convos::Action::Open {
+                            users: vec![user_id.clone()],
+                        }));
                     close = true;
                 }
                 if theme::secondary_button(ui, &palette, &t("Close")).clicked() {

@@ -681,6 +681,18 @@ impl Worker {
                     tokio::spawn(super::desktop::dnd_info(client, team, sink));
                 }
             }
+            Command::Convos { team, command } => match self.team(&team) {
+                Some((client, sink)) => {
+                    tokio::spawn(super::convos::run(client, team, command, sink));
+                }
+                None => self.sink.send(Event::Convos {
+                    team,
+                    event: crate::convos::Event::Failed {
+                        what: command.failure(),
+                        error: NOT_SIGNED_IN.to_owned(),
+                    },
+                }),
+            },
         }
     }
 
@@ -2778,6 +2790,11 @@ fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> {
         "dnd_updated" => {
             if let Some(dnd) = super::desktop::dnd_event(event) {
                 out.push(Translated::Event(Event::Dnd { team, dnd }));
+            }
+        }
+        "pin_added" | "pin_removed" => {
+            if let Some(event) = super::convos::pin_event(kind, event) {
+                out.push(Translated::Event(Event::Convos { team, event }));
             }
         }
         // Read on another device (or in another window): the read marker

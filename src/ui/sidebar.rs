@@ -258,6 +258,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                 },
                             );
                         }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            super::browse::header_buttons(ui, &palette, actions);
+                            if workspace.sections.is_some()
+                                && theme::icon_button(
+                                    ui,
+                                    &palette,
+                                    Icon::Plus,
+                                    16.0,
+                                    &t("New section"),
+                                )
+                                .clicked()
+                            {
+                                actions.push(Action::NameSection {
+                                    rename: None,
+                                    channel: None,
+                                });
+                            }
+                        });
                     });
                 });
             if let Some(reason) = &workspace.signed_out {
@@ -553,6 +571,10 @@ fn row_menu(
     actions: &mut Vec<Action>,
 ) {
     let Some(sections) = workspace.sections.as_deref() else {
+        // Without Slack's sections, leaving is all there is to offer.
+        if !conversation.kind.is_dm() {
+            response.context_menu(|ui| super::browse::leave_item(ui, conversation, false, actions));
+        }
         return;
     };
     let channel = conversation.id.clone();
@@ -605,6 +627,7 @@ fn row_menu(
         }
         ui.separator();
         super::desktop::conversation_menu(ui, workspace, conversation, actions);
+        super::browse::leave_item(ui, conversation, true, actions);
     });
 }
 

@@ -322,6 +322,11 @@ fn header(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec
                 .font(theme::regular(12.0))
                 .color(palette.dim),
         );
+        if message.pinned {
+            let (rect, pin) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+            Icon::Pin.image(palette.dim, 12.0).paint_at(ui, rect);
+            pin.on_hover_text(t("Pinned"));
+        }
         // The full date only when asked for: formatting it for every
         // message on every frame was wasted work.
         if message.ts.seconds().is_some() {
@@ -1100,7 +1105,7 @@ fn toolbar(
     let quick: std::sync::Arc<Vec<String>> = ui
         .data(|d| d.get_temp(super::quick_reactions_id()))
         .unwrap_or_default();
-    let mut buttons = 4 + usize::from(!row.in_thread);
+    let mut buttons = 5 + usize::from(!row.in_thread);
     if me {
         buttons += 2;
     }
@@ -1198,6 +1203,18 @@ fn toolbar(
                 ts: message.ts.clone(),
                 thread: message.thread_ts.clone(),
             });
+        }
+        let (icon, tip) = if message.pinned {
+            (Icon::PinOff, t("Unpin from the conversation"))
+        } else {
+            (Icon::Pin, t("Pin to the conversation"))
+        };
+        if theme::icon_button(ui, palette, icon, 16.0, &tip).clicked() {
+            actions.push(Action::Convos(crate::convos::Action::Pin {
+                channel: row.channel.to_owned(),
+                ts: message.ts.clone(),
+                pin: !message.pinned,
+            }));
         }
         if me {
             if theme::icon_button(ui, palette, Icon::Pencil, 16.0, &t("Edit message (E)")).clicked()

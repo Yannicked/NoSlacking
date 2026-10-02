@@ -974,3 +974,216 @@ msgstr "Donkere huidskleur"
 
 msgid "{name}, draft"
 msgstr "{name}, concept"
+
+msgid "Could not open the conversation: {error}"
+msgstr "Het gesprek kon niet worden geopend: {error}"
+
+msgid "New message"
+msgstr "Nieuw bericht"
+
+msgid "New message ({shortcut})"
+msgstr "Nieuw bericht ({shortcut})"
+
+msgid "Remove {name}"
+msgstr "{name} verwijderen"
+
+msgid "A group message has at most {count} other people"
+msgstr "Een groepsbericht heeft hoogstens {count} andere mensen"
+
+msgid "Type a name"
+msgstr "Typ een naam"
+
+msgid "Add someone else"
+msgstr "Voeg nog iemand toe"
+
+msgid "Nobody by that name."
+msgstr "Niemand met die naam."
+
+msgid "Start group message"
+msgstr "Groepsbericht starten"
+
+msgid "Could not list the channels: {error}"
+msgstr "De kanalen konden niet worden opgehaald: {error}"
+
+msgid "Could not join the channel: {error}"
+msgstr "Kon niet deelnemen aan het kanaal: {error}"
+
+msgid "Could not leave the channel: {error}"
+msgstr "Kon het kanaal niet verlaten: {error}"
+
+msgid "Could not create the channel: {error}"
+msgstr "Het kanaal kon niet worden aangemaakt: {error}"
+
+msgid "Browse channels"
+msgstr "Kanalen bekijken"
+
+msgid "Browse channels ({shortcut})"
+msgstr "Kanalen bekijken ({shortcut})"
+
+msgid "Leave channel"
+msgstr "Kanaal verlaten"
+
+msgid "Create a channel"
+msgstr "Kanaal aanmaken"
+
+msgid "Search channels"
+msgstr "Kanalen zoeken"
+
+msgid "{count} channels so far…"
+msgstr "Tot nu toe {count} kanalen…"
+
+msgid "{count} channel you can join"
+msgid_plural "{count} channels you can join"
+msgstr[0] "{count} kanaal waar je aan kunt deelnemen"
+msgstr[1] "{count} kanalen waar je aan kunt deelnemen"
+
+msgid "Join"
+msgstr "Deelnemen"
+
+msgid "Give the channel a name."
+msgstr "Geef het kanaal een naam."
+
+msgid "Names can be at most {count} characters."
+msgstr "Namen zijn hoogstens {count} tekens lang."
+
+msgid "Names can have only letters, numbers, hyphens and underscores, not “{character}”."
+msgstr "Namen mogen alleen letters, cijfers, streepjes en lage streepjes bevatten, geen “{character}”."
+
+msgid "You already have a channel by that name."
+msgstr "Je hebt al een kanaal met die naam."
+
+msgid "e.g. plan-budget"
+msgstr "bijv. budget-plannen"
+
+msgid "It will be called #{name}."
+msgstr "Het gaat #{name} heten."
+
+msgid "Public"
+msgstr "Openbaar"
+
+msgid "Private"
+msgstr "Privé"
+
+msgid "Only people you invite can see and join it."
+msgstr "Alleen mensen die je uitnodigt kunnen het zien en eraan deelnemen."
+
+msgid "Anyone in the workspace can find and join it."
+msgstr "Iedereen in de werkruimte kan het vinden en eraan deelnemen."
+
+msgid "Leave #{name}?"
+msgstr "#{name} verlaten?"
+
+msgid "It is private: you need an invitation to come back."
+msgstr "Het is privé: je hebt een uitnodiging nodig om terug te komen."
+
+msgid "You can join it again from the channel browser."
+msgstr "Je kunt later weer deelnemen via het kanalenoverzicht."
+
+msgid "Leave"
+msgstr "Verlaten"
+
+msgid "Could not set the topic: {error}"
+msgstr "Het onderwerp kon niet worden ingesteld: {error}"
+
+msgid "Could not set the description: {error}"
+msgstr "De beschrijving kon niet worden ingesteld: {error}"
+
+msgid "Details"
+msgstr "Details"
+
+msgid "Close details"
+msgstr "Details sluiten"
+
+msgid "Members"
+msgstr "Leden"
+
+msgid "Members ({count})"
+msgstr "Leden ({count})"
+
+msgid "About"
+msgstr "Over"
+
+msgid "Topic"
+msgstr "Onderwerp"
+
+msgid "Description"
+msgstr "Beschrijving"
+
+msgid "Created"
+msgstr "Aangemaakt"
+
+msgid "By {name} on {date}"
+msgstr "Door {name} op {date}"
+
+msgid "By {name}"
+msgstr "Door {name}"
+
+msgid "Edit"
+msgstr "Bewerken"
+
+msgid "None yet"
+msgstr "Nog niets"
+
+msgid "Try again"
+msgstr "Opnieuw proberen"
+
+msgid "No files shared here yet."
+msgstr "Hier zijn nog geen bestanden gedeeld."
+
+msgid "Pinned"
+msgstr "Vastgezet"
+
+msgid "Pinned messages"
+msgstr "Vastgezette berichten"
+
+msgid "Bookmarks"
+msgstr "Bladwijzers"
+
+msgid "Nothing is pinned here yet. Pin a message from its toolbar."
+msgstr "Hier is nog niets vastgezet. Zet een bericht vast via de knoppen erboven."
+
+msgid "Unpin"
+msgstr "Losmaken"
+
+msgid "Pinned by {name}"
+msgstr "Vastgezet door {name}"
+
+msgid "Open in a thread"
+msgstr "In een draad openen"
+
+msgid "No bookmarks here yet."
+msgstr "Hier zijn nog geen bladwijzers."
+
+msgid "Pin to the conversation"
+msgstr "In het gesprek vastzetten"
+
+msgid "Unpin from the conversation"
+msgstr "Uit het gesprek losmaken"
+
+msgid "Could not pin the message: {error}"
+msgstr "Het bericht kon niet worden vastgezet: {error}"
+
+msgid "Could not unpin the message: {error}"
+msgstr "Het bericht kon niet worden losgemaakt: {error}"
+
+msgid "This account is deactivated."
+msgstr "Dit account is gedeactiveerd."
+
+msgid "{count} hour ahead of you"
+msgid_plural "{count} hours ahead of you"
+msgstr[0] "{count} uur voor op jou"
+msgstr[1] "{count} uur voor op jou"
+
+msgid "{count} hour behind you"
+msgid_plural "{count} hours behind you"
+msgstr[0] "{count} uur achter op jou"
+msgstr[1] "{count} uur achter op jou"
+
+msgid "{time} hours ahead of you"
+msgstr "{time} uur voor op jou"
+
+msgid "{time} hours behind you"
+msgstr "{time} uur achter op jou"
+
+msgid "{time} local time, {difference}"
+msgstr "{time} lokale tijd, {difference}"

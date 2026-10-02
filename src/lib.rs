@@ -9,6 +9,7 @@ pub mod auth;
 pub mod autostart;
 pub mod backend;
 pub mod badge;
+pub mod convos;
 pub mod credentials;
 #[cfg(feature = "demo")]
 pub mod demo;

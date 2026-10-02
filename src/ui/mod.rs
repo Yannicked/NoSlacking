@@ -1,9 +1,11 @@
 //! The interface: a workspace rail, the conversation list, the open
 //! conversation and, when one is open, its thread.
 
+mod browse;
 mod composer;
 mod conversation;
 mod desktop;
+mod details;
 mod format;
 mod keys;
 mod login;
@@ -46,6 +48,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // First, so Esc leaves a selected message before it closes the thread.
     selection::keys(app, ui.ctx());
     keys::global(app, ui.ctx());
+    browse::keys(app, ui.ctx());
     match app.page {
         Page::SignIn => login::show(app, ui),
         Page::Settings => {
@@ -57,12 +60,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             sidebar::show(app, ui);
             if app.thread.is_some() {
                 thread::show(app, ui);
+            } else if app.convos.details.is_some() {
+                details::show(app, ui);
             }
             conversation::show(app, ui);
         }
     }
     overlays::show(app, ui.ctx());
     search::show(app, ui.ctx());
+    browse::show(app, ui.ctx());
     rich::end_frame();
 }
 

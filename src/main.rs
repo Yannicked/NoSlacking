@@ -513,6 +513,36 @@ impl DemoSetup {
                 path: "release-notes.pdf".into(),
                 comment: String::new(),
             }),
+            // Picking people for a group message, one already picked.
+            Some(view @ ("details" | "members" | "files" | "pins" | "bookmarks")) => {
+                use noslacking::convos::{Action as Convos, Tab};
+                let tab = match view {
+                    "members" => Tab::Members,
+                    "files" => Tab::Files,
+                    "pins" => Tab::Pins,
+                    "bookmarks" => Tab::Bookmarks,
+                    _ => Tab::About,
+                };
+                app.actions.push(Action::Convos(Convos::Details {
+                    channel: "C02".into(),
+                    tab,
+                }));
+            }
+            Some("browse") => app
+                .actions
+                .push(Action::Convos(noslacking::convos::Action::Browse)),
+            Some("new-channel") => {
+                app.convos.new_channel = Some(noslacking::convos::NewChannel {
+                    name: "Release Notes".into(),
+                    ..Default::default()
+                });
+            }
+            Some("new-message") => {
+                let mut dialog = noslacking::convos::NewMessage::default();
+                dialog.pick("U02".into());
+                dialog.query = "a".into();
+                app.convos.new_message = Some(dialog);
+            }
             _ => {}
         }
     }

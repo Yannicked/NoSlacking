@@ -32,7 +32,10 @@
         "files:write",
         "emoji:read",
         "team:read",
-        "search:read"
+        "search:read",
+        "pins:read",
+        "pins:write",
+        "bookmarks:read"
       ]
     }
   },
@@ -55,7 +58,9 @@
         "group_unarchive",
         "user_change",
         "team_join",
-        "emoji_changed"
+        "emoji_changed",
+        "pin_added",
+        "pin_removed"
       ]
     },
     "interactivity": {

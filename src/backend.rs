@@ -6,6 +6,7 @@
 //! nothing happens.
 
 mod around;
+pub mod convos;
 pub mod desktop;
 mod search;
 pub mod worker;
@@ -192,6 +193,11 @@ pub enum Command {
         channel: String,
         muted: bool,
         all: Vec<String>,
+    },
+    /// Starts, finds or looks after a conversation (see [`crate::convos`]).
+    Convos {
+        team: String,
+        command: crate::convos::Command,
     },
 }
 
@@ -406,6 +412,11 @@ impl std::fmt::Debug for Command {
                 .field("muted", muted)
                 .field("all", all)
                 .finish(),
+            Self::Convos { team, command } => f
+                .debug_struct("Convos")
+                .field("team", team)
+                .field("command", command)
+                .finish(),
         }
     }
 }
@@ -614,6 +625,12 @@ pub enum Event {
     /// cancelled.
     UploadDone {
         id: u64,
+    },
+    /// An answer about starting, finding or looking after a conversation
+    /// (see [`crate::convos`]).
+    Convos {
+        team: String,
+        event: crate::convos::Event,
     },
 }
 

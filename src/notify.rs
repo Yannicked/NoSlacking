@@ -431,6 +431,7 @@ mod tests {
             subtype: None,
             delivery: Delivery::Sent,
             broadcast: false,
+            pinned: false,
         }
     }
 
