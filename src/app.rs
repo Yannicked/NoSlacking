@@ -66,6 +66,19 @@ pub struct Editing {
     pub focus: bool,
 }
 
+/// A message picked with the keyboard, whose actions its letter keys run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Selected {
+    pub channel: String,
+    pub ts: Ts,
+    /// Whether it is picked in the thread panel rather than the
+    /// conversation, which can both show a thread's parent.
+    pub in_thread: bool,
+    /// Bring it into view and give it focus when it is next drawn: the
+    /// selection has just moved.
+    pub reveal: bool,
+}
+
 /// An unsent message.
 #[derive(Clone, Debug, Default)]
 pub struct Draft {
@@ -731,6 +744,7 @@ pub struct App {
     pub thread: Option<(String, Ts)>,
     pub drafts: HashMap<String, Draft>,
     pub editing: Option<Editing>,
+    pub selected: Option<Selected>,
     pub toasts: Vec<Toast>,
     pub actions: Vec<Action>,
     pub switcher: Option<(String, usize)>,
@@ -836,6 +850,7 @@ impl App {
             thread: None,
             drafts: HashMap::new(),
             editing: None,
+            selected: None,
             toasts: Vec::new(),
             actions: Vec::new(),
             switcher: None,

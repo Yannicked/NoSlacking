@@ -257,6 +257,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         actions,
         editing,
         read_line,
+        selected,
         ..
     } = app;
     let Some(workspace) = crate::app::active_in(workspaces, settings) else {
@@ -320,6 +321,9 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
             in_thread: false,
             enter_sends: settings.enter_sends,
             overlay,
+            selected: selected
+                .as_ref()
+                .filter(|s| !s.in_thread && s.channel == channel),
         };
         let mut previous = None;
         let mut previous_day: Option<jiff::civil::Date> = None;
