@@ -488,6 +488,15 @@ impl DemoSetup {
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             Some("general") => app.actions.push(Action::OpenConversation("C01".into())),
             // Picking people for a group message, one already picked.
+            Some("browse") => app
+                .actions
+                .push(Action::Convos(noslacking::convos::Action::Browse)),
+            Some("new-channel") => {
+                app.convos.new_channel = Some(noslacking::convos::NewChannel {
+                    name: "Release Notes".into(),
+                    ..Default::default()
+                });
+            }
             Some("new-message") => {
                 let mut dialog = noslacking::convos::NewMessage::default();
                 dialog.pick("U02".into());

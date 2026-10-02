@@ -688,3 +688,83 @@ msgstr "Niemand met die naam."
 
 msgid "Start group message"
 msgstr "Groepsbericht starten"
+
+msgid "Could not list the channels: {error}"
+msgstr "De kanalen konden niet worden opgehaald: {error}"
+
+msgid "Could not join the channel: {error}"
+msgstr "Kon niet deelnemen aan het kanaal: {error}"
+
+msgid "Could not leave the channel: {error}"
+msgstr "Kon het kanaal niet verlaten: {error}"
+
+msgid "Could not create the channel: {error}"
+msgstr "Het kanaal kon niet worden aangemaakt: {error}"
+
+msgid "Browse channels"
+msgstr "Kanalen bekijken"
+
+msgid "Browse channels ({shortcut})"
+msgstr "Kanalen bekijken ({shortcut})"
+
+msgid "Leave channel"
+msgstr "Kanaal verlaten"
+
+msgid "Create a channel"
+msgstr "Kanaal aanmaken"
+
+msgid "Search channels"
+msgstr "Kanalen zoeken"
+
+msgid "{count} channels so far…"
+msgstr "Tot nu toe {count} kanalen…"
+
+msgid "{count} channel you can join"
+msgid_plural "{count} channels you can join"
+msgstr[0] "{count} kanaal waar je aan kunt deelnemen"
+msgstr[1] "{count} kanalen waar je aan kunt deelnemen"
+
+msgid "Join"
+msgstr "Deelnemen"
+
+msgid "Give the channel a name."
+msgstr "Geef het kanaal een naam."
+
+msgid "Names can be at most {count} characters."
+msgstr "Namen zijn hoogstens {count} tekens lang."
+
+msgid "Names can have only letters, numbers, hyphens and underscores, not “{character}”."
+msgstr "Namen mogen alleen letters, cijfers, streepjes en lage streepjes bevatten, geen “{character}”."
+
+msgid "You already have a channel by that name."
+msgstr "Je hebt al een kanaal met die naam."
+
+msgid "e.g. plan-budget"
+msgstr "bijv. budget-plannen"
+
+msgid "It will be called #{name}."
+msgstr "Het gaat #{name} heten."
+
+msgid "Public"
+msgstr "Openbaar"
+
+msgid "Private"
+msgstr "Privé"
+
+msgid "Only people you invite can see and join it."
+msgstr "Alleen mensen die je uitnodigt kunnen het zien en eraan deelnemen."
+
+msgid "Anyone in the workspace can find and join it."
+msgstr "Iedereen in de werkruimte kan het vinden en eraan deelnemen."
+
+msgid "Leave #{name}?"
+msgstr "#{name} verlaten?"
+
+msgid "It is private: you need an invitation to come back."
+msgstr "Het is privé: je hebt een uitnodiging nodig om terug te komen."
+
+msgid "You can join it again from the channel browser."
+msgstr "Je kunt later weer deelnemen via het kanalenoverzicht."
+
+msgid "Leave"
+msgstr "Verlaten"
