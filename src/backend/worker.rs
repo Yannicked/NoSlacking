@@ -1824,6 +1824,21 @@ async fn conversations(
 /// Your sidebar sections and starred conversations, as Slack's own client
 /// gets them. `users.channelSections.list` is undocumented and only answers
 /// browser sessions; anything else keeps the plain sidebar.
+/// Workspaces whose unsent section channels were logged already.
+static SECTIONS_NOTED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether `key` is new to `seen`, remembering it.
+fn first_time(seen: &std::sync::Mutex<Vec<String>>, key: &str) -> bool {
+    let mut seen = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if seen.iter().any(|k| k == key) {
+        return false;
+    }
+    seen.push(key.to_owned());
+    true
+}
+
 async fn sections(client: Client, team: String, sink: Sink) {
     // The web client sends the token in the form; do the same.
     let token = client.token().access;
@@ -1860,22 +1875,18 @@ async fn sections(client: Client, team: String, sink: Sink) {
         log::info!("no sidebar sections ({error}); using the plain sidebar");
         return;
     }
-    for section in &all {
-        // Slack sends a long section's first channels only, with a cursor
-        // for the rest through a call that is not known; say so rather
-        // than show the section as complete without a word.
-        if section
-            .channel_ids_page
-            .cursor
-            .as_deref()
-            .is_some_and(|c| !c.is_empty())
-        {
-            log::warn!(
-                "sidebar section {} has more channels than Slack sent; showing {}",
-                section.channel_section_id,
-                section.channel_ids_page.channel_ids.len()
-            );
-        }
+    // Slack files more channels in a section than it sends (archived and
+    // left ones) and offers no call for the rest (see
+    // `types::ChannelIdsPage`). Say so once per workspace and run; a
+    // channel missing from its section still shows under Channels.
+    let unsent: usize = all
+        .iter()
+        .filter_map(|section| section.channel_ids_page.unsent())
+        .sum();
+    if unsent > 0 && first_time(&SECTIONS_NOTED, &team) {
+        log::info!(
+            "sidebar sections of {team}: {unsent} filed channels not sent (archived or left, most likely)"
+        );
     }
     let mut ordered = types::order_sections(all);
     // Slack leaves Starred empty in the section list; stars.list fills it.
