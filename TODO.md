@@ -4,6 +4,10 @@ Findings from a code review at `684c148`. Line numbers are as of that
 commit. When this review was written, `cargo fmt`, clippy (`-D warnings`)
 and all 59 tests passed.
 
+Status on 2026-10-02: every review finding (P0 to P3) is fixed on `main`,
+which now has 282 tests. Most features are done; the rest are in progress
+(batch B) and are marked so below.
+
 ## P0: Security
 
 - [x] **Credentials leak to any host whose URL contains `files.slack.com`.**
@@ -59,32 +63,32 @@ and all 59 tests passed.
 
 ### Data loss and wrong results
 
-- [ ] **Editing a message breaks its mentions and links.** `StartEdit`
+- [x] **Editing a message breaks its mentions and links.** `StartEdit`
       uses `unescape` (`app.rs:1519`) and `Edit` uses `escape` (`:1465`),
       so `<@U123>` is saved as `&lt;@U123&gt;`.
       - Convert the wire text into editable text, seed `Draft.mentions`,
         and save through `to_wire`.
       - Add a round-trip test.
-- [ ] **A picked file can upload to the wrong conversation.** `PickUpload`
+- [x] **A picked file can upload to the wrong conversation.** `PickUpload`
       looks up the team and channel when the dialog closes
       (`app.rs:1576`). Capture them when the button is pressed.
-- [ ] **Failed optimistic edits, deletes and reactions are never undone**
+- [x] **Failed optimistic edits, deletes and reactions are never undone**
       (`app.rs:1337,1460`). Return per-request result events with the
       original state, as `Sent` already does.
-- [ ] **Sign-out does not cancel `boot` or `unread_sweep`.** A late
+- [x] **Sign-out does not cancel `boot` or `unread_sweep`.** A late
       `WorkspaceReady` re-adds the signed-out workspace
       (`worker.rs:204,1044`).
       - Store a cancellation handle per team, or drop events for unknown
         teams.
-- [ ] **Commands for an unknown team fail silently.** The optimistic send
+- [x] **Commands for an unknown team fail silently.** The optimistic send
       then stays pending forever (`worker.rs:371,409,549`). Emit
       `Sent { Err }` or `Event::Error`.
-- [ ] **Settings: one invalid field resets everything**, and the next save
+- [x] **Settings: one invalid field resets everything**, and the next save
       overwrites the file (`settings.rs:110`).
       - Back up the bad file before saving.
       - Deserialize leniently, field by field.
       - Add a `version` field.
-- [ ] **Manifest scopes are missing.** `conversations.mark` needs
+- [x] **Manifest scopes are missing.** `conversations.mark` needs
       `channels:write`, `groups:write`, `im:write` and `mpim:write`, and the
       stars calls need `stars:read` and `stars:write`. Without these,
       marking as read fails for OAuth users.
@@ -92,20 +96,20 @@ and all 59 tests passed.
 
 ### Real-time, polling and rate limits
 
-- [ ] **One global `socket_up` flag covers every workspace and both socket
+- [x] **One global `socket_up` flag covers every workspace and both socket
       kinds** (`worker.rs:66,822-896`). An RTM connection for workspace A
       stops polling for workspace B. Track liveness per team.
-- [ ] **Polling piles up under rate limits** (`worker.rs:893`,
+- [x] **Polling piles up under rate limits** (`worker.rs:893`,
       `client.rs:243`).
       - A new history task starts every 6 s with no in-flight check.
       - Requests hold their semaphore permit while sleeping on
         `Retry-After`, so sends starve.
-- [ ] **RTM gives up for good after 3 quick failures** (`rtm.rs:86`), for
+- [x] **RTM gives up for good after 3 quick failures** (`rtm.rs:86`), for
       example while Wi-Fi reconnects after sleep. Keep retrying network
       errors with capped backoff.
-- [ ] **A stale RTM `Unavailable` can kill the replacement socket**
+- [x] **A stale RTM `Unavailable` can kill the replacement socket**
       (`worker.rs:854`). Tag each socket with a generation id.
-- [ ] **Socket Mode `disconnect` reconnects immediately**, which can loop
+- [x] **Socket Mode `disconnect` reconnects immediately**, which can loop
       hot (`socket.rs:125`).
       - Treat `link_disabled` as fatal.
       - Apply backoff to short-lived connections.
@@ -113,154 +117,156 @@ and all 59 tests passed.
 
 ### Tokens and keyring
 
-- [ ] **Failed token refresh** (`client.rs:195`):
+- [x] **Failed token refresh** (`client.rs:195`):
       - It retries on every API call.
       - `invalid_refresh_token` and `invalid_grant` are not in `is_auth`,
         so the user never reaches the signed-out state.
-- [ ] **Rotated tokens can be saved out of order** (`worker.rs:179`).
+- [x] **Rotated tokens can be saved out of order** (`worker.rs:179`).
       - Refreshes call `tokio::spawn(save_token)` and don't wait.
       - `SaveApp` builds new `Client`s with a separate `refresh_lock`.
       - Save inside the refresh critical section, and share one token and
         lock per team.
-- [ ] **Keyring calls block the worker loop** (`worker.rs:118,272`), for
+- [x] **Keyring calls block the worker loop** (`worker.rs:118,272`), for
       example while a Secret Service unlock prompt is open. Spawn them.
-- [ ] **A keyring error at boot leaves the remaining workspaces in limbo**
+- [x] **A keyring error at boot leaves the remaining workspaces in limbo**
       (`worker.rs:160`). Emit `SignedOut` for each one that was skipped.
 
 ### Files
 
-- [ ] **The 120 s total timeout breaks large uploads and downloads**
+- [x] **The 120 s total timeout breaks large uploads and downloads**
       (`client.rs:147`). Use a separate client or a per-request timeout
       for transfers.
-- [ ] **Uploads and downloads buffer up to 1 GB in memory**
+- [x] **Uploads and downloads buffer up to 1 GB in memory**
       (`worker.rs:496,533`). Stream the body and write to a temp file
       followed by a rename.
 
 ### Unread state and counters
 
-- [ ] **`Event::Read` can move the read marker backwards** (`app.rs:795`).
+- [x] **`Event::Read` can move the read marker backwards** (`app.rs:795`).
       Use `max_ts`, and only clear counts when the marker is at or past
       `latest`.
-- [ ] **Unread counts stick** after reading on another device
+- [x] **Unread counts stick** after reading on another device
       (`app.rs:1664`). Make `unread` an `Option`, or clear it when
       `last_read >= latest`.
-- [ ] **`message_changed` raises the reply count and mention count**
+- [x] **`message_changed` raises the reply count and mention count**
       (`app.rs:959,988`). Flag edits on the event.
-- [ ] **Reply counts after deletes:**
+- [x] **Reply counts after deletes:**
       - Deleting a reply doesn't lower the parent's `reply_count`.
       - An edit with `reply_count == 0` keeps the old count
         (`model.rs:451`).
 
 ### Scroll, threads and focus
 
-- [ ] **A global `scroll_to_bottom` flag** makes a thread reply yank the
+- [x] **A global `scroll_to_bottom` flag** makes a thread reply yank the
       main list down (`app.rs:1287,938`). Key it by list.
-- [ ] **A stale `prepended` anchor** survives switching conversations
+- [x] **A stale `prepended` anchor** survives switching conversations
       (`conversation.rs:253`).
-- [ ] **Open threads outlive their source:**
+- [x] **Open threads outlive their source:**
       - An open thread isn't closed when its conversation disappears.
       - Deleting a parent leaves an empty thread panel open.
-- [ ] **The edit field traps focus and swallows Escape** before overlays
+- [x] **The edit field traps focus and swallows Escape** before overlays
       (`message.rs:319,336`).
-- [ ] **The same message can get two edit fields with one Id** when its
+- [x] **The same message can get two edit fields with one Id** when its
       thread parent is shown in both panels (`message.rs:65,311`).
 
 ### Composer and pickers
 
-- [ ] **The suggestion popup can't be dismissed.** Enter always accepts,
+- [x] **The suggestion popup can't be dismissed.** Enter always accepts,
       so a message like "@chan" can't be sent as typed
       (`composer.rs:157`).
-- [ ] **`to_wire` mention labels:**
+- [x] **`to_wire` mention labels:**
       - Labels are replaced anywhere in the text: "@Ann" plus "@Annabel"
         gives `<@U1>abel`.
       - `replace_word` checks the boundary against `rest` instead of the
         full text.
-- [ ] **Enter in the emoji picker** with an empty query reacts with the
+- [x] **Enter in the emoji picker** with an empty query reacts with the
       first custom emoji (`overlays.rs:292`).
-- [ ] **The settings "Save" button** doesn't check `can_sign_in()`
+- [x] **The settings "Save" button** doesn't check `can_sign_in()`
       (`settings.rs:278`).
 
 ### Pagination and fetch caches
 
-- [ ] **Pagination stops silently** (worker.rs):
+- [x] **Pagination stops silently** (worker.rs):
       - threads are capped at 2000 replies
       - `stars.list` reads one page
       - section `channel_ids_page` cursors are ignored
       - `users.list` stops at 40 pages
 
       Follow the cursors, or log when a cap is hit.
-- [ ] **`users_requested` and `bots_requested` are never cleared**, so a
+      *Done, except section `channel_ids_page` cursors, which are only
+      logged so far (in progress, batch B).*
+- [x] **`users_requested` and `bots_requested` are never cleared**, so a
       transient failure means that user is never fetched again
       (`worker.rs:615,648`).
-- [ ] **Failed images never retry** (`images.rs:182`). Add a backoff.
+- [x] **Failed images never retry** (`images.rs:182`). Add a backoff.
 
 ### Sidebar
 
-- [ ] **Local section ids can collide** (`sidebar.rs:334`), and
+- [x] **Local section ids can collide** (`sidebar.rs:334`), and
       `local-*` ids are sent to Slack.
-- [ ] **Shift and Star edge cases** (`sidebar.rs:356,113`):
+- [x] **Shift and Star edge cases** (`sidebar.rs:356,113`):
       - Shift swaps with hidden neighbours.
       - Starring with no Starred section changes nothing locally but still
         calls Slack.
 
 ### Minor
 
-- [ ] **Download naming** (`worker.rs:1476`):
+- [x] **Download naming** (`worker.rs:1476`):
       - The `exists()` check is a TOCTOU race; use `create_new`.
       - Names aren't safe on Windows (`<>:"|?*`, `CON`, trailing dots).
       - Long names aren't truncated.
-- [ ] **The startup error log** comes before logger init and is lost
+- [x] **The startup error log** comes before logger init and is lost
       (`main.rs:100`).
-- [ ] **`write_atomic`** (`paths.rs:299`) doesn't fsync, and its fixed
+- [x] **`write_atomic`** (`paths.rs:299`) doesn't fsync, and its fixed
       `.tmp` name races between writers.
-- [ ] **mrkdwn edge cases:**
+- [x] **mrkdwn edge cases:**
       - `<!foo>` is drawn as a broadcast.
       - Word boundaries are ASCII-only.
       - Double-backtick code isn't handled.
       - A quote is lost before a fenced block.
       - Emoji need no boundary, so `10:30:00` matches `:30:`.
-- [ ] **Small UI errors:**
+- [x] **Small UI errors:**
       - The `short_time` doc comment is wrong (`ui/mod.rs:110`).
       - The rail badge shows "9" instead of "9+" (`sidebar.rs:75`).
 
 ## P2: Performance
 
-- [ ] **The mrkdwn parser is quadratic.** One 40 KB message of
+- [x] **The mrkdwn parser is quadratic.** One 40 KB message of
       `"*a "` takes about 600 ms to parse (release build), and that
       happens every frame (`mrkdwn.rs:190,222`). Make it linear.
-- [ ] **The whole history is laid out every frame** (`conversation.rs:332`,
+- [x] **The whole history is laid out every frame** (`conversation.rs:332`,
       `rich.rs:80`, `message.rs:813`):
       - Use `show_viewport` with cached row heights.
       - Cache parsed blocks per `(ts, edited)`.
       - Build reaction hover text lazily.
-- [ ] **Composer autocomplete** rescans and re-lowercases every user on
+- [x] **Composer autocomplete** rescans and re-lowercases every user on
       every frame (`composer.rs:61`). Cache results by query.
-- [ ] **The emoji picker** filters and paints about 1,900 emoji every frame
+- [x] **The emoji picker** filters and paints about 1,900 emoji every frame
       (`overlays.rs:342`). Use `show_rows` and a per-query cache.
-- [ ] **Settings are written on the UI thread every frame while dragging**
+- [x] **Settings are written on the UI thread every frame while dragging**
       (`sidebar.rs:268`, `thread.rs:188`, `app.rs:514`). Debounce the save
       and move it off-thread.
-- [ ] **`sidebar::layout` is recomputed every frame.** Memoise it by a
+- [x] **`sidebar::layout` is recomputed every frame.** Memoise it by a
       generation counter.
-- [ ] **The disk image cache is never pruned.** Add an LRU size cap.
-- [ ] **The boot unread sweep** makes 1–2 sequential calls per
+- [x] **The disk image cache is never pruned.** Add an LRU size cap.
+- [x] **The boot unread sweep** makes 1–2 sequential calls per
       conversation (`worker.rs:1350`). Use `client.counts` or
       `users.counts` where available.
 
 ## P2: Accessibility and i18n
 
-- [ ] **Custom-painted buttons and rows have no AccessKit info.** Call
+- [x] **Custom-painted buttons and rows have no AccessKit info.** Call
       `widget_info` in `theme::icon_button` and the row helpers, and link
       fields with `labelled_by`.
-- [ ] **Message actions are mouse-only.** Add a focused-message state with
+- [x] **Message actions are mouse-only.** Add a focused-message state with
       shortcuts (r, e, Del).
-- [ ] **Keyboard issues:**
+- [x] **Keyboard issues:**
       - Alt+↑/↓ is consumed inside text fields (`keys.rs:30`).
       - Overlays re-grab focus every frame, so Tab can't reach their
         buttons.
       - The edit field saves on Enter even when "Enter sends" is off.
       - The filter's hint says "Ctrl+K", which opens the switcher.
-- [ ] **i18n gaps:**
+- [x] **i18n gaps:**
       - Dates use English `strftime` names.
       - Some sentences are glued from pieces; use `{name}` placeholders.
       - Emoji group names come from `Debug`.
@@ -269,63 +275,65 @@ and all 59 tests passed.
 
 ## P3: Architecture and maintainability
 
-- [ ] **Views call `app.backend.send` and `open::that_detached`
+- [x] **Views call `app.backend.send` and `open::that_detached`
       directly** (`login.rs`, `settings.rs`). Route these through
       `Action`s.
-- [ ] **Split the large functions:**
+- [x] **Split the large functions:**
       - `Worker::command` (about 320 lines)
       - `App::handle` and `App::apply` (220+ lines each)
       - `edit_sidebar`
-- [ ] **Shared helpers to add:**
+- [x] **Shared helpers to add:**
       - an active-workspace lookup (copied 5 times)
       - `timelines_for(channel)` (6 copies with inconsistent filtering)
       - a `paginate` helper (4 hand-written loops)
       - `From<reqwest::Error>` for `SlackError`
-- [ ] **Auth error codes** live in `is_auth`, `describe` and
+- [x] **Auth error codes** live in `is_auth`, `describe` and
       `socket::is_fatal`, and the three lists disagree. Use one list.
-- [ ] **Make `App` testable without a backend**, for example by moving
+- [x] **Make `App` testable without a backend**, for example by moving
       the event and action handlers onto `WorkspaceState`.
 
 ## P3: Tests
 
-- [ ] Hostile-URL tests for `image_uri`, `images::split` and `get_bytes`.
-- [ ] `redact_tokens`, `describe`, `safe_name` (Windows cases), `backoff`,
+- [x] Hostile-URL tests for `image_uri`, `images::split` and `get_bytes`.
+- [x] `redact_tokens`, `describe`, `safe_name` (Windows cases), `backoff`,
       `normalize_workspace`, and `parse_callback` with duplicate params.
-- [ ] Optimistic reconciliation, `Event::Read` ordering,
+- [x] Optimistic reconciliation, `Event::Read` ordering,
       `merge_conversation`, and the edit round-trip.
-- [ ] Composer `suggestions` and `replace_word` with multibyte text, and
+- [x] Composer `suggestions` and `replace_word` with multibyte text, and
       `keys::step`.
-- [ ] mrkdwn:
+- [x] mrkdwn:
       - unterminated `<`, `<!subteam^…>` and `<!date^…>`
       - a fuzz or proptest target asserting that parsing never panics
       - a 40 KB time-budget test
-- [ ] Settings: a corrupt file, a newer-version file, and `write_atomic`.
-- [ ] Sidebar `apply` with local ids, and byte-cache eviction.
+- [x] Settings: a corrupt file, a newer-version file, and `write_atomic`.
+- [x] Sidebar `apply` with local ids, and byte-cache eviction.
 
 ## P3: CI, dependencies and packaging
 
-- [ ] **CI triggers on `main`, but the working branch is `master`.**
+- [x] **CI triggers on `main`, but the working branch is `master`.**
       Rename the branch or add it to the triggers.
-- [ ] **Two toolchains get installed.** Use the pinned toolchain
+- [x] **Two toolchains get installed.** Use the pinned toolchain
       (`@1.98.0` or `rustup show`) instead of `dtolnay/...@stable`.
-- [ ] **Run clippy and the non-demo build on macOS and Windows too**,
+- [x] **Run clippy and the non-demo build on macOS and Windows too**,
       since the `cfg` code there is never linted.
-- [ ] **Add `cargo-deny`** for advisories, licenses and a `sources`
+- [x] **Add `cargo-deny`** for advisories, licenses and a `sources`
       allowlist for the git deps.
-- [ ] **Pin actions by SHA.**
-- [ ] **Add a release job** that builds the binaries and packages.
-- [ ] **Add a `LICENSE` file.** `Cargo.toml` says MIT, but the repo has
+- [x] **Pin actions by SHA.**
+- [x] **Add a release job** that builds the binaries and packages.
+- [x] **Add a `LICENSE` file.** `Cargo.toml` says MIT, but the repo has
       none.
-- [ ] **Bump `sha1`, `sha2` and `rand`** to the versions the transitive
+- [x] **Bump `sha1`, `sha2` and `rand`** to the versions the transitive
       deps use, to reduce duplicate crates.
 - [ ] **Consider not embedding 12.6 MB of emoji fonts**: load them from
       the system, or compress them.
-- [ ] **Packaging:**
+      *In progress (batch B): bundle per platform.*
+- [x] **Packaging:**
       - The `.desktop` file has `Icon=cloud.yannick.NoSlacking`, but the
         icons are named `noslacking-*.png`.
       - Add AppStream metainfo.
       - Run `desktop-file-validate` in CI.
       - Add macOS and Windows packaging.
+      *Done; the macOS bundle and Windows icon are untested off Linux.*
 
 ## Features
 
@@ -336,22 +344,25 @@ sections. Nothing below exists yet.
 
 ### Expected of any chat client
 
-- [ ] **Desktop notifications** for DMs, mentions and keywords, with
+- [x] **Desktop notifications** for DMs, mentions and keywords, with
       per-channel settings, plus a taskbar/dock unread badge (fastframe-shell
       may help). Without this the client can't replace Slack.
-- [ ] **Search**: `search.messages` and `search.files`, with
+- [x] **Search**: `search.messages` and `search.files`, with
       `from:`/`in:`/`before:` filters and jump-to-message with context.
-- [ ] **Start conversations**: open a DM or group DM (`conversations.open`),
+- [x] **Start conversations**: open a DM or group DM (`conversations.open`),
       browse and join or leave channels, create a channel.
 - [ ] **Presence and typing**: green dots, `user_typing` over RTM and Socket
       Mode, and setting yourself away.
+      *In progress (batch B).*
 - [ ] **Your own status and DND**: set the status emoji, text and expiry,
       and snooze notifications (`dnd.setSnooze`).
-- [ ] **Mute and unmute channels**, honouring Slack's muted list so muted
+      *DND and snooze are done; setting your status is in progress
+      (batch B).*
+- [x] **Mute and unmute channels**, honouring Slack's muted list so muted
       channels don't count as unread.
-- [ ] **Persistent drafts** per conversation and thread across restarts,
+- [x] **Persistent drafts** per conversation and thread across restarts,
       plus a Drafts list.
-- [ ] **Jump to a message**: copy a message link, open `slack://` and
+- [x] **Jump to a message**: copy a message link, open `slack://` and
       `https://…/archives/C…/p…` permalinks inside the app, and jump to
       the unread line or to the newest message.
 
@@ -359,55 +370,106 @@ sections. Nothing below exists yet.
 
 - [ ] **Activity / Mentions**: one list of mentions and replies across
       channels.
+      *In progress (batch B).*
 - [ ] **All unreads**: one list of every unread message.
+      *In progress (batch B).*
 - [ ] **Threads**: a list of threads you follow, with unread replies.
+      *In progress (batch B).*
 - [ ] **Saved for later and reminders** (`reminders.add`, or the newer
       saved-items API on session tokens).
-- [ ] **Pins and bookmarks** in a channel header panel (`pins.list`,
+      *In progress (batch B).*
+- [x] **Pins and bookmarks** in a channel header panel (`pins.list`,
       `bookmarks.list`).
 - [ ] **Scheduled messages** (`chat.scheduleMessage`) and "send later" in
       the composer.
-- [ ] **Channel details**: topic, purpose, members, files, and editing the
+      *In progress (batch B).*
+- [x] **Channel details**: topic, purpose, members, files, and editing the
       topic.
-- [ ] **Profile card** on clicking a name: local time, title, status, and
+- [x] **Profile card** on clicking a name: local time, title, status, and
       a "Message" button.
 
 ### Composer and rendering
 
-- [ ] **Syntax highlighting** in code blocks (e.g. `syntect`, behind a
+- [x] **Syntax highlighting** in code blocks (e.g. `syntect`, behind a
       feature flag), and a copy button.
-- [ ] **Formatting toolbar and shortcuts** (Ctrl+B/I/Shift+X), a live
+- [x] **Formatting toolbar and shortcuts** (Ctrl+B/I/Shift+X), a live
       preview of mrkdwn, and Up-arrow to edit your last message.
-- [ ] **Paste images** from the clipboard and drag-and-drop files in the
+      *Done, without the live mrkdwn preview.*
+- [x] **Paste images** from the clipboard and drag-and-drop files in the
       composer, with upload progress and cancel.
+      *Done. On Wayland the clipboard is read through XWayland.*
 - [ ] **Spell checking** (system spellchecker, or `hunspell` behind a
       feature).
-- [ ] **Slash commands** (`/remind`, `/status`, `/invite`) and `#channel`
+      *In progress (batch B).*
+- [x] **Slash commands** (`/remind`, `/status`, `/invite`) and `#channel`
       autocomplete.
+      *`/remind` and app commands need the browser sign-in (`chat.command`).*
 - [ ] **Rich unfurls** for link previews, video and audio file playback or
       a "play externally" option, and PDF thumbnails.
+      *In progress (batch B).*
 - [ ] **Image viewer**: a full-size lightbox with zoom and arrow-key
       navigation through the channel's images.
-- [ ] **Emoji**: skin tones, recently used, and a frequent-reactions row.
+      *In progress (batch B).*
+- [x] **Emoji**: skin tones, recently used, and a frequent-reactions row.
 
 ### Desktop integration
 
-- [ ] **System tray** with an unread indicator and close-to-tray, and
+- [x] **System tray** with an unread indicator and close-to-tray, and
       start on login.
-- [ ] **`slack://` URL handler** registration so links open in NoSlacking.
+- [x] **`slack://` URL handler** registration so links open in NoSlacking.
 - [ ] **Offline cache**: keep recent history on disk so start-up is instant
       and the client works read-only offline. Keep the cache encrypted, or
       at least per-team and wiped on sign-out.
+      *In progress (batch B).*
 - [ ] **Proxy settings** (HTTP or SOCKS) for corporate networks.
+      *In progress (batch B).*
 - [ ] **Multi-window**: pop a conversation out into its own window.
+      *In progress (batch B).*
 - [ ] **Compact / IRC-style density**, and an option to hide avatars and
       images.
+      *In progress (batch B).*
 
 ### Bigger bets
 
 - [ ] **Enterprise Grid / Slack Connect**: shared channels, external user
       badges, and org-level sign-in.
+      *In progress (batch B).*
 - [ ] **Huddles and calls**: probably out of scope. At least show "huddle
       in progress" and open it in the browser.
+      *In progress (batch B).*
 - [ ] **Plugins or scripting hooks** for keyword alerts and auto-replies,
       in the spirit of wee-slack.
+      *In progress (batch B).*
+
+## Follow-ups found along the way
+
+- [x] **Browser sign-in, inspired by msga**: open `ssb/signin`,
+      receive the `slack://` magic link (the handler is registered by
+      default and used only during a sign-in you started) or paste it, and
+      redeem it with `auth.loginMagicBulk`. Tested against a real
+      workspace.
+- [x] **Sidebar sections fetched ten times**: Slack repeats the same page
+      with a new cursor; the walk now stops.
+- [x] **Images answering 404 or 403 were retried**: they now fail for good.
+- [x] **`channel_marked` was ignored**: reads on other devices now move the
+      read marker here.
+- [ ] **Sidebar sections show only their first channels** when Slack sends
+      a `channel_ids_page` cursor. *In progress (batch B).*
+- [ ] **Your own Slack app sign-in needs PKCE**: `pkce_enabled` in the
+      manifest, an `http://localhost` redirect, no client secret. *In
+      progress (batch B).*
+- [ ] **macOS never receives `slack://` or `noslacking://` links**: the
+      bundle declares them, but the open-URL event isn't handled. *In
+      progress (batch B).*
+- [ ] **Close DMs** (`conversations.close`). *In progress (batch B).*
+- [ ] **The new-message icon touches the sidebar edge.** *In progress
+      (batch B).*
+- [ ] **DND for your-own-app sign-ins** needs the `dnd:read` and
+      `dnd:write` scopes. Adding them breaks apps made from the old
+      manifest, so DND is local only for those sign-ins for now.
+- [ ] **No Dock or taskbar badge on macOS and Windows**: it would need
+      `unsafe` platform calls. The unread count is in the window title.
+- [ ] **Notifications only arrive over a live socket**, not from polling.
+- [ ] **Cancelling an upload during its last step** may still post it.
+- [ ] **Test on macOS and Windows**: the platform code is only compiled on
+      Linux so far.
