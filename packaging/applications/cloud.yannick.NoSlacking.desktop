@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=NoSlacking
+GenericName=Slack Client
+Comment=A native Slack client
+Exec=noslacking %u
+Icon=cloud.yannick.NoSlacking
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+Keywords=slack;chat;messaging;
+MimeType=x-scheme-handler/noslacking;
+StartupNotify=true
+StartupWMClass=cloud.yannick.NoSlacking

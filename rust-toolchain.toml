@@ -1,0 +1,4 @@
+# The same compiler, clippy and rustfmt locally and in CI.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]

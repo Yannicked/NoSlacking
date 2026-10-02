@@ -1,0 +1,62 @@
+{
+  "_metadata": {
+    "major_version": 1,
+    "minor_version": 1
+  },
+  "display_information": {
+    "name": "NoSlacking",
+    "description": "A native Slack client",
+    "background_color": "#1a1d21"
+  },
+  "oauth_config": {
+    "scopes": {
+      "user": [
+        "channels:history",
+        "channels:read",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "mpim:history",
+        "mpim:read",
+        "chat:write",
+        "reactions:read",
+        "reactions:write",
+        "users:read",
+        "files:read",
+        "files:write",
+        "emoji:read",
+        "team:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "user_events": [
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "message.mpim",
+        "reaction_added",
+        "reaction_removed",
+        "member_joined_channel",
+        "member_left_channel",
+        "channel_rename",
+        "group_rename",
+        "channel_archive",
+        "channel_unarchive",
+        "group_archive",
+        "group_unarchive",
+        "user_change",
+        "team_join",
+        "emoji_changed"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}
