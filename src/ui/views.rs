@@ -1,5 +1,5 @@
-//! The views at the top of the sidebar (All unreads, Activity) and the pane
-//! each shows in place of the conversation.
+//! The views at the top of the sidebar (All unreads, Threads, Activity) and
+//! the pane each shows in place of the conversation.
 
 use egui::{CornerRadius, Margin, RichText, Sense, Stroke, Vec2};
 
@@ -22,6 +22,7 @@ fn icon(view: View) -> Icon {
     match view {
         View::Activity => Icon::AtSign,
         View::Unreads => Icon::Inbox,
+        View::Threads => Icon::Messages,
     }
 }
 
@@ -35,6 +36,7 @@ fn count(view: View, workspace: &WorkspaceState, views: Option<&TeamViews>) -> u
             .iter()
             .filter(|c| !c.archived && workspace.is_unread(c))
             .count(),
+        View::Threads => views.map_or(0, TeamViews::unread_threads),
     }
 }
 
@@ -146,7 +148,7 @@ pub fn entries(
 }
 
 /// Shortcuts that open the views, as Slack's: Ctrl+Shift+M for Activity,
-/// Ctrl+Shift+A for All unreads.
+/// Ctrl+Shift+A for All unreads, Ctrl+Shift+T for Threads.
 pub fn keys(app: &mut App, ctx: &egui::Context) {
     if app.overlay_open() || app.workspaces.is_empty() {
         return;
@@ -167,6 +169,7 @@ fn shortcut(view: View) -> egui::Key {
     match view {
         View::Activity => egui::Key::M,
         View::Unreads => egui::Key::A,
+        View::Threads => egui::Key::T,
     }
 }
 
@@ -195,6 +198,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             match view {
                 View::Activity => activity(ui, &palette, workspace, data, actions),
                 View::Unreads => unreads(ui, &palette, workspace, data, actions),
+                View::Threads => threads(ui, &palette, workspace, data, actions),
             }
         });
 }
@@ -211,6 +215,7 @@ fn header(
     let loading = match view {
         View::Activity => data.activity.loading,
         View::Unreads => data.unread.values().any(|f| f.loading),
+        View::Threads => data.threads.loading,
     };
     egui::Panel::top("view-header")
         .exact_size(52.0 + inset)
@@ -374,14 +379,14 @@ fn card_guess(message: &Message) -> f32 {
 
 /// One message as a card: where and why above it, if that is said, then
 /// who wrote it and what it says, with `buttons` on the right. A click on
-/// the card shows the message in context; the buttons, links and mentions
-/// inside it take their own clicks.
+/// the card asks for `open` (showing the message in context, say); the
+/// buttons, links and mentions inside it take their own clicks.
 #[allow(clippy::too_many_arguments)]
 fn card(
     ui: &mut egui::Ui,
     palette: &Palette,
     workspace: &WorkspaceState,
-    channel: &str,
+    open: Action,
     message: &Message,
     above: Option<&str>,
     unread: bool,
@@ -429,7 +434,7 @@ fn card(
     };
     theme::describe(&response, egui::WidgetType::Button, &spoken);
     if response.clicked() {
-        actions.push(jump(channel, message));
+        actions.push(open);
     }
 }
 
@@ -490,6 +495,11 @@ fn card_contents(
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
+                if unread && above.is_none() {
+                    let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                    ui.painter()
+                        .circle_filled(dot.center(), 4.0, palette.accent);
+                }
                 ui.label(
                     RichText::new(author)
                         .font(theme::bold(14.0))
@@ -556,7 +566,7 @@ fn activity(
             ui,
             palette,
             workspace,
-            &item.channel,
+            jump(&item.channel, &item.message),
             &item.message,
             Some(&above),
             item.unread,
@@ -661,7 +671,7 @@ fn unreads(
                 ui,
                 palette,
                 workspace,
-                &conversations[c].id,
+                jump(&conversations[c].id, &messages(c)[m]),
                 &messages(c)[m],
                 None,
                 false,
@@ -760,4 +770,195 @@ fn unread_head(
                 });
             });
         });
+}
+
+/// A row of the threads list.
+#[derive(Clone, Copy)]
+enum ThreadRow {
+    /// Where the thread is, and how much is new in it.
+    Head(usize),
+    /// The message that started it.
+    Parent(usize),
+    /// One of its newest replies.
+    Reply(usize, usize),
+    /// How many replies there are, and a way into the thread.
+    Foot(usize),
+}
+
+/// The threads you follow, the newest reply first, each with its newest
+/// replies. A click opens the thread beside the list.
+fn threads(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    workspace: &WorkspaceState,
+    data: &TeamViews,
+    actions: &mut Vec<Action>,
+) {
+    status(
+        ui,
+        palette,
+        data.threads.waiting(),
+        data.threads.error.as_deref(),
+    );
+    if data.threads_searched {
+        egui::Frame::new()
+            .inner_margin(Margin::symmetric(20, 6))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(t("Threads you replied in, found by searching."))
+                        .font(theme::regular(12.5))
+                        .color(palette.dim),
+                );
+            });
+    }
+    let threads = data.threads.value.as_deref().unwrap_or_default();
+    if threads.is_empty() {
+        if !data.threads.waiting() {
+            note(
+                ui,
+                palette,
+                &t("No threads yet. Reply in one to follow it."),
+            );
+        }
+        return;
+    }
+    let mut rows = Vec::new();
+    for (index, thread) in threads.iter().enumerate() {
+        rows.push(ThreadRow::Head(index));
+        rows.push(ThreadRow::Parent(index));
+        rows.extend((0..thread.replies.len()).map(|r| ThreadRow::Reply(index, r)));
+        rows.push(ThreadRow::Foot(index));
+    }
+    let thread_key = |t: &crate::views::Followed| (t.channel.clone(), t.parent.ts.0.clone());
+    let keys: Vec<u64> = rows
+        .iter()
+        .map(|row| match *row {
+            ThreadRow::Head(i) => key(("head", thread_key(&threads[i]))),
+            ThreadRow::Parent(i) => key(("parent", thread_key(&threads[i]))),
+            ThreadRow::Reply(i, r) => key(("reply", threads[i].replies[r].ts.as_str())),
+            ThreadRow::Foot(i) => key(("foot", thread_key(&threads[i]))),
+        })
+        .collect();
+    let guesses: Vec<f32> = rows
+        .iter()
+        .map(|row| match *row {
+            ThreadRow::Head(_) => 52.0,
+            ThreadRow::Parent(i) => card_guess(&threads[i].parent) - 20.0,
+            ThreadRow::Reply(i, r) => card_guess(&threads[i].replies[r]) - 20.0,
+            ThreadRow::Foot(_) => 36.0,
+        })
+        .collect();
+    let open = |thread: &crate::views::Followed| {
+        Action::Views(Views::OpenThread {
+            channel: thread.channel.clone(),
+            ts: thread.parent.ts.clone(),
+        })
+    };
+    list(ui, "threads", &keys, &guesses, |ui, index| {
+        match rows[index] {
+            ThreadRow::Head(i) => {
+                let thread = &threads[i];
+                ui.add_space(10.0);
+                egui::Frame::new()
+                    .fill(palette.surface)
+                    .inner_margin(Margin::symmetric(20, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.label(
+                                RichText::new(place(workspace, &thread.channel))
+                                    .font(theme::bold(15.0))
+                                    .color(palette.text),
+                            );
+                            if thread.unread > 0 {
+                                ui.label(
+                                    RichText::new(tn(
+                                        "{count} new reply",
+                                        "{count} new replies",
+                                        thread.unread,
+                                    ))
+                                    .font(theme::semibold(12.5))
+                                    .color(palette.accent),
+                                );
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if theme::icon_button(
+                                        ui,
+                                        palette,
+                                        Icon::Reply,
+                                        15.0,
+                                        &t("Reply"),
+                                    )
+                                    .clicked()
+                                    {
+                                        actions.push(open(thread));
+                                    }
+                                },
+                            );
+                        });
+                    });
+            }
+            ThreadRow::Parent(i) => {
+                let thread = &threads[i];
+                card(
+                    ui,
+                    palette,
+                    workspace,
+                    open(thread),
+                    &thread.parent,
+                    None,
+                    false,
+                    actions,
+                    |_, _| {},
+                );
+            }
+            ThreadRow::Reply(i, r) => {
+                let thread = &threads[i];
+                // The last `unread` replies are the new ones.
+                let new = r + usize::try_from(thread.unread).unwrap_or(usize::MAX)
+                    >= thread.replies.len();
+                ui.horizontal(|ui| {
+                    ui.add_space(28.0);
+                    ui.vertical(|ui| {
+                        card(
+                            ui,
+                            palette,
+                            workspace,
+                            open(thread),
+                            &thread.replies[r],
+                            None,
+                            new,
+                            actions,
+                            |_, _| {},
+                        );
+                    });
+                });
+            }
+            ThreadRow::Foot(i) => {
+                let thread = &threads[i];
+                let shown = u32::try_from(thread.replies.len()).unwrap_or(u32::MAX);
+                let total = thread.parent.reply_count.max(shown);
+                egui::Frame::new()
+                    .inner_margin(Margin {
+                        left: 48,
+                        right: 20,
+                        top: 6,
+                        bottom: 8,
+                    })
+                    .show(ui, |ui| {
+                        let label = if total > shown {
+                            tn("See all {count} reply", "See all {count} replies", total)
+                        } else {
+                            t("Open the thread").into_owned()
+                        };
+                        if ui.link(label).clicked() {
+                            actions.push(open(thread));
+                        }
+                    });
+            }
+        }
+    });
 }

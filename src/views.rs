@@ -1,7 +1,8 @@
 //! The views at the top of the sidebar that take the place of the open
 //! conversation, as in Slack: Activity (what mentions you or answers you)
-//! and All unreads (every conversation with something new, with the new
-//! messages).
+//! All unreads (every conversation with something new, with the new
+//! messages) and Threads (the threads you follow, with their newest
+//! replies).
 //!
 //! Views push [`Action`]s (wrapped in [`crate::model::Action::Views`]);
 //! [`apply`] turns them into [`Command`]s for the worker, whose answers come
@@ -21,6 +22,8 @@ const LIVE_LIMIT: usize = 200;
 /// The most unread conversations whose messages are loaded at once: the
 /// rest load as they are scrolled to.
 const UNREAD_LIMIT: usize = 30;
+/// How many of a thread's newest replies the threads list shows.
+pub const THREAD_REPLIES: usize = 3;
 
 /// One of the views at the top of the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -29,17 +32,20 @@ pub enum View {
     Activity,
     /// Every conversation with unread messages, and those messages.
     Unreads,
+    /// Threads you follow, with their newest replies.
+    Threads,
 }
 
 impl View {
     /// Every view, in the sidebar's order.
-    pub const ALL: [Self; 2] = [Self::Unreads, Self::Activity];
+    pub const ALL: [Self; 3] = [Self::Unreads, Self::Threads, Self::Activity];
 
     /// Its name in the sidebar and its header.
     pub fn label(self) -> String {
         match self {
             Self::Activity => t("Activity").into_owned(),
             Self::Unreads => t("All unreads").into_owned(),
+            Self::Threads => t("Threads").into_owned(),
         }
     }
 }
@@ -59,6 +65,8 @@ pub enum Action {
     MarkRead { channel: String },
     /// Marks every unread conversation read.
     MarkAllRead,
+    /// Opens a thread of the threads list beside it, and marks it read.
+    OpenThread { channel: String, ts: Ts },
 }
 
 /// What the interface asks the worker to do for one workspace.
@@ -70,6 +78,13 @@ pub enum Command {
     /// The messages of `channel` after `after` (the last one you read),
     /// oldest first; with no read marker, the newest few.
     Unread { channel: String, after: Option<Ts> },
+    /// The threads you follow, newest reply first. `me` is your user id,
+    /// for finding the threads you replied in when Slack's own list cannot
+    /// be read.
+    Threads { me: String },
+    /// Tells Slack you read thread `thread` up to `ts` (browser sessions;
+    /// others keep no thread read state to tell).
+    ReadThread { channel: String, thread: Ts, ts: Ts },
 }
 
 impl Command {
@@ -84,6 +99,11 @@ impl Command {
                 channel: channel.clone(),
                 result: Err(error),
             },
+            Self::Threads { .. } => Event::Threads {
+                result: Err(error),
+                searched: false,
+            },
+            Self::ReadThread { .. } => Event::Nothing,
         }
     }
 }
@@ -104,6 +124,56 @@ pub enum Event {
         channel: String,
         result: Result<(Vec<Message>, bool), String>,
     },
+    /// The threads you follow, or why there are none. `searched` says they
+    /// were found by searching for your replies rather than read from
+    /// Slack's own list.
+    Threads {
+        result: Result<Vec<Followed>, String>,
+        searched: bool,
+    },
+    /// A command that needs no answer was carried out (or not, which
+    /// changes nothing on screen).
+    Nothing,
+}
+
+/// A thread you follow: you started it, replied in it, or asked to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Followed {
+    pub channel: String,
+    pub parent: Message,
+    /// Its newest replies, oldest first: at most [`THREAD_REPLIES`].
+    pub replies: Vec<Message>,
+    /// How many replies you have not read.
+    pub unread: u32,
+}
+
+impl Followed {
+    /// When it last moved: its newest reply, or the parent.
+    pub fn latest(&self) -> &Ts {
+        self.replies.last().map_or(&self.parent.ts, |m| &m.ts)
+    }
+
+    /// Takes in a reply seen live: it joins the newest replies and, from
+    /// someone else, counts as unread.
+    pub fn add_reply(&mut self, reply: &Message, me: &str) {
+        if self.replies.iter().any(|m| m.ts == reply.ts) {
+            return;
+        }
+        self.replies.push(reply.clone());
+        self.replies.sort_by(|a, b| a.ts.cmp(&b.ts));
+        let extra = self.replies.len().saturating_sub(THREAD_REPLIES);
+        self.replies.drain(..extra);
+        self.parent.reply_count += 1;
+        if reply.user.as_deref() != Some(me) {
+            self.unread += 1;
+        }
+    }
+}
+
+/// Orders followed threads as the list shows them: the one with the newest
+/// reply first.
+pub fn sort_threads(threads: &mut [Followed]) {
+    threads.sort_by(|a, b| b.latest().cmp(a.latest()));
 }
 
 /// Why a message is in your activity.
@@ -203,6 +273,9 @@ pub struct TeamViews {
     /// The unread messages of conversations, by id, and whether there are
     /// more than were read.
     pub unread: HashMap<String, Fetch<(Vec<Message>, bool)>>,
+    pub threads: Fetch<Vec<Followed>>,
+    /// Whether the threads came from a search rather than Slack's list.
+    pub threads_searched: bool,
 }
 
 /// Everything the views hold.
@@ -239,6 +312,17 @@ impl TeamViews {
     /// How many items of the activity are unread, for the sidebar.
     pub fn unread_activity(&self) -> usize {
         self.activity().iter().filter(|a| a.unread).count()
+    }
+
+    /// How many followed threads have replies you have not read.
+    pub fn unread_threads(&self) -> usize {
+        self.threads
+            .value
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|t| t.unread > 0)
+            .count()
     }
 }
 
@@ -343,6 +427,35 @@ pub fn arrived(app: &mut App, team: &str, channel: &str, message: &Message) {
     {
         messages.push(message.clone());
     }
+    // A list of threads already read stays fresh; one never read is read
+    // whole when it is opened.
+    if let Some(parent) = message.thread_ts.as_ref().filter(|_| message.is_reply())
+        && let Some(threads) = views.threads.value.as_mut()
+    {
+        let me = workspace.info.user_id.as_str();
+        let known = workspace.find_message(channel, parent).cloned();
+        match threads
+            .iter_mut()
+            .find(|t| t.channel == channel && t.parent.ts == *parent)
+        {
+            Some(thread) => thread.add_reply(message, me),
+            // A reply to a thread of yours that the list does not hold yet.
+            None if reason == Some(Reason::Reply) => {
+                if let Some(parent) = known {
+                    let mut thread = Followed {
+                        channel: channel.to_owned(),
+                        parent,
+                        replies: Vec::new(),
+                        unread: 0,
+                    };
+                    thread.add_reply(message, me);
+                    threads.push(thread);
+                }
+            }
+            None => {}
+        }
+        sort_threads(threads);
+    }
     let Some(reason) = reason else {
         return;
     };
@@ -401,6 +514,34 @@ pub fn apply(app: &mut App, action: Action) {
             for channel in channels {
                 app.mark_read(&team, &channel);
             }
+        }
+        Action::OpenThread { channel, ts } => {
+            let newest = app
+                .views
+                .team_mut(&team)
+                .threads
+                .value
+                .as_mut()
+                .and_then(|threads| {
+                    let thread = threads
+                        .iter_mut()
+                        .find(|t| t.channel == channel && t.parent.ts == ts)?;
+                    let unread = std::mem::take(&mut thread.unread);
+                    (unread > 0).then(|| thread.latest().clone())
+                });
+            if let Some(newest) = newest {
+                send(
+                    app,
+                    &team,
+                    Command::ReadThread {
+                        channel: channel.clone(),
+                        thread: ts.clone(),
+                        ts: newest,
+                    },
+                );
+            }
+            app.actions
+                .push(crate::model::Action::OpenThread { channel, ts });
         }
     }
 }
@@ -468,6 +609,10 @@ fn load(app: &mut App, team: &str, view: View) {
                 load_unread(app, team, &channel);
             }
         }
+        View::Threads => {
+            app.views.team_mut(team).threads.start();
+            send(app, team, Command::Threads { me });
+        }
     }
 }
 
@@ -510,6 +655,25 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                 .or_default()
                 .arrived(result);
         }
+        Event::Threads { result, searched } => {
+            if let Ok(threads) = &result {
+                let people: Vec<String> = threads
+                    .iter()
+                    .flat_map(|t| std::iter::once(&t.parent).chain(&t.replies))
+                    .filter_map(|m| m.user.clone())
+                    .collect();
+                crate::convos::fetch_unknown(app, team, &people);
+            }
+            let views = app.views.team_mut(team);
+            if result.is_ok() {
+                views.threads_searched = searched;
+            }
+            views.threads.arrived(result.map(|mut threads| {
+                sort_threads(&mut threads);
+                threads
+            }));
+        }
+        Event::Nothing => {}
     }
 }
 
@@ -647,6 +811,39 @@ mod tests {
             ["C3", "C1"],
             "read, archived and muted ones are left out"
         );
+    }
+
+    #[test]
+    fn live_replies_keep_a_thread_fresh() {
+        let parent = bare_message(Ts::new("1.0"), Some("U0".into()), "plan".into(), None);
+        let mut thread = Followed {
+            channel: "C1".into(),
+            parent,
+            replies: Vec::new(),
+            unread: 0,
+        };
+        for (ts, user) in [("2.0", "U1"), ("3.0", "U0"), ("4.0", "U1"), ("5.0", "U2")] {
+            let reply = bare_message(Ts::new(ts), Some(user.into()), String::new(), None);
+            thread.add_reply(&reply, "U0");
+            thread.add_reply(&reply, "U0");
+        }
+        let kept: Vec<&str> = thread.replies.iter().map(|m| m.ts.as_str()).collect();
+        assert_eq!(kept, ["3.0", "4.0", "5.0"], "the newest few, oldest first");
+        assert_eq!(
+            thread.unread, 3,
+            "your own reply is read, a repeat counts once"
+        );
+        assert_eq!(thread.parent.reply_count, 4);
+        assert_eq!(thread.latest(), &Ts::new("5.0"));
+        let quiet = Followed {
+            channel: "C2".into(),
+            parent: bare_message(Ts::new("4.5"), None, String::new(), None),
+            replies: Vec::new(),
+            unread: 0,
+        };
+        let mut threads = vec![quiet, thread];
+        sort_threads(&mut threads);
+        assert_eq!(threads[0].channel, "C1");
     }
 
     #[test]

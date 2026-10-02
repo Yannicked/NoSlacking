@@ -12,7 +12,7 @@ use super::{Event, Sink};
 use crate::model::{Message, Ts};
 use crate::slack::search::MessagesAnswer;
 use crate::slack::{Client, SlackError, types};
-use crate::views::{self, Activity, Command, Reason};
+use crate::views::{self, Activity, Command, Followed, Reason};
 
 /// How many items of the activity feed are read.
 const FEED_LIMIT: usize = 50;
@@ -24,6 +24,12 @@ const FILL_LIMIT: usize = 40;
 const UNREAD_COUNT: usize = 50;
 /// How many messages are shown of a conversation with no read marker.
 const UNMARKED_COUNT: usize = 10;
+/// How many followed threads are listed.
+const THREADS_LIMIT: usize = 25;
+/// How many threads found by searching for your replies are read whole.
+const SEARCHED_THREADS: usize = 15;
+/// The most replies read of one thread found by searching.
+const THREAD_PAGE: usize = 200;
 
 /// Runs one command and reports back. Every command is answered, so a view
 /// waiting on it never waits for ever.
@@ -42,6 +48,40 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
                 .map_err(|e| describe(&e)),
             channel,
         },
+        Command::Threads { me } => match threads(&client, &me).await {
+            Ok((threads, searched)) => views::Event::Threads {
+                result: Ok(threads),
+                searched,
+            },
+            Err(error) => views::Event::Threads {
+                result: Err(describe(&error)),
+                searched: false,
+            },
+        },
+        Command::ReadThread {
+            channel,
+            thread,
+            ts,
+        } => {
+            // Only the web client keeps a thread's read state.
+            if client.token().is_session() {
+                let marked = client
+                    .act::<serde_json::Value>(
+                        "subscriptions.thread.mark",
+                        &[
+                            ("channel", channel),
+                            ("thread_ts", thread.0),
+                            ("ts", ts.0),
+                            ("read", "1".to_owned()),
+                        ],
+                    )
+                    .await;
+                if let Err(error) = marked {
+                    log::debug!("subscriptions.thread.mark: {error}");
+                }
+            }
+            views::Event::Nothing
+        }
     };
     reply(&sink, &team, event);
 }
@@ -51,6 +91,179 @@ fn reply(sink: &Sink, team: &str, event: views::Event) {
         team: team.to_owned(),
         event,
     });
+}
+
+// ---- threads ----------------------------------------------------------
+
+/// `subscriptions.thread.getView`, the web client's Threads list.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ThreadView {
+    threads: Vec<ViewThread>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ViewThread {
+    root_msg: Option<PlacedMessage>,
+    latest_replies: Vec<PlacedMessage>,
+    unread_replies: Vec<PlacedMessage>,
+}
+
+/// A message that says which conversation it is in.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct PlacedMessage {
+    #[serde(flatten)]
+    message: types::Message,
+    channel: String,
+}
+
+/// The threads of the web client's list, as the view shows them.
+fn viewed_threads(view: ThreadView) -> Vec<Followed> {
+    view.threads
+        .into_iter()
+        .filter_map(|thread| {
+            let root = thread.root_msg?;
+            let channel = Some(root.channel).filter(|c| !c.is_empty()).or_else(|| {
+                thread
+                    .latest_replies
+                    .iter()
+                    .map(|r| r.channel.clone())
+                    .find(|c| !c.is_empty())
+            })?;
+            let parent = root.message.into_model()?;
+            let mut replies: Vec<Message> = thread
+                .latest_replies
+                .into_iter()
+                .filter_map(|r| r.message.into_model())
+                .filter(|m| m.ts != parent.ts)
+                .collect();
+            replies.sort_by(|a, b| a.ts.cmp(&b.ts));
+            let extra = replies.len().saturating_sub(views::THREAD_REPLIES);
+            replies.drain(..extra);
+            Some(Followed {
+                channel,
+                parent,
+                replies,
+                unread: u32::try_from(thread.unread_replies.len()).unwrap_or(u32::MAX),
+            })
+        })
+        .collect()
+}
+
+/// A thread as `conversations.replies` gives it (the parent first), as
+/// the view shows it. What you have not read is what came after you last
+/// wrote in it: nothing else keeps a thread's read state.
+fn replied_thread(
+    channel: &str,
+    parent: &Ts,
+    messages: Vec<Message>,
+    me: &str,
+) -> Option<Followed> {
+    let mut parent_message = None;
+    let mut replies = Vec::new();
+    for message in messages {
+        if message.ts == *parent {
+            parent_message = Some(message);
+        } else {
+            replies.push(message);
+        }
+    }
+    let parent_message = parent_message?;
+    if replies.is_empty() {
+        return None;
+    }
+    replies.sort_by(|a, b| a.ts.cmp(&b.ts));
+    let mine = |m: &Message| m.user.as_deref() == Some(me);
+    let last_mine = replies
+        .iter()
+        .rposition(mine)
+        .map(|at| at + 1)
+        .or_else(|| mine(&parent_message).then_some(0));
+    let unread = last_mine.map_or(0, |from| {
+        replies[from..].iter().filter(|m| !mine(m)).count()
+    });
+    let extra = replies.len().saturating_sub(views::THREAD_REPLIES);
+    replies.drain(..extra);
+    Some(Followed {
+        channel: channel.to_owned(),
+        parent: parent_message,
+        replies,
+        unread: u32::try_from(unread).unwrap_or(u32::MAX),
+    })
+}
+
+/// The threads you follow: the web client's own list for a browser
+/// session, else (or when that cannot be read) the threads a search finds
+/// you replied in. Answers whether it searched.
+async fn threads(client: &Client, me: &str) -> Result<(Vec<Followed>, bool), SlackError> {
+    if client.token().is_session() {
+        match client
+            .call::<ThreadView>(
+                "subscriptions.thread.getView",
+                &[("limit", THREADS_LIMIT.to_string())],
+            )
+            .await
+        {
+            Ok(view) => return Ok((viewed_threads(view), false)),
+            Err(error) => {
+                log::info!("subscriptions.thread.getView: {error}; searching instead");
+            }
+        }
+    }
+    let answer: MessagesAnswer = client
+        .call(
+            "search.messages",
+            &[
+                ("query", format!("from:<@{me}> is:thread")),
+                ("count", SEARCH_COUNT.to_string()),
+                ("sort", "timestamp".to_owned()),
+                ("sort_dir", "desc".to_owned()),
+            ],
+        )
+        .await?;
+    let mut seen = std::collections::HashSet::new();
+    let found: Vec<(String, Ts)> = answer
+        .into_page()
+        .hits
+        .into_iter()
+        .filter_map(|hit| {
+            let channel = hit.channel?;
+            // A reply names its parent; a message of yours that started
+            // a thread is the parent.
+            let parent = hit.thread.or(hit.ts)?;
+            Some((channel, parent))
+        })
+        .filter(|key| seen.insert(key.clone()))
+        .take(SEARCHED_THREADS)
+        .collect();
+    let read = futures_util::future::join_all(found.iter().map(|(channel, parent)| async move {
+        let params = [
+            ("channel", channel.clone()),
+            ("ts", parent.0.clone()),
+            ("limit", THREAD_PAGE.to_string()),
+        ];
+        match client
+            .call::<types::HistoryPage>("conversations.replies", &params)
+            .await
+        {
+            Ok(page) => {
+                let messages = page
+                    .messages
+                    .into_iter()
+                    .filter_map(types::Message::into_model)
+                    .collect();
+                replied_thread(channel, parent, messages, me)
+            }
+            Err(error) => {
+                log::debug!("could not read a thread you replied in: {error}");
+                None
+            }
+        }
+    }))
+    .await;
+    Ok((read.into_iter().flatten().collect(), true))
 }
 
 // ---- unreads ----------------------------------------------------------
@@ -397,6 +610,73 @@ mod tests {
         let texts: Vec<&str> = messages.iter().map(|m| m.text.as_str()).collect();
         assert_eq!(texts, ["b", "c"]);
         assert!(more);
+    }
+
+    #[test]
+    fn the_threads_list_reads_with_its_replies() {
+        let view: ThreadView = serde_json::from_str(
+            r#"{"ok":true,"has_more":false,"threads":[
+              {"root_msg":{"type":"message","ts":"1.000100","user":"U0","text":"plan",
+                 "thread_ts":"1.000100","reply_count":4,"channel":"C1"},
+               "latest_replies":[
+                 {"type":"message","ts":"5.000100","user":"U2","text":"e","thread_ts":"1.000100","channel":"C1"},
+                 {"type":"message","ts":"2.000100","user":"U1","text":"b","thread_ts":"1.000100","channel":"C1"},
+                 {"type":"message","ts":"3.000100","user":"U1","text":"c","thread_ts":"1.000100","channel":"C1"},
+                 {"type":"message","ts":"4.000100","user":"U1","text":"d","thread_ts":"1.000100","channel":"C1"}],
+               "unread_replies":[{"type":"message","ts":"5.000100","channel":"C1"}]},
+              {"latest_replies":[]}
+            ]}"#,
+        )
+        .expect("parses");
+        let threads = viewed_threads(view);
+        assert_eq!(threads.len(), 1);
+        let thread = &threads[0];
+        assert_eq!(thread.channel, "C1");
+        assert_eq!(thread.parent.text, "plan");
+        let texts: Vec<&str> = thread.replies.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, ["c", "d", "e"]);
+        assert_eq!(thread.unread, 1);
+    }
+
+    #[test]
+    fn what_came_after_your_last_reply_is_unread() {
+        let message = |ts: &str, user: &str| {
+            views::bare_message(
+                Ts::new(ts),
+                Some(user.into()),
+                ts.into(),
+                Some(Ts::new("1.0")),
+            )
+        };
+        let parent = Ts::new("1.0");
+        let thread = replied_thread(
+            "C1",
+            &parent,
+            vec![
+                message("1.0", "U1"),
+                message("2.0", "U0"),
+                message("3.0", "U1"),
+                message("4.0", "U2"),
+            ],
+            "U0",
+        )
+        .expect("a thread");
+        assert_eq!(thread.unread, 2);
+        assert_eq!(thread.replies.len(), 3);
+        // You started it and someone answered.
+        let started = replied_thread(
+            "C1",
+            &parent,
+            vec![message("1.0", "U0"), message("2.0", "U1")],
+            "U0",
+        )
+        .expect("a thread");
+        assert_eq!(started.unread, 1);
+        // No replies: not a thread.
+        assert_eq!(
+            replied_thread("C1", &parent, vec![message("1.0", "U0")], "U0"),
+            None
+        );
     }
 
     #[test]
