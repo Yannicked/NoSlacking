@@ -8,9 +8,12 @@
 //! and nothing to acknowledge. Each session workspace keeps its own socket.
 //!
 //! Slack does not offer RTM to every session. A connection only counts once
-//! Slack sends `hello`; if several attempts in a row end without one, the
-//! socket reports [`RtmEvent::Unavailable`] and stops, and the worker polls
-//! the open conversation instead.
+//! Slack sends `hello`. If Slack itself turns several attempts in a row
+//! away (an error code, or closing the socket before `hello`), the socket
+//! reports [`RtmEvent::Unavailable`] and stops, and the worker polls the
+//! open conversation instead. Failing to reach Slack at all (no network,
+//! a timeout, a rate limit) is not a refusal: it is retried for as long as
+//! it takes, with a capped backoff.
 
 use std::time::Duration;
 
@@ -25,8 +28,10 @@ use super::client::SlackError;
 
 const SILENCE: Duration = Duration::from_secs(60);
 const PING_EVERY: Duration = Duration::from_secs(20);
-/// Attempts in a row without a `hello` before RTM is given up on.
-const MAX_FAILED_ATTEMPTS: u32 = 3;
+/// Attempts in a row that Slack refused before RTM is given up on.
+const MAX_REFUSED_ATTEMPTS: u32 = 3;
+/// The longest wait between reconnect attempts.
+const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 /// What the socket tells the worker.
 #[derive(Debug)]
@@ -47,11 +52,50 @@ struct RtmConnect {
 }
 
 /// How one connection ended.
+#[derive(Debug)]
 enum Ended {
     /// Slack said hello, then the connection closed.
     AfterHello(SlackError),
-    /// The connection ended before Slack said hello.
-    BeforeHello(SlackError),
+    /// Slack answered, but turned the connection away before hello.
+    Refused(SlackError),
+    /// Slack could not be reached: the network, a timeout, a rate limit.
+    Unreachable(SlackError),
+}
+
+/// What to do once a connection has ended.
+#[derive(Debug, PartialEq)]
+enum Next {
+    /// Stop: Slack will not give this session a socket.
+    GiveUp,
+    /// Try again, after a fresh backoff when `reset`.
+    Retry { reset: bool },
+}
+
+/// Decides what follows `ended`, counting Slack's refusals in a row in
+/// `refused`. Only refusals count; an outage, however long, never makes
+/// the socket give up.
+fn next(ended: &Ended, refused: &mut u32) -> Next {
+    match ended {
+        // Refused outright: retrying will not help.
+        Ended::AfterHello(error) | Ended::Refused(error) | Ended::Unreachable(error)
+            if error.is_auth() =>
+        {
+            Next::GiveUp
+        }
+        Ended::AfterHello(_) => {
+            *refused = 0;
+            Next::Retry { reset: true }
+        }
+        Ended::Refused(_) => {
+            *refused += 1;
+            if *refused >= MAX_REFUSED_ATTEMPTS {
+                Next::GiveUp
+            } else {
+                Next::Retry { reset: false }
+            }
+        }
+        Ended::Unreachable(_) => Next::Retry { reset: false },
+    }
 }
 
 /// Keeps the socket open until `stop` changes, reporting through `sink`.
@@ -61,7 +105,7 @@ pub async fn run(
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut backoff = Duration::from_secs(1);
-    let mut failed = 0;
+    let mut refused = 0;
     loop {
         if *stop.borrow() {
             return;
@@ -70,25 +114,28 @@ pub async fn run(
             ended = connection(&client, &sink) => ended,
             _ = stop.changed() => return,
         };
-        match ended {
-            // Refused outright: retrying will not help.
-            Ended::AfterHello(error) | Ended::BeforeHello(error) if error.is_auth() => {
+        match next(&ended, &mut refused) {
+            Next::GiveUp => {
+                let (Ended::AfterHello(error) | Ended::Refused(error) | Ended::Unreachable(error)) =
+                    ended;
                 sink(RtmEvent::Unavailable(error.to_string()));
                 return;
             }
-            Ended::AfterHello(error) => {
-                // A real drop after a working connection: say so, then retry.
-                failed = 0;
-                backoff = Duration::from_secs(1);
-                log::info!("RTM connection lost: {error}");
-                sink(RtmEvent::Disconnected(error.to_string()));
-            }
-            Ended::BeforeHello(error) => {
-                failed += 1;
-                log::info!("RTM attempt {failed} failed: {error}");
-                if failed >= MAX_FAILED_ATTEMPTS {
-                    sink(RtmEvent::Unavailable(error.to_string()));
-                    return;
+            Next::Retry { reset } => {
+                if reset {
+                    backoff = Duration::from_secs(1);
+                }
+                match ended {
+                    Ended::AfterHello(error) => {
+                        // A real drop after a working connection: say so.
+                        log::info!("RTM connection lost: {error}");
+                        sink(RtmEvent::Disconnected(error.to_string()));
+                    }
+                    Ended::Refused(error) => log::info!("RTM attempt refused: {error}"),
+                    Ended::Unreachable(error) => {
+                        log::info!("RTM could not reach Slack, retrying: {error}");
+                        sink(RtmEvent::Disconnected(error.to_string()));
+                    }
                 }
             }
         }
@@ -96,20 +143,21 @@ pub async fn run(
             _ = tokio::time::sleep(backoff) => {}
             _ = stop.changed() => return,
         }
-        backoff = (backoff * 2).min(Duration::from_secs(60));
+        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
 
 async fn connection(client: &Client, sink: &(impl Fn(RtmEvent) + Send + Sync)) -> Ended {
     let connect: RtmConnect = match client.call("rtm.connect", &[]).await {
         Ok(connect) => connect,
-        Err(error) => return Ended::BeforeHello(error),
+        Err(error @ SlackError::Api(_)) => return Ended::Refused(error),
+        Err(error) => return Ended::Unreachable(error),
     };
     // The wss URL carries no auth of its own: the handshake must repeat the
     // `d` cookie, or Slack answers the socket with invalid_auth.
     let mut request = match connect.url.as_str().into_client_request() {
         Ok(request) => request,
-        Err(error) => return Ended::BeforeHello(SlackError::Network(error.to_string())),
+        Err(error) => return Ended::Refused(SlackError::Decode(error.to_string())),
     };
     if let Some(cookie) = client.token().cookie
         && let Ok(value) = HeaderValue::from_str(&format!("d={cookie}"))
@@ -118,14 +166,22 @@ async fn connection(client: &Client, sink: &(impl Fn(RtmEvent) + Send + Sync)) -
     }
     let (mut socket, _) = match tokio_tungstenite::connect_async(request).await {
         Ok(socket) => socket,
-        Err(error) => return Ended::BeforeHello(SlackError::Network(error.to_string())),
+        // Slack answered the handshake with an HTTP error: a refusal.
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            return Ended::Refused(SlackError::Http(response.status().as_u16()));
+        }
+        Err(error) => return Ended::Unreachable(SlackError::Network(error.to_string())),
     };
     let mut hello = false;
-    let end = |hello: bool, error: SlackError| {
+    // Before hello, an answer from Slack (an error frame, a close) is a
+    // refusal, and a dead line is not.
+    let end = |hello: bool, from_slack: bool, error: SlackError| {
         if hello {
             Ended::AfterHello(error)
+        } else if from_slack {
+            Ended::Refused(error)
         } else {
-            Ended::BeforeHello(error)
+            Ended::Unreachable(error)
         }
     };
     let mut ping = tokio::time::interval(PING_EVERY);
@@ -135,19 +191,25 @@ async fn connection(client: &Client, sink: &(impl Fn(RtmEvent) + Send + Sync)) -
         let frame = tokio::select! {
             frame = socket.next() => frame,
             () = tokio::time::sleep_until(heard + SILENCE) => {
-                return end(hello, SlackError::Network("connection went silent".into()));
+                return end(hello, false, SlackError::Network("connection went silent".into()));
             }
             _ = ping.tick() => {
                 if let Err(error) = socket.send(Frame::Ping(Vec::new().into())).await {
-                    return end(hello, SlackError::Network(error.to_string()));
+                    return end(hello, false, SlackError::Network(error.to_string()));
                 }
                 continue;
             }
         };
         heard = tokio::time::Instant::now();
         let frame = match frame {
-            None => return end(hello, SlackError::Network("connection closed".into())),
-            Some(Err(error)) => return end(hello, SlackError::Network(error.to_string())),
+            None => {
+                return end(
+                    hello,
+                    false,
+                    SlackError::Network("connection closed".into()),
+                );
+            }
+            Some(Err(error)) => return end(hello, false, SlackError::Network(error.to_string())),
             Some(Ok(frame)) => frame,
         };
         match frame {
@@ -167,7 +229,7 @@ async fn connection(client: &Client, sink: &(impl Fn(RtmEvent) + Send + Sync)) -
                             .pointer("/error/msg")
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or("error");
-                        return end(hello, SlackError::Api(message.to_owned()));
+                        return end(hello, true, SlackError::Api(message.to_owned()));
                     }
                     // Housekeeping frames carry no message.
                     Some("pong" | "reconnect_url" | "pref_change" | "dnd_updated") | None => {}
@@ -176,9 +238,69 @@ async fn connection(client: &Client, sink: &(impl Fn(RtmEvent) + Send + Sync)) -
             }
             Frame::Close(frame) => {
                 let reason = frame.map_or_else(|| "closed".to_owned(), |c| c.reason.to_string());
-                return end(hello, SlackError::Network(reason));
+                return end(hello, true, SlackError::Network(reason));
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn network() -> SlackError {
+        SlackError::Network("no route to host".into())
+    }
+
+    #[test]
+    fn outages_never_give_up() {
+        let mut refused = 0;
+        for _ in 0..100 {
+            assert_eq!(
+                next(&Ended::Unreachable(network()), &mut refused),
+                Next::Retry { reset: false }
+            );
+        }
+        assert_eq!(
+            next(&Ended::Unreachable(SlackError::RateLimited), &mut refused),
+            Next::Retry { reset: false }
+        );
+        assert_eq!(refused, 0);
+    }
+
+    #[test]
+    fn repeated_refusals_give_up() {
+        let mut refused = 0;
+        let refusal = || Ended::Refused(SlackError::Api("not_allowed".into()));
+        assert_eq!(next(&refusal(), &mut refused), Next::Retry { reset: false });
+        // An outage in between neither counts nor clears the count.
+        assert_eq!(
+            next(&Ended::Unreachable(network()), &mut refused),
+            Next::Retry { reset: false }
+        );
+        assert_eq!(next(&refusal(), &mut refused), Next::Retry { reset: false });
+        assert_eq!(next(&refusal(), &mut refused), Next::GiveUp);
+    }
+
+    #[test]
+    fn a_working_connection_clears_the_count() {
+        let mut refused = 2;
+        assert_eq!(
+            next(&Ended::AfterHello(network()), &mut refused),
+            Next::Retry { reset: true }
+        );
+        assert_eq!(refused, 0);
+    }
+
+    #[test]
+    fn a_dead_sign_in_gives_up_at_once() {
+        let mut refused = 0;
+        let auth = || SlackError::Api("invalid_auth".into());
+        assert_eq!(next(&Ended::AfterHello(auth()), &mut refused), Next::GiveUp);
+        assert_eq!(
+            next(&Ended::Unreachable(auth()), &mut refused),
+            Next::GiveUp
+        );
     }
 }
