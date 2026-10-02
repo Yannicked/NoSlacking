@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
+# Built from git dependencies, so never published to crates.io; cargo-deny
+# also reads this to accept them.
+publish = false
 description = "A native Slack client"
 keywords = ["slack", "chat", "egui", "client"]
 categories = ["gui"]
