@@ -16,21 +16,24 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Every action is pinned by commit SHA (the tag is in the comment), so a moved
+# tag can't change what runs here. The toolchain comes from
+# rust-toolchain.toml through the runner's own rustup, so each job installs
+# exactly one compiler: the pinned one.
 jobs:
   quality:
     name: quality
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain
+        run: rustup toolchain install
       - name: GUI build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Formatting
         run: cargo fmt --all --check
       - name: Clippy (default features)
@@ -51,15 +54,26 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain
+        run: rustup toolchain install
       - name: GUI build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Linux is linted in `quality`; the macOS and Windows `cfg` code
+      # (keyring stores, single instance, the URL scheme) only here.
+      - name: Clippy (default features)
+        if: runner.os != 'Linux'
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Clippy (all features)
+        if: runner.os != 'Linux'
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --locked --all-features
+      - name: Build (what ships)
+        run: cargo build --locked
       - name: Demo build
         run: cargo build --locked --features demo
