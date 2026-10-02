@@ -2,16 +2,19 @@
 //! conversation, as in Slack: Activity (what mentions you or answers you)
 //! All unreads (every conversation with something new, with the new
 //! messages), Threads (the threads you follow, with their newest replies)
-//! and Later (messages saved for later, and your reminders).
+//! Later (messages saved for later, and your reminders) and Scheduled
+//! (messages waiting to be sent, see [`schedule`]).
 //!
 //! Views push [`Action`]s (wrapped in [`crate::model::Action::Views`]);
 //! [`apply`] turns them into [`Command`]s for the worker, whose answers come
 //! back as [`Event`]s for [`handle`]. What the views hold lives in
 //! [`State`], kept on [`App`].
 
+pub mod schedule;
+
 use std::collections::{HashMap, HashSet};
 
-use crate::app::{App, WorkspaceState};
+use crate::app::{App, Draft, WorkspaceState};
 use crate::backend;
 use crate::i18n::{t, tf};
 use crate::model::{Delivery, Message, Ts};
@@ -36,11 +39,19 @@ pub enum View {
     Threads,
     /// Messages saved for later, and reminders.
     Later,
+    /// Messages scheduled to be sent later.
+    Scheduled,
 }
 
 impl View {
     /// Every view, in the sidebar's order.
-    pub const ALL: [Self; 4] = [Self::Unreads, Self::Threads, Self::Activity, Self::Later];
+    pub const ALL: [Self; 5] = [
+        Self::Unreads,
+        Self::Threads,
+        Self::Activity,
+        Self::Later,
+        Self::Scheduled,
+    ];
 
     /// Its name in the sidebar and its header.
     pub fn label(self) -> String {
@@ -49,6 +60,7 @@ impl View {
             Self::Unreads => t("All unreads").into_owned(),
             Self::Threads => t("Threads").into_owned(),
             Self::Later => t("Later").into_owned(),
+            Self::Scheduled => t("Scheduled").into_owned(),
         }
     }
 }
@@ -75,6 +87,22 @@ pub enum Action {
     Save { channel: String, ts: Ts, save: bool },
     /// Marks a reminder complete.
     CompleteReminder { id: String },
+    /// Schedules the draft of the composer for `thread` (or the
+    /// conversation's) to be sent `when`.
+    SendLater {
+        thread: Option<Ts>,
+        when: schedule::When,
+    },
+    /// Asks when to send the draft of the composer for `thread`.
+    AskSendLater { thread: Option<Ts> },
+    /// Opens a scheduled message to change its text or time.
+    EditScheduled { id: String },
+    /// Carries out the "Send at" dialog.
+    ConfirmSchedule,
+    /// Closes the "Send at" dialog.
+    CloseSchedule,
+    /// Keeps a scheduled message from being sent.
+    CancelScheduled { channel: String, id: String },
 }
 
 /// What the interface asks the worker to do for one workspace.
@@ -101,6 +129,21 @@ pub enum Command {
     Save { channel: String, ts: Ts, save: bool },
     /// Marks a reminder complete, already taken off the list.
     CompleteReminder { id: String },
+    /// The messages waiting to be sent.
+    Scheduled,
+    /// `chat.scheduleMessage`, answered under `request`. `replace` is a
+    /// scheduled message this one takes the place of, deleted once the new
+    /// one is in.
+    Schedule {
+        request: u64,
+        channel: String,
+        text: String,
+        thread: Option<Ts>,
+        post_at: i64,
+        replace: Option<String>,
+    },
+    /// `chat.deleteScheduledMessage`, already taken off the list.
+    CancelScheduled { channel: String, id: String },
 }
 
 impl Command {
@@ -135,6 +178,12 @@ impl Command {
                 id: id.clone(),
                 error,
             },
+            Self::Scheduled => Event::ScheduledList { result: Err(error) },
+            Self::Schedule { request, .. } => Event::ScheduleDone {
+                request: *request,
+                result: Err(error),
+            },
+            Self::CancelScheduled { .. } => Event::CancelFailed { error },
         }
     }
 }
@@ -182,6 +231,17 @@ pub enum Event {
     },
     /// Completing a reminder failed; the reminders are read again.
     CompleteFailed { id: String, error: String },
+    /// The messages waiting to be sent, soonest first.
+    ScheduledList {
+        result: Result<Vec<schedule::Scheduled>, String>,
+    },
+    /// Slack answered schedule request `request`.
+    ScheduleDone {
+        request: u64,
+        result: Result<schedule::Scheduled, String>,
+    },
+    /// A scheduled message could not be cancelled; the list is read again.
+    CancelFailed { error: String },
     /// A command that needs no answer was carried out (or not, which
     /// changes nothing on screen).
     Nothing,
@@ -353,6 +413,17 @@ pub struct TeamViews {
     /// The messages known to be saved, by conversation and timestamp, for
     /// the message toolbar's "Save for later" or "Remove from Later".
     pub saved_keys: HashSet<(String, Ts)>,
+    pub scheduled: Fetch<Vec<schedule::Scheduled>>,
+}
+
+/// A schedule request on its way: what to put back if Slack refuses.
+#[derive(Clone, Debug)]
+pub struct Pending {
+    pub team: String,
+    /// The composer it came from, and its draft as it was.
+    pub draft: Option<(String, Draft)>,
+    /// The scheduled message it replaces.
+    pub replace: Option<String>,
 }
 
 /// Everything the views hold.
@@ -362,6 +433,11 @@ pub struct State {
     pub open: Option<View>,
     /// By team.
     pub teams: HashMap<String, TeamViews>,
+    /// The "Send at" dialog, when it is open.
+    pub dialog: Option<schedule::Dialog>,
+    /// Schedule requests waiting for Slack, by request.
+    pub pending: HashMap<u64, Pending>,
+    next_request: u64,
 }
 
 impl State {
@@ -619,6 +695,63 @@ pub fn apply(app: &mut App, action: Action) {
             }
             send(app, &team, Command::CompleteReminder { id });
         }
+        Action::SendLater { thread, when } => {
+            let Some((key, channel)) = composer(app, &team, thread.as_ref()) else {
+                return;
+            };
+            if let Some(post_at) = when.post_at(&jiff::Zoned::now()) {
+                schedule_draft(app, &team, key, channel, thread, post_at);
+            }
+        }
+        Action::AskSendLater { thread } => {
+            let Some((key, channel)) = composer(app, &team, thread.as_ref()) else {
+                return;
+            };
+            app.focus_overlay = true;
+            app.views.dialog = Some(schedule::Dialog::new(
+                schedule::Target::Draft {
+                    key,
+                    channel,
+                    thread,
+                },
+                String::new(),
+                None,
+                &jiff::Zoned::now(),
+            ));
+        }
+        Action::EditScheduled { id } => {
+            let Some(message) = app
+                .views
+                .team(&team)
+                .and_then(|v| v.scheduled.value.as_ref())
+                .and_then(|list| list.iter().find(|s| s.id == id))
+                .cloned()
+            else {
+                return;
+            };
+            let (text, mentions) = app
+                .active_workspace()
+                .map(|w| w.editable(&message.text))
+                .unwrap_or_default();
+            app.focus_overlay = true;
+            let at = Some(message.post_at);
+            let mut dialog = schedule::Dialog::new(
+                schedule::Target::Edit(message),
+                text,
+                at,
+                &jiff::Zoned::now(),
+            );
+            dialog.mentions = mentions;
+            app.views.dialog = Some(dialog);
+        }
+        Action::ConfirmSchedule => confirm_schedule(app, &team),
+        Action::CloseSchedule => app.views.dialog = None,
+        Action::CancelScheduled { channel, id } => {
+            if let Some(list) = app.views.team_mut(&team).scheduled.value.as_mut() {
+                list.retain(|s| s.id != id);
+            }
+            send(app, &team, Command::CancelScheduled { channel, id });
+        }
         Action::OpenThread { channel, ts } => {
             let newest = app
                 .views
@@ -646,6 +779,174 @@ pub fn apply(app: &mut App, action: Action) {
             }
             app.actions
                 .push(crate::model::Action::OpenThread { channel, ts });
+        }
+    }
+}
+
+/// The draft key and conversation of the composer for `thread`, or the
+/// open conversation's.
+fn composer(app: &App, team: &str, thread: Option<&Ts>) -> Option<(String, String)> {
+    let channel = match thread {
+        Some(_) => app.thread.as_ref().map(|(c, _)| c.clone()),
+        None => app.active_workspace().and_then(|w| w.active.clone()),
+    }?;
+    Some((App::draft_key(team, &channel, thread), channel))
+}
+
+/// Takes a composer's draft and asks Slack to send it at `post_at`. A
+/// refusal puts the draft back.
+fn schedule_draft(
+    app: &mut App,
+    team: &str,
+    key: String,
+    channel: String,
+    thread: Option<Ts>,
+    post_at: i64,
+) {
+    let Some(draft) = app.drafts.get(&key).cloned() else {
+        return;
+    };
+    if draft.text.trim().is_empty() {
+        return;
+    }
+    if crate::slash::parse(&draft.text).is_some() {
+        app.toast(t("A slash command cannot be scheduled."), true);
+        return;
+    }
+    let wire = crate::app::to_wire(&draft.text, &draft.mentions);
+    let wire = crate::emoji::tone_shortcodes(&wire, app.settings.skin_tone);
+    app.drafts.remove(&key);
+    let request = next_request(app);
+    app.views.pending.insert(
+        request,
+        Pending {
+            team: team.to_owned(),
+            draft: Some((key, draft)),
+            replace: None,
+        },
+    );
+    send(
+        app,
+        team,
+        Command::Schedule {
+            request,
+            channel,
+            text: wire,
+            thread,
+            post_at,
+            replace: None,
+        },
+    );
+}
+
+fn next_request(app: &mut App) -> u64 {
+    app.views.next_request += 1;
+    app.views.next_request
+}
+
+/// Carries out the "Send at" dialog: checks the time, then schedules the
+/// draft, or sends the changed message in place of the old one.
+fn confirm_schedule(app: &mut App, team: &str) {
+    let Some(dialog) = app.views.dialog.as_mut() else {
+        return;
+    };
+    if dialog.busy {
+        return;
+    }
+    let now = jiff::Zoned::now();
+    let post_at = match schedule::moment(
+        &dialog.date,
+        &dialog.time,
+        now.time_zone(),
+        now.timestamp().as_second(),
+    ) {
+        Ok(post_at) => post_at,
+        Err(problem) => {
+            dialog.problem = Some(problem);
+            return;
+        }
+    };
+    match dialog.target.clone() {
+        schedule::Target::Draft {
+            key,
+            channel,
+            thread,
+        } => {
+            app.views.dialog = None;
+            schedule_draft(app, team, key, channel, thread, post_at);
+        }
+        schedule::Target::Edit(old) => {
+            if dialog.text.trim().is_empty() {
+                dialog.problem = Some(schedule::Problem::Empty);
+                return;
+            }
+            dialog.busy = true;
+            dialog.problem = None;
+            let wire = crate::app::to_wire(&dialog.text, &dialog.mentions);
+            let wire = crate::emoji::tone_shortcodes(&wire, app.settings.skin_tone);
+            let request = next_request(app);
+            app.views.pending.insert(
+                request,
+                Pending {
+                    team: team.to_owned(),
+                    draft: None,
+                    replace: Some(old.id.clone()),
+                },
+            );
+            send(
+                app,
+                team,
+                Command::Schedule {
+                    request,
+                    channel: old.channel,
+                    text: wire,
+                    thread: old.thread,
+                    post_at,
+                    replace: Some(old.id),
+                },
+            );
+        }
+    }
+}
+
+/// Takes in Slack's answer to a schedule request.
+fn scheduled(app: &mut App, team: &str, request: u64, result: Result<schedule::Scheduled, String>) {
+    let pending = app.views.pending.remove(&request);
+    let busy = app.views.dialog.as_ref().is_some_and(|d| d.busy);
+    match result {
+        Ok(message) => {
+            if busy {
+                app.views.dialog = None;
+            }
+            let when = crate::ui::moment_label(message.post_at);
+            let list = app.views.team_mut(team).scheduled.value.as_mut();
+            if let Some(list) = list {
+                if let Some(old) = pending.as_ref().and_then(|p| p.replace.as_ref()) {
+                    list.retain(|s| s.id != *old);
+                }
+                list.push(message);
+                list.sort_by_key(|s| s.post_at);
+            }
+            app.toast(tf("Scheduled for {when}", &[("when", &when)]), false);
+        }
+        Err(error) => {
+            if let Some(dialog) = app.views.dialog.as_mut() {
+                dialog.busy = false;
+            }
+            // Back in its composer, unless something new was typed there.
+            if let Some((key, draft)) = pending.and_then(|p| p.draft) {
+                let current = app.drafts.entry(key).or_default();
+                if current.text.trim().is_empty() {
+                    *current = draft;
+                }
+            }
+            app.toast(
+                tf(
+                    "Could not schedule the message: {error}",
+                    &[("error", &error)],
+                ),
+                true,
+            );
         }
     }
 }
@@ -748,6 +1049,10 @@ fn load(app: &mut App, team: &str, view: View) {
             views.reminders.start();
             send(app, team, Command::Saved);
             send(app, team, Command::Reminders);
+        }
+        View::Scheduled => {
+            app.views.team_mut(team).scheduled.start();
+            send(app, team, Command::Scheduled);
         }
     }
 }
@@ -860,6 +1165,19 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
             );
             app.views.team_mut(team).reminders.start();
             send(app, team, Command::Reminders);
+        }
+        Event::ScheduledList { result } => app.views.team_mut(team).scheduled.arrived(result),
+        Event::ScheduleDone { request, result } => scheduled(app, team, request, result),
+        Event::CancelFailed { error } => {
+            app.toast(
+                tf(
+                    "Could not cancel the scheduled message: {error}",
+                    &[("error", &error)],
+                ),
+                true,
+            );
+            app.views.team_mut(team).scheduled.start();
+            send(app, team, Command::Scheduled);
         }
         Event::Nothing => {}
     }

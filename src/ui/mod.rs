@@ -84,6 +84,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     overlays::show(app, ui.ctx());
     search::show(app, ui.ctx());
     browse::show(app, ui.ctx());
+    views::dialog(app, ui.ctx());
     rich::end_frame();
 }
 
@@ -181,6 +182,16 @@ pub fn day_label(ts: &crate::model::Ts) -> String {
     } else {
         long_date(&t, date, date.year() != today.year())
     }
+}
+
+/// A moment given in seconds since the epoch, as a list shows it: "Today
+/// at 14:03", "Monday, March 3 at 09:00".
+pub fn moment_label(seconds: i64) -> String {
+    let ts = crate::model::Ts::new(format!("{seconds}.000000"));
+    crate::i18n::tf(
+        "{date} at {time}",
+        &[("date", &day_label(&ts)), ("time", &short_time(&ts))],
+    )
 }
 
 /// The full moment of a message, for the tooltip over its time:

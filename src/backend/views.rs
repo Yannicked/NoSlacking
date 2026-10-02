@@ -12,6 +12,7 @@ use super::{Event, Sink};
 use crate::model::{Message, Ts};
 use crate::slack::search::MessagesAnswer;
 use crate::slack::{Client, SlackError, types};
+use crate::views::schedule::Scheduled;
 use crate::views::{self, Activity, Command, Followed, Reason, Reminder, Saved};
 
 /// How many items of the activity feed are read.
@@ -32,6 +33,8 @@ const SEARCHED_THREADS: usize = 15;
 const THREAD_PAGE: usize = 200;
 /// How many saved messages are listed.
 const SAVED_LIMIT: usize = 50;
+/// The most pages of scheduled messages read, 100 a page.
+const SCHEDULED_PAGES: usize = 5;
 
 /// Runs one command and reports back. Every command is answered, so a view
 /// waiting on it never waits for ever.
@@ -110,6 +113,45 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
                 error: describe(&error),
             },
         },
+        Command::Scheduled => views::Event::ScheduledList {
+            result: scheduled(&client).await.map_err(|e| describe(&e)),
+        },
+        Command::Schedule {
+            request,
+            channel,
+            text,
+            thread,
+            post_at,
+            replace,
+        } => {
+            let result = schedule(&client, &channel, &text, thread.as_ref(), post_at)
+                .await
+                .map(|id| Scheduled {
+                    id,
+                    channel: channel.clone(),
+                    post_at,
+                    text,
+                    thread,
+                })
+                .map_err(|e| describe(&e));
+            // The new one is in: the old one goes. Should that fail, both
+            // stay, and the list shows them.
+            if result.is_ok()
+                && let Some(old) = replace
+                && let Err(error) = unschedule(&client, &channel, &old).await
+            {
+                log::warn!("could not delete the scheduled message it replaced: {error}");
+            }
+            views::Event::ScheduleDone { request, result }
+        }
+        Command::CancelScheduled { channel, id } => {
+            match unschedule(&client, &channel, &id).await {
+                Ok(()) => views::Event::Nothing,
+                Err(error) => views::Event::CancelFailed {
+                    error: describe(&error),
+                },
+            }
+        }
         Command::CompleteReminder { id } => match client
             .act::<serde_json::Value>("reminders.complete", &[("reminder", id.clone())])
             .await
@@ -131,6 +173,106 @@ fn reply(sink: &Sink, team: &str, event: views::Event) {
         team: team.to_owned(),
         event,
     });
+}
+
+// ---- scheduled --------------------------------------------------------
+
+/// A page of `chat.scheduledMessages.list`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ScheduledPage {
+    scheduled_messages: Vec<ScheduledItem>,
+    response_metadata: types::ResponseMetadata,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ScheduledItem {
+    id: String,
+    channel_id: String,
+    post_at: i64,
+    text: String,
+    thread_ts: Option<String>,
+}
+
+/// `chat.scheduleMessage`'s answer.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ScheduleAnswer {
+    scheduled_message_id: String,
+}
+
+/// The scheduled messages of a page, as the view lists them.
+fn scheduled_items(page: Vec<ScheduledItem>) -> Vec<Scheduled> {
+    page.into_iter()
+        .filter(|item| !item.id.is_empty() && !item.channel_id.is_empty())
+        .map(|item| Scheduled {
+            id: item.id,
+            channel: item.channel_id,
+            post_at: item.post_at,
+            text: item.text,
+            thread: item.thread_ts.filter(|t| !t.is_empty()).map(Ts::new),
+        })
+        .collect()
+}
+
+/// Every message waiting to be sent, soonest first.
+async fn scheduled(client: &Client) -> Result<Vec<Scheduled>, SlackError> {
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..SCHEDULED_PAGES {
+        let mut params = vec![("limit", "100".to_owned())];
+        if let Some(cursor) = cursor.take() {
+            params.push(("cursor", cursor));
+        }
+        let page: ScheduledPage = client.call("chat.scheduledMessages.list", &params).await?;
+        out.extend(scheduled_items(page.scheduled_messages));
+        match page.response_metadata.cursor() {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    out.sort_by_key(|s| s.post_at);
+    Ok(out)
+}
+
+/// Schedules `text` for `channel` (in `thread`, if any) at `post_at`, and
+/// answers the scheduled message's id.
+async fn schedule(
+    client: &Client,
+    channel: &str,
+    text: &str,
+    thread: Option<&Ts>,
+    post_at: i64,
+) -> Result<String, SlackError> {
+    let mut params = vec![
+        ("channel", channel.to_owned()),
+        ("text", text.to_owned()),
+        ("post_at", post_at.to_string()),
+    ];
+    if let Some(thread) = thread {
+        params.push(("thread_ts", thread.0.clone()));
+    }
+    let answer: ScheduleAnswer = client.act("chat.scheduleMessage", &params).await?;
+    Ok(answer.scheduled_message_id)
+}
+
+/// Keeps a scheduled message from being sent. One already gone is no
+/// failure.
+async fn unschedule(client: &Client, channel: &str, id: &str) -> Result<(), SlackError> {
+    match client
+        .act::<serde_json::Value>(
+            "chat.deleteScheduledMessage",
+            &[
+                ("channel", channel.to_owned()),
+                ("scheduled_message_id", id.to_owned()),
+            ],
+        )
+        .await
+    {
+        Err(SlackError::Api(code)) if code == "invalid_scheduled_message_id" => Ok(()),
+        other => other.map(|_| ()),
+    }
 }
 
 // ---- later ------------------------------------------------------------
@@ -885,6 +1027,23 @@ mod tests {
             replied_thread("C1", &parent, vec![message("1.0", "U0")], "U0"),
             None
         );
+    }
+
+    #[test]
+    fn scheduled_messages_read_with_their_thread() {
+        let page: ScheduledPage = serde_json::from_str(
+            r#"{"ok":true,"scheduled_messages":[
+              {"id":"Q1","channel_id":"C1","post_at":1700000000,"date_created":1690000000,"text":"hi"},
+              {"id":"Q2","channel_id":"C2","post_at":1700000100,"text":"reply","thread_ts":"1.000100"},
+              {"id":"","channel_id":"C3","post_at":1,"text":"broken"}
+            ],"response_metadata":{"next_cursor":""}}"#,
+        )
+        .expect("parses");
+        assert_eq!(page.response_metadata.cursor(), None);
+        let items = scheduled_items(page.scheduled_messages);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].post_at, 1_700_000_000);
+        assert_eq!(items[1].thread, Some(Ts::new("1.000100")));
     }
 
     #[test]

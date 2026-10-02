@@ -357,6 +357,7 @@ fastframe_icons::icons! {
         ChevronDown => lucide "chevron-down",
         ChevronRight => lucide "chevron-right",
         CircleAlert => lucide "circle-alert",
+        Clock => lucide "clock",
         Code => "code",
         CodeBlock => "square-code",
         Copy => lucide "copy",
