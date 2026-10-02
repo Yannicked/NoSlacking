@@ -1,6 +1,7 @@
 //! Keyboard shortcuts that work anywhere in the window.
 //!
 //! - Ctrl+K (⌘K): jump to a conversation
+//! - Ctrl+F (⌘F): search messages and files
 //! - Alt+↑ / Alt+↓: previous / next conversation in the sidebar
 //! - Alt+Shift+↑ / ↓: previous / next unread conversation
 //!
@@ -53,6 +54,14 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
             app.switcher = None;
         } else {
             app.actions.push(Action::OpenSwitcher);
+        }
+    }
+    let search = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::F));
+    if search && !app.workspaces.is_empty() {
+        if app.search.open {
+            app.search.open = false;
+        } else if !overlay {
+            app.actions.push(Action::OpenSearch);
         }
     }
     if settings {

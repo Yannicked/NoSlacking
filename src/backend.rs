@@ -6,6 +6,7 @@
 //! nothing happens.
 
 mod around;
+mod search;
 pub mod worker;
 
 use std::collections::HashMap;
@@ -72,6 +73,12 @@ pub enum Command {
         team: String,
         channel: String,
         ts: Ts,
+    },
+    /// Page `page` of a search, answered as request `request`.
+    Search {
+        query: crate::search::Query,
+        page: u32,
+        request: u64,
     },
     /// The page of messages right after `after`.
     LoadNewer {
@@ -206,6 +213,16 @@ impl std::fmt::Debug for Command {
                 .field("team", team)
                 .field("channel", channel)
                 .field("ts", ts)
+                .finish(),
+            Self::Search {
+                query,
+                page,
+                request,
+            } => f
+                .debug_struct("Search")
+                .field("query", query)
+                .field("page", page)
+                .field("request", request)
                 .finish(),
             Self::LoadNewer {
                 team,
@@ -432,6 +449,12 @@ pub enum Event {
         has_older: bool,
         cursor: Option<String>,
         has_newer: bool,
+    },
+    /// A page of search results, or why there is none.
+    Search {
+        team: String,
+        request: u64,
+        result: Result<crate::search::Page, crate::search::Failure>,
     },
     /// The page after the newest message loaded, oldest first.
     Newer {

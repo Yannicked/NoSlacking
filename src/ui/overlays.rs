@@ -92,7 +92,8 @@ fn section_dialog(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-fn modal_frame(app: &App) -> egui::Frame {
+/// The frame every dialog and picker floats in.
+pub(super) fn modal_frame(app: &App) -> egui::Frame {
     egui::Frame::new()
         .fill(app.palette.overlay)
         .stroke(Stroke::new(1.0, app.palette.outline))

@@ -3,6 +3,7 @@
 pub mod client;
 pub mod magic;
 pub mod rtm;
+pub mod search;
 pub mod session;
 pub mod socket;
 pub mod types;
