@@ -12,6 +12,7 @@ use crate::settings::{Appearance, Redirect};
 use crate::theme::{self, Palette};
 
 mod network;
+mod spelling;
 
 pub(super) fn group(
     ui: &mut egui::Ui,
@@ -366,6 +367,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         }
     });
 
+    spelling::show(app, ui, palette);
     network::show(app, ui, palette);
 
     group(ui, palette, &t("Files"), |ui| {

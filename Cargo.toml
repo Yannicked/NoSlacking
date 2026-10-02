@@ -81,6 +81,9 @@ arboard = { version = "3.6", default-features = false, features = ["image-data"]
 # The offline cache's encryption (src/offline.rs). chacha20 is already in
 # the tree through rand; the nonces come from rand too.
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
+# Spell checking in the composer with the system's Hunspell dictionaries:
+# pure Rust (Helix's), MPL-2.0, two small dependencies.
+spellbook = "0.4.2"
 
 # Desktop notifications: D-Bus on Linux and the BSDs, the notification
 # center on macOS, toasts on Windows. Elsewhere there are none.
