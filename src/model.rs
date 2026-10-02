@@ -552,6 +552,10 @@ pub enum Action {
     },
     CloseThread,
     LoadOlder,
+    /// Brings the open conversation's "New" line into view.
+    JumpToUnread,
+    /// Brings the open conversation's newest messages into view.
+    JumpToNewest,
     /// Reads the page after the newest message loaded, in a list opened
     /// around an older message.
     LoadNewer,

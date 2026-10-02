@@ -278,6 +278,8 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     // A list of older history has no end to hold on to.
     let detached = timeline.is_some_and(|t| t.has_newer);
     let mut target: Option<(f32, f32)> = None;
+    // Where the "New" line starts, to offer a way back up to it.
+    let mut unread_top: Option<f32> = None;
     let height_id = egui::Id::new(("content-height", &scroll_key));
     let previous_height: Option<f32> = ui.data(|d| d.get_temp(height_id));
     let mut area = egui::ScrollArea::vertical()
@@ -365,6 +367,10 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
             MARGIN,
         );
         heights.sweep();
+        unread_top = items
+            .iter()
+            .position(|item| matches!(item, Item::Message { unread: true, .. }))
+            .map(|index| plan.tops[index]);
         if let Some(jump) = &jump {
             target = items
                 .iter()
@@ -435,6 +441,22 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     // A jump holds the view itself.
     if steering || detached {
         pinned = false;
+    }
+    let view = output.inner_rect;
+    if !steering && timeline.is_some_and(|t| t.loaded) {
+        // Away from the newest messages, or from the "New" line above.
+        if detached || bottom - offset > view.height() * 0.5 {
+            let at = egui::pos2(view.center().x, view.bottom() - 28.0);
+            if pill(ui, &palette, at, Icon::ArrowDown, &t("Jump to newest")) {
+                actions.push(Action::JumpToNewest);
+            }
+        }
+        if unread_top.is_some_and(|top| top < offset - 1.0) {
+            let at = egui::pos2(view.center().x, view.top() + 24.0);
+            if pill(ui, &palette, at, Icon::ArrowUp, &t("Jump to unread")) {
+                actions.push(Action::JumpToUnread);
+            }
+        }
     }
     if let Some(index) = jumps.iter().position(|j| j.list == scroll_key) {
         let loading = timeline.is_none_or(|t| t.loading || !t.loaded || t.around.is_some());
@@ -611,6 +633,59 @@ fn top(
     } else {
         beginning(ui, workspace, conversation, palette);
     }
+}
+
+/// A small floating button centred on `at`, over the message list.
+/// Returns whether it was clicked.
+fn pill(
+    ui: &mut egui::Ui,
+    palette: &crate::theme::Palette,
+    at: egui::Pos2,
+    icon: Icon,
+    label: &str,
+) -> bool {
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        theme::semibold(12.5),
+        egui::Color32::WHITE,
+    );
+    let size = Vec2::new(galley.size().x + 44.0, 28.0);
+    let rect = egui::Rect::from_center_size(at, size);
+    let response = ui
+        .interact(
+            rect,
+            egui::Id::new(("jump-pill", label)),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let fill = if response.hovered() {
+        palette.accent.gamma_multiply(0.85)
+    } else {
+        palette.accent
+    };
+    ui.painter().add(
+        egui::epaint::Shadow {
+            offset: [0, 2],
+            blur: 8,
+            spread: 0,
+            color: palette.shadow,
+        }
+        .as_shape(rect, CornerRadius::same(14)),
+    );
+    ui.painter().rect_filled(rect, CornerRadius::same(14), fill);
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 20.0, rect.center().y),
+        Vec2::splat(14.0),
+    );
+    icon.image(egui::Color32::WHITE, 14.0)
+        .paint_at(ui, icon_rect);
+    ui.painter().galley(
+        egui::pos2(rect.left() + 32.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        egui::Color32::WHITE,
+    );
+    theme::describe(&response, egui::WidgetType::Button, label);
+    response.clicked()
 }
 
 /// Lights up the message just drawn from `top` down, behind it in the

@@ -2,6 +2,9 @@
 //!
 //! - Ctrl+K (⌘K): jump to a conversation
 //! - Ctrl+F (⌘F): search messages and files
+//! - Ctrl+J (⌘J): jump to the "New" line of the open conversation
+//! - Ctrl+Shift+J (⌘⇧J), or End outside a text field: jump to its newest
+//!   messages
 //! - Alt+↑ / Alt+↓: previous / next conversation in the sidebar
 //! - Alt+Shift+↑ / ↓: previous / next unread conversation
 //!
@@ -62,6 +65,23 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
             app.search.open = false;
         } else if !overlay {
             app.actions.push(Action::OpenSearch);
+        }
+    }
+    let typing = ctx.text_edit_focused();
+    let (newest, unread) = ctx.input_mut(|input| {
+        (
+            // With Shift first, so plain Ctrl+J does not swallow it.
+            input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::J)
+                || (!typing && input.consume_key(Modifiers::NONE, Key::End)),
+            input.consume_key(Modifiers::COMMAND, Key::J),
+        )
+    });
+    if app.page == Page::Main && !overlay {
+        if unread {
+            app.actions.push(Action::JumpToUnread);
+        }
+        if newest {
+            app.actions.push(Action::JumpToNewest);
         }
     }
     if settings {

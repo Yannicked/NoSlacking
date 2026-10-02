@@ -2002,6 +2002,14 @@ impl App {
             Action::CloseThread => self.thread = None,
             Action::LoadOlder => self.load_older(),
             Action::LoadNewer => self.load_newer(),
+            Action::JumpToNewest => {
+                if let Some(team) = self.active_team()
+                    && let Some(channel) = self.active_workspace().and_then(|w| w.active.clone())
+                {
+                    self.show_newest(&team, &channel);
+                }
+            }
+            Action::JumpToUnread => self.jump_to_unread(),
             Action::JumpTo {
                 channel,
                 ts,
@@ -2247,6 +2255,49 @@ impl App {
         }
         self.search.open = true;
         self.search.focus = true;
+    }
+
+    /// Brings the open conversation's "New" line into view: the first
+    /// message after the one you had read when it opened, loading the
+    /// history around it when it is further back than the list reaches.
+    fn jump_to_unread(&mut self) {
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        let Some(workspace) = self.active_workspace() else {
+            return;
+        };
+        let Some(channel) = workspace.active.clone() else {
+            return;
+        };
+        let list = Self::draft_key(&team, &channel, None);
+        let Some(read) = self
+            .read_line
+            .as_ref()
+            .filter(|(key, _)| *key == list)
+            .and_then(|(_, ts)| ts.clone())
+        else {
+            return;
+        };
+        let timeline = workspace.timelines.get(&channel);
+        let reaches = timeline
+            .is_some_and(|t| !t.has_more || t.messages.first().is_some_and(|m| m.ts <= read));
+        let first = timeline.and_then(|t| first_unread(t, &read, &workspace.info.user_id));
+        match first {
+            Some(ts) if reaches => {
+                self.jumps.retain(|j| j.list != list);
+                self.scroll_to_bottom.remove(&list);
+                self.jumps.push(crate::jump::Jump::new(list, ts, false));
+            }
+            // Further back than the list goes: the messages around the
+            // last one read, with the line just after it.
+            _ => {
+                self.jump_to(&team, &channel, read, None);
+                if let Some(jump) = self.jumps.iter_mut().find(|j| j.list == list) {
+                    jump.highlight = false;
+                }
+            }
+        }
     }
 
     /// Asks for the page after the newest message of the open list, when
@@ -2614,6 +2665,18 @@ fn remove_echoed_local(timeline: &mut Timeline, message: &Message, from_me: bool
     {
         timeline.messages.remove(position);
     }
+}
+
+/// The message the "New" line goes above: the first in the
+/// conversation's own list after `read` that is not yours, as the list
+/// draws it.
+fn first_unread(timeline: &Timeline, read: &Ts, me: &str) -> Option<Ts> {
+    timeline
+        .messages
+        .iter()
+        .filter(|m| m.in_channel() && !m.ts.is_local())
+        .find(|m| m.ts > *read && m.user.as_deref() != Some(me))
+        .map(|m| m.ts.clone())
 }
 
 /// What `@here`, `@channel` and `@everyone` become for Slack.
@@ -3417,5 +3480,24 @@ mod tests {
         assert!(!w.timelines["C1"].has_newer);
         w.message_arrived("C1", message("11.0", None), false);
         assert_eq!(w.timelines["C1"].messages.len(), 6);
+    }
+
+    #[test]
+    fn the_new_line_goes_above_the_first_message_from_someone_else() {
+        let mut timeline = Timeline::default();
+        let mut mine = message("2.0", None);
+        mine.user = Some("U1".into());
+        let mut reply = message("3.0", Some("1.0"));
+        reply.user = Some("U2".into());
+        let mut theirs = message("4.0", None);
+        theirs.user = Some("U2".into());
+        for m in [message("1.0", None), mine, reply, theirs] {
+            timeline.upsert(m);
+        }
+        assert_eq!(
+            first_unread(&timeline, &Ts::new("1.0"), "U1"),
+            Some(Ts::new("4.0"))
+        );
+        assert_eq!(first_unread(&timeline, &Ts::new("4.0"), "U1"), None);
     }
 }
