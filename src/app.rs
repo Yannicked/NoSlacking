@@ -127,6 +127,9 @@ pub struct WorkspaceState {
     requested_users: HashSet<String>,
     requested_bots: HashSet<String>,
     requested_conversations: HashSet<String>,
+    /// Raised whenever people arrive, so lookups built from `users` know
+    /// when to rebuild.
+    users_version: u64,
 }
 
 impl WorkspaceState {
@@ -147,7 +150,14 @@ impl WorkspaceState {
             requested_users: HashSet::new(),
             requested_bots: HashSet::new(),
             requested_conversations: HashSet::new(),
+            users_version: 0,
         }
+    }
+
+    /// Changes whenever `users` gains or updates someone through the
+    /// worker; pair it with `users.len()` for edits made directly.
+    pub fn users_version(&self) -> u64 {
+        self.users_version
     }
 
     pub fn conversation(&self, id: &str) -> Option<&Conversation> {
@@ -412,6 +422,7 @@ impl WorkspaceState {
     }
 
     fn users_arrived(&mut self, users: Vec<User>) {
+        self.users_version += 1;
         for user in users {
             self.requested_users.remove(&user.id);
             self.users.insert(user.id.clone(), user);
