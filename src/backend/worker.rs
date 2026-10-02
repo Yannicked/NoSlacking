@@ -17,6 +17,7 @@ use crate::auth::{self, Flow, SignedIn};
 use crate::credentials::{AppCredentials, Credentials};
 use crate::images::ImageLoader;
 use crate::model::{Conversation, ConversationKind, Message, Ts, User, Workspace};
+use crate::offline::Cache;
 use crate::paths::AppDirs;
 use crate::settings::{Redirect, WorkspaceMeta};
 use crate::slack::magic::TeamResult;
@@ -65,6 +66,8 @@ enum Internal {
     Loaded {
         app: Result<Option<AppCredentials>, crate::credentials::Error>,
         workspaces: Vec<(WorkspaceMeta, Stored)>,
+        /// The offline cache's key, unless the keyring failed.
+        cache_key: Option<crate::offline::CacheKey>,
     },
     Callback(String),
     SignedIn(Result<SignedIn, String>),
@@ -136,7 +139,8 @@ struct Live {
 }
 
 pub struct Worker {
-    http: reqwest::Client,
+    /// The encrypted offline cache, once the keyring gave its key.
+    cache: Cache,
     credentials: Credentials,
     dirs: AppDirs,
     sink: Sink,
@@ -179,16 +183,10 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn new(
-        http: reqwest::Client,
-        credentials: Credentials,
-        dirs: AppDirs,
-        sink: Sink,
-        images: ImageLoader,
-    ) -> Self {
+    pub fn new(credentials: Credentials, dirs: AppDirs, sink: Sink, images: ImageLoader) -> Self {
         let (internal, internal_rx) = mpsc::unbounded_channel();
         Self {
-            http,
+            cache: Cache::disabled(),
             credentials,
             dirs,
             sink,
@@ -273,9 +271,21 @@ impl Worker {
                 };
                 stored.push((meta, token));
             }
+            let cache_key = if failed {
+                None
+            } else {
+                match credentials.cache_key().await {
+                    Ok(key) => Some(key),
+                    Err(error) => {
+                        log::warn!("no offline cache: {error}");
+                        None
+                    }
+                }
+            };
             let _ = internal.send(Internal::Loaded {
                 app,
                 workspaces: stored,
+                cache_key,
             });
         });
     }
@@ -352,7 +362,7 @@ impl Worker {
     fn make_client(&self, team: &str, token: Token, sink: Sink) -> Client {
         let credentials = self.credentials.clone();
         let team = team.to_owned();
-        Client::new(self.http.clone(), token).with_refresh(
+        Client::shared(token).with_refresh(
             self.app.as_ref().and_then(AppCredentials::oauth),
             move |result| {
                 let credentials = credentials.clone();
@@ -388,7 +398,7 @@ impl Worker {
         let boot = tokio::spawn(boot(
             client.clone(),
             workspace.clone(),
-            self.dirs.clone(),
+            self.cache.clone(),
             sink.clone(),
         ))
         .abort_handle();
@@ -486,7 +496,7 @@ impl Worker {
         self.report_socket();
         let internal = self.internal.clone();
         tokio::spawn(socket::run(
-            self.http.clone(),
+            crate::slack::net::api(),
             token,
             move |event| {
                 let _ = internal.send(Internal::Socket { generation, event });
@@ -663,6 +673,12 @@ impl Worker {
             Command::FetchUsers { team, ids } => self.fetch_users(team, ids),
             Command::FetchBots { team, ids } => self.fetch_bots(team, ids),
             Command::Sidebar { team, calls } => self.edit_sidebar(team, calls),
+            Command::CloseConversation { team, channel } => self.act(
+                &team,
+                "conversations.close",
+                vec![("channel", channel)],
+                &["channel_not_found", "already_closed"],
+            ),
             Command::FetchConversation { team, channel } => {
                 if let Some((client, sink)) = self.team(&team) {
                     tokio::spawn(conversation_info(client, team, channel, sink));
@@ -671,6 +687,13 @@ impl Worker {
                 }
             }
             Command::Reconnect => self.reconnect(),
+            Command::SetProxy(proxy) => match crate::slack::net::configure(&proxy) {
+                // New clients only help once the sockets reconnect on them.
+                Ok(()) => self.reconnect(),
+                Err(error) => self
+                    .sink
+                    .send(Event::Error(format!("Could not use the proxy: {error}"))),
+            },
             Command::Snooze { team, minutes } => {
                 if let Some((client, sink)) = self.team(&team) {
                     tokio::spawn(super::desktop::snooze(client, team, minutes, sink));
@@ -747,7 +770,7 @@ impl Worker {
     }
 
     fn paste_token(&mut self, token: String) {
-        let http = self.http.clone();
+        let http = crate::slack::net::api();
         let internal = self.internal.clone();
         self.sink.send(Event::SignIn(SignIn::Exchanging));
         tokio::spawn(async move {
@@ -878,7 +901,14 @@ impl Worker {
     /// The newest page of history, or the one before `cursor`.
     fn load_history(&self, team: String, channel: String, cursor: Option<String>) {
         if let Some((client, sink)) = self.team(&team) {
-            tokio::spawn(history(client, team, channel, cursor, sink));
+            tokio::spawn(history(
+                client,
+                team,
+                channel,
+                cursor,
+                self.cache.clone(),
+                sink,
+            ));
         } else {
             self.history_unavailable(team, channel);
         }
@@ -1083,7 +1113,7 @@ impl Worker {
             tokio::spawn(conversations(
                 team.client.clone(),
                 id.clone(),
-                self.dirs.clone(),
+                self.cache.clone(),
                 team.sink.clone(),
             ));
         }
@@ -1227,7 +1257,7 @@ impl Worker {
     fn start_sign_in(&mut self, redirect: Redirect, port: u16) {
         let Some(app) = self.app.clone().filter(AppCredentials::can_sign_in) else {
             self.sink.send(Event::SignIn(SignIn::Failed(
-                "Enter the Slack app's client ID and client secret first.".into(),
+                "Enter the Slack app's client ID first.".into(),
             )));
             return;
         };
@@ -1303,7 +1333,7 @@ impl Worker {
             return;
         };
         self.sink.send(Event::SignIn(SignIn::Exchanging));
-        let http = self.http.clone();
+        let http = crate::slack::net::api();
         let internal = self.internal.clone();
         tokio::spawn(async move {
             let result = auth::exchange(&http, &app, &flow, &code)
@@ -1311,6 +1341,20 @@ impl Worker {
                 .map_err(|e| describe(&e));
             let _ = internal.send(Internal::SignedIn(result));
         });
+    }
+
+    /// Removes the unencrypted lists older builds kept for `team`.
+    fn remove_plain_cache(&self, team: &str) {
+        for path in [
+            self.dirs.users_cache(team),
+            self.dirs.conversations_cache(team),
+        ] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => log::info!("removed the unencrypted {}", path.display()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => log::warn!("could not remove {}: {error}", path.display()),
+            }
+        }
     }
 
     fn sign_out(&mut self, team: &str) {
@@ -1338,6 +1382,9 @@ impl Worker {
             });
         }
         self.images.remove_client(team);
+        // Nothing read in the workspace stays on disk after signing out.
+        self.cache.wipe(team);
+        self.remove_plain_cache(team);
         // A later sign-in to the same workspace fetches everyone afresh.
         self.users_requested.retain(|(t, _)| t != team);
         self.bots_requested.retain(|(t, _)| t != team);
@@ -1353,7 +1400,19 @@ impl Worker {
 
     fn internal(&mut self, message: Internal) {
         match message {
-            Internal::Loaded { app, workspaces } => self.loaded(app, workspaces),
+            Internal::Loaded {
+                app,
+                workspaces,
+                cache_key,
+            } => {
+                if let Some(key) = cache_key {
+                    self.cache = Cache::new(self.dirs.offline(), &key);
+                }
+                for (meta, _) in &workspaces {
+                    self.remove_plain_cache(&meta.team_id);
+                }
+                self.loaded(app, workspaces);
+            }
             // Signed out since: its entries are gone already.
             Internal::FetchFailed { team, .. } if !self.teams.contains_key(&team) => {}
             Internal::FetchFailed { team, users, bots } => {
@@ -1372,7 +1431,7 @@ impl Worker {
             }
             Internal::SignedIn(Err(error)) => self.sink.send(Event::SignIn(SignIn::Failed(error))),
             Internal::SignedIn(Ok(signed)) => {
-                let http = self.http.clone();
+                let http = crate::slack::net::api();
                 let credentials = self.credentials.clone();
                 let internal = self.internal.clone();
                 let sink = self.sink.clone();
@@ -1552,6 +1611,7 @@ impl Worker {
                 team.clone(),
                 channel.clone(),
                 None,
+                Cache::disabled(),
                 sink,
             )));
         }
@@ -1729,34 +1789,18 @@ async fn workspace_details(client: &Client, team: &str, user: &str) -> Workspace
     workspace
 }
 
-fn read_cache<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Option<T> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-fn write_cache<T: serde::Serialize>(path: &std::path::Path, value: &T) {
-    match serde_json::to_vec(value) {
-        Ok(bytes) => {
-            if let Err(error) = crate::paths::write_atomic(path, &bytes) {
-                log::debug!("cache not written: {error}");
-            }
-        }
-        Err(error) => log::debug!("cache not encoded: {error}"),
-    }
-}
-
 /// Everything a workspace needs after signing in: cached lists first, then
 /// a check of the token, fresh lists, custom emoji and unread state.
-async fn boot(client: Client, workspace: Workspace, dirs: AppDirs, sink: Sink) {
+async fn boot(client: Client, workspace: Workspace, cache: Cache, sink: Sink) {
     let team = workspace.team_id.clone();
-    if let Some(list) = read_cache::<Vec<Conversation>>(&dirs.conversations_cache(&team)) {
+    if let Some(list) = cache.read::<Vec<Conversation>>(&team, "conversations") {
         sink.send(Event::Conversations {
             team: team.clone(),
             list,
             complete: false,
         });
     }
-    if let Some(users) = read_cache::<Vec<User>>(&dirs.users_cache(&team)) {
+    if let Some(users) = cache.read::<Vec<User>>(&team, "users") {
         sink.send(Event::Users {
             team: team.clone(),
             users,
@@ -1784,7 +1828,7 @@ async fn boot(client: Client, workspace: Workspace, dirs: AppDirs, sink: Sink) {
     if details != workspace {
         sink.send(Event::WorkspaceReady(details));
     }
-    let list = conversations(client.clone(), team.clone(), dirs.clone(), sink.clone()).await;
+    let list = conversations(client.clone(), team.clone(), cache.clone(), sink.clone()).await;
     match client.call::<types::EmojiList>("emoji.list", &[]).await {
         Ok(list) => sink.send(Event::Emoji {
             team: team.clone(),
@@ -1800,7 +1844,7 @@ async fn boot(client: Client, workspace: Workspace, dirs: AppDirs, sink: Sink) {
         }
     };
     tokio::join!(
-        users(client.clone(), team.clone(), dirs, sink.clone()),
+        users(client.clone(), team.clone(), cache, sink.clone()),
         sections(client.clone(), team.clone(), sink.clone()),
         sweep,
     );
@@ -1810,7 +1854,7 @@ async fn boot(client: Client, workspace: Workspace, dirs: AppDirs, sink: Sink) {
 async fn conversations(
     client: Client,
     team: String,
-    dirs: AppDirs,
+    cache: Cache,
     sink: Sink,
 ) -> Option<Vec<Conversation>> {
     let mut list = Vec::new();
@@ -1847,7 +1891,7 @@ async fn conversations(
         )));
         return None;
     }
-    write_cache(&dirs.conversations_cache(&team), &list);
+    cache.write(&team, "conversations", &list);
     sink.send(Event::Conversations {
         team,
         list: list.clone(),
@@ -1859,6 +1903,21 @@ async fn conversations(
 /// Your sidebar sections and starred conversations, as Slack's own client
 /// gets them. `users.channelSections.list` is undocumented and only answers
 /// browser sessions; anything else keeps the plain sidebar.
+/// Workspaces whose unsent section channels were logged already.
+static SECTIONS_NOTED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether `key` is new to `seen`, remembering it.
+fn first_time(seen: &std::sync::Mutex<Vec<String>>, key: &str) -> bool {
+    let mut seen = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if seen.iter().any(|k| k == key) {
+        return false;
+    }
+    seen.push(key.to_owned());
+    true
+}
+
 async fn sections(client: Client, team: String, sink: Sink) {
     // The web client sends the token in the form; do the same.
     let token = client.token().access;
@@ -1895,22 +1954,18 @@ async fn sections(client: Client, team: String, sink: Sink) {
         log::info!("no sidebar sections ({error}); using the plain sidebar");
         return;
     }
-    for section in &all {
-        // Slack sends a long section's first channels only, with a cursor
-        // for the rest through a call that is not known; say so rather
-        // than show the section as complete without a word.
-        if section
-            .channel_ids_page
-            .cursor
-            .as_deref()
-            .is_some_and(|c| !c.is_empty())
-        {
-            log::warn!(
-                "sidebar section {} has more channels than Slack sent; showing {}",
-                section.channel_section_id,
-                section.channel_ids_page.channel_ids.len()
-            );
-        }
+    // Slack files more channels in a section than it sends (archived and
+    // left ones) and offers no call for the rest (see
+    // `types::ChannelIdsPage`). Say so once per workspace and run; a
+    // channel missing from its section still shows under Channels.
+    let unsent: usize = all
+        .iter()
+        .filter_map(|section| section.channel_ids_page.unsent())
+        .sum();
+    if unsent > 0 && first_time(&SECTIONS_NOTED, &team) {
+        log::info!(
+            "sidebar sections of {team}: {unsent} filed channels not sent (archived or left, most likely)"
+        );
     }
     let mut ordered = types::order_sections(all);
     // Slack leaves Starred empty in the section list; stars.list fills it.
@@ -2106,7 +2161,7 @@ async fn edit_sidebar(
 }
 
 /// The workspace's people, page by page, each page shown as it arrives.
-async fn users(client: Client, team: String, dirs: AppDirs, sink: Sink) {
+async fn users(client: Client, team: String, cache: Cache, sink: Sink) {
     let mut all = Vec::new();
     let walked = paginate(
         "users.list",
@@ -2136,7 +2191,7 @@ async fn users(client: Client, team: String, dirs: AppDirs, sink: Sink) {
         log::info!("users.list: {error}");
     }
     if !all.is_empty() {
-        write_cache(&dirs.users_cache(&team), &all);
+        cache.write(&team, "users", &all);
     }
 }
 
@@ -2278,13 +2333,38 @@ async fn fetch_conversation(
 }
 
 /// A page of history: the newest one, or the one before `cursor`.
+///
+/// For the newest page, the copy in the offline cache goes out first, so
+/// the conversation shows at once (and without a network); Slack's answer
+/// then replaces it and is kept for next time.
 async fn history(
     client: Client,
     team: String,
     channel: String,
     cursor: Option<String>,
+    cache: Cache,
     sink: Sink,
 ) {
+    let newest = cursor.is_none() && cache.is_enabled();
+    if newest {
+        let (cached_team, cached_channel, reader) = (team.clone(), channel.clone(), cache.clone());
+        let cached =
+            tokio::task::spawn_blocking(move || reader.read_history(&cached_team, &cached_channel))
+                .await
+                .ok()
+                .flatten()
+                .and_then(|value| serde_json::from_value::<types::HistoryPage>(value).ok());
+        if let Some(page) = cached {
+            let (messages, has_more, cursor) = history_page(page);
+            sink.send(Event::CachedHistory {
+                team: team.clone(),
+                channel: channel.clone(),
+                messages,
+                has_more,
+                cursor,
+            });
+        }
+    }
     let mut params = vec![
         ("channel", channel.clone()),
         ("limit", HISTORY_PAGE.to_string()),
@@ -2294,11 +2374,18 @@ async fn history(
     if let Some(cursor) = cursor {
         params.push(("cursor", cursor));
     }
-    match client
-        .call::<types::HistoryPage>("conversations.history", &params)
+    // As Slack sent it, so the cache keeps the page exactly and reads it
+    // back the same way.
+    let answer = client
+        .call::<Value>("conversations.history", &params)
         .await
-    {
-        Ok(page) => {
+        .and_then(|value| {
+            serde_json::from_value::<types::HistoryPage>(value.clone())
+                .map(|page| (page, value))
+                .map_err(|error| SlackError::Decode(error.to_string()))
+        });
+    match answer {
+        Ok((page, value)) => {
             // A huddle still going on shows on its conversation. Only the
             // newest page can hold one.
             if !older
@@ -2309,20 +2396,21 @@ async fn history(
                     event,
                 });
             }
-            let mut messages: Vec<Message> = page
-                .messages
-                .into_iter()
-                .filter_map(types::Message::into_model)
-                .collect();
-            messages.reverse();
+            let (messages, has_more, cursor) = history_page(page);
             sink.send(Event::History {
-                team,
-                channel,
+                team: team.clone(),
+                channel: channel.clone(),
                 messages,
-                has_more: page.has_more,
-                cursor: page.response_metadata.cursor(),
+                has_more,
+                cursor,
                 older,
             });
+            if newest {
+                let _ = tokio::task::spawn_blocking(move || {
+                    cache.write_history(&team, &channel, &value);
+                })
+                .await;
+            }
         }
         Err(error) => sink.send(Event::HistoryFailed {
             team,
@@ -2330,6 +2418,19 @@ async fn history(
             error: describe(&error),
         }),
     }
+}
+
+/// A history page's messages, oldest first, and whether and how to read
+/// on.
+fn history_page(page: types::HistoryPage) -> (Vec<Message>, bool, Option<String>) {
+    let cursor = page.response_metadata.cursor();
+    let mut messages: Vec<Message> = page
+        .messages
+        .into_iter()
+        .filter_map(types::Message::into_model)
+        .collect();
+    messages.reverse();
+    (messages, page.has_more, cursor)
 }
 
 async fn thread(client: Client, team: String, channel: String, ts: Ts, sink: Sink) {
@@ -2529,7 +2630,7 @@ async fn upload(
             // Without a live socket the new file would only show
             // at the next poll.
             if poll_after {
-                history(client, team, channel, None, sink.clone()).await;
+                history(client, team, channel, None, Cache::disabled(), sink.clone()).await;
             }
         }
         Err(error) => sink.send(Event::Error(format!(
@@ -3058,19 +3159,8 @@ mod tests {
             gate: None,
         };
         let root = std::env::temp_dir().join(format!("noslacking-test-{}", std::process::id()));
-        let http = reqwest::Client::new();
-        let images = ImageLoader::new(
-            http.clone(),
-            tokio::runtime::Handle::current(),
-            root.join("images"),
-        );
-        let worker = Worker::new(
-            http,
-            Credentials::memory(),
-            AppDirs::under(&root),
-            sink,
-            images,
-        );
+        let images = ImageLoader::new(tokio::runtime::Handle::current(), root.join("images"));
+        let worker = Worker::new(Credentials::memory(), AppDirs::under(&root), sink, images);
         (worker, events)
     }
 
@@ -3199,6 +3289,7 @@ mod tests {
                 ),
                 (meta("TC"), Stored::Skipped),
             ],
+            cache_key: None,
         });
         assert!(worker.waiting.is_none());
         let signed_out: Vec<String> = events

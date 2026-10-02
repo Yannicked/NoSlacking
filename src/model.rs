@@ -538,6 +538,9 @@ pub struct Timeline {
     /// The message whose surroundings are on their way, after a jump to
     /// it: they replace the list when they arrive.
     pub around: Option<Ts>,
+    /// Whether the list is the offline cache's copy of the newest page,
+    /// which the first page from Slack replaces.
+    pub cached: bool,
 }
 
 impl Timeline {
@@ -607,6 +610,11 @@ impl Timeline {
 pub enum Action {
     SelectWorkspace(String),
     OpenConversation(String),
+    /// Opens a conversation of the active workspace in a window of its own.
+    PopOut(String),
+    /// Closes a direct message or group DM of the active workspace: it
+    /// leaves the sidebar until something new arrives in it.
+    CloseConversation(String),
     OpenThread {
         channel: String,
         ts: Ts,
@@ -749,6 +757,11 @@ pub enum Action {
     AddWorkspace,
     SignOut(String),
     Reconnect,
+    /// Uses the proxy now in the settings and restarts the connections.
+    ApplyProxy,
+    /// Loads the spelling dictionary now in the settings, or stops
+    /// checking.
+    ApplySpelling,
     DismissError,
     // Sign-in. These carry no secrets: the app reads the typed cookie,
     // token and credentials from its form, so they never sit in an action

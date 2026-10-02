@@ -872,12 +872,33 @@ pub struct ChannelSection {
     pub channel_ids_page: ChannelIdsPage,
 }
 
+/// A section's channels as `users.channelSections.list` sends them.
+///
+/// Slack's web client knows no call that pages through the rest (no
+/// `users.channelSections.channels.list`: Slack answers `unknown_method`),
+/// and `users.channelSections.list` takes no per-section cursor. In
+/// practice the list holds every channel you are still in: `cursor` is the
+/// last id sent, and `count` also counts channels archived or left since
+/// they were filed, which are not sent. A channel left out anyway still
+/// shows, under Channels or Direct messages.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ChannelIdsPage {
     pub channel_ids: Vec<String>,
-    /// Set when the section has more channels than were sent.
+    /// The last id sent, when Slack has more ids filed than it sent.
     pub cursor: Option<String>,
+    /// Every channel ever filed here, including archived and left ones.
+    pub count: Option<usize>,
+}
+
+impl ChannelIdsPage {
+    /// How many filed channels Slack did not send, when it says there are
+    /// more (most often archived or left ones).
+    pub fn unsent(&self) -> Option<usize> {
+        let more = self.cursor.as_deref().is_some_and(|c| !c.is_empty());
+        let count = self.count.unwrap_or(0);
+        (more && count > self.channel_ids.len()).then(|| count - self.channel_ids.len())
+    }
 }
 
 /// Puts sections in the order the linked list gives them, keeping the kinds
@@ -1115,6 +1136,20 @@ pub struct Authorization {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsent_section_channels_are_counted() {
+        let page = |json: &str| -> ChannelIdsPage { serde_json::from_str(json).expect("parses") };
+        let short = page(r#"{"channel_ids":["C1","C2"],"count":70,"cursor":"C2"}"#);
+        assert_eq!(short.unsent(), Some(68));
+        // All sent: a cursor alone, or a count that matches, is no gap.
+        assert_eq!(
+            page(r#"{"channel_ids":["C1"],"count":1,"cursor":"C1"}"#).unsent(),
+            None
+        );
+        assert_eq!(page(r#"{"channel_ids":["C1"],"count":5}"#).unsent(), None);
+        assert_eq!(page(r#"{"channel_ids":[],"cursor":""}"#).unsent(), None);
+    }
 
     #[test]
     fn group_dm_names_read_as_people() {

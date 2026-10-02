@@ -1622,5 +1622,77 @@ msgstr "Afbeelding gekopieerd"
 msgid "Could not copy the image: {error}"
 msgstr "De afbeelding kon niet worden gekopieerd: {error}"
 
-msgid "Remove {name}"
-msgstr "{name} verwijderen"
+msgid "After creating it, generate an app-level token with connections:write on Basic Information. The manifest already allows the sign-in redirect http://localhost:53682/callback; to come back through noslacking:// links instead, add noslacking://oauth/callback under OAuth & Permissions yourself and pick it in Settings."
+msgstr "Maak daarna onder Basic Information een app-token met connections:write. Het manifest staat de redirect http://localhost:53682/callback al toe; wil je via noslacking://-links terugkomen, voeg dan zelf noslacking://oauth/callback toe onder OAuth & Permissions en kies die in Instellingen."
+
+msgid "Client secret (optional)"
+msgstr "Clientgeheim (optioneel)"
+
+msgid "Not needed: sign-in uses PKCE"
+msgstr "Niet nodig: aanmelden gebruikt PKCE"
+
+msgid "The manifest adds the loopback one; add noslacking://oauth/callback there yourself to use it."
+msgstr "Het manifest voegt de loopback-URL toe; voeg noslacking://oauth/callback daar zelf toe om die te gebruiken."
+
+msgid "Network"
+msgstr "Netwerk"
+
+msgid "Use system proxy"
+msgstr "Systeemproxy gebruiken"
+
+msgid "No proxy"
+msgstr "Geen proxy"
+
+msgid "Manual"
+msgstr "Handmatig"
+
+msgid "Proxy"
+msgstr "Proxy"
+
+msgid "The system proxy follows the HTTPS_PROXY and NO_PROXY variables, and on macOS and Windows the system's settings."
+msgstr "De systeemproxy volgt de variabelen HTTPS_PROXY en NO_PROXY, en op macOS en Windows de systeeminstellingen."
+
+msgid "Proxy URL"
+msgstr "Proxy-URL"
+
+msgid "Apply"
+msgstr "Toepassen"
+
+msgid "http:// or socks5:// (socks5h:// to let the proxy look up names). A user name may go in the URL; a password cannot be saved."
+msgstr "http:// of socks5:// (socks5h:// om de proxy namen te laten opzoeken). Een gebruikersnaam mag in de URL; een wachtwoord kan niet worden bewaard."
+
+msgid "Enter a proxy URL."
+msgstr "Vul een proxy-URL in."
+
+msgid "That is not a proxy URL with a host and port."
+msgstr "Dat is geen proxy-URL met een host en poort."
+
+msgid "The proxy URL must start with http://, socks5:// or socks5h://."
+msgstr "De proxy-URL moet beginnen met http://, socks5:// of socks5h://."
+
+msgid "A proxy password cannot be saved; leave it out of the URL."
+msgstr "Een proxywachtwoord kan niet worden bewaard; laat het weg uit de URL."
+
+msgid "Spelling"
+msgstr "Spelling"
+
+msgid "Check spelling as you type"
+msgstr "Spelling controleren tijdens het typen"
+
+msgid "Right-click a marked word for spellings."
+msgstr "Klik met rechts op een gemarkeerd woord voor spellingen."
+
+msgid "No dictionaries found. Install Hunspell dictionaries (such as hunspell-en-us) or put a .aff and .dic pair in {folder}."
+msgstr "Geen woordenboeken gevonden. Installeer Hunspell-woordenboeken (zoals hunspell-nl) of zet een .aff- en .dic-bestand in {folder}."
+
+msgid "Automatic"
+msgstr "Automatisch"
+
+msgid "No spellings found"
+msgstr "Geen spellingen gevonden"
+
+msgid "Open in new window"
+msgstr "Openen in nieuw venster"
+
+msgid "Close conversation"
+msgstr "Gesprek sluiten"

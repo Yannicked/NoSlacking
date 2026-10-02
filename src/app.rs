@@ -26,6 +26,9 @@ use crate::theme::{self, Catalog, Palette};
 
 mod desktop;
 mod hooks;
+mod popout;
+
+pub use popout::Popout;
 
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(5);
@@ -532,6 +535,13 @@ impl WorkspaceState {
         };
         let newest = messages.iter().map(|m| m.ts.clone()).max();
         let timeline = self.timelines.entry(channel.to_owned()).or_default();
+        if !older && timeline.cached {
+            // Slack's own newest page replaces the cached copy whole: the
+            // copy may hold messages deleted since, or end before a gap.
+            timeline.cached = false;
+            timeline.loaded = false;
+            timeline.messages.retain(|m| m.ts.is_local());
+        }
         let first = !timeline.loaded;
         // The newest page does not join a stretch of older history opened
         // around a message: it would leave a gap between them unseen.
@@ -551,6 +561,32 @@ impl WorkspaceState {
             conversation.latest = Some(newest);
         }
         (arrived, first)
+    }
+
+    /// The offline cache's copy of the newest page, shown only while nothing
+    /// else is, until Slack's page replaces it. Returns whom to fetch, or
+    /// `None` when the copy came too late to be of use.
+    fn cached_history_arrived(
+        &mut self,
+        channel: &str,
+        messages: Vec<Message>,
+        has_more: bool,
+        cursor: Option<String>,
+    ) -> Option<Arrived> {
+        if self
+            .timelines
+            .get(channel)
+            .is_some_and(|t| t.loaded || t.around.is_some())
+        {
+            return None;
+        }
+        let (arrived, _) = self.history_arrived(channel, messages, has_more, cursor, false);
+        if let Some(timeline) = self.timelines.get_mut(channel) {
+            timeline.cached = true;
+            // Older pages wait for Slack's newest one, whose cursor counts.
+            timeline.loading = true;
+        }
+        Some(arrived)
     }
 
     /// The messages around one jumped to, which replace the list: the
@@ -1009,6 +1045,8 @@ pub struct App {
     pub scroll_to_bottom: HashSet<String>,
     /// Focus the composer next frame.
     pub focus_composer: bool,
+    /// Conversations open in windows of their own.
+    pub popouts: Vec<Popout>,
     /// Focus the field of the dialog or picker just opened, once: asking
     /// every frame would keep Tab from reaching its buttons.
     pub focus_overlay: bool,
@@ -1067,6 +1105,12 @@ impl App {
                 credentials_in_memory: false,
             }
         };
+        // Before the worker's first request, so nothing goes around the
+        // chosen proxy.
+        if let Err(error) = crate::slack::net::configure(&settings.proxy) {
+            log::warn!("ignoring the saved proxy setting: {error}");
+        }
+        crate::spell::configure(&settings.spelling, &dirs.config);
         let backend = backend::spawn(waker, source, dirs.images());
         let mut catalog = Catalog::default();
         if !options.demo {
@@ -1156,6 +1200,7 @@ impl App {
             prepended: None,
             scroll_to_bottom: HashSet::new(),
             focus_composer: true,
+            popouts: Vec::new(),
             focus_overlay: false,
             jumps: Vec::new(),
             search: crate::search::Search::default(),
@@ -1498,6 +1543,22 @@ impl App {
                 cursor,
                 older,
             } => self.history(&team, &channel, messages, has_more, cursor, older),
+            Event::CachedHistory {
+                team,
+                channel,
+                messages,
+                has_more,
+                cursor,
+            } => {
+                if let Some(workspace) = self.workspace_mut(&team)
+                    && let Some(arrived) =
+                        workspace.cached_history_arrived(&channel, messages, has_more, cursor)
+                {
+                    self.scroll_to_bottom
+                        .insert(Self::draft_key(&team, &channel, None));
+                    self.fetch_arrived(&team, arrived);
+                }
+            }
             Event::HistoryFailed {
                 team,
                 channel,
@@ -1965,10 +2026,38 @@ impl App {
         });
     }
 
+    /// Hides a direct message from the sidebar until it has something
+    /// new, and closes it in Slack too.
+    fn close_conversation(&mut self, channel: String) {
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        let latest = self
+            .workspace_mut(&team)
+            .and_then(|w| w.conversation(&channel))
+            .and_then(|c| c.latest.clone())
+            .map_or_else(|| "0".to_owned(), |ts| ts.0);
+        self.settings
+            .closed
+            .entry(team.clone())
+            .or_default()
+            .insert(channel.clone(), latest);
+        self.save_settings();
+        self.backend
+            .send(Command::CloseConversation { team, channel });
+    }
+
     pub fn open_conversation(&mut self, channel: &str) {
         let Some(team) = self.active_team() else {
             return;
         };
+        // Opening a closed conversation opens it in the sidebar again.
+        if let Some(closed) = self.settings.closed.get_mut(&team)
+            && closed.remove(channel).is_some()
+            && closed.is_empty()
+        {
+            self.settings.closed.remove(&team);
+        }
         if let Some(workspace) = self.workspace_mut(&team) {
             workspace.active = Some(channel.to_owned());
         }
@@ -2424,6 +2513,8 @@ impl App {
         match action {
             // Where you are.
             Action::SelectWorkspace(team) => self.select_workspace(team),
+            Action::PopOut(channel) => self.pop_out(channel),
+            Action::CloseConversation(channel) => self.close_conversation(channel),
             Action::OpenConversation(channel) => self.open_conversation(&channel),
             Action::OpenThread { channel, ts } => self.open_thread(channel, ts),
             Action::CloseThread => self.thread = None,
@@ -2581,6 +2672,12 @@ impl App {
             }
             Action::SignOut(team) => self.backend.send(Command::SignOut(team)),
             Action::Reconnect => self.backend.send(Command::Reconnect),
+            Action::ApplySpelling => {
+                crate::spell::configure(&self.settings.spelling, &self.dirs.config);
+            }
+            Action::ApplyProxy => self
+                .backend
+                .send(Command::SetProxy(self.settings.proxy.clone())),
             Action::SignInSession => {
                 self.sign_in = None;
                 self.backend.send(Command::SignInSession {
@@ -3968,6 +4065,53 @@ mod tests {
         // Nor in a conversation that is not loaded at all.
         w.message_changed("C2", old);
         assert!(!w.timelines.contains_key("C2"));
+    }
+
+    #[test]
+    fn slacks_newest_page_replaces_the_cached_copy() {
+        let mut w = workspace();
+        w.conversations.push(conversation("1.0", "9.0", 0, 0));
+        let order = |w: &WorkspaceState| -> Vec<String> {
+            w.timelines["C1"]
+                .messages
+                .iter()
+                .map(|m| m.ts.0.clone())
+                .collect()
+        };
+        assert!(
+            w.cached_history_arrived(
+                "C1",
+                vec![message("5.0", None), message("6.0", None)],
+                true,
+                Some("stale".into()),
+            )
+            .is_some()
+        );
+        assert_eq!(order(&w), ["5.0", "6.0"]);
+        assert!(w.timelines["C1"].cached && w.timelines["C1"].loading);
+        w.add_local(
+            "C1",
+            local_message("U1", &Ts::new("local-1"), "hi", &None, false),
+        );
+        // 6.0 was deleted meanwhile: Slack's page drops it, and its cursor
+        // is the one that counts.
+        w.history_arrived(
+            "C1",
+            vec![message("5.0", None), message("8.0", None)],
+            true,
+            Some("fresh".into()),
+            false,
+        );
+        assert_eq!(order(&w), ["5.0", "8.0", "local-1"]);
+        let timeline = &w.timelines["C1"];
+        assert!(!timeline.cached && !timeline.loading);
+        assert_eq!(timeline.cursor.as_deref(), Some("fresh"));
+        // A cached copy that comes after Slack's page is not used.
+        assert!(
+            w.cached_history_arrived("C1", vec![message("1.0", None)], false, None)
+                .is_none()
+        );
+        assert_eq!(order(&w), ["5.0", "8.0", "local-1"]);
     }
 
     #[test]

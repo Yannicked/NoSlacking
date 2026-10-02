@@ -152,20 +152,11 @@ impl std::fmt::Debug for Token {
     }
 }
 
-/// The app's OAuth credentials, for refreshing rotating tokens.
-#[derive(Clone)]
+/// The app's OAuth identity, for refreshing rotating tokens. Only the
+/// client id: a PKCE app refreshes without its secret.
+#[derive(Clone, Debug)]
 pub struct OauthApp {
     pub client_id: String,
-    pub client_secret: String,
-}
-
-impl std::fmt::Debug for OauthApp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OauthApp")
-            .field("client_id", &self.client_id)
-            .field("client_secret", &crate::redact::REDACTED)
-            .finish()
-    }
 }
 
 type OnRefresh = Arc<dyn Fn(Result<Token, SlackError>) -> BoxFuture<'static, ()> + Send + Sync>;
@@ -208,7 +199,10 @@ struct Shared {
 /// One workspace's API access.
 #[derive(Clone)]
 pub struct Client {
-    http: reqwest::Client,
+    /// A client of its own (a cookie jar, a test), or `None` for
+    /// [`super::net::api`], taken afresh for each call so a new proxy
+    /// setting applies at once.
+    http: Option<reqwest::Client>,
     shared: Arc<Shared>,
     base: String,
 }
@@ -219,38 +213,15 @@ impl std::fmt::Debug for Client {
     }
 }
 
-/// The shared HTTP client: rustls, gzip, a sane timeout, an honest agent.
+/// The shared HTTP client for Web API calls, through the current proxy
+/// (see [`super::net`]).
 pub fn http() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent(concat!("NoSlacking/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(120))
-        .build()
-        .unwrap_or_else(|error| {
-            log::error!("HTTP client setup failed, using defaults: {error}");
-            reqwest::Client::new()
-        })
+    super::net::api()
 }
 
-/// How long a transfer may go without a single byte moving.
-const TRANSFER_STALL: Duration = Duration::from_secs(60);
-
-/// The client for uploads and downloads. It has no total deadline: a
-/// large file on a slow line can take longer than any fixed one. A
-/// transfer fails instead when no data has moved for [`TRANSFER_STALL`].
-fn transfers() -> &'static reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .user_agent(concat!("NoSlacking/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(15))
-            .read_timeout(TRANSFER_STALL)
-            .build()
-            .unwrap_or_else(|error| {
-                log::error!("transfer client setup failed, using defaults: {error}");
-                reqwest::Client::new()
-            })
-    })
+/// The client for uploads and downloads, through the current proxy.
+fn transfers() -> reqwest::Client {
+    super::net::transfers()
 }
 
 pub fn now() -> i64 {
@@ -258,7 +229,19 @@ pub fn now() -> i64 {
 }
 
 impl Client {
+    /// A client that goes through `http` alone: one with a cookie jar, or
+    /// a test's.
     pub fn new(http: reqwest::Client, token: Token) -> Self {
+        Self::with_http(Some(http), token)
+    }
+
+    /// A client on the app's shared HTTP client, which follows the proxy
+    /// setting as it changes.
+    pub fn shared(token: Token) -> Self {
+        Self::with_http(None, token)
+    }
+
+    fn with_http(http: Option<reqwest::Client>, token: Token) -> Self {
         Self {
             http,
             shared: Arc::new(Shared {
@@ -295,8 +278,9 @@ impl Client {
         *lock(&self.shared.failure) = None;
     }
 
-    pub fn http(&self) -> &reqwest::Client {
-        &self.http
+    /// The HTTP client this call should use.
+    pub fn http(&self) -> reqwest::Client {
+        self.http.clone().unwrap_or_else(super::net::api)
     }
 
     pub fn token(&self) -> Token {
@@ -331,7 +315,7 @@ impl Client {
             }
         }
         let on_refresh = lock(&self.shared.on_refresh).clone();
-        match refresh_token(&self.http, &self.base, &app, &refresh).await {
+        match refresh_token(&self.http(), &self.base, &app, &refresh).await {
             Ok(renewed) => {
                 *lock(&self.shared.token) = renewed.clone();
                 *lock(&self.shared.failure) = None;
@@ -398,7 +382,7 @@ impl Client {
                 .await
                 .map_err(|_| SlackError::Network("client closed".into()))?;
             let token = self.access_token().await?;
-            let mut request = self.http.post(&url).bearer_auth(&token).form(params);
+            let mut request = self.http().post(&url).bearer_auth(&token).form(params);
             if let Some(cookie) = self.cookie() {
                 request = request.header(reqwest::header::COOKIE, format!("d={cookie}"));
             }
@@ -442,10 +426,17 @@ impl Client {
     /// link preview can choose, is fetched without them.
     pub async fn get_bytes(&self, url: &str, max: usize) -> Result<Vec<u8>, SlackError> {
         if !is_slack_file_url(url) {
-            return get_bytes(&self.http, url, None, None, max).await;
+            return get_bytes(&self.http(), url, None, None, max).await;
         }
         let token = self.access_token().await?;
-        get_bytes(&self.http, url, Some(&token), self.cookie().as_deref(), max).await
+        get_bytes(
+            &self.http(),
+            url,
+            Some(&token),
+            self.cookie().as_deref(),
+            max,
+        )
+        .await
     }
 
     /// Starts downloading a file for saving, with the same rule for the
@@ -453,10 +444,10 @@ impl Client {
     /// read chunk by chunk, so a large file never sits in memory.
     pub async fn download(&self, url: &str) -> Result<reqwest::Response, SlackError> {
         if !is_slack_file_url(url) {
-            return fetch(transfers(), url, None, None).await;
+            return fetch(&transfers(), url, None, None).await;
         }
         let token = self.access_token().await?;
-        fetch(transfers(), url, Some(&token), self.cookie().as_deref()).await
+        fetch(&transfers(), url, Some(&token), self.cookie().as_deref()).await
     }
 
     /// Uploads a file with Slack's two-step external upload, streaming
@@ -650,7 +641,9 @@ async fn fetch(
     Ok(response)
 }
 
-/// Exchanges a refresh token for a new access token.
+/// Exchanges a refresh token for a new access token. Slack's PKCE flow
+/// sends only the client id and the refresh token here: no secret, and no
+/// verifier, which belongs to the first exchange alone.
 pub async fn refresh_token(
     http: &reqwest::Client,
     base: &str,
@@ -661,7 +654,6 @@ pub async fn refresh_token(
         .post(format!("{base}oauth.v2.access"))
         .form(&[
             ("client_id", app.client_id.as_str()),
-            ("client_secret", app.client_secret.as_str()),
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh),
         ])
@@ -744,13 +736,9 @@ mod tests {
         };
         let app = OauthApp {
             client_id: "123.456".into(),
-            client_secret: "s3cr3t".into(),
         };
         let printed = format!("{token:?} {app:?} {:#?}", token);
-        assert!(
-            !printed.contains("xox") && !printed.contains("s3cr3t"),
-            "{printed}"
-        );
+        assert!(!printed.contains("xox"), "{printed}");
         assert!(printed.contains("123.456") && printed.contains("expires_at"));
     }
 
@@ -819,7 +807,6 @@ mod tests {
         let clone = client.clone();
         client.set_app(Some(OauthApp {
             client_id: "1.2".into(),
-            client_secret: "s".into(),
         }));
         assert!(lock(&clone.shared.app).is_some());
         assert!(Arc::ptr_eq(&client.shared, &clone.shared));

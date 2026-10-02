@@ -213,22 +213,19 @@ pub fn install(ctx: &egui::Context) {
     ctx.add_plugin(fastframe_emoji::EmojiPlugin::default());
 }
 
-/// Noto Color Emoji as a bitmap (CBDT) font, behind the platform's own.
-///
-/// fastframe-emoji draws colour bitmap fonts (CBDT, sbix). Some Linux
-/// desktops (Fedora among them) ship Noto Color Emoji only as a COLRv1
-/// vector font, which it cannot draw; without this every emoji would fall
-/// back to the monochrome outline glyph.
-const BUNDLED_EMOJI: &[u8] = include_bytes!("../assets/fonts/NotoColorEmoji.ttf");
+mod emoji_font;
 
-/// Chooses the platform's colour emoji font, with the bundled one for
-/// whatever it lacks, and finds it off this thread.
+/// Chooses the platform's colour emoji font, with the bundled one (if this
+/// platform needs one, see `emoji_font`) for whatever it lacks, and finds
+/// it off this thread.
 pub fn install_emoji(synchronous: bool) {
-    fastframe_emoji::EmojiSetup::default()
+    let mut setup = fastframe_emoji::EmojiSetup::default()
         .system(true)
-        .bundled(BUNDLED_EMOJI)
-        .synchronous(synchronous)
-        .install();
+        .synchronous(synchronous);
+    if let Some(font) = emoji_font::bundled() {
+        setup = setup.bundled(font);
+    }
+    setup.install();
     std::thread::spawn(fastframe_emoji::warm_up);
 }
 

@@ -226,7 +226,11 @@ async fn stream(
     url: &str,
     sink: &(impl Fn(SocketEvent) + Send + Sync),
 ) -> Result<String, SlackError> {
-    let (mut socket, _) = tokio_tungstenite::connect_async(url)
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+    let request = url
+        .into_client_request()
+        .map_err(|e| SlackError::Decode(e.to_string()))?;
+    let (mut socket, _) = super::net::websocket(request)
         .await
         .map_err(|e| SlackError::Network(e.to_string()))?;
     let mut ping = tokio::time::interval(PING_EVERY);

@@ -5,7 +5,9 @@
 //!
 //! - `app`: the Slack app's client id, client secret and app-level token;
 //! - `workspace:<team id>`: that workspace's user token, and its refresh
-//!   token when the app rotates tokens.
+//!   token when the app rotates tokens;
+//! - `cache-key`: the random key the offline cache is encrypted with (see
+//!   [`crate::offline`]).
 //!
 //! Keyring calls can block (an unlock prompt, a slow D-Bus), so they all run
 //! in order on one thread of their own and answer through oneshot channels.
@@ -19,10 +21,14 @@ use tokio::sync::oneshot;
 use crate::paths::APP_ID;
 use crate::slack::Token;
 
-/// The Slack app the user registered (see `slack-app-manifest.yaml`).
+/// The Slack app the user registered (see `slack-app-manifest.json`).
 #[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AppCredentials {
     pub client_id: String,
+    /// Optional and never sent: the manifest turns PKCE on, and Slack wants
+    /// no secret from a PKCE app. Kept so a secret saved by an older build,
+    /// or typed in by habit, still round-trips through the keyring.
+    #[serde(default)]
     pub client_secret: String,
     /// The app-level token (`xapp-`) with `connections:write`, for Socket Mode.
     pub app_token: String,
@@ -40,14 +46,16 @@ impl std::fmt::Debug for AppCredentials {
 }
 
 impl AppCredentials {
+    /// Whether these are enough for the OAuth sign-in: with PKCE, the
+    /// client id alone.
     pub fn can_sign_in(&self) -> bool {
-        !self.client_id.trim().is_empty() && !self.client_secret.trim().is_empty()
+        !self.client_id.trim().is_empty()
     }
 
+    /// What refreshing a rotating token needs, once the app can sign in.
     pub fn oauth(&self) -> Option<crate::slack::OauthApp> {
         self.can_sign_in().then(|| crate::slack::OauthApp {
             client_id: self.client_id.trim().to_owned(),
-            client_secret: self.client_secret.trim().to_owned(),
         })
     }
 }
@@ -232,6 +240,22 @@ impl Credentials {
         self.write_json(format!("workspace:{team}"), token).await
     }
 
+    /// The offline cache's key, made and stored on first use. A stored
+    /// key of the wrong length is replaced, which only costs the cache.
+    pub async fn cache_key(&self) -> Result<crate::offline::CacheKey, Error> {
+        self.run(|store| {
+            if let Some(bytes) = store.read("cache-key")?
+                && let Ok(key) = <[u8; 32]>::try_from(bytes.as_slice())
+            {
+                return Ok(crate::offline::CacheKey(key));
+            }
+            let key = crate::offline::CacheKey::random();
+            store.write("cache-key", &key.0)?;
+            Ok(key)
+        })
+        .await
+    }
+
     pub async fn delete_token(&self, team: &str) -> Result<(), Error> {
         let key = format!("workspace:{team}");
         self.run(move |store| store.delete(&key)).await
@@ -241,6 +265,13 @@ impl Credentials {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_cache_key_is_made_once() {
+        let credentials = Credentials::memory();
+        let first = credentials.cache_key().await.expect("made");
+        assert_eq!(credentials.cache_key().await, Ok(first));
+    }
 
     #[tokio::test]
     async fn secrets_round_trip_through_the_thread() {

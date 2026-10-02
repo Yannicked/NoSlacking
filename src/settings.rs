@@ -39,26 +39,17 @@ pub enum Density {
 }
 
 /// How Slack sends the browser back after sign-in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Redirect {
-    /// `http://127.0.0.1:<port>/callback`: needs no desktop integration,
-    /// but the Slack app must list it as a redirect URL.
+    /// `http://localhost:<port>/callback`: needs no desktop integration.
+    /// The bundled manifest lists it for the default port.
+    #[default]
     Loopback,
     /// `noslacking://oauth/callback`, delivered by the desktop's URL handler.
-    /// What the bundled manifest registers.
+    /// Slack's manifest only takes http(s) redirect URLs, so the user adds
+    /// this one by hand under the app's OAuth & Permissions.
     Scheme,
-}
-
-impl Default for Redirect {
-    /// The scheme, except on macOS, where only an app bundle can own one.
-    fn default() -> Self {
-        if cfg!(target_os = "macos") {
-            Self::Loopback
-        } else {
-            Self::Scheme
-        }
-    }
 }
 
 /// A signed-in workspace, minus its token.
@@ -120,6 +111,13 @@ pub struct Settings {
     pub inline_media: bool,
     /// Programs to run on new messages; off by default.
     pub hooks: crate::hooks::Hooks,
+    /// Which proxy every connection goes through (Settings → Network).
+    pub proxy: crate::slack::net::ProxySettings,
+    /// Spell checking in the composer.
+    pub spelling: crate::spell::SpellSettings,
+    /// Direct messages closed in the sidebar, by workspace: each one's
+    /// newest message when it was closed. Anything newer brings it back.
+    pub closed: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Default for Settings {
@@ -145,6 +143,9 @@ impl Default for Settings {
             density: Density::Comfortable,
             inline_media: true,
             hooks: crate::hooks::Hooks::default(),
+            proxy: crate::slack::net::ProxySettings::default(),
+            spelling: crate::spell::SpellSettings::default(),
+            closed: BTreeMap::new(),
         }
     }
 }
@@ -240,6 +241,9 @@ impl Settings {
             density,
             inline_media,
             hooks,
+            proxy,
+            spelling,
+            closed,
         );
         // One damaged workspace must not sign you out of the others, so
         // these are read entry by entry.

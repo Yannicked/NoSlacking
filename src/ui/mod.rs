@@ -89,7 +89,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     search::show(app, ui.ctx());
     browse::show(app, ui.ctx());
     views::dialog(app, ui.ctx());
+    // Before the sweep, so what the pop-outs draw stays parsed.
+    app.show_popouts(&ui.ctx().clone());
     rich::end_frame();
+}
+
+/// A pop-out window's contents: its conversation, made the active one for
+/// the while (see [`crate::app::Popout`]).
+pub fn popout(app: &mut App, ui: &mut egui::Ui) {
+    conversation::show(app, ui);
 }
 
 /// A rounded square picture, or coloured initials until there is one.

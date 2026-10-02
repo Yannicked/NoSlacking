@@ -11,6 +11,9 @@ use crate::model::Action;
 use crate::settings::{Appearance, Density, Redirect};
 use crate::theme::{self, Palette};
 
+mod network;
+mod spelling;
+
 pub(super) fn group(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -322,7 +325,11 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         });
         for (label, value, secret) in [
             (t("Client ID"), &mut app.setup.client_id, false),
-            (t("Client secret"), &mut app.setup.client_secret, true),
+            (
+                t("Client secret (optional)"),
+                &mut app.setup.client_secret,
+                true,
+            ),
             (t("App-level token"), &mut app.setup.app_token, true),
         ] {
             let label = ui.label(
@@ -344,8 +351,8 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             app_token: app.setup.app_token.trim().to_owned(),
         };
         let changed = app.app_credentials.as_ref() != Some(&form);
-        // As on the sign-in page: an app without both halves of its OAuth
-        // credentials cannot sign anyone in, so it is not worth saving.
+        // As on the sign-in page: an app without a client id cannot sign
+        // anyone in, so it is not worth saving. The secret may stay empty.
         ui.add_enabled_ui(changed && form.can_sign_in(), |ui| {
             if theme::primary_button(ui, palette, &t("Save")).clicked() {
                 app.actions.push(Action::SaveApp);
@@ -383,6 +390,12 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                     .labelled_by(name);
             },
         );
+        // Under the row: next to the menu it would run beneath it.
+        ui.label(
+            RichText::new(t("The manifest adds the loopback one; add noslacking://oauth/callback there yourself to use it."))
+                .font(theme::regular(12.5))
+                .color(palette.dim),
+        );
         if redirect != app.settings.redirect {
             app.settings.redirect = redirect;
             app.settings_changed();
@@ -399,6 +412,9 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             }
         }
     });
+
+    spelling::show(app, ui, palette);
+    network::show(app, ui, palette);
 
     group(ui, palette, &t("Files"), |ui| {
         let folders = [

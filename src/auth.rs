@@ -10,6 +10,12 @@
 //!    [`crate::single_instance`]).
 //! 3. [`exchange`] trades the code for the user token with
 //!    `oauth.v2.access`.
+//!
+//! Slack accepts a redirect that is not https (`http://localhost`, a
+//! custom scheme) only from an app with PKCE turned on, and such an app is a
+//! "public client": the code exchange carries the PKCE verifier and a token
+//! refresh the refresh token, never the client secret, and the tokens
+//! always rotate (refresh tokens last 30 days).
 
 use base64::Engine as _;
 use rand::Rng as _;
@@ -62,8 +68,17 @@ pub const USER_SCOPES: &[&str] = &[
     "reminders:write",
 ];
 
+/// The redirect URL of the loopback listener. It says `localhost` rather
+/// than an address because that is what Slack's manifest accepts and what
+/// the bundled manifest lists; [`loopback`] listens on both IPv4 and IPv6
+/// so it answers whichever the browser picks.
 pub fn loopback_redirect(port: u16) -> String {
-    format!("http://127.0.0.1:{port}/callback")
+    format!("{}/callback", loopback_origin(port))
+}
+
+/// `http://localhost:<port>`, the start of every URL the listener hands on.
+fn loopback_origin(port: u16) -> String {
+    format!("http://localhost:{port}")
 }
 
 /// One sign-in attempt.
@@ -184,9 +199,10 @@ pub async fn exchange(
 ) -> Result<SignedIn, SlackError> {
     let response = http
         .post(format!("{}oauth.v2.access", client::API))
+        // No client secret: a PKCE app is a public client, and the verifier
+        // proves this is the attempt that asked for the code.
         .form(&[
             ("client_id", app.client_id.trim()),
-            ("client_secret", app.client_secret.trim()),
             ("code", code),
             ("redirect_uri", flow.redirect_uri.as_str()),
             ("code_verifier", flow.verifier.as_str()),
@@ -216,9 +232,17 @@ const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>NoSlacking</t
 /// (a stray page, an old redirect) is answered and ignored, so it cannot
 /// end the attempt.
 pub async fn loopback(port: u16, state: &str) -> std::io::Result<String> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    // Browsers resolve `localhost` to 127.0.0.1 or ::1 as they like, so
+    // listen on both. One of them failing (no IPv6 on this machine, or the
+    // port taken on one family) is fine while the other works.
+    let v4 = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await;
+    let v6 = tokio::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port)).await;
+    let (v4, v6) = match (v4, v6) {
+        (Err(error), Err(_)) => return Err(error),
+        (v4, v6) => (v4.ok(), v6.ok()),
+    };
     loop {
-        let (mut stream, _) = listener.accept().await?;
+        let (mut stream, _) = accept_either(v4.as_ref(), v6.as_ref()).await?;
         let mut buffer = vec![0u8; 8192];
         let read = match tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -239,7 +263,7 @@ pub async fn loopback(port: u16, state: &str) -> std::io::Result<String> {
             continue;
         };
         let ours = path == "/callback" || path.starts_with("/callback?");
-        let url = format!("http://127.0.0.1:{port}{path}");
+        let url = format!("{}{path}", loopback_origin(port));
         if !ours || !belongs_to(&url, state) {
             let _ = stream
                 .write_all(
@@ -258,10 +282,27 @@ pub async fn loopback(port: u16, state: &str) -> std::io::Result<String> {
     }
 }
 
+/// The next connection on whichever listener gets one first.
+async fn accept_either(
+    v4: Option<&tokio::net::TcpListener>,
+    v6: Option<&tokio::net::TcpListener>,
+) -> std::io::Result<(tokio::net::TcpStream, std::net::SocketAddr)> {
+    match (v4, v6) {
+        (Some(v4), Some(v6)) => tokio::select! {
+            accepted = v4.accept() => accepted,
+            accepted = v6.accept() => accepted,
+        },
+        (Some(only), None) | (None, Some(only)) => only.accept().await,
+        (None, None) => Err(std::io::Error::other("no loopback listener")),
+    }
+}
+
 /// Registers `noslacking://` and `slack://` with the desktop so the browser
 /// can hand sign-in links back. Linux writes a desktop file for this
-/// executable; Windows writes the per-user URL protocol keys. macOS needs an
-/// app bundle, which declares the schemes in its Info.plist.
+/// executable; Windows writes the per-user URL protocol keys. On macOS the
+/// app bundle's Info.plist declares the schemes, but the links arrive as an
+/// Apple event the app cannot receive without `unsafe` AppKit code, so this
+/// fails there (see CONTRIBUTING.md).
 pub fn register_scheme() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     register_scheme_for(&exe)
@@ -349,7 +390,7 @@ fn run_reg(args: &[&str]) -> Result<(), String> {
 #[cfg(not(any(target_os = "linux", windows)))]
 fn register_scheme_for(_exe: &std::path::Path) -> Result<(), String> {
     Err(
-        "noslacking:// links need the app bundle on this platform; use the loopback redirect"
+        "this platform does not hand noslacking:// links to the app yet; use the loopback redirect"
             .into(),
     )
 }
@@ -361,7 +402,7 @@ mod tests {
     fn app() -> AppCredentials {
         AppCredentials {
             client_id: "123.456".into(),
-            client_secret: "secret".into(),
+            client_secret: String::new(),
             app_token: String::new(),
         }
     }
@@ -382,7 +423,12 @@ mod tests {
         assert!(flow.url.contains("code_challenge_method=S256"));
         assert_ne!(flow.state, Flow::start(&app(), Redirect::Scheme, 0).state);
         let loopback = Flow::start(&app(), Redirect::Loopback, 53682);
-        assert_eq!(loopback.redirect_uri, "http://127.0.0.1:53682/callback");
+        assert_eq!(loopback.redirect_uri, "http://localhost:53682/callback");
+        assert!(
+            loopback
+                .url
+                .contains("redirect_uri=http%3A%2F%2Flocalhost%3A53682%2Fcallback")
+        );
     }
 
     #[test]

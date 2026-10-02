@@ -183,7 +183,16 @@ pub enum Command {
         team: String,
         channel: String,
     },
+    /// Closes a direct message or group DM in Slack (`conversations.close`),
+    /// as closing it in Slack's own sidebar does.
+    CloseConversation {
+        team: String,
+        channel: String,
+    },
     Reconnect,
+    /// Switches every connection to this proxy setting and restarts the
+    /// live ones.
+    SetProxy(crate::slack::net::ProxySettings),
     /// Snoozes notifications in Slack for this many minutes, or with
     /// `None` ends the snooze.
     Snooze {
@@ -419,7 +428,13 @@ impl std::fmt::Debug for Command {
                 .field("team", team)
                 .field("channel", channel)
                 .finish(),
+            Self::CloseConversation { team, channel } => f
+                .debug_struct("CloseConversation")
+                .field("team", team)
+                .field("channel", channel)
+                .finish(),
             Self::Reconnect => f.write_str("Reconnect"),
+            Self::SetProxy(proxy) => f.debug_tuple("SetProxy").field(&proxy.mode).finish(),
             Self::Snooze { team, minutes } => f
                 .debug_struct("Snooze")
                 .field("team", team)
@@ -547,6 +562,15 @@ pub enum Event {
         has_more: bool,
         cursor: Option<String>,
         older: bool,
+    },
+    /// The newest page of a conversation as the offline cache kept it, to
+    /// show until [`Event::History`] brings Slack's own.
+    CachedHistory {
+        team: String,
+        channel: String,
+        messages: Vec<Message>,
+        has_more: bool,
+        cursor: Option<String>,
     },
     HistoryFailed {
         team: String,
@@ -787,8 +811,7 @@ pub fn spawn(waker: &Waker, source: Source, cache_dir: PathBuf) -> Backend {
     // Without a runtime there is no app to run.
     let runtime =
         runtime.unwrap_or_else(|error| panic!("could not start the network runtime: {error}"));
-    let http = crate::slack::client::http();
-    let images = ImageLoader::new(http.clone(), runtime.handle().clone(), cache_dir);
+    let images = ImageLoader::new(runtime.handle().clone(), cache_dir);
     let worker_images = images.clone();
     let handle = runtime.handle().clone();
     let spawned = std::thread::Builder::new()
@@ -806,7 +829,7 @@ pub fn spawn(waker: &Waker, source: Source, cache_dir: PathBuf) -> Backend {
                         } else {
                             Credentials::native(Some(handle))
                         };
-                        worker::Worker::new(http, credentials, dirs, sink, worker_images)
+                        worker::Worker::new(credentials, dirs, sink, worker_images)
                             .run(workspaces, receiver)
                             .await;
                     }

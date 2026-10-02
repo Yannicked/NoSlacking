@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod magic;
+pub mod net;
 pub mod rtm;
 pub mod search;
 pub mod session;
