@@ -24,5 +24,6 @@ pub mod settings;
 pub mod sidebar;
 pub mod single_instance;
 pub mod slack;
+pub mod slash;
 pub mod theme;
 mod ui;

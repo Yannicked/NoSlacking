@@ -642,6 +642,11 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                 });
                 uploads.insert(id, task.abort_handle());
             }
+            // Every command works, as far as the demo can tell.
+            Command::Slash { command, .. } => sink.send(Event::Slash {
+                command,
+                result: Ok(None),
+            }),
             Command::CancelUpload { id } => {
                 if let Some(task) = uploads.remove(&id) {
                     task.abort();

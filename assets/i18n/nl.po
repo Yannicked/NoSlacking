@@ -701,3 +701,57 @@ msgstr "{percent}% geüpload"
 
 msgid "Drop files to upload"
 msgstr "Sleep bestanden hierheen om te uploaden"
+
+msgid "Say what you are doing, in italics"
+msgstr "Zeg wat je doet, cursief"
+
+msgid "Add a shrug to your message"
+msgstr "Voeg een schouderophaal toe aan je bericht"
+
+msgid "Set or clear your status"
+msgstr "Stel je status in of wis hem"
+
+msgid "Show yourself as away"
+msgstr "Toon jezelf als afwezig"
+
+msgid "Show yourself as active"
+msgstr "Toon jezelf als actief"
+
+msgid "Set the conversation's topic"
+msgstr "Stel het onderwerp van het gesprek in"
+
+msgid "Add someone to this channel"
+msgstr "Voeg iemand toe aan dit kanaal"
+
+msgid "Leave this channel"
+msgstr "Verlaat dit kanaal"
+
+msgid "Set a reminder"
+msgstr "Stel een herinnering in"
+
+msgid "Run a command"
+msgstr "Voer een opdracht uit"
+
+msgid "You are now shown as away"
+msgstr "Je wordt nu als afwezig getoond"
+
+msgid "You are now shown as active"
+msgstr "Je wordt nu als actief getoond"
+
+msgid "Your status is updated"
+msgstr "Je status is bijgewerkt"
+
+msgid "The topic is changed"
+msgstr "Het onderwerp is gewijzigd"
+
+msgid "Invited"
+msgstr "Uitgenodigd"
+
+msgid "You left the channel"
+msgstr "Je hebt het kanaal verlaten"
+
+msgid "{command} only works when you sign in with your browser"
+msgstr "{command} werkt alleen als je inlogt met je browser"
+
+msgid "{command} failed: {error}"
+msgstr "{command} mislukt: {error}"

@@ -1254,6 +1254,7 @@ impl App {
                 }
             }
             Event::UploadDone { id } => self.upload_done(id),
+            Event::Slash { command, result } => self.slash_done(&command, result),
             Event::Notice(text) => self.toast(text, false),
             // A workspace's conversations, people, apps and sidebar.
             Event::Conversations {
@@ -1749,6 +1750,26 @@ impl App {
         };
         let key = Self::draft_key(&team, &channel, thread.as_ref());
         let draft = self.drafts.remove(&key).unwrap_or_default();
+        let mut text = text;
+        if let Some((command, args)) = crate::slash::parse(&text) {
+            match command.as_str() {
+                // Plain messages in the end, sent as any other.
+                "shrug" => text = crate::slash::shrug(args),
+                // chat.meMessage cannot reply in a thread; italics read
+                // the same there.
+                "me" if thread.is_some() && !args.is_empty() => text = format!("_{args}_"),
+                _ => {
+                    let text = to_wire(args, &draft.mentions);
+                    self.backend.send(Command::Slash {
+                        team,
+                        channel,
+                        command,
+                        text,
+                    });
+                    return;
+                }
+            }
+        }
         let wire = to_wire(&text, &draft.mentions);
         if wire.trim().is_empty() {
             return;
@@ -1896,6 +1917,46 @@ impl App {
             path,
             comment,
         });
+    }
+
+    /// A slash command finished: Slack's reply if it gave one, a word
+    /// that it worked otherwise, or why not.
+    fn slash_done(&mut self, command: &str, result: Result<Option<String>, String>) {
+        let name = format!("/{command}");
+        match result {
+            Ok(Some(reply)) => {
+                let reply = mrkdwn::plain(&reply, |_| None);
+                self.toast(reply, false);
+            }
+            Ok(None) => {
+                let done = match command {
+                    // The message itself shows that it worked.
+                    "me" => return,
+                    "away" => t("You are now shown as away"),
+                    "active" => t("You are now shown as active"),
+                    "status" => t("Your status is updated"),
+                    "topic" => t("The topic is changed"),
+                    "invite" => t("Invited"),
+                    "leave" => t("You left the channel"),
+                    _ => t("Done"),
+                };
+                self.toast(done.into_owned(), false);
+            }
+            Err(error) if error == backend::SLASH_NEEDS_SESSION => self.toast(
+                tf(
+                    "{command} only works when you sign in with your browser",
+                    &[("command", &name)],
+                ),
+                true,
+            ),
+            Err(error) => self.toast(
+                tf(
+                    "{command} failed: {error}",
+                    &[("command", &name), ("error", &error)],
+                ),
+                true,
+            ),
+        }
     }
 
     /// An upload ended one way or another: it leaves the composer, and a

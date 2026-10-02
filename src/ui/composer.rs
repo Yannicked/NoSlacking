@@ -37,6 +37,12 @@ enum Suggestion {
         name: String,
     },
     Special(&'static str),
+    Channel {
+        id: String,
+        name: String,
+        private: bool,
+    },
+    Command(&'static crate::slash::Known),
 }
 
 impl Suggestion {
@@ -45,7 +51,25 @@ impl Suggestion {
             Self::User { label, .. } => format!("@{label} "),
             Self::Emoji { name } => format!(":{name}: "),
             Self::Special(name) => format!("@{name} "),
+            Self::Channel { name, .. } => format!("#{name} "),
+            Self::Command(known) => format!("/{} ", known.name),
         }
+    }
+}
+
+/// What a slash command does, for its suggestion.
+fn command_description(name: &str) -> std::borrow::Cow<'static, str> {
+    match name {
+        "me" => t("Say what you are doing, in italics"),
+        "shrug" => t("Add a shrug to your message"),
+        "status" => t("Set or clear your status"),
+        "away" => t("Show yourself as away"),
+        "active" => t("Show yourself as active"),
+        "topic" => t("Set the conversation's topic"),
+        "invite" => t("Add someone to this channel"),
+        "leave" => t("Leave this channel"),
+        "remind" => t("Set a reminder"),
+        _ => t("Run a command"),
     }
 }
 
@@ -132,8 +156,9 @@ impl People {
 #[derive(Clone, Debug, Default)]
 struct Memo {
     people: People,
-    /// The word, the custom emoji count and what was found.
-    last: Option<(String, usize, Vec<Suggestion>)>,
+    /// The word, the custom emoji and conversation counts, and what was
+    /// found.
+    last: Option<(String, (usize, usize), Vec<Suggestion>)>,
 }
 
 impl Memo {
@@ -142,7 +167,10 @@ impl Memo {
             self.people = People::build(workspace);
             self.last = None;
         }
-        let custom = workspace.emoji.custom_names().count();
+        let custom = (
+            workspace.emoji.custom_names().count(),
+            workspace.conversations.len(),
+        );
         if let Some((last, count, found)) = &self.last
             && last == word
             && *count == custom
@@ -161,6 +189,39 @@ fn suggestions(workspace: &WorkspaceState, word: &str) -> Vec<Suggestion> {
 }
 
 fn suggest(people: &People, workspace: &WorkspaceState, word: &str) -> Vec<Suggestion> {
+    if let Some(typed) = word.strip_prefix('/') {
+        return crate::slash::matching(typed)
+            .map(Suggestion::Command)
+            .collect();
+    }
+    if let Some(query) = word.strip_prefix('#') {
+        let query = query.to_lowercase();
+        let mut channels: Vec<(String, &crate::model::Conversation)> = workspace
+            .conversations
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.kind,
+                    crate::model::ConversationKind::Channel
+                        | crate::model::ConversationKind::Private
+                ) && !c.archived
+            })
+            .map(|c| (c.name.to_lowercase(), c))
+            .filter(|(name, _)| name.contains(&query))
+            .collect();
+        channels.sort_by(|(a, _), (b, _)| {
+            (!a.starts_with(&query), a).cmp(&(!b.starts_with(&query), b))
+        });
+        return channels
+            .into_iter()
+            .take(8)
+            .map(|(_, c)| Suggestion::Channel {
+                id: c.id.clone(),
+                name: c.name.clone(),
+                private: c.kind == crate::model::ConversationKind::Private,
+            })
+            .collect();
+    }
     if let Some(query) = word.strip_prefix('@') {
         let query = query.to_lowercase();
         let mut out: Vec<Suggestion> = ["here", "channel", "everyone"]
@@ -241,7 +302,8 @@ pub fn show(
         draft.dismissed = None;
     }
     let mut found = match &word {
-        Some((_, w)) if draft.dismissed.is_none() => {
+        // Commands only suggest as the message's first word.
+        Some((start, w)) if draft.dismissed.is_none() && (*start == 0 || !w.starts_with('/')) => {
             let memo_id = id.with("suggestions");
             let mut memo: Memo = ui.data_mut(|d| d.remove_temp(memo_id)).unwrap_or_default();
             let found = memo.suggestions(composer.workspace, w);
@@ -328,10 +390,18 @@ pub fn show(
         text.push_str(&insert);
         text.extend(&chars[end..]);
         draft.text = text;
-        if let Suggestion::User { id, label, .. } = &suggestion {
-            draft
-                .mentions
-                .push((format!("@{label}"), format!("<@{id}>")));
+        match &suggestion {
+            Suggestion::User { id, label, .. } => {
+                draft
+                    .mentions
+                    .push((format!("@{label}"), format!("<@{id}>")));
+            }
+            Suggestion::Channel { id, name, .. } => {
+                draft
+                    .mentions
+                    .push((format!("#{name}"), format!("<#{id}|{name}>")));
+            }
+            _ => {}
         }
         let at = start + insert.chars().count();
         if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {
@@ -777,6 +847,36 @@ fn suggestion_list(
                                 .color(palette.dim),
                         );
                     }
+                    Suggestion::Channel { name, private, .. } => {
+                        let icon = if *private { Icon::Lock } else { Icon::Hash };
+                        let (rect, _) =
+                            child.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                        icon.image(palette.secondary, 14.0).paint_at(&child, rect);
+                        child.label(
+                            RichText::new(name)
+                                .font(theme::semibold(13.5))
+                                .color(palette.text),
+                        );
+                    }
+                    Suggestion::Command(known) => {
+                        child.label(
+                            RichText::new(format!("/{}", known.name))
+                                .font(theme::semibold(13.5))
+                                .color(palette.text),
+                        );
+                        if !known.usage.is_empty() {
+                            child.label(
+                                RichText::new(known.usage)
+                                    .font(theme::mono(12.0))
+                                    .color(palette.secondary),
+                            );
+                        }
+                        child.label(
+                            RichText::new(command_description(known.name))
+                                .font(theme::regular(12.5))
+                                .color(palette.dim),
+                        );
+                    }
                 }
                 theme::describe_selected(
                     &response,
@@ -797,6 +897,7 @@ fn suggestion_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Conversation;
 
     #[test]
     fn the_word_at_the_cursor() {
@@ -846,6 +947,8 @@ mod tests {
                 Suggestion::User { label, .. } => label.clone(),
                 Suggestion::Emoji { name } => format!(":{name}:"),
                 Suggestion::Special(name) => format!("@{name}"),
+                Suggestion::Channel { name, .. } => format!("#{name}"),
+                Suggestion::Command(known) => format!("/{}", known.name),
             })
             .collect()
     }
@@ -885,6 +988,60 @@ mod tests {
             ["andy", "Ann", "Joanna Ek", "anbot"]
         );
         assert_eq!(memo.suggestions(&w, ":ta"), suggestions(&w, ":ta"));
+    }
+
+    fn channel(id: &str, name: &str, kind: crate::model::ConversationKind) -> Conversation {
+        Conversation {
+            id: id.into(),
+            name: name.into(),
+            kind,
+            user: None,
+            topic: String::new(),
+            purpose: String::new(),
+            members: None,
+            archived: false,
+            last_read: None,
+            latest: None,
+            unread: 0,
+            mentions: 0,
+        }
+    }
+
+    #[test]
+    fn channels_suggest_by_name_and_become_channel_links() {
+        use crate::model::ConversationKind::{Channel, Direct, Private};
+        let mut w = workspace();
+        w.conversations = vec![
+            channel("C1", "random", Channel),
+            channel("C2", "design-review", Private),
+            channel("C3", "design", Channel),
+            channel("D1", "U2", Direct),
+            Conversation {
+                archived: true,
+                ..channel("C4", "design-old", Channel)
+            },
+        ];
+        // Prefix matches first, archived channels and DMs never.
+        assert_eq!(
+            labels(&suggestions(&w, "#des")),
+            ["#design", "#design-review"]
+        );
+        assert_eq!(labels(&suggestions(&w, "#view")), ["#design-review"]);
+        assert_eq!(suggestions(&w, "#").len(), 3);
+        // What the suggestion inserts goes out as Slack's channel link.
+        let mentions = vec![("#design".to_owned(), "<#C3|design>".to_owned())];
+        assert_eq!(
+            crate::app::to_wire("see #design, not #designer", &mentions),
+            "see <#C3|design>, not #designer"
+        );
+    }
+
+    #[test]
+    fn slash_commands_suggest_with_their_usage() {
+        let w = workspace();
+        assert_eq!(labels(&suggestions(&w, "/st")), ["/status"]);
+        assert_eq!(suggestions(&w, "/").len(), crate::slash::KNOWN.len());
+        assert!(suggestions(&w, "/zz").is_empty());
     }
 
     #[test]

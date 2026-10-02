@@ -580,6 +580,12 @@ impl Worker {
                 path,
                 comment,
             } => self.upload(id, team, channel, thread, path, comment),
+            Command::Slash {
+                team,
+                channel,
+                command,
+                text,
+            } => self.slash(team, channel, command, text),
             Command::CancelUpload { id } => {
                 if let Some(task) = self.uploads.remove(&id) {
                     task.abort();
@@ -881,6 +887,23 @@ impl Worker {
             sink.send(Event::UploadDone { id });
         });
         self.uploads.insert(id, task.abort_handle());
+    }
+
+    /// Runs a slash command: through its own Web API method where it has
+    /// one, so it works with any sign-in, and otherwise through
+    /// `chat.command`, Slack's own runner, which only sessions may call.
+    fn slash(&self, team: String, channel: String, command: String, text: String) {
+        let Some((client, sink)) = self.team(&team) else {
+            self.sink.send(Event::Slash {
+                command,
+                result: Err(NOT_SIGNED_IN.to_owned()),
+            });
+            return;
+        };
+        tokio::spawn(async move {
+            let result = run_slash(&client, &channel, &command, &text).await;
+            sink.send(Event::Slash { command, result });
+        });
     }
 
     fn download(&self, team: &str, url: String, name: String) {
@@ -2173,6 +2196,80 @@ async fn thread(client: Client, team: String, channel: String, ts: Ts, sink: Sin
 /// The body streams into a hidden temporary file next to its final place,
 /// which is renamed once complete, so a large file never sits in memory
 /// and a failed download never appears under the real name.
+/// What [`Worker::slash`] runs: the command's own method, or
+/// `chat.command`. `Ok` carries Slack's reply text, when it has one.
+async fn run_slash(
+    client: &Client,
+    channel: &str,
+    command: &str,
+    text: &str,
+) -> Result<Option<String>, String> {
+    let act = |method: &'static str, params: Vec<(&'static str, String)>| async move {
+        client
+            .act::<Value>(method, &params)
+            .await
+            .map(|_| None)
+            .map_err(|e| describe(&e))
+    };
+    let channel = channel.to_owned();
+    match command {
+        "me" => {
+            act(
+                "chat.meMessage",
+                vec![("channel", channel), ("text", text.to_owned())],
+            )
+            .await
+        }
+        "away" => act("users.setPresence", vec![("presence", "away".to_owned())]).await,
+        "active" => act("users.setPresence", vec![("presence", "auto".to_owned())]).await,
+        "status" => {
+            let (emoji, status) = crate::slash::status(&crate::mrkdwn::unescape(text));
+            let profile = serde_json::json!({
+                "status_text": status,
+                "status_emoji": emoji,
+                "status_expiration": 0,
+            });
+            act("users.profile.set", vec![("profile", profile.to_string())]).await
+        }
+        "topic" => {
+            act(
+                "conversations.setTopic",
+                vec![("channel", channel), ("topic", text.to_owned())],
+            )
+            .await
+        }
+        "invite" => {
+            let people = crate::slash::mentioned(text);
+            if people.is_empty() {
+                return Err("name someone to invite with @".to_owned());
+            }
+            act(
+                "conversations.invite",
+                vec![("channel", channel), ("users", people.join(","))],
+            )
+            .await
+        }
+        "leave" => act("conversations.leave", vec![("channel", channel)]).await,
+        _ if client.token().is_session() => {
+            let params = [
+                ("channel", channel),
+                ("command", format!("/{command}")),
+                ("text", text.to_owned()),
+            ];
+            client
+                .act::<Value>("chat.command", &params)
+                .await
+                .map(|answer| {
+                    str_of(&answer, "response")
+                        .filter(|r| !r.is_empty())
+                        .map(str::to_owned)
+                })
+                .map_err(|e| describe(&e))
+        }
+        _ => Err(super::SLASH_NEEDS_SESSION.to_owned()),
+    }
+}
+
 /// Uploads one file for [`Worker::upload`], telling the interface how far
 /// it got along the way.
 #[allow(clippy::too_many_arguments)]
