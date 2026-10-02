@@ -579,6 +579,46 @@ fn emoji(text: &str) -> Option<(&str, usize)> {
     valid.then_some((name, end + 2))
 }
 
+/// Parsed texts kept between frames, so an immediate-mode view need not
+/// parse every message on every frame.
+///
+/// Keyed by the text itself, so an edited message is parsed afresh and two
+/// texts can never share an entry. Call [`ParseCache::sweep`] once a frame:
+/// it drops what was not asked for since the last sweep, so the cache
+/// holds about what is on screen.
+#[derive(Debug, Default)]
+pub struct ParseCache {
+    entries: HashMap<String, (std::sync::Arc<[Block]>, bool)>,
+}
+
+impl ParseCache {
+    /// The blocks of `text`, parsed now or on an earlier frame.
+    pub fn get(&mut self, text: &str) -> std::sync::Arc<[Block]> {
+        if let Some((blocks, used)) = self.entries.get_mut(text) {
+            *used = true;
+            return blocks.clone();
+        }
+        let blocks: std::sync::Arc<[Block]> = parse(text).into();
+        self.entries.insert(text.to_owned(), (blocks.clone(), true));
+        blocks
+    }
+
+    /// Forgets the texts not asked for since the last sweep.
+    pub fn sweep(&mut self) {
+        self.entries.retain(|_, (_, used)| std::mem::take(used));
+    }
+
+    /// How many texts are kept.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether nothing is kept.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 /// Whether a message is only emoji (and whitespace), drawn large like Slack.
 pub fn only_emoji(blocks: &[Block]) -> bool {
     let [Block::Paragraph(inlines)] = blocks else {
@@ -1139,6 +1179,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_parse_cache_keeps_what_is_used() {
+        let mut cache = ParseCache::default();
+        let first = cache.get("*hi*");
+        assert_eq!(&*first, parse("*hi*").as_slice());
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &cache.get("*hi*")),
+            "parsed once"
+        );
+        cache.get("other");
+        cache.sweep();
+        assert_eq!(cache.len(), 2, "both were used before the sweep");
+        cache.get("*hi*");
+        cache.sweep();
+        assert_eq!(cache.len(), 1, "unused since the last sweep");
+        cache.sweep();
+        assert!(cache.is_empty());
     }
 
     #[test]
