@@ -36,19 +36,21 @@ fn section_dialog(app: &mut App, ctx: &egui::Context) {
             } else {
                 t("New section")
             };
-            ui.label(
+            let heading = ui.label(
                 RichText::new(heading)
                     .font(theme::bold(17.0))
                     .color(palette.text),
             );
             ui.add_space(6.0);
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut dialog.name)
-                    .id(egui::Id::new("section-name"))
-                    .hint_text(t("Section name"))
-                    .desired_width(f32::INFINITY)
-                    .margin(Margin::symmetric(8, 6)),
-            );
+            let field = ui
+                .add(
+                    egui::TextEdit::singleline(&mut dialog.name)
+                        .id(egui::Id::new("section-name"))
+                        .hint_text(t("Section name"))
+                        .desired_width(f32::INFINITY)
+                        .margin(Margin::symmetric(8, 6)),
+                )
+                .labelled_by(heading.id);
             if focus {
                 field.request_focus();
             }

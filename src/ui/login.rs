@@ -66,7 +66,7 @@ fn field(
     hint: &str,
     secret: bool,
 ) {
-    ui.label(
+    let label = ui.label(
         RichText::new(label)
             .font(theme::semibold(13.0))
             .color(palette.secondary),
@@ -77,7 +77,8 @@ fn field(
             .hint_text(hint)
             .desired_width(f32::INFINITY)
             .margin(Margin::symmetric(8, 6)),
-    );
+    )
+    .labelled_by(label.id);
 }
 
 fn card(palette: &Palette) -> egui::Frame {
@@ -306,6 +307,11 @@ fn app_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             )
             .id_salt("manual-token")
             .show(ui, |ui| {
+                let label = ui.label(
+                    RichText::new(t("User token"))
+                        .font(theme::semibold(13.0))
+                        .color(palette.secondary),
+                );
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut app.setup.user_token)
@@ -313,7 +319,8 @@ fn app_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                             .hint_text("xoxp-…")
                             .desired_width(ui.available_width() - 90.0)
                             .margin(Margin::symmetric(8, 6)),
-                    );
+                    )
+                    .labelled_by(label.id);
                     let ready = app.setup.user_token.trim().starts_with("xox") && !busy(app);
                     ui.add_enabled_ui(ready, |ui| {
                         if theme::primary_button(ui, palette, &t("Sign in")).clicked() {
