@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The NoSlacking.app Info.plist. packaging/macos/bundle.sh fills in
+     @VERSION@. CFBundleURLTypes is what lets macOS route noslacking://
+     links (the "your own app" sign-in redirect) to the app. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>NoSlacking</string>
+  <key>CFBundleExecutable</key>
+  <string>noslacking</string>
+  <key>CFBundleIconFile</key>
+  <string>NoSlacking</string>
+  <key>CFBundleIdentifier</key>
+  <string>cloud.yannick.NoSlacking</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>NoSlacking</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@VERSION@</string>
+  <key>CFBundleVersion</key>
+  <string>@VERSION@</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>cloud.yannick.NoSlacking</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>noslacking</string>
+      </array>
+    </dict>
+  </array>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.social-networking</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>11.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSHumanReadableCopyright</key>
+  <string>Copyright (c) 2026 Yannick de Jong. MIT License.</string>
+</dict>
+</plist>
