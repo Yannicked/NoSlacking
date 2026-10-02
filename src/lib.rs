@@ -19,6 +19,7 @@ pub mod drafts;
 pub mod emoji;
 #[cfg(feature = "highlight")]
 pub mod highlight;
+pub mod hooks;
 pub mod i18n;
 pub mod images;
 pub mod jump;

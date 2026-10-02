@@ -25,6 +25,7 @@ use crate::settings::{Appearance, Settings, WorkspaceMeta};
 use crate::theme::{self, Catalog, Palette};
 
 mod desktop;
+mod hooks;
 
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(5);
@@ -1745,6 +1746,9 @@ impl App {
         } else {
             self.note_for(team, channel, &message, viewing)
         };
+        if !changed {
+            self.run_hooks(team, channel, &message);
+        }
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
@@ -1757,6 +1761,7 @@ impl App {
             return;
         }
         let from_me = message.user.as_deref() == Some(workspace.info.user_id.as_str());
+
         if let Some(user) = &message.user {
             workspace.people.stopped_typing(channel, user);
         }

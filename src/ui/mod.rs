@@ -7,6 +7,7 @@ mod conversation;
 mod desktop;
 mod details;
 mod format;
+mod hooks;
 mod keys;
 mod login;
 mod message;

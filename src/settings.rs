@@ -99,6 +99,8 @@ pub struct Settings {
     /// The emoji you used lately, newest first, by name without a tone;
     /// at most [`crate::emoji::RECENT_MAX`].
     pub recent_emoji: Vec<String>,
+    /// Programs to run on new messages; off by default.
+    pub hooks: crate::hooks::Hooks,
 }
 
 impl Default for Settings {
@@ -121,6 +123,7 @@ impl Default for Settings {
             desktop: crate::desktop::DesktopSettings::default(),
             skin_tone: 0,
             recent_emoji: Vec::new(),
+            hooks: crate::hooks::Hooks::default(),
         }
     }
 }
@@ -213,6 +216,7 @@ impl Settings {
             desktop,
             skin_tone,
             recent_emoji,
+            hooks,
         );
         // One damaged workspace must not sign you out of the others, so
         // these are read entry by entry.
