@@ -12,6 +12,7 @@
 //! answer when the sections are fetched again.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::model::{Conversation, SectionKind, SidebarSection, User};
 
@@ -86,15 +87,58 @@ pub enum SidebarCall {
     Star { channel: String, starred: bool },
 }
 
+/// What the ids of sections made here start with, until Slack's own id
+/// arrives with the next fetch.
+const LOCAL_PREFIX: &str = "local-";
+
+/// Whether a section was made here and Slack does not know its id yet.
+pub fn is_local(section: &str) -> bool {
+    section.starts_with(LOCAL_PREFIX)
+}
+
+/// A new local section id. A counter rather than the number of sections,
+/// which repeats once a section is deleted and another made.
+fn local_id() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    format!("{LOCAL_PREFIX}{}", NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Whether the sidebar hides a section, so moving past it changes nothing
+/// on screen. Only an empty Starred section is known to be hidden from the
+/// sections alone; whether Apps shows depends on the conversations, so it
+/// counts as shown.
+fn hidden(section: &SidebarSection) -> bool {
+    section.kind == SectionKind::Starred && section.channel_ids.is_empty()
+}
+
+/// For moving the section at `at` one place, the section that changes
+/// place and the one it goes right before. Slack's call puts one section
+/// before another, so moving down is moving the next one up. Hidden
+/// sections are stepped over.
+fn shift(sections: &[SidebarSection], at: usize, up: bool) -> Option<(usize, usize)> {
+    if up {
+        let previous = (0..at).rev().find(|&i| !hidden(&sections[i]))?;
+        Some((at, previous))
+    } else {
+        let next = (at + 1..sections.len()).find(|&i| !hidden(&sections[i]))?;
+        Some((next, at))
+    }
+}
+
 /// The Slack calls an edit needs, worked out from the sections before it.
+///
+/// Sections made here have no Slack id until the next fetch, so calls that
+/// would name one are left out; the fetch that follows the creation then
+/// shows what Slack has.
 pub fn plan(sections: &[SidebarSection], edit: &SidebarEdit) -> Vec<SidebarCall> {
     let kind = |id: &str| sections.iter().find(|s| s.id == id).map(|s| s.kind);
-    // The custom section that names a conversation, if any.
+    // The custom section that names a conversation, if Slack knows it.
     let custom_home = |channel: &str| {
         sections
             .iter()
             .find(|s| s.kind == SectionKind::Custom && s.channel_ids.iter().any(|id| id == channel))
             .map(|s| s.id.clone())
+            .filter(|id| !is_local(id))
     };
     match edit {
         SidebarEdit::Create { name, channel } => vec![SidebarCall::Create {
@@ -102,6 +146,11 @@ pub fn plan(sections: &[SidebarSection], edit: &SidebarEdit) -> Vec<SidebarCall>
             channel: channel.clone(),
             remove_from: channel.as_deref().and_then(custom_home),
         }],
+        SidebarEdit::Rename { section, .. } | SidebarEdit::Delete { section }
+            if is_local(section) =>
+        {
+            Vec::new()
+        }
         SidebarEdit::Rename { section, name } => vec![SidebarCall::Set {
             section: section.clone(),
             name: Some(name.clone()),
@@ -114,22 +163,17 @@ pub fn plan(sections: &[SidebarSection], edit: &SidebarEdit) -> Vec<SidebarCall>
             let Some(at) = sections.iter().position(|s| s.id == *section) else {
                 return Vec::new();
             };
-            // Each call puts a section right before another; moving down is
-            // moving the next one up.
-            let (moved, before) = if *up {
-                match at.checked_sub(1) {
-                    Some(previous) => (at, previous),
-                    None => return Vec::new(),
-                }
-            } else if at + 1 < sections.len() {
-                (at + 1, at)
-            } else {
+            let Some((moved, before)) = shift(sections, at, *up) else {
                 return Vec::new();
             };
+            let (moved, before) = (&sections[moved].id, &sections[before].id);
+            if is_local(moved) || is_local(before) {
+                return Vec::new();
+            }
             vec![SidebarCall::Set {
-                section: sections[moved].id.clone(),
+                section: moved.clone(),
                 name: None,
-                next: Some(sections[before].id.clone()),
+                next: Some(before.clone()),
             }]
         }
         SidebarEdit::Move { channel, from, to } => {
@@ -143,7 +187,8 @@ pub fn plan(sections: &[SidebarSection], edit: &SidebarEdit) -> Vec<SidebarCall>
                 });
             }
             let remove = custom_home(channel).filter(|home| home != to);
-            let insert = (to_kind == Some(SectionKind::Custom)).then(|| to.clone());
+            let insert =
+                (to_kind == Some(SectionKind::Custom) && !is_local(to)).then(|| to.clone());
             if insert.is_some() || remove.is_some() {
                 calls.push(SidebarCall::Channels {
                     channel: channel.clone(),
@@ -331,7 +376,7 @@ pub fn apply(sections: &mut Vec<SidebarSection>, edit: &SidebarEdit) {
             // Slack puts new sections first; the real id arrives with the
             // next fetch.
             let mut section = SidebarSection {
-                id: format!("local-{}", sections.len()),
+                id: local_id(),
                 kind: SectionKind::Custom,
                 name: name.clone(),
                 emoji: String::new(),
@@ -354,11 +399,14 @@ pub fn apply(sections: &mut Vec<SidebarSection>, edit: &SidebarEdit) {
         }
         SidebarEdit::Delete { section } => sections.retain(|s| s.id != *section),
         SidebarEdit::Shift { section, up } => {
-            if let Some(at) = sections.iter().position(|s| s.id == *section) {
-                let to = if *up { at.checked_sub(1) } else { Some(at + 1) };
-                if let Some(to) = to.filter(|to| *to < sections.len()) {
-                    sections.swap(at, to);
-                }
+            // The same move as the Slack call `plan` makes, so the local
+            // order matches what the next fetch brings.
+            if let Some(at) = sections.iter().position(|s| s.id == *section)
+                && let Some((moved, before)) = shift(sections, at, *up)
+            {
+                let section = sections.remove(moved);
+                let before = if moved < before { before - 1 } else { before };
+                sections.insert(before, section);
             }
         }
         SidebarEdit::Move { channel, to, .. } => {
@@ -376,9 +424,27 @@ pub fn apply(sections: &mut Vec<SidebarSection>, edit: &SidebarEdit) {
         }
         SidebarEdit::Star { channel, starred } => {
             if *starred {
-                if let Some(stars) = sections.iter_mut().find(|s| s.kind == SectionKind::Starred)
-                    && !stars.channel_ids.contains(channel)
-                {
+                // Slack makes the Starred section with the first star;
+                // until the next fetch brings it, show a local one so the
+                // star appears at once, as it will in Slack.
+                let stars = match sections.iter().position(|s| s.kind == SectionKind::Starred) {
+                    Some(at) => at,
+                    None => {
+                        sections.insert(
+                            0,
+                            SidebarSection {
+                                id: local_id(),
+                                kind: SectionKind::Starred,
+                                name: String::new(),
+                                emoji: String::new(),
+                                channel_ids: Vec::new(),
+                            },
+                        );
+                        0
+                    }
+                };
+                let stars = &mut sections[stars];
+                if !stars.channel_ids.contains(channel) {
                     stars.channel_ids.push(channel.clone());
                 }
             } else {
@@ -771,6 +837,211 @@ mod tests {
                 remove_from: Some("S2".into())
             }]
         );
+    }
+
+    fn create(sections: &mut Vec<SidebarSection>, name: &str) -> String {
+        apply(
+            sections,
+            &SidebarEdit::Create {
+                name: name.into(),
+                channel: None,
+            },
+        );
+        let made = sections.iter().find(|s| s.name == name).expect("created");
+        made.id.clone()
+    }
+
+    #[test]
+    fn local_sections_never_share_an_id() {
+        let (mut sections, ..) = sample();
+        let first = create(&mut sections, "A");
+        apply(
+            &mut sections,
+            &SidebarEdit::Delete {
+                section: first.clone(),
+            },
+        );
+        let second = create(&mut sections, "B");
+        let third = create(&mut sections, "C");
+        assert!(is_local(&first) && is_local(&second) && is_local(&third));
+        assert_ne!(first, second, "an id is not reused after a delete");
+        assert_ne!(second, third);
+    }
+
+    #[test]
+    fn local_section_ids_never_reach_slack() {
+        let (mut sections, ..) = sample();
+        apply(
+            &mut sections,
+            &SidebarEdit::Create {
+                name: "New".into(),
+                channel: Some("C1".into()),
+            },
+        );
+        let local = sections[1].id.clone();
+        for edit in [
+            SidebarEdit::Rename {
+                section: local.clone(),
+                name: "Renamed".into(),
+            },
+            SidebarEdit::Delete {
+                section: local.clone(),
+            },
+            // Up past Starred, and down past Team: either way one side of
+            // the call is the local section.
+            SidebarEdit::Shift {
+                section: local.clone(),
+                up: true,
+            },
+            SidebarEdit::Shift {
+                section: "S2".into(),
+                up: true,
+            },
+        ] {
+            assert_eq!(plan(&sections, &edit), [], "{edit:?}");
+        }
+        // Into the local section: nothing to insert into on Slack's side.
+        assert_eq!(
+            plan(
+                &sections,
+                &SidebarEdit::Move {
+                    channel: "C4".into(),
+                    from: Some("S3".into()),
+                    to: local.clone(),
+                }
+            ),
+            []
+        );
+        // Out of it, back to Channels: Slack never had it there.
+        assert_eq!(
+            plan(
+                &sections,
+                &SidebarEdit::Move {
+                    channel: "C1".into(),
+                    from: Some(local.clone()),
+                    to: "S3".into(),
+                }
+            ),
+            []
+        );
+        // Out of it, into Team: only the insert.
+        assert_eq!(
+            plan(
+                &sections,
+                &SidebarEdit::Move {
+                    channel: "C1".into(),
+                    from: Some(local.clone()),
+                    to: "S2".into(),
+                }
+            ),
+            [SidebarCall::Channels {
+                channel: "C1".into(),
+                insert: Some("S2".into()),
+                remove: None
+            }]
+        );
+        // A new section taking C1 along has nothing to take it out of.
+        assert_eq!(
+            plan(
+                &sections,
+                &SidebarEdit::Create {
+                    name: "Other".into(),
+                    channel: Some("C1".into()),
+                }
+            ),
+            [SidebarCall::Create {
+                name: "Other".into(),
+                channel: Some("C1".into()),
+                remove_from: None
+            }]
+        );
+    }
+
+    #[test]
+    fn shifting_steps_over_a_hidden_starred_section() {
+        let mut sections = vec![
+            section("S1", SectionKind::Custom, "One", &[]),
+            section("S2", SectionKind::Starred, "", &[]),
+            section("S3", SectionKind::Custom, "Three", &[]),
+            section("S4", SectionKind::Channels, "", &[]),
+        ];
+        let up = SidebarEdit::Shift {
+            section: "S3".into(),
+            up: true,
+        };
+        assert_eq!(
+            plan(&sections, &up),
+            [SidebarCall::Set {
+                section: "S3".into(),
+                name: None,
+                next: Some("S1".into())
+            }]
+        );
+        apply(&mut sections, &up);
+        let order: Vec<&str> = sections.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(order, ["S3", "S1", "S2", "S4"], "as Slack will have it");
+
+        let down = SidebarEdit::Shift {
+            section: "S1".into(),
+            up: false,
+        };
+        assert_eq!(
+            plan(&sections, &down),
+            [SidebarCall::Set {
+                section: "S4".into(),
+                name: None,
+                next: Some("S1".into())
+            }]
+        );
+        apply(&mut sections, &down);
+        let order: Vec<&str> = sections.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(order, ["S3", "S4", "S1", "S2"]);
+
+        // Nothing shown above: no call and no change.
+        let mut top = vec![
+            section("S1", SectionKind::Starred, "", &[]),
+            section("S2", SectionKind::Custom, "Two", &[]),
+        ];
+        let edit = SidebarEdit::Shift {
+            section: "S2".into(),
+            up: true,
+        };
+        assert_eq!(plan(&top, &edit), []);
+        apply(&mut top, &edit);
+        assert_eq!(top[1].id, "S2");
+    }
+
+    #[test]
+    fn starring_without_a_starred_section_shows_the_star_at_once() {
+        let mut sections = vec![
+            section("S1", SectionKind::Custom, "Team", &[]),
+            section("S2", SectionKind::Channels, "", &[]),
+        ];
+        let star = SidebarEdit::Star {
+            channel: "C1".into(),
+            starred: true,
+        };
+        assert_eq!(
+            plan(&sections, &star),
+            [SidebarCall::Star {
+                channel: "C1".into(),
+                starred: true
+            }]
+        );
+        apply(&mut sections, &star);
+        assert!(is_starred(Some(&sections), "C1"));
+        assert_eq!(sections[0].kind, SectionKind::Starred);
+        assert!(is_local(&sections[0].id));
+        // A second star goes into the same section.
+        apply(
+            &mut sections,
+            &SidebarEdit::Star {
+                channel: "C2".into(),
+                starred: true,
+            },
+        );
+        assert_eq!(sections.len(), 3);
+        assert_eq!(sections[0].channel_ids, ["C1", "C2"]);
     }
 
     #[test]
