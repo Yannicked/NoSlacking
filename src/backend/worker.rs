@@ -37,9 +37,15 @@ enum Internal {
         meta: Workspace,
         token: Token,
     },
-    Socket(SocketEvent),
+    /// From the Socket Mode task started as `generation`.
+    Socket {
+        generation: u64,
+        event: SocketEvent,
+    },
+    /// From the RTM task started for `team` as `generation`.
     Rtm {
         team: String,
+        generation: u64,
         event: crate::slack::rtm::RtmEvent,
     },
     SignInListenerFailed(String),
@@ -48,6 +54,17 @@ enum Internal {
 struct Team {
     client: Client,
     user_id: String,
+}
+
+/// A real-time socket the worker started, and what it last reported.
+///
+/// Each start gets a fresh `generation`. A socket that was replaced can
+/// still report on its way out; its reports carry the old generation and
+/// are ignored, so they cannot mark the new socket down or remove it.
+struct Live {
+    stop: watch::Sender<bool>,
+    generation: u64,
+    status: Socket,
 }
 
 pub struct Worker {
@@ -60,11 +77,17 @@ pub struct Worker {
     teams: HashMap<String, Team>,
     flow: Option<Flow>,
     listener: Option<tokio::task::JoinHandle<()>>,
-    socket_stop: Option<watch::Sender<bool>>,
+    /// The Socket Mode connection, which serves every workspace signed in
+    /// through the app.
+    socket: Option<Live>,
     /// Per-session-workspace RTM sockets.
-    rtm_stops: HashMap<String, watch::Sender<bool>>,
-    socket_up: bool,
-    focus: Option<(String, String)>,
+    rtm: HashMap<String, Live>,
+    /// The generation the next socket gets.
+    next_generation: u64,
+    /// The workspace on screen, and its open conversation if any.
+    focus: Option<(String, Option<String>)>,
+    /// The status last sent to the interface, so it hears only changes.
+    reported: Option<Socket>,
     users_requested: HashSet<(String, String)>,
     bots_requested: HashSet<(String, String)>,
     internal: mpsc::UnboundedSender<Internal>,
@@ -90,10 +113,11 @@ impl Worker {
             teams: HashMap::new(),
             flow: None,
             listener: None,
-            socket_stop: None,
-            rtm_stops: HashMap::new(),
-            socket_up: false,
+            socket: None,
+            rtm: HashMap::new(),
+            next_generation: 0,
             focus: None,
+            reported: None,
             users_requested: HashSet::new(),
             bots_requested: HashSet::new(),
             internal,
@@ -122,11 +146,11 @@ impl Worker {
                 _ = poll.tick() => self.poll(),
             }
         }
-        if let Some(stop) = self.socket_stop.take() {
-            let _ = stop.send(true);
+        if let Some(live) = self.socket.take() {
+            let _ = live.stop.send(true);
         }
-        for (_, stop) in self.rtm_stops.drain() {
-            let _ = stop.send(true);
+        for (_, live) in self.rtm.drain() {
+            let _ = live.stop.send(true);
         }
     }
 
@@ -210,16 +234,25 @@ impl Worker {
         if session {
             self.start_rtm(&workspace.team_id, client);
         }
+        self.report_socket();
     }
 
     /// Opens (or reopens) the RTM socket for a session workspace.
     fn start_rtm(&mut self, team: &str, client: Client) {
-        if let Some(stop) = self.rtm_stops.remove(team) {
-            let _ = stop.send(true);
+        if let Some(old) = self.rtm.remove(team) {
+            let _ = old.stop.send(true);
         }
         let (stop, stopped) = watch::channel(false);
-        self.rtm_stops.insert(team.to_owned(), stop);
-        self.sink.send(Event::Socket(Socket::Connecting));
+        let generation = self.generation();
+        self.rtm.insert(
+            team.to_owned(),
+            Live {
+                stop,
+                generation,
+                status: Socket::Connecting,
+            },
+        );
+        self.report_socket();
         let internal = self.internal.clone();
         let team = team.to_owned();
         tokio::spawn(crate::slack::rtm::run(
@@ -227,6 +260,7 @@ impl Worker {
             move |event| {
                 let _ = internal.send(Internal::Rtm {
                     team: team.clone(),
+                    generation,
                     event,
                 });
             },
@@ -234,36 +268,83 @@ impl Worker {
         ));
     }
 
+    fn generation(&mut self) -> u64 {
+        self.next_generation += 1;
+        self.next_generation
+    }
+
     fn restart_socket(&mut self) {
-        if let Some(stop) = self.socket_stop.take() {
-            let _ = stop.send(true);
+        if let Some(old) = self.socket.take() {
+            let _ = old.stop.send(true);
         }
-        self.socket_up = false;
         let token = self
             .app
             .as_ref()
             .map(|app| app.app_token.trim().to_owned())
             .unwrap_or_default();
         if token.is_empty() || self.teams.is_empty() {
-            // Session workspaces have their own RTM sockets; leave their
-            // status alone and only report "off" when nothing is live.
-            if self.rtm_stops.is_empty() {
-                self.sink.send(Event::Socket(Socket::Off));
-            }
+            self.report_socket();
             return;
         }
         let (stop, stopped) = watch::channel(false);
-        self.socket_stop = Some(stop);
-        self.sink.send(Event::Socket(Socket::Connecting));
+        let generation = self.generation();
+        self.socket = Some(Live {
+            stop,
+            generation,
+            status: Socket::Connecting,
+        });
+        self.report_socket();
         let internal = self.internal.clone();
         tokio::spawn(socket::run(
             self.http.clone(),
             token,
             move |event| {
-                let _ = internal.send(Internal::Socket(event));
+                let _ = internal.send(Internal::Socket { generation, event });
             },
             stopped,
         ));
+    }
+
+    fn is_session(&self, team: &str) -> bool {
+        self.teams
+            .get(team)
+            .is_some_and(|t| t.client.token().is_session())
+    }
+
+    /// The real-time status of one workspace: its own RTM socket for a
+    /// browser session, the shared Socket Mode connection otherwise.
+    fn status(&self, team: &str) -> Socket {
+        if self.is_session(team) {
+            return self
+                .rtm
+                .get(team)
+                .map_or(Socket::Off, |live| live.status.clone());
+        }
+        self.socket
+            .as_ref()
+            .map_or(Socket::Off, |live| live.status.clone())
+    }
+
+    /// Whether events for `team` arrive live, so polling it is not needed.
+    fn is_live(&self, team: &str) -> bool {
+        self.status(team) == Socket::Connected
+    }
+
+    /// Tells the interface the status of the workspace on screen, when it
+    /// changed. The interface shows one status, and the one that matters
+    /// is the one for what you are looking at.
+    fn report_socket(&mut self) {
+        let team = self
+            .focus
+            .as_ref()
+            .map(|(team, _)| team.clone())
+            .filter(|team| self.teams.contains_key(team))
+            .or_else(|| self.teams.keys().min().cloned());
+        let status = team.map_or(Socket::Off, |team| self.status(&team));
+        if self.reported.as_ref() != Some(&status) {
+            self.reported = Some(status.clone());
+            self.sink.send(Event::Socket(status));
+        }
     }
 
     async fn command(&mut self, command: Command) {
@@ -333,7 +414,8 @@ impl Worker {
             }
             Command::SignOut(team) => self.sign_out(&team),
             Command::Focus { team, channel } => {
-                self.focus = channel.map(|channel| (team, channel));
+                self.focus = Some((team, channel));
+                self.report_socket();
             }
             Command::LoadHistory { team, channel } => {
                 if let Some(client) = self.client(&team) {
@@ -478,7 +560,7 @@ impl Worker {
                     return;
                 };
                 let sink = self.sink.clone();
-                let poll_after = !self.socket_up;
+                let poll_after = !self.is_live(&team);
                 tokio::spawn(async move {
                     let name = path
                         .file_name()
@@ -748,8 +830,8 @@ impl Worker {
     }
 
     fn sign_out(&mut self, team: &str) {
-        if let Some(stop) = self.rtm_stops.remove(team) {
-            let _ = stop.send(true);
+        if let Some(live) = self.rtm.remove(team) {
+            let _ = live.stop.send(true);
         }
         if let Some(removed) = self.teams.remove(team) {
             let credentials = self.credentials.clone();
@@ -775,6 +857,7 @@ impl Worker {
         if self.teams.is_empty() {
             self.restart_socket();
         }
+        self.report_socket();
     }
 
     async fn internal(&mut self, message: Internal) {
@@ -806,59 +889,72 @@ impl Worker {
             }
             Internal::TeamAdded { meta, token } => {
                 let name = meta.name.clone();
-                let had_socket = self.socket_stop.is_some();
+                let had_socket = self.socket.is_some();
                 self.add_team(meta, token);
                 self.sink.send(Event::SignIn(SignIn::Done(name)));
                 if !had_socket {
                     self.restart_socket();
                 }
             }
-            Internal::Socket(event) => self.socket_event(event),
-            Internal::Rtm { team, event } => self.rtm_event(&team, event),
+            Internal::Socket { generation, event } => {
+                if self.socket.as_ref().map(|live| live.generation) == Some(generation) {
+                    self.socket_event(event);
+                } else {
+                    log::debug!("ignoring a report from a replaced Socket Mode connection");
+                }
+            }
+            Internal::Rtm {
+                team,
+                generation,
+                event,
+            } => {
+                if self.rtm.get(&team).map(|live| live.generation) == Some(generation) {
+                    self.rtm_event(&team, event);
+                } else {
+                    log::debug!("ignoring a report from a replaced RTM socket for {team}");
+                }
+            }
         }
     }
 
     fn socket_event(&mut self, event: SocketEvent) {
-        match event {
-            SocketEvent::Connected => {
-                self.socket_up = true;
-                self.sink.send(Event::Socket(Socket::Connected));
+        let status = match event {
+            SocketEvent::Connected => Socket::Connected,
+            SocketEvent::Disconnected(reason) => Socket::Disconnected(reason),
+            SocketEvent::Rejected(reason) => Socket::Rejected(reason),
+            SocketEvent::Event { team, event } => {
+                self.dispatch_event(&team, &event);
+                return;
             }
-            SocketEvent::Disconnected(reason) => {
-                self.socket_up = false;
-                self.sink.send(Event::Socket(Socket::Disconnected(reason)));
-            }
-            SocketEvent::Rejected(reason) => {
-                self.socket_up = false;
-                self.sink.send(Event::Socket(Socket::Rejected(reason)));
-            }
-            SocketEvent::Event { team, event } => self.dispatch_event(&team, &event),
+        };
+        if let Some(live) = &mut self.socket {
+            live.status = status;
         }
+        self.report_socket();
     }
 
     fn rtm_event(&mut self, team: &str, event: crate::slack::rtm::RtmEvent) {
         use crate::slack::rtm::RtmEvent;
-        match event {
-            RtmEvent::Connected => {
-                self.socket_up = true;
-                self.sink.send(Event::Socket(Socket::Connected));
-            }
-            RtmEvent::Disconnected(reason) => {
-                self.socket_up = false;
-                self.sink.send(Event::Socket(Socket::Disconnected(reason)));
-            }
+        let status = match event {
+            RtmEvent::Connected => Socket::Connected,
+            RtmEvent::Disconnected(reason) => Socket::Disconnected(reason),
             RtmEvent::Unavailable(reason) => {
                 // Slack will not give this session a socket. Not an outage:
                 // poll the open conversation and say so calmly.
                 log::info!("RTM unavailable for {team}, polling instead: {reason}");
-                self.socket_up = false;
-                self.rtm_stops.remove(team);
-                if self.rtm_stops.is_empty() && self.socket_stop.is_none() {
-                    self.sink.send(Event::Socket(Socket::Off));
-                }
+                self.rtm.remove(team);
+                self.report_socket();
+                return;
             }
-            RtmEvent::Event(event) => self.dispatch_event(team, &event),
+            RtmEvent::Event(event) => {
+                self.dispatch_event(team, &event);
+                return;
+            }
+        };
+        if let Some(live) = self.rtm.get_mut(team) {
+            live.status = status;
         }
+        self.report_socket();
     }
 
     /// Routes one real-time event (from Socket Mode or RTM) to the interface.
@@ -889,15 +985,15 @@ impl Worker {
         }
     }
 
-    /// Without Socket Mode, the open conversation is fetched again now and
-    /// then, so new messages still show up.
+    /// Without a live socket for its workspace, the open conversation is
+    /// fetched again now and then, so new messages still show up.
     fn poll(&self) {
-        if self.socket_up {
-            return;
-        }
-        let Some((team, channel)) = &self.focus else {
+        let Some((team, Some(channel))) = &self.focus else {
             return;
         };
+        if self.is_live(team) {
+            return;
+        }
         if let Some(client) = self.client(team) {
             tokio::spawn(history(
                 client,
@@ -1727,6 +1823,137 @@ mod tests {
         );
         assert!(
             events(r#"{"type":"channel_created","channel":{"id":"C5","name":"x"}}"#).is_empty()
+        );
+    }
+
+    /// A worker with no network behind it: an in-memory keyring, a
+    /// throwaway folder, and the events it sends.
+    fn worker() -> (Worker, std::sync::mpsc::Receiver<Event>) {
+        let (sender, events) = std::sync::mpsc::channel();
+        let sink = Sink {
+            sender,
+            waker: super::super::Waker::default(),
+        };
+        let root = std::env::temp_dir().join(format!("noslacking-test-{}", std::process::id()));
+        let http = reqwest::Client::new();
+        let images = ImageLoader::new(
+            http.clone(),
+            tokio::runtime::Handle::current(),
+            root.join("images"),
+        );
+        let worker = Worker::new(
+            http,
+            Credentials::memory(),
+            AppDirs::under(&root),
+            sink,
+            images,
+        );
+        (worker, events)
+    }
+
+    fn team(worker: &mut Worker, id: &str, token: Token) {
+        let client = Client::new(reqwest::Client::new(), token);
+        worker.teams.insert(
+            id.to_owned(),
+            Team {
+                client,
+                user_id: "U1".into(),
+            },
+        );
+    }
+
+    fn live(worker: &mut Worker, status: Socket) -> Live {
+        Live {
+            stop: watch::channel(false).0,
+            generation: worker.generation(),
+            status,
+        }
+    }
+
+    fn session() -> Token {
+        Token::session("xoxc-1", "xoxd-1", "https://a.slack.com")
+    }
+
+    #[tokio::test]
+    async fn each_workspace_has_its_own_liveness() {
+        let (mut worker, _events) = worker();
+        team(&mut worker, "TA", session());
+        team(&mut worker, "TB", session());
+        team(&mut worker, "TC", Token::plain("xoxp-1"));
+        let up = live(&mut worker, Socket::Connected);
+        worker.rtm.insert("TA".into(), up);
+        // RTM for A says nothing about B, nor about Socket Mode for C.
+        assert!(worker.is_live("TA"));
+        assert!(!worker.is_live("TB"));
+        assert!(!worker.is_live("TC"));
+        let up = live(&mut worker, Socket::Connected);
+        worker.socket = Some(up);
+        assert!(worker.is_live("TC"));
+        assert!(!worker.is_live("TB"));
+    }
+
+    #[tokio::test]
+    async fn the_interface_hears_the_focused_workspace() {
+        let (mut worker, events) = worker();
+        team(&mut worker, "TA", session());
+        team(&mut worker, "TB", session());
+        let up = live(&mut worker, Socket::Connected);
+        worker.rtm.insert("TA".into(), up);
+        worker.focus = Some(("TB".into(), None));
+        worker.report_socket();
+        worker.focus = Some(("TA".into(), Some("C1".into())));
+        worker.report_socket();
+        // No change, no event.
+        worker.report_socket();
+        let heard: Vec<Socket> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::Socket(socket) => Some(socket),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(heard, [Socket::Off, Socket::Connected]);
+    }
+
+    #[tokio::test]
+    async fn a_replaced_socket_cannot_remove_its_successor() {
+        use crate::slack::rtm::RtmEvent;
+        let (mut worker, _events) = worker();
+        team(&mut worker, "TA", session());
+        let old = live(&mut worker, Socket::Connecting).generation;
+        let current = live(&mut worker, Socket::Connected);
+        let generation = current.generation;
+        worker.rtm.insert("TA".into(), current);
+        worker
+            .internal(Internal::Rtm {
+                team: "TA".into(),
+                generation: old,
+                event: RtmEvent::Unavailable("gone".into()),
+            })
+            .await;
+        assert!(worker.is_live("TA"));
+        worker
+            .internal(Internal::Rtm {
+                team: "TA".into(),
+                generation,
+                event: RtmEvent::Disconnected("drop".into()),
+            })
+            .await;
+        assert!(!worker.is_live("TA"));
+        assert!(worker.rtm.contains_key("TA"));
+        // A stale Socket Mode report is ignored the same way.
+        let socket = live(&mut worker, Socket::Connected);
+        let generation = socket.generation;
+        worker.socket = Some(socket);
+        worker
+            .internal(Internal::Socket {
+                generation: generation - 1,
+                event: SocketEvent::Disconnected("old".into()),
+            })
+            .await;
+        assert_eq!(
+            worker.socket.as_ref().map(|s| s.status.clone()),
+            Some(Socket::Connected)
         );
     }
 
