@@ -201,6 +201,8 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         .find(|w| Some(&w.info.team_id) == settings.active_workspace.as_ref())
         .or_else(|| workspaces.first())
     else {
+        // Put the draft back: it was taken out to be edited.
+        app.drafts.insert(key, draft);
         return;
     };
     let Some(conversation) = workspace.conversation(channel) else {
