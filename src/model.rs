@@ -1,0 +1,683 @@
+//! What the interface shows, independent of Slack's JSON.
+//!
+//! The worker turns API responses and Socket Mode events into these types;
+//! views only ever read them, and ask for changes with [`Action`]s.
+
+use std::cmp::Ordering;
+use std::path::PathBuf;
+
+/// A Slack message timestamp: `"1700000000.123456"`. Unique per conversation
+/// and ordered by time. Optimistic messages carry `local-<n>` until Slack
+/// answers, and sort after every real one.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Ts(pub String);
+
+impl Ts {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.0.starts_with("local-")
+    }
+
+    /// Seconds and microseconds, for ordering. Local and malformed values
+    /// sort last.
+    fn key(&self) -> (u64, u64) {
+        let mut parts = self.0.splitn(2, '.');
+        let secs = parts.next().and_then(|s| s.parse().ok());
+        let micros = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        match secs {
+            Some(secs) => (secs, micros),
+            None => (u64::MAX, 0),
+        }
+    }
+
+    /// Seconds since the epoch.
+    pub fn seconds(&self) -> Option<i64> {
+        let (secs, _) = self.key();
+        (secs != u64::MAX).then(|| i64::try_from(secs).unwrap_or(i64::MAX))
+    }
+
+    pub fn zoned(&self) -> Option<jiff::Zoned> {
+        let ts = jiff::Timestamp::from_second(self.seconds()?).ok()?;
+        Some(ts.to_zoned(jiff::tz::TimeZone::system()))
+    }
+}
+
+impl PartialOrd for Ts {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Ts {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key()
+            .cmp(&other.key())
+            .then_with(|| self.0.cmp(&other.0))
+    }
+}
+
+/// A signed-in workspace.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Workspace {
+    pub team_id: String,
+    pub name: String,
+    pub domain: String,
+    pub icon: Option<String>,
+    /// You, in this workspace.
+    pub user_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ConversationKind {
+    Channel,
+    Private,
+    Direct,
+    Group,
+}
+
+impl ConversationKind {
+    pub fn is_dm(self) -> bool {
+        matches!(self, Self::Direct | Self::Group)
+    }
+}
+
+/// A channel, private channel, direct message or group direct message.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Conversation {
+    pub id: String,
+    /// The channel name, or for a DM the other person's user id until
+    /// [`crate::app`] resolves it.
+    pub name: String,
+    pub kind: ConversationKind,
+    /// The other person, for a direct message.
+    pub user: Option<String>,
+    pub topic: String,
+    pub purpose: String,
+    pub members: Option<u32>,
+    pub archived: bool,
+    /// The newest message you have read.
+    #[serde(default)]
+    pub last_read: Option<Ts>,
+    /// The newest message known.
+    #[serde(default)]
+    pub latest: Option<Ts>,
+    /// Unread messages Slack counted, when it says.
+    #[serde(default)]
+    pub unread: u32,
+    /// Unread mentions of you, counted from messages seen live.
+    #[serde(default)]
+    pub mentions: u32,
+}
+
+impl Conversation {
+    pub fn has_unread(&self) -> bool {
+        if self.unread > 0 {
+            return true;
+        }
+        match (&self.latest, &self.last_read) {
+            (Some(latest), Some(read)) => latest > read,
+            (Some(_), None) => self.kind.is_dm(),
+            _ => false,
+        }
+    }
+}
+
+/// Someone in a workspace.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct User {
+    pub id: String,
+    /// The handle (`jane.doe`).
+    pub name: String,
+    pub real_name: String,
+    pub display_name: String,
+    pub avatar: Option<String>,
+    pub is_bot: bool,
+    pub deleted: bool,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub status_text: String,
+    #[serde(default)]
+    pub status_emoji: String,
+    #[serde(default)]
+    pub tz: Option<String>,
+}
+
+impl User {
+    /// The name Slack shows: display name, else real name, else handle.
+    pub fn label(&self) -> &str {
+        if !self.display_name.is_empty() {
+            &self.display_name
+        } else if !self.real_name.is_empty() {
+            &self.real_name
+        } else {
+            &self.name
+        }
+    }
+}
+
+/// What a sidebar section holds, as Slack types them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SectionKind {
+    /// A section you made yourself.
+    Custom,
+    Starred,
+    /// Every channel not placed in another section.
+    Channels,
+    /// Every DM not placed in another section.
+    DirectMessages,
+    /// DMs with apps and bots.
+    Apps,
+}
+
+/// One section of your Slack sidebar, in your order.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SidebarSection {
+    pub id: String,
+    pub kind: SectionKind,
+    /// Your name for a custom section; empty for Slack's own.
+    pub name: String,
+    /// Its emoji shortcode, without colons, if any.
+    pub emoji: String,
+    /// The conversations placed in it explicitly. Slack's catch-all
+    /// sections leave this empty.
+    pub channel_ids: Vec<String>,
+}
+
+/// An app or integration that posts messages.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Bot {
+    pub id: String,
+    pub name: String,
+    pub icon: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reaction {
+    /// The shortcode without colons (`thumbsup`, `+1::skin-tone-2`).
+    pub name: String,
+    pub count: u32,
+    pub users: Vec<String>,
+}
+
+/// A file shared in a message.
+#[derive(Clone, Debug, PartialEq)]
+pub struct File {
+    pub id: String,
+    pub name: String,
+    pub title: String,
+    pub mimetype: String,
+    pub size: u64,
+    /// The full file, which needs your token.
+    pub url_private: Option<String>,
+    pub download_url: Option<String>,
+    /// The largest thumbnail Slack made, for images.
+    pub thumb: Option<String>,
+    pub thumb_size: Option<[f32; 2]>,
+    pub permalink: Option<String>,
+}
+
+impl File {
+    pub fn is_image(&self) -> bool {
+        self.mimetype.starts_with("image/") && self.thumb.is_some()
+    }
+}
+
+/// A labelled value in a legacy attachment (GlitchTip's "Project",
+/// "Environment"). Short fields sit two to a row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Field {
+    /// mrkdwn.
+    pub title: String,
+    /// mrkdwn.
+    pub value: String,
+    pub short: bool,
+}
+
+/// An attachment card: a link unfurl or a bot's legacy attachment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Attachment {
+    pub color: Option<egui::Color32>,
+    /// The service or author shown above the title.
+    pub service: Option<String>,
+    /// mrkdwn shown above the card, outside its colour bar.
+    pub pretext: Option<String>,
+    pub title: Option<String>,
+    pub title_link: Option<String>,
+    /// mrkdwn.
+    pub text: String,
+    pub fields: Vec<Field>,
+    pub image: Option<String>,
+    /// A small picture beside the text.
+    pub thumb: Option<String>,
+    pub footer: Option<String>,
+    /// Block Kit layout some apps put inside an attachment.
+    pub blocks: Vec<KitBlock>,
+}
+
+/// A Block Kit button. Only links can be followed here; interactive buttons
+/// need the app's own server.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Button {
+    pub text: String,
+    pub url: Option<String>,
+    /// `primary` or `danger`, for colour.
+    pub style: Option<String>,
+}
+
+/// What a Block Kit section shows on its right.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Accessory {
+    Image { url: String, alt: String },
+    Button(Button),
+}
+
+/// One piece of a Block Kit context line.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContextItem {
+    /// mrkdwn.
+    Text(String),
+    Image {
+        url: String,
+        alt: String,
+    },
+}
+
+/// A Block Kit block, as apps lay out their messages. Every text here is
+/// mrkdwn (plain text is escaped into it).
+#[derive(Clone, Debug, PartialEq)]
+pub enum KitBlock {
+    Header(String),
+    Section {
+        text: Option<String>,
+        fields: Vec<String>,
+        accessory: Option<Accessory>,
+    },
+    Context(Vec<ContextItem>),
+    Divider,
+    Image {
+        url: String,
+        alt: String,
+        title: Option<String>,
+    },
+    Actions(Vec<Button>),
+    /// What people type; the message's `text` already says the same.
+    RichText(String),
+}
+
+impl KitBlock {
+    /// Whether the block says something the message's `text` may not.
+    pub fn is_layout(&self) -> bool {
+        !matches!(self, Self::RichText(_))
+    }
+}
+
+/// Where a message stands on the way to Slack.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Delivery {
+    Sent,
+    Sending,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Message {
+    pub ts: Ts,
+    /// Who wrote it, for people.
+    pub user: Option<String>,
+    /// The name a bot or integration posted under.
+    pub username: Option<String>,
+    pub bot_icon: Option<String>,
+    /// The app or integration that posted it. Webhook messages often carry
+    /// only this, and the name comes from `bots.info`.
+    pub bot_id: Option<String>,
+    /// Slack mrkdwn as Slack sends it, still escaped: [`crate::mrkdwn`] parses it.
+    pub text: String,
+    /// Set on replies and on a thread's parent.
+    pub thread_ts: Option<Ts>,
+    pub reply_count: u32,
+    pub reply_users: Vec<String>,
+    pub latest_reply: Option<Ts>,
+    pub reactions: Vec<Reaction>,
+    pub files: Vec<File>,
+    pub attachments: Vec<Attachment>,
+    /// Block Kit layout. When it holds more than rich text, it is drawn
+    /// instead of `text`, which apps send only as the notification fallback.
+    pub blocks: Vec<KitBlock>,
+    pub edited: bool,
+    /// Slack's subtype (`channel_join`, `bot_message`, ...), if any.
+    pub subtype: Option<String>,
+    pub delivery: Delivery,
+    /// A reply also sent to the channel.
+    pub broadcast: bool,
+}
+
+impl Message {
+    /// Whether the Block Kit layout replaces `text` on screen.
+    pub fn uses_blocks(&self) -> bool {
+        self.blocks.iter().any(KitBlock::is_layout)
+    }
+
+    /// Whether this is a reply inside a thread (not the parent).
+    pub fn is_reply(&self) -> bool {
+        self.thread_ts
+            .as_ref()
+            .is_some_and(|parent| *parent != self.ts)
+    }
+
+    /// Whether it belongs in the channel's own list: parents, ordinary
+    /// messages and replies also sent to the channel.
+    pub fn in_channel(&self) -> bool {
+        !self.is_reply() || self.broadcast
+    }
+
+    /// A join, leave, topic change or the like, drawn as one quiet line.
+    pub fn is_system(&self) -> bool {
+        matches!(
+            self.subtype.as_deref(),
+            Some(
+                "channel_join"
+                    | "channel_leave"
+                    | "channel_topic"
+                    | "channel_purpose"
+                    | "channel_name"
+                    | "channel_archive"
+                    | "channel_unarchive"
+                    | "group_join"
+                    | "group_leave"
+                    | "group_topic"
+                    | "group_purpose"
+                    | "group_name"
+                    | "pinned_item"
+                    | "unpinned_item"
+            )
+        )
+    }
+
+    /// Adds or removes one person's reaction.
+    pub fn toggle_reaction(&mut self, name: &str, user: &str, added: bool) {
+        match self.reactions.iter_mut().position(|r| r.name == name) {
+            Some(index) => {
+                let reaction = &mut self.reactions[index];
+                let has = reaction.users.iter().any(|u| u == user);
+                if added && !has {
+                    reaction.users.push(user.to_owned());
+                    reaction.count += 1;
+                } else if !added && has {
+                    reaction.users.retain(|u| u != user);
+                    reaction.count = reaction.count.saturating_sub(1);
+                }
+                if reaction.count == 0 {
+                    self.reactions.remove(index);
+                }
+            }
+            None if added => self.reactions.push(Reaction {
+                name: name.to_owned(),
+                count: 1,
+                users: vec![user.to_owned()],
+            }),
+            None => {}
+        }
+    }
+}
+
+/// Messages of one conversation or thread, oldest first.
+#[derive(Clone, Debug, Default)]
+pub struct Timeline {
+    pub messages: Vec<Message>,
+    /// Whether older messages exist on the server.
+    pub has_more: bool,
+    /// The cursor for the next older page.
+    pub cursor: Option<String>,
+    pub loading: bool,
+    /// Whether the first page has arrived.
+    pub loaded: bool,
+}
+
+impl Timeline {
+    /// Inserts or replaces a message, keeping the order.
+    pub fn upsert(&mut self, message: Message) {
+        if let Some(existing) = self.messages.iter_mut().find(|m| m.ts == message.ts) {
+            // Keep thread counters a bare edit event leaves out.
+            let mut message = message;
+            if message.reply_count == 0 && existing.reply_count > 0 {
+                message.reply_count = existing.reply_count;
+                message.reply_users = std::mem::take(&mut existing.reply_users);
+                message.latest_reply = existing.latest_reply.take();
+            }
+            *existing = message;
+            return;
+        }
+        if message.ts.is_local() {
+            self.messages.push(message);
+            return;
+        }
+        let real = self.first_local();
+        let at = self.messages[..real].partition_point(|m| m.ts < message.ts);
+        self.messages.insert(at, message);
+    }
+
+    fn first_local(&self) -> usize {
+        self.messages
+            .iter()
+            .position(|m| m.ts.is_local())
+            .unwrap_or(self.messages.len())
+    }
+
+    /// Merges a page of history: newer pages replace what they cover, older
+    /// ones go in front.
+    pub fn merge(&mut self, page: Vec<Message>) {
+        for message in page {
+            self.upsert(message);
+        }
+    }
+
+    pub fn find_mut(&mut self, ts: &Ts) -> Option<&mut Message> {
+        self.messages.iter_mut().find(|m| &m.ts == ts)
+    }
+
+    pub fn remove(&mut self, ts: &Ts) {
+        self.messages.retain(|m| &m.ts != ts);
+    }
+
+    pub fn newest(&self) -> Option<&Ts> {
+        self.messages
+            .iter()
+            .rev()
+            .map(|m| &m.ts)
+            .find(|ts| !ts.is_local())
+    }
+}
+
+/// A request from a view, applied by [`crate::app::App`] after the frame.
+#[derive(Clone, Debug)]
+pub enum Action {
+    SelectWorkspace(String),
+    OpenConversation(String),
+    OpenThread {
+        channel: String,
+        ts: Ts,
+    },
+    CloseThread,
+    LoadOlder,
+    Send {
+        text: String,
+        thread: Option<Ts>,
+        broadcast: bool,
+    },
+    Retry {
+        channel: String,
+        local: Ts,
+    },
+    Edit {
+        channel: String,
+        ts: Ts,
+        text: String,
+    },
+    Delete {
+        channel: String,
+        ts: Ts,
+    },
+    React {
+        channel: String,
+        ts: Ts,
+        name: String,
+    },
+    /// Opens the emoji picker to react to a message.
+    PickReaction {
+        channel: String,
+        ts: Ts,
+    },
+    /// Opens the emoji picker to insert into a draft.
+    PickEmoji {
+        draft: String,
+    },
+    StartEdit {
+        channel: String,
+        ts: Ts,
+    },
+    CancelEdit,
+    /// Edits your newest message in the open conversation.
+    EditLast,
+    /// Asks before deleting a message.
+    AskDelete {
+        channel: String,
+        ts: Ts,
+    },
+    /// Shows an image large.
+    Preview {
+        uri: String,
+        name: String,
+    },
+    OpenSwitcher,
+    /// Changes the sidebar here and in Slack.
+    Sidebar(crate::sidebar::SidebarEdit),
+    /// Asks for a section name: a new section (taking `channel` along), or
+    /// a new name for `rename`.
+    NameSection {
+        rename: Option<String>,
+        channel: Option<String>,
+    },
+    Upload {
+        thread: Option<Ts>,
+        path: PathBuf,
+        comment: String,
+    },
+    PickUpload {
+        thread: Option<Ts>,
+    },
+    Download {
+        url: String,
+        name: String,
+    },
+    OpenUrl(String),
+    OpenProfile(String),
+    Copy(String),
+    ShowSettings,
+    HideSettings,
+    AddWorkspace,
+    SignOut(String),
+    Reconnect,
+    DismissError,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(ts: &str) -> Message {
+        Message {
+            ts: Ts::new(ts),
+            user: None,
+            username: None,
+            bot_icon: None,
+            bot_id: None,
+            text: ts.to_owned(),
+            thread_ts: None,
+            reply_count: 0,
+            reply_users: Vec::new(),
+            latest_reply: None,
+            reactions: Vec::new(),
+            files: Vec::new(),
+            attachments: Vec::new(),
+            blocks: Vec::new(),
+            edited: false,
+            subtype: None,
+            delivery: Delivery::Sent,
+            broadcast: false,
+        }
+    }
+
+    #[test]
+    fn timestamps_order_numerically() {
+        assert!(Ts::new("1700000000.000200") > Ts::new("1700000000.000100"));
+        assert!(Ts::new("1700000001.000000") > Ts::new("999999999.999999"));
+        assert!(Ts::new("local-1") > Ts::new("1700000000.000100"));
+    }
+
+    #[test]
+    fn upserts_keep_order_and_local_messages_last() {
+        let mut timeline = Timeline::default();
+        timeline.upsert(message("2.0"));
+        timeline.upsert(message("local-1"));
+        timeline.upsert(message("1.0"));
+        timeline.upsert(message("3.0"));
+        let order: Vec<_> = timeline.messages.iter().map(|m| m.ts.as_str()).collect();
+        assert_eq!(order, ["1.0", "2.0", "3.0", "local-1"]);
+        assert_eq!(timeline.newest(), Some(&Ts::new("3.0")));
+    }
+
+    #[test]
+    fn edits_keep_thread_counters() {
+        let mut timeline = Timeline::default();
+        let mut parent = message("1.0");
+        parent.reply_count = 3;
+        timeline.upsert(parent);
+        let mut edited = message("1.0");
+        edited.text = "edited".into();
+        timeline.upsert(edited);
+        assert_eq!(timeline.messages[0].reply_count, 3);
+        assert_eq!(timeline.messages[0].text, "edited");
+    }
+
+    #[test]
+    fn reactions_toggle_per_person() {
+        let mut m = message("1.0");
+        m.toggle_reaction("tada", "U1", true);
+        m.toggle_reaction("tada", "U2", true);
+        m.toggle_reaction("tada", "U1", true);
+        assert_eq!(m.reactions[0].count, 2);
+        m.toggle_reaction("tada", "U1", false);
+        m.toggle_reaction("tada", "U2", false);
+        assert!(m.reactions.is_empty());
+    }
+
+    #[test]
+    fn unread_compares_latest_with_last_read() {
+        let mut c = Conversation {
+            id: "C1".into(),
+            name: "general".into(),
+            kind: ConversationKind::Channel,
+            user: None,
+            topic: String::new(),
+            purpose: String::new(),
+            members: None,
+            archived: false,
+            last_read: Some(Ts::new("5.0")),
+            latest: Some(Ts::new("4.0")),
+            unread: 0,
+            mentions: 0,
+        };
+        assert!(!c.has_unread());
+        c.latest = Some(Ts::new("6.0"));
+        assert!(c.has_unread());
+    }
+}
