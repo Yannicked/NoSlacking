@@ -2533,6 +2533,11 @@ fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> {
         | "channel_sections_channels_removed"
         | "star_added"
         | "star_removed" => out.push(Translated::RefreshSections),
+        "pin_added" | "pin_removed" => {
+            if let Some(event) = super::convos::pin_event(kind, event) {
+                out.push(Translated::Event(Event::Convos { team, event }));
+            }
+        }
         // Read on another device (or in another window): the read marker
         // moves, so unread counts here follow. The interface only ever moves
         // a marker forward, so an older mark arriving late changes nothing.

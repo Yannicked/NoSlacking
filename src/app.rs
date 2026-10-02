@@ -2245,6 +2245,7 @@ fn local_message(
         subtype: None,
         delivery: Delivery::Sending,
         broadcast,
+        pinned: false,
     }
 }
 
@@ -2647,6 +2648,7 @@ mod tests {
             subtype: None,
             delivery: Delivery::Sent,
             broadcast: false,
+            pinned: false,
         }
     }
 

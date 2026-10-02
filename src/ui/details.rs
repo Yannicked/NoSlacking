@@ -1,6 +1,6 @@
 //! A conversation's details beside it: its topic and description (which
-//! members can change), when and by whom it was made, its members and the
-//! files shared in it.
+//! members can change), when and by whom it was made, its members, its
+//! pinned messages, its bookmarks and the files shared in it.
 
 use egui::{CornerRadius, Margin, RichText, Sense, Stroke, Vec2};
 
@@ -73,6 +73,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ),
                     Tab::Members => members(ui, &palette, workspace, conversation, data, actions),
                     Tab::Files => files(ui, &palette, workspace, conversation, data, actions),
+                    Tab::Pins => pins(ui, &palette, workspace, conversation, data, actions),
+                    Tab::Bookmarks => bookmarks(ui, &palette, conversation, data, actions),
                 });
         });
 }
@@ -143,7 +145,7 @@ fn tabs(
             bottom: 0,
         })
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let members = match conversation.members {
                     Some(count) => tf("Members ({count})", &[("count", &count.to_string())]),
                     None => t("Members").into_owned(),
@@ -151,6 +153,8 @@ fn tabs(
                 for (tab, label) in [
                     (Tab::About, t("About").into_owned()),
                     (Tab::Members, members),
+                    (Tab::Pins, t("Pinned").into_owned()),
+                    (Tab::Bookmarks, t("Bookmarks").into_owned()),
                     (Tab::Files, t("Files").into_owned()),
                 ] {
                     let text = RichText::new(label).font(theme::medium(13.5)).color(
@@ -520,6 +524,192 @@ fn files(
                             name: file.name.clone(),
                         });
                     }
+                }
+            }
+        });
+}
+
+/// The pinned messages, newest pin first; a click opens the message as a
+/// thread, and each can be unpinned.
+fn pins(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    workspace: &WorkspaceState,
+    conversation: &Conversation,
+    data: &ChannelData,
+    actions: &mut Vec<Action>,
+) {
+    let Some(pins) = loaded(ui, palette, conversation, Tab::Pins, &data.pins, actions) else {
+        return;
+    };
+    if pins.is_empty() {
+        ui.label(
+            RichText::new(t(
+                "Nothing is pinned here yet. Pin a message from its toolbar.",
+            ))
+            .color(palette.dim),
+        );
+        return;
+    }
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for pin in pins {
+                let message = &pin.message;
+                let author = workspace.author(message);
+                let card = egui::Frame::new()
+                    .fill(palette.surface)
+                    .corner_radius(CornerRadius::same(theme::RADIUS))
+                    .inner_margin(Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            super::avatar(
+                                ui,
+                                workspace.author_icon(message),
+                                &author,
+                                message.user.as_deref().unwrap_or(&author),
+                                20.0,
+                            );
+                            ui.label(
+                                RichText::new(&author)
+                                    .font(theme::semibold(13.5))
+                                    .color(palette.text),
+                            );
+                            if let Some(day) = message.ts.seconds().and_then(date_of) {
+                                ui.label(
+                                    RichText::new(day)
+                                        .font(theme::regular(12.0))
+                                        .color(palette.dim),
+                                );
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if theme::icon_button(
+                                        ui,
+                                        palette,
+                                        Icon::PinOff,
+                                        14.0,
+                                        &t("Unpin"),
+                                    )
+                                    .clicked()
+                                    {
+                                        actions.push(Action::Convos(Convos::Pin {
+                                            channel: conversation.id.clone(),
+                                            ts: message.ts.clone(),
+                                            pin: false,
+                                        }));
+                                    }
+                                },
+                            );
+                        });
+                        let text = super::message::plain_text(workspace, message);
+                        ui.add(egui::Label::new(RichText::new(text).color(palette.text)).wrap());
+                        if let Some(by) = &pin.by {
+                            ui.label(
+                                RichText::new(tf(
+                                    "Pinned by {name}",
+                                    &[("name", &workspace.user_label(by))],
+                                ))
+                                .font(theme::regular(12.0))
+                                .color(palette.dim),
+                            );
+                        }
+                    });
+                let open = card
+                    .response
+                    .interact(Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(t("Open in a thread"));
+                if open.clicked() {
+                    actions.push(Action::OpenThread {
+                        channel: conversation.id.clone(),
+                        ts: message
+                            .thread_ts
+                            .clone()
+                            .unwrap_or_else(|| message.ts.clone()),
+                    });
+                }
+                ui.add_space(6.0);
+            }
+        });
+}
+
+/// The links saved at the top of the conversation; a click opens one.
+fn bookmarks(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    conversation: &Conversation,
+    data: &ChannelData,
+    actions: &mut Vec<Action>,
+) {
+    let Some(bookmarks) = loaded(
+        ui,
+        palette,
+        conversation,
+        Tab::Bookmarks,
+        &data.bookmarks,
+        actions,
+    ) else {
+        return;
+    };
+    if bookmarks.is_empty() {
+        ui.label(RichText::new(t("No bookmarks here yet.")).color(palette.dim));
+        return;
+    }
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show_rows(ui, ROW, bookmarks.len(), |ui, range| {
+            for bookmark in &bookmarks[range] {
+                let (rect, row) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW), Sense::click());
+                if row.hovered() {
+                    ui.painter().rect_filled(
+                        rect,
+                        CornerRadius::same(theme::RADIUS_SMALL),
+                        palette.surface_hover,
+                    );
+                }
+                let left = egui::pos2(rect.left() + 18.0, rect.center().y);
+                match bookmark
+                    .emoji
+                    .as_deref()
+                    .and_then(|e| crate::emoji::unicode(e, None))
+                {
+                    Some(emoji) => {
+                        ui.painter().text(
+                            left,
+                            egui::Align2::CENTER_CENTER,
+                            emoji,
+                            theme::regular(16.0),
+                            palette.text,
+                        );
+                    }
+                    None => Icon::Bookmark
+                        .image(palette.accent, 16.0)
+                        .paint_at(ui, egui::Rect::from_center_size(left, Vec2::splat(16.0))),
+                }
+                let mut job = egui::text::LayoutJob::simple_singleline(
+                    bookmark.title.clone(),
+                    theme::semibold(14.0),
+                    palette.text,
+                );
+                job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 48.0);
+                let galley = ui.painter().layout_job(job);
+                ui.painter().galley(
+                    egui::pos2(rect.left() + 40.0, rect.center().y - galley.size().y / 2.0),
+                    galley,
+                    palette.text,
+                );
+                theme::describe(&row, egui::WidgetType::Link, &bookmark.title);
+                if row
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(&bookmark.link)
+                    .clicked()
+                {
+                    actions.push(Action::OpenUrl(bookmark.link.clone()));
                 }
             }
         });

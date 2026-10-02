@@ -1,7 +1,7 @@
 //! Starting, finding and looking after conversations: a new direct message
 //! with one or more people, the channel browser, joining, leaving and
-//! creating channels, and a channel's details (topic, purpose, members and
-//! files).
+//! creating channels, a channel's details (topic, purpose, members, files,
+//! pinned messages and bookmarks), and pinning messages.
 //!
 //! Views push [`Action`]s (wrapped in [`crate::model::Action::Convos`]);
 //! [`apply`] turns them into [`Command`]s for the worker, whose answers come
@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use crate::app::{App, WorkspaceState};
 use crate::backend;
 use crate::i18n::tf;
-use crate::model::{ConversationKind, File, User};
+use crate::model::{ConversationKind, File, Message, Ts, User};
 
 /// The most people a group message can have besides you: Slack's limit.
 pub const MAX_PEOPLE: usize = 8;
@@ -65,6 +65,12 @@ pub enum Action {
         field: Field,
         text: String,
     },
+    /// Pins a message to its conversation, or unpins it.
+    Pin {
+        channel: String,
+        ts: Ts,
+        pin: bool,
+    },
 }
 
 /// What the interface asks the worker to do for one workspace.
@@ -92,6 +98,12 @@ pub enum Command {
         field: Field,
         text: String,
     },
+    /// The pinned messages (`pins.list`).
+    Pins { channel: String },
+    /// The bookmarks (`bookmarks.list`).
+    Bookmarks { channel: String },
+    /// `pins.add` or `pins.remove`.
+    Pin { channel: String, ts: Ts, pin: bool },
 }
 
 impl Command {
@@ -103,11 +115,18 @@ impl Command {
             Self::Join { .. } => Failure::Join,
             Self::Leave { .. } => Failure::Leave,
             Self::Create { .. } => Failure::Create,
-            Self::About { channel } | Self::Members { channel } | Self::Files { channel } => {
-                Failure::Load {
-                    channel: channel.clone(),
-                }
-            }
+            Self::About { channel }
+            | Self::Members { channel }
+            | Self::Files { channel }
+            | Self::Pins { channel }
+            | Self::Bookmarks { channel } => Failure::Load {
+                channel: channel.clone(),
+            },
+            Self::Pin { channel, ts, pin } => Failure::Pin {
+                channel: channel.clone(),
+                ts: ts.clone(),
+                pin: *pin,
+            },
             Self::Describe { channel, field, .. } => Failure::Describe {
                 channel: channel.clone(),
                 field: *field,
@@ -136,6 +155,21 @@ pub enum Event {
         channel: String,
         result: Result<Vec<SharedFile>, String>,
     },
+    Pins {
+        channel: String,
+        result: Result<Vec<Pin>, String>,
+    },
+    Bookmarks {
+        channel: String,
+        result: Result<Vec<Bookmark>, String>,
+    },
+    /// A message was pinned or unpinned, maybe by someone else.
+    Pinned {
+        channel: String,
+        ts: Ts,
+        pinned: bool,
+        by: Option<String>,
+    },
     /// Slack refused, or could not be reached.
     Failed { what: Failure, error: String },
 }
@@ -158,6 +192,12 @@ pub enum Failure {
         channel: String,
         field: Field,
     },
+    /// Pinning (`pin`) or unpinning a message, already shown as done.
+    Pin {
+        channel: String,
+        ts: Ts,
+        pin: bool,
+    },
 }
 
 /// A conversation's text that its members can change.
@@ -173,7 +213,27 @@ pub enum Tab {
     #[default]
     About,
     Members,
+    Pins,
+    Bookmarks,
     Files,
+}
+
+/// A pinned message.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pin {
+    pub message: Message,
+    /// Who pinned it.
+    pub by: Option<String>,
+}
+
+/// A link saved at the top of a conversation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Bookmark {
+    pub id: String,
+    pub title: String,
+    pub link: String,
+    /// Its emoji shortcode, without colons, if any.
+    pub emoji: Option<String>,
 }
 
 /// Something the details panel fetches when it is first shown.
@@ -226,6 +286,8 @@ pub struct ChannelData {
     pub about: Loaded<About>,
     pub members: Loaded<Vec<String>>,
     pub files: Loaded<Vec<SharedFile>>,
+    pub pins: Loaded<Vec<Pin>>,
+    pub bookmarks: Loaded<Vec<Bookmark>>,
 }
 
 /// The details panel beside a conversation.
@@ -576,7 +638,54 @@ pub fn apply(app: &mut App, action: Action) {
                 },
             );
         }
+        Action::Pin { channel, ts, pin } => {
+            if ts.is_local() {
+                return;
+            }
+            let me = app.active_workspace().map(|w| w.info.user_id.clone());
+            pinned(app, &team, &channel, &ts, pin, me);
+            send(app, team, Command::Pin { channel, ts, pin });
+        }
     }
+}
+
+/// Shows a message as pinned or not wherever it is loaded, and keeps a
+/// loaded list of pins in step with it.
+fn pinned(app: &mut App, team: &str, channel: &str, ts: &Ts, pin: bool, by: Option<String>) {
+    let Some(workspace) = app.workspaces.iter_mut().find(|w| w.info.team_id == team) else {
+        return;
+    };
+    let message = set_pinned(workspace, channel, ts, pin);
+    let data = app.convos.data_mut(team, channel);
+    let Loaded::Ready(pins) = &mut data.pins else {
+        return;
+    };
+    pins.retain(|p| p.message.ts != *ts);
+    if pin {
+        match message {
+            Some(message) => pins.insert(0, Pin { message, by }),
+            // Not loaded here: fetch the list again when it is next shown.
+            None => data.pins = Loaded::Idle,
+        }
+    }
+}
+
+/// Marks every loaded copy of a message as pinned or not, and returns it
+/// as it now is, if it is loaded.
+pub fn set_pinned(
+    workspace: &mut WorkspaceState,
+    channel: &str,
+    ts: &Ts,
+    pinned: bool,
+) -> Option<Message> {
+    let mut found = None;
+    for timeline in workspace.timelines_for_mut(channel) {
+        if let Some(message) = timeline.find_mut(ts) {
+            message.pinned = pinned;
+            found = Some(message.clone());
+        }
+    }
+    found
 }
 
 /// Opens the details panel on `tab`, in place of a thread, and asks for
@@ -611,6 +720,14 @@ fn details(app: &mut App, team: String, channel: String, tab: Tab) {
         Tab::Members if data.members.wanted() => {
             data.members = Loaded::Loading;
             commands.push(Command::Members { channel });
+        }
+        Tab::Pins if data.pins.wanted() => {
+            data.pins = Loaded::Loading;
+            commands.push(Command::Pins { channel });
+        }
+        Tab::Bookmarks if data.bookmarks.wanted() => {
+            data.bookmarks = Loaded::Loading;
+            commands.push(Command::Bookmarks { channel });
         }
         Tab::Files if data.files.wanted() => {
             data.files = Loaded::Loading;
@@ -721,6 +838,25 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
             }
             app.convos.data_mut(team, &channel).files = result.into();
         }
+        Event::Pins { channel, result } => {
+            if let Ok(pins) = &result {
+                let people: Vec<String> = pins
+                    .iter()
+                    .flat_map(|p| p.message.user.iter().chain(p.by.iter()).cloned())
+                    .collect();
+                fetch_unknown(app, team, &people);
+            }
+            app.convos.data_mut(team, &channel).pins = result.into();
+        }
+        Event::Bookmarks { channel, result } => {
+            app.convos.data_mut(team, &channel).bookmarks = result.into();
+        }
+        Event::Pinned {
+            channel,
+            ts,
+            pinned: pin,
+            by,
+        } => pinned(app, team, &channel, &ts, pin, by),
         Event::Failed { what, error } => {
             let text = match what {
                 Failure::Open => {
@@ -767,7 +903,21 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                     if data.files == Loaded::Loading {
                         data.files = Loaded::Failed(error.clone());
                     }
+                    if data.pins == Loaded::Loading {
+                        data.pins = Loaded::Failed(error.clone());
+                    }
+                    if data.bookmarks == Loaded::Loading {
+                        data.bookmarks = Loaded::Failed(error.clone());
+                    }
                     return;
+                }
+                Failure::Pin { channel, ts, pin } => {
+                    pinned(app, team, &channel, &ts, !pin, None);
+                    if pin {
+                        tf("Could not pin the message: {error}", &[("error", &error)])
+                    } else {
+                        tf("Could not unpin the message: {error}", &[("error", &error)])
+                    }
                 }
                 Failure::Describe { channel, field } => {
                     // Put back what Slack really has.
@@ -918,6 +1068,56 @@ mod tests {
         );
         assert_eq!(existing_dm(&workspace, &["U2".into()]), None);
         assert_eq!(existing_dm(&workspace, &["U1".into(), "U2".into()]), None);
+    }
+
+    #[test]
+    fn pinning_marks_every_loaded_copy() {
+        let mut workspace = WorkspaceState::new(Workspace {
+            team_id: "T1".into(),
+            name: "Acme".into(),
+            domain: "acme".into(),
+            icon: None,
+            user_id: "U0".into(),
+        });
+        let message = Message {
+            ts: Ts::new("1.0"),
+            user: Some("U1".into()),
+            username: None,
+            bot_icon: None,
+            bot_id: None,
+            text: "hi".into(),
+            thread_ts: Some(Ts::new("1.0")),
+            reply_count: 0,
+            replies_known: false,
+            reply_users: Vec::new(),
+            latest_reply: None,
+            reactions: Vec::new(),
+            files: Vec::new(),
+            attachments: Vec::new(),
+            blocks: Vec::new(),
+            edited: false,
+            subtype: None,
+            delivery: crate::model::Delivery::Sent,
+            broadcast: false,
+            pinned: false,
+        };
+        // A thread's parent is in the channel and in its thread.
+        workspace
+            .timelines
+            .entry("C1".into())
+            .or_default()
+            .upsert(message.clone());
+        workspace
+            .threads
+            .entry(("C1".into(), Ts::new("1.0")))
+            .or_default()
+            .upsert(message);
+        let shown = set_pinned(&mut workspace, "C1", &Ts::new("1.0"), true);
+        assert!(shown.is_some_and(|m| m.pinned));
+        assert!(workspace.timelines_for("C1").all(|t| t.messages[0].pinned));
+        assert!(set_pinned(&mut workspace, "C1", &Ts::new("2.0"), true).is_none());
+        set_pinned(&mut workspace, "C1", &Ts::new("1.0"), false);
+        assert!(workspace.timelines_for("C1").all(|t| !t.messages[0].pinned));
     }
 
     #[test]

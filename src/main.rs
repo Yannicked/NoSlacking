@@ -488,11 +488,13 @@ impl DemoSetup {
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             Some("general") => app.actions.push(Action::OpenConversation("C01".into())),
             // Picking people for a group message, one already picked.
-            Some(view @ ("details" | "members" | "files")) => {
+            Some(view @ ("details" | "members" | "files" | "pins" | "bookmarks")) => {
                 use noslacking::convos::{Action as Convos, Tab};
                 let tab = match view {
                     "members" => Tab::Members,
                     "files" => Tab::Files,
+                    "pins" => Tab::Pins,
+                    "bookmarks" => Tab::Bookmarks,
                     _ => Tab::About,
                 };
                 app.actions.push(Action::Convos(Convos::Details {
