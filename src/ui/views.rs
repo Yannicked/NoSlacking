@@ -1,12 +1,12 @@
-//! The views at the top of the sidebar (Activity) and the pane each shows in
-//! place of the conversation.
+//! The views at the top of the sidebar (All unreads, Activity) and the pane
+//! each shows in place of the conversation.
 
 use egui::{CornerRadius, Margin, RichText, Sense, Stroke, Vec2};
 
 use super::rich::{self, Rich};
 use super::rows;
 use crate::app::{App, WorkspaceState};
-use crate::i18n::{t, tf};
+use crate::i18n::{t, tf, tn};
 use crate::model::{Action, ConversationKind, Message, Ts};
 use crate::theme::{self, Icon, Palette};
 use crate::views::{Action as Views, Activity, State, TeamViews, View};
@@ -21,13 +21,20 @@ pub fn open_id() -> egui::Id {
 fn icon(view: View) -> Icon {
     match view {
         View::Activity => Icon::AtSign,
+        View::Unreads => Icon::Inbox,
     }
 }
 
-/// What a view's sidebar row counts: unread activity.
-fn count(view: View, _workspace: &WorkspaceState, views: Option<&TeamViews>) -> usize {
+/// What a view's sidebar row counts: unread activity, unread
+/// conversations.
+fn count(view: View, workspace: &WorkspaceState, views: Option<&TeamViews>) -> usize {
     match view {
         View::Activity => views.map_or(0, TeamViews::unread_activity),
+        View::Unreads => workspace
+            .conversations
+            .iter()
+            .filter(|c| !c.archived && workspace.is_unread(c))
+            .count(),
     }
 }
 
@@ -138,7 +145,8 @@ pub fn entries(
     ui.add_space(2.0);
 }
 
-/// Shortcuts that open the views, as Slack's: Ctrl+Shift+M for Activity.
+/// Shortcuts that open the views, as Slack's: Ctrl+Shift+M for Activity,
+/// Ctrl+Shift+A for All unreads.
 pub fn keys(app: &mut App, ctx: &egui::Context) {
     if app.overlay_open() || app.workspaces.is_empty() {
         return;
@@ -158,6 +166,7 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
 fn shortcut(view: View) -> egui::Key {
     match view {
         View::Activity => egui::Key::M,
+        View::Unreads => egui::Key::A,
     }
 }
 
@@ -185,6 +194,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             header(ui, &palette, view, data, actions);
             match view {
                 View::Activity => activity(ui, &palette, workspace, data, actions),
+                View::Unreads => unreads(ui, &palette, workspace, data, actions),
             }
         });
 }
@@ -200,6 +210,7 @@ fn header(
     let inset = theme::titlebar_inset(ui.ctx());
     let loading = match view {
         View::Activity => data.activity.loading,
+        View::Unreads => data.unread.values().any(|f| f.loading),
     };
     egui::Panel::top("view-header")
         .exact_size(52.0 + inset)
@@ -361,8 +372,10 @@ fn card_guess(message: &Message) -> f32 {
     76.0 + (message.text.len() / 90) as f32 * 20.0
 }
 
-/// One message as a card: where and why above it, then who wrote it and
-/// what it says. A click on the card shows the message in context.
+/// One message as a card: where and why above it, if that is said, then
+/// who wrote it and what it says, with `buttons` on the right. A click on
+/// the card shows the message in context; the buttons, links and mentions
+/// inside it take their own clicks.
 #[allow(clippy::too_many_arguments)]
 fn card(
     ui: &mut egui::Ui,
@@ -370,67 +383,32 @@ fn card(
     workspace: &WorkspaceState,
     channel: &str,
     message: &Message,
-    above: &str,
+    above: Option<&str>,
     unread: bool,
     actions: &mut Vec<Action>,
     buttons: impl FnOnce(&mut egui::Ui, &mut Vec<Action>),
 ) {
     let background = ui.painter().add(egui::Shape::Noop);
     let author = workspace.author(message);
-    let mut inner_actions = Vec::new();
-    let inner = egui::Frame::new()
-        .inner_margin(Margin::symmetric(20, 10))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                if unread {
-                    let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                    ui.painter()
-                        .circle_filled(dot.center(), 4.0, palette.accent);
-                }
-                ui.label(
-                    RichText::new(above)
-                        .font(theme::semibold(12.5))
-                        .color(palette.secondary),
-                );
-                ui.label(
-                    RichText::new(when(&message.ts))
-                        .font(theme::regular(12.0))
-                        .color(palette.dim),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    buttons(ui, &mut inner_actions);
-                });
-            });
-            ui.add_space(4.0);
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                super::avatar(
-                    ui,
-                    workspace.author_icon(message),
-                    &author,
-                    message.user.as_deref().unwrap_or(&author),
-                    32.0,
-                );
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(
-                        RichText::new(&author)
-                            .font(theme::bold(14.0))
-                            .color(palette.text),
+    // Sensed before its contents are laid out, so they sit on top of it.
+    let scope = ui.scope_builder(
+        egui::UiBuilder::new().sense(Sense::click()).id_salt("card"),
+        |ui| {
+            egui::Frame::new()
+                .inner_margin(Margin::symmetric(20, 10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    card_contents(
+                        ui, palette, workspace, message, &author, above, unread, actions, buttons,
                     );
-                    let rich = Rich::new(palette, workspace).size(14.0);
-                    let mut ignored = Vec::new();
-                    rich::show(ui, &rich, &message.text, message.edited, &mut ignored);
                 });
-            });
-        });
-    let rect = inner.response.rect;
-    let response = ui
-        .interact(rect, ui.id().with("card"), Sense::click())
+        },
+    );
+    let rect = scope.response.rect;
+    let response = scope
+        .response
         .on_hover_cursor(egui::CursorIcon::PointingHand);
-    if response.hovered() {
+    if ui.rect_contains_pointer(rect) {
         ui.painter().set(
             background,
             egui::Shape::rect_filled(
@@ -445,17 +423,91 @@ fn card(
         rect.bottom(),
         Stroke::new(1.0, palette.outline.gamma_multiply(0.6)),
     );
-    theme::describe(
-        &response,
-        egui::WidgetType::Button,
-        &format!("{above}: {author}"),
-    );
-    // A button's own click comes first; the card's means "show it".
-    if !inner_actions.is_empty() {
-        actions.extend(inner_actions);
-    } else if response.clicked() {
+    let spoken = match above {
+        Some(above) => format!("{above}: {author}"),
+        None => author.clone(),
+    };
+    theme::describe(&response, egui::WidgetType::Button, &spoken);
+    if response.clicked() {
         actions.push(jump(channel, message));
     }
+}
+
+/// What a [`card`] holds.
+#[allow(clippy::too_many_arguments)]
+fn card_contents(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    workspace: &WorkspaceState,
+    message: &Message,
+    author: &str,
+    above: Option<&str>,
+    unread: bool,
+    actions: &mut Vec<Action>,
+    buttons: impl FnOnce(&mut egui::Ui, &mut Vec<Action>),
+) {
+    let time = |ui: &mut egui::Ui| {
+        ui.label(
+            RichText::new(when(&message.ts))
+                .font(theme::regular(12.0))
+                .color(palette.dim),
+        )
+        .on_hover_text(super::full_time(&message.ts).unwrap_or_default());
+    };
+    let mut buttons = Some(buttons);
+    if let Some(above) = above {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if unread {
+                let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                ui.painter()
+                    .circle_filled(dot.center(), 4.0, palette.accent);
+            }
+            ui.label(
+                RichText::new(above)
+                    .font(theme::semibold(12.5))
+                    .color(palette.secondary),
+            );
+            time(ui);
+            if let Some(buttons) = buttons.take() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    buttons(ui, actions);
+                });
+            }
+        });
+        ui.add_space(4.0);
+    }
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        super::avatar(
+            ui,
+            workspace.author_icon(message),
+            author,
+            message.user.as_deref().unwrap_or(author),
+            32.0,
+        );
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(
+                    RichText::new(author)
+                        .font(theme::bold(14.0))
+                        .color(palette.text),
+                );
+                if above.is_none() {
+                    time(ui);
+                }
+                if let Some(buttons) = buttons.take() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        buttons(ui, actions);
+                    });
+                }
+            });
+            let rich = Rich::new(palette, workspace).size(14.0);
+            rich::show(ui, &rich, &message.text, message.edited, actions);
+        });
+    });
 }
 
 /// Mentions of you and everyone, and replies to your threads.
@@ -506,10 +558,206 @@ fn activity(
             workspace,
             &item.channel,
             &item.message,
-            &above,
+            Some(&above),
             item.unread,
             actions,
             |_, _| {},
         );
     });
+}
+
+/// A row of the unreads list.
+#[derive(Clone, Copy)]
+enum UnreadRow {
+    /// A conversation's name and its "Mark as read".
+    Head(usize),
+    /// One of its unread messages.
+    Message(usize, usize),
+    /// Its messages on their way, or why they are not.
+    Status(usize),
+    /// A link to the conversation for the messages not loaded.
+    More(usize),
+}
+
+/// Every conversation with something new, and the new messages in each.
+fn unreads(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    workspace: &WorkspaceState,
+    data: &TeamViews,
+    actions: &mut Vec<Action>,
+) {
+    let conversations = crate::views::unread_conversations(workspace);
+    if conversations.is_empty() {
+        note(ui, palette, &t("You are all caught up."));
+        return;
+    }
+    egui::Frame::new()
+        .inner_margin(Margin::symmetric(20, 8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(tn(
+                        "{count} conversation with unread messages",
+                        "{count} conversations with unread messages",
+                        u32::try_from(conversations.len()).unwrap_or(u32::MAX),
+                    ))
+                    .font(theme::regular(13.0))
+                    .color(palette.secondary),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::secondary_button(ui, palette, &t("Mark all as read")).clicked() {
+                        actions.push(Action::Views(Views::MarkAllRead));
+                    }
+                });
+            });
+        });
+    let mut rows = Vec::new();
+    for (index, conversation) in conversations.iter().enumerate() {
+        rows.push(UnreadRow::Head(index));
+        match data
+            .unread
+            .get(&conversation.id)
+            .and_then(|f| f.value.as_ref())
+        {
+            Some((messages, more)) => {
+                rows.extend((0..messages.len()).map(|m| UnreadRow::Message(index, m)));
+                // Nothing new outside threads, or more than was read.
+                if *more || messages.is_empty() {
+                    rows.push(UnreadRow::More(index));
+                }
+            }
+            None => rows.push(UnreadRow::Status(index)),
+        }
+    }
+    let messages = |index: usize| {
+        data.unread
+            .get(&conversations[index].id)
+            .and_then(|f| f.value.as_ref())
+            .map(|(messages, _)| messages.as_slice())
+            .unwrap_or_default()
+    };
+    let keys: Vec<u64> = rows
+        .iter()
+        .map(|row| match *row {
+            UnreadRow::Head(c) => key(("head", &conversations[c].id)),
+            UnreadRow::Message(c, m) => key((&conversations[c].id, messages(c)[m].ts.as_str())),
+            UnreadRow::Status(c) => key(("status", &conversations[c].id)),
+            UnreadRow::More(c) => key(("more", &conversations[c].id)),
+        })
+        .collect();
+    let guesses: Vec<f32> = rows
+        .iter()
+        .map(|row| match *row {
+            UnreadRow::Head(_) => 52.0,
+            UnreadRow::Message(c, m) => card_guess(&messages(c)[m]) - 20.0,
+            UnreadRow::Status(_) | UnreadRow::More(_) => 34.0,
+        })
+        .collect();
+    list(ui, "unreads", &keys, &guesses, |ui, index| {
+        match rows[index] {
+            UnreadRow::Head(c) => unread_head(ui, palette, workspace, conversations[c], actions),
+            UnreadRow::Message(c, m) => card(
+                ui,
+                palette,
+                workspace,
+                &conversations[c].id,
+                &messages(c)[m],
+                None,
+                false,
+                actions,
+                |_, _| {},
+            ),
+            UnreadRow::Status(c) => {
+                let channel = &conversations[c].id;
+                let fetch = data.unread.get(channel);
+                egui::Frame::new()
+                    .inner_margin(Margin::symmetric(20, 8))
+                    .show(ui, |ui| match fetch {
+                        Some(fetch) if fetch.loading => {
+                            ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
+                        }
+                        Some(fetch) => {
+                            let error = fetch.error.clone().unwrap_or_default();
+                            ui.label(
+                                RichText::new(tf(
+                                    "Could not load the messages: {error}",
+                                    &[("error", &error)],
+                                ))
+                                .font(theme::regular(13.0))
+                                .color(palette.danger),
+                            );
+                        }
+                        // Scrolled to before its messages were asked for.
+                        None => {
+                            actions.push(Action::Views(Views::LoadUnread {
+                                channel: channel.clone(),
+                            }));
+                            ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
+                        }
+                    });
+            }
+            UnreadRow::More(c) => {
+                let label = if messages(c).is_empty() {
+                    t("Open the conversation")
+                } else {
+                    t("Open the conversation for the rest")
+                };
+                egui::Frame::new()
+                    .inner_margin(Margin::symmetric(20, 8))
+                    .show(ui, |ui| {
+                        if ui.link(label).clicked() {
+                            actions.push(Action::OpenConversation(conversations[c].id.clone()));
+                        }
+                    });
+            }
+        }
+    });
+}
+
+/// The heading of a conversation in the unreads list.
+fn unread_head(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    workspace: &WorkspaceState,
+    conversation: &crate::model::Conversation,
+    actions: &mut Vec<Action>,
+) {
+    ui.add_space(10.0);
+    egui::Frame::new()
+        .fill(palette.surface)
+        .inner_margin(Margin::symmetric(20, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let name = place(workspace, &conversation.id);
+                let title = ui
+                    .add(
+                        egui::Label::new(
+                            RichText::new(&name)
+                                .font(theme::bold(15.0))
+                                .color(palette.text),
+                        )
+                        .sense(Sense::click()),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(t("Open the conversation"));
+                if title.clicked() {
+                    actions.push(Action::OpenConversation(conversation.id.clone()));
+                }
+                if conversation.mentions > 0 {
+                    super::badge(ui, palette, conversation.mentions);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::icon_button(ui, palette, Icon::CheckCheck, 15.0, &t("Mark as read"))
+                        .clicked()
+                    {
+                        actions.push(Action::Views(Views::MarkRead {
+                            channel: conversation.id.clone(),
+                        }));
+                    }
+                });
+            });
+        });
 }

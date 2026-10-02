@@ -1858,7 +1858,7 @@ impl App {
 
     /// Clears a conversation's unread state here and tells Slack, at most
     /// every few seconds.
-    fn mark_read(&mut self, team: &str, channel: &str) {
+    pub(crate) fn mark_read(&mut self, team: &str, channel: &str) {
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };

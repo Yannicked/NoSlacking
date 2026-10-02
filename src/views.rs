@@ -1,5 +1,7 @@
 //! The views at the top of the sidebar that take the place of the open
-//! conversation, as in Slack: Activity (what mentions you or answers you).
+//! conversation, as in Slack: Activity (what mentions you or answers you)
+//! and All unreads (every conversation with something new, with the new
+//! messages).
 //!
 //! Views push [`Action`]s (wrapped in [`crate::model::Action::Views`]);
 //! [`apply`] turns them into [`Command`]s for the worker, whose answers come
@@ -16,22 +18,28 @@ use crate::model::{Delivery, Message, Ts};
 /// The most live mentions kept per workspace: enough for a day of chatter,
 /// few enough that the list stays quick.
 const LIVE_LIMIT: usize = 200;
+/// The most unread conversations whose messages are loaded at once: the
+/// rest load as they are scrolled to.
+const UNREAD_LIMIT: usize = 30;
 
 /// One of the views at the top of the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum View {
     /// Mentions of you, of everyone, and replies to your threads.
     Activity,
+    /// Every conversation with unread messages, and those messages.
+    Unreads,
 }
 
 impl View {
     /// Every view, in the sidebar's order.
-    pub const ALL: [Self; 1] = [Self::Activity];
+    pub const ALL: [Self; 2] = [Self::Unreads, Self::Activity];
 
     /// Its name in the sidebar and its header.
     pub fn label(self) -> String {
         match self {
             Self::Activity => t("Activity").into_owned(),
+            Self::Unreads => t("All unreads").into_owned(),
         }
     }
 }
@@ -45,6 +53,12 @@ pub enum Action {
     Close,
     /// Loads the open view's list again.
     Refresh,
+    /// Loads the unread messages of a conversation the unreads list shows.
+    LoadUnread { channel: String },
+    /// Marks a conversation read up to its newest message.
+    MarkRead { channel: String },
+    /// Marks every unread conversation read.
+    MarkAllRead,
 }
 
 /// What the interface asks the worker to do for one workspace.
@@ -53,6 +67,9 @@ pub enum Command {
     /// What mentions you or answers you, newest first. `me` is your user
     /// id, for searching when Slack's own feed cannot be read.
     Activity { me: String },
+    /// The messages of `channel` after `after` (the last one you read),
+    /// oldest first; with no read marker, the newest few.
+    Unread { channel: String, after: Option<Ts> },
 }
 
 impl Command {
@@ -62,6 +79,10 @@ impl Command {
             Self::Activity { .. } => Event::Activity {
                 result: Err(error),
                 searched: false,
+            },
+            Self::Unread { channel, .. } => Event::Unread {
+                channel: channel.clone(),
+                result: Err(error),
             },
         }
     }
@@ -76,6 +97,12 @@ pub enum Event {
     Activity {
         result: Result<Vec<Activity>, String>,
         searched: bool,
+    },
+    /// A conversation's unread messages, oldest first. `more` says there
+    /// are more than were read.
+    Unread {
+        channel: String,
+        result: Result<(Vec<Message>, bool), String>,
     },
 }
 
@@ -173,6 +200,9 @@ pub struct TeamViews {
     /// Mentions and replies seen live since the list was fetched, newest
     /// last.
     pub live: Vec<Activity>,
+    /// The unread messages of conversations, by id, and whether there are
+    /// more than were read.
+    pub unread: HashMap<String, Fetch<(Vec<Message>, bool)>>,
 }
 
 /// Everything the views hold.
@@ -287,16 +317,35 @@ pub fn bare_message(ts: Ts, user: Option<String>, text: String, thread: Option<T
     }
 }
 
+/// The unread conversations, newest first, as the unreads list shows them.
+pub fn unread_conversations(workspace: &WorkspaceState) -> Vec<&crate::model::Conversation> {
+    let mut list: Vec<_> = workspace
+        .conversations
+        .iter()
+        .filter(|c| !c.archived && workspace.is_unread(c))
+        .collect();
+    list.sort_by(|a, b| b.latest.cmp(&a.latest).then_with(|| a.id.cmp(&b.id)));
+    list
+}
+
 /// Takes in a new message seen live: one that mentions you or answers your
-/// thread joins the activity at once.
+/// thread joins the activity at once, and one in a conversation the
+/// unreads list has loaded joins its messages.
 pub fn arrived(app: &mut App, team: &str, channel: &str, message: &Message) {
     let Some(workspace) = app.workspaces.iter().find(|w| w.info.team_id == team) else {
         return;
     };
-    let Some(reason) = live_reason(workspace, channel, message) else {
+    let reason = live_reason(workspace, channel, message);
+    let views = app.views.team_mut(team);
+    if message.in_channel()
+        && let Some((messages, _)) = views.unread.get_mut(channel).and_then(|f| f.value.as_mut())
+        && !messages.iter().any(|m| m.ts == message.ts)
+    {
+        messages.push(message.clone());
+    }
+    let Some(reason) = reason else {
         return;
     };
-    let views = app.views.team_mut(team);
     if views.live.iter().any(|a| a.key() == (channel, &message.ts)) {
         return;
     }
@@ -337,7 +386,54 @@ pub fn apply(app: &mut App, action: Action) {
                 load(app, &team, view);
             }
         }
+        Action::LoadUnread { channel } => load_unread(app, &team, &channel),
+        Action::MarkRead { channel } => app.mark_read(&team, &channel),
+        Action::MarkAllRead => {
+            let channels: Vec<String> = app
+                .active_workspace()
+                .map(|w| {
+                    unread_conversations(w)
+                        .iter()
+                        .map(|c| c.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for channel in channels {
+                app.mark_read(&team, &channel);
+            }
+        }
     }
+}
+
+/// Asks for a conversation's unread messages, unless they are on their way.
+fn load_unread(app: &mut App, team: &str, channel: &str) {
+    let Some(after) = app
+        .workspaces
+        .iter()
+        .find(|w| w.info.team_id == team)
+        .and_then(|w| w.conversation(channel))
+        .map(|c| c.last_read.clone())
+    else {
+        return;
+    };
+    let fetch = app
+        .views
+        .team_mut(team)
+        .unread
+        .entry(channel.to_owned())
+        .or_default();
+    if fetch.loading {
+        return;
+    }
+    fetch.start();
+    send(
+        app,
+        team,
+        Command::Unread {
+            channel: channel.to_owned(),
+            after,
+        },
+    );
 }
 
 /// Asks for what `view` lists in `team`.
@@ -348,14 +444,31 @@ fn load(app: &mut App, team: &str, view: View) {
         .find(|w| w.info.team_id == team)
         .map(|w| w.info.user_id.clone())
         .unwrap_or_default();
-    let views = app.views.team_mut(team);
-    let command = match view {
+    match view {
         View::Activity => {
-            views.activity.start();
-            Command::Activity { me }
+            app.views.team_mut(team).activity.start();
+            send(app, team, Command::Activity { me });
         }
-    };
-    send(app, team, command);
+        View::Unreads => {
+            // Read afresh: what was loaded may be read by now.
+            app.views.team_mut(team).unread.clear();
+            let channels: Vec<String> = app
+                .workspaces
+                .iter()
+                .find(|w| w.info.team_id == team)
+                .map(|w| {
+                    unread_conversations(w)
+                        .iter()
+                        .take(UNREAD_LIMIT)
+                        .map(|c| c.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for channel in channels {
+                load_unread(app, team, &channel);
+            }
+        }
+    }
 }
 
 /// Sends a command for `team` to the worker.
@@ -384,6 +497,18 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                 views.live.clear();
             }
             views.activity.arrived(result);
+        }
+        Event::Unread { channel, result } => {
+            if let Ok((messages, _)) = &result {
+                let people: Vec<String> = messages.iter().filter_map(|m| m.user.clone()).collect();
+                crate::convos::fetch_unknown(app, team, &people);
+            }
+            app.views
+                .team_mut(team)
+                .unread
+                .entry(channel)
+                .or_default()
+                .arrived(result);
         }
     }
 }
@@ -480,6 +605,48 @@ mod tests {
         // Your own messages are never your activity.
         let mine = bare_message(Ts::new("4.0"), Some("U0".into()), "<@U0>".into(), None);
         assert_eq!(live_reason(&workspace, "C1", &mine), None);
+    }
+
+    fn conversation(id: &str, latest: &str, read: &str) -> crate::model::Conversation {
+        crate::model::Conversation {
+            id: id.into(),
+            name: id.to_lowercase(),
+            kind: crate::model::ConversationKind::Channel,
+            user: None,
+            topic: String::new(),
+            purpose: String::new(),
+            members: None,
+            archived: false,
+            last_read: Some(Ts::new(read)),
+            latest: Some(Ts::new(latest)),
+            unread: 0,
+            mentions: 0,
+        }
+    }
+
+    #[test]
+    fn unreads_list_what_is_new_newest_first() {
+        let mut workspace = workspace();
+        workspace.conversations = vec![
+            conversation("C1", "5.0", "4.0"),
+            conversation("C2", "3.0", "3.0"),
+            conversation("C3", "9.0", "1.0"),
+            crate::model::Conversation {
+                archived: true,
+                ..conversation("C4", "9.0", "1.0")
+            },
+            conversation("C5", "8.0", "1.0"),
+        ];
+        workspace.desktop.local_muted.insert("C5".into());
+        let ids: Vec<&str> = unread_conversations(&workspace)
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["C3", "C1"],
+            "read, archived and muted ones are left out"
+        );
     }
 
     #[test]

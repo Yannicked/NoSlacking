@@ -12,6 +12,16 @@ pub fn answer(team: &str, command: Command) -> Vec<Event> {
             result: Ok(activity()),
             searched: false,
         },
+        Command::Unread { channel, after } => views::Event::Unread {
+            result: Ok((
+                history(&channel)
+                    .into_iter()
+                    .filter(|m| m.in_channel() && after.as_ref().is_none_or(|a| m.ts > *a))
+                    .collect(),
+                false,
+            )),
+            channel,
+        },
     };
     vec![Event::Views {
         team: team.to_owned(),

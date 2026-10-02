@@ -366,6 +366,7 @@ fastframe_icons::icons! {
         FileText => "file-text",
         Hash => "hash",
         Image => "image",
+        Inbox => "inbox",
         Info => lucide "info",
         Link => "link",
         Italic => "italic",
