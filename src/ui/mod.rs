@@ -107,7 +107,8 @@ pub fn section_label(ui: &mut egui::Ui, palette: &Palette, text: &str) {
     );
 }
 
-/// "14:03" today, "Yesterday 14:03" or a date otherwise.
+/// The local time of day, "14:03", whatever the date: the day separators
+/// above the messages already say which day it is.
 pub fn short_time(ts: &crate::model::Ts) -> String {
     ts.zoned()
         .map(|z| z.strftime("%H:%M").to_string())
