@@ -771,6 +771,8 @@ pub struct ChannelSection {
 #[serde(default)]
 pub struct ChannelIdsPage {
     pub channel_ids: Vec<String>,
+    /// Set when the section has more channels than were sent.
+    pub cursor: Option<String>,
 }
 
 /// Puts sections in the order the linked list gives them, keeping the kinds
@@ -835,6 +837,7 @@ pub fn order_sections(sections: Vec<ChannelSection>) -> Vec<model::SidebarSectio
 #[serde(default)]
 pub struct StarsList {
     pub items: Vec<StarItem>,
+    pub response_metadata: ResponseMetadata,
 }
 
 #[derive(Debug, Default, Deserialize)]
