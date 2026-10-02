@@ -14,6 +14,7 @@ pub enum Resolved {
 
 /// Slack's names for emoji that GitHub's gemoji table (which `emojis`
 /// follows) spells differently.
+/// Names the two tables share are looked up directly and need no entry.
 const SLACK_NAMES: &[(&str, &str)] = &[
     ("simple_smile", "slightly_smiling_face"),
     ("thumbsup_all", "+1"),
@@ -21,9 +22,7 @@ const SLACK_NAMES: &[(&str, &str)] = &[
     ("white_frowning_face", "frowning_face"),
     ("face_with_rolling_eyes", "roll_eyes"),
     ("hugging_face", "hugs"),
-    ("upside_down_face", "upside_down_face"),
     ("party_popper", "tada"),
-    ("heavy_check_mark", "heavy_check_mark"),
 ];
 
 /// A workspace's custom emoji, from `emoji.list`.
@@ -107,6 +106,15 @@ mod tests {
             Resolved::Unicode("👍🏿".into())
         );
         assert_eq!(set.resolve("simple_smile"), Resolved::Unicode("🙂".into()));
+        // Names both tables share need no entry of their own.
+        assert_eq!(
+            set.resolve("upside_down_face"),
+            Resolved::Unicode("🙃".into())
+        );
+        assert_eq!(
+            set.resolve("heavy_check_mark"),
+            Resolved::Unicode("✔️".into())
+        );
         assert_eq!(set.resolve("no_such_thing"), Resolved::Unknown);
     }
 

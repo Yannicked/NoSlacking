@@ -7,12 +7,16 @@
 //!
 //! Bytes are held in memory up to a budget and then evicted oldest first;
 //! egui keeps the decoded texture, and asks again (served from disk) only
-//! if it forgets it.
+//! if it forgets it. The disk cache is trimmed to [`DISK_BYTES`] at start,
+//! least recently used first.
+//!
+//! A failed fetch is tried again after a wait that doubles each time, so a
+//! dropped connection does not leave a broken image for the whole session.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use egui::load::{Bytes, BytesLoadResult, BytesLoader, BytesPoll, LoadError};
 use sha1::{Digest as _, Sha1};
@@ -21,6 +25,8 @@ use crate::slack;
 
 /// Bytes held in memory at most.
 const HELD_BYTES: usize = 96 * 1024 * 1024;
+/// The disk cache is trimmed to this at start, least recently used first.
+pub const DISK_BYTES: u64 = 512 * 1024 * 1024;
 /// The largest single image fetched.
 const MAX_IMAGE_BYTES: usize = 24 * 1024 * 1024;
 const PREFIX: &str = "nsauth:";
@@ -115,10 +121,59 @@ fn gif_frames(bytes: &[u8]) -> Option<u64> {
     }
 }
 
+/// Why an image could not be had.
+#[derive(Clone, Debug, PartialEq)]
+enum Failure {
+    /// The network or the server failed; worth asking again later.
+    Fetch(String),
+    /// The image arrived but is refused (too large to decode): asking again
+    /// brings the same bytes.
+    Refused(String),
+    /// The workspace has no client yet (still starting) or any more
+    /// (signed out). [`ImageLoader::set_client`] clears these.
+    SignedOut,
+}
+
+impl Failure {
+    fn message(&self) -> String {
+        match self {
+            Self::Fetch(error) | Self::Refused(error) => error.clone(),
+            Self::SignedOut => "workspace signed out".to_owned(),
+        }
+    }
+}
+
 enum Entry {
-    Pending,
-    Ready { bytes: Arc<[u8]>, used: Instant },
-    Failed(String),
+    /// Being fetched, after `failures` failed attempts.
+    Pending {
+        failures: u32,
+    },
+    Ready {
+        bytes: Arc<[u8]>,
+        used: Instant,
+    },
+    Failed {
+        failure: Failure,
+        at: Instant,
+        /// Failed attempts in a row, this one included.
+        failures: u32,
+    },
+}
+
+/// How long after its `failures`-th failure in a row an image is asked for
+/// again, or `None` for never: from 5 seconds, doubling, up to 10 minutes.
+fn retry_delay(failure: &Failure, failures: u32) -> Option<Duration> {
+    const FIRST: Duration = Duration::from_secs(5);
+    const LONGEST: Duration = Duration::from_secs(600);
+    match failure {
+        Failure::Fetch(_) => {
+            let doublings = failures.saturating_sub(1).min(16);
+            Some(FIRST.saturating_mul(1 << doublings).min(LONGEST))
+        }
+        Failure::Refused(_) => None,
+        // Retried when the client arrives, not on a timer.
+        Failure::SignedOut => None,
+    }
 }
 
 struct Inner {
@@ -136,8 +191,12 @@ pub struct ImageLoader {
 }
 
 impl ImageLoader {
+    /// A loader caching on disk in `cache_dir`. Trims that folder to
+    /// [`DISK_BYTES`] in the background first.
     pub fn new(http: reqwest::Client, runtime: tokio::runtime::Handle, cache_dir: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(&cache_dir);
+        let dir = cache_dir.clone();
+        runtime.spawn_blocking(move || prune_disk(&dir, DISK_BYTES));
         Self {
             inner: Arc::new(Inner {
                 entries: Mutex::new(HashMap::new()),
@@ -149,9 +208,21 @@ impl ImageLoader {
         }
     }
 
-    /// Lets the loader fetch `team`'s files.
+    /// Lets the loader fetch `team`'s files, including those asked for
+    /// before the workspace was ready.
     pub fn set_client(&self, team: &str, client: slack::Client) {
         write(&self.inner.clients).insert(team.to_owned(), client);
+        let prefix = authed(team, "");
+        lock(&self.inner.entries).retain(|uri, entry| {
+            !(uri.starts_with(&prefix)
+                && matches!(
+                    entry,
+                    Entry::Failed {
+                        failure: Failure::SignedOut,
+                        ..
+                    }
+                ))
+        });
     }
 
     /// Stops fetching `team`'s files and deletes the ones already fetched,
@@ -206,7 +277,7 @@ impl Inner {
         self.cache_dir.join("private").join(name)
     }
 
-    async fn fetch(&self, team: Option<&str>, url: &str) -> Result<Vec<u8>, String> {
+    async fn fetch(&self, team: Option<&str>, url: &str) -> Result<Vec<u8>, Failure> {
         let path = match team {
             Some(team) => self.private_dir(team).join(cache_name(url)),
             None => self.cache_dir.join(cache_name(url)),
@@ -214,52 +285,138 @@ impl Inner {
         if let Ok(bytes) = tokio::fs::read(&path).await
             && !bytes.is_empty()
         {
-            check_decoded_size(&bytes)?;
+            check_decoded_size(&bytes).map_err(Failure::Refused)?;
+            // The disk cache is trimmed oldest first by modification time;
+            // mark this one as recently used.
+            tokio::task::spawn_blocking(move || touch(&path));
             return Ok(bytes);
         }
         let bytes = match team {
             Some(team) => {
                 let client = read(&self.clients).get(team).cloned();
-                let client = client.ok_or_else(|| "workspace signed out".to_owned())?;
+                let client = client.ok_or(Failure::SignedOut)?;
                 client.get_bytes(url, MAX_IMAGE_BYTES).await
             }
             None => slack::client::get_bytes(&self.http, url, None, None, MAX_IMAGE_BYTES).await,
         }
-        .map_err(|e| e.to_string())?;
-        check_decoded_size(&bytes)?;
+        .map_err(|e| Failure::Fetch(e.to_string()))?;
+        check_decoded_size(&bytes).map_err(Failure::Refused)?;
         if let Err(error) = crate::paths::write_atomic(&path, &bytes) {
             log::debug!("image not cached: {error}");
         }
         Ok(bytes)
     }
+}
 
-    fn evict(&self, entries: &mut HashMap<String, Entry>, keep: &str) {
-        let mut held: usize = entries
-            .values()
-            .map(|e| match e {
-                Entry::Ready { bytes, .. } => bytes.len(),
-                _ => 0,
-            })
-            .sum();
-        if held <= HELD_BYTES {
-            return;
+/// Drops the least recently used bytes once more than [`HELD_BYTES`] are
+/// held, down to three quarters of it, never dropping `keep` (the image
+/// that just arrived).
+fn evict(entries: &mut HashMap<String, Entry>, keep: &str) {
+    let mut held: usize = entries
+        .values()
+        .map(|e| match e {
+            Entry::Ready { bytes, .. } => bytes.len(),
+            _ => 0,
+        })
+        .sum();
+    if held <= HELD_BYTES {
+        return;
+    }
+    let mut ready: Vec<(String, Instant, usize)> = entries
+        .iter()
+        .filter_map(|(uri, e)| match e {
+            Entry::Ready { bytes, used } if uri != keep => Some((uri.clone(), *used, bytes.len())),
+            _ => None,
+        })
+        .collect();
+    ready.sort_by_key(|(_, used, _)| *used);
+    for (uri, _, size) in ready {
+        if held <= HELD_BYTES * 3 / 4 {
+            break;
         }
-        let mut ready: Vec<(String, Instant, usize)> = entries
-            .iter()
-            .filter_map(|(uri, e)| match e {
-                Entry::Ready { bytes, used } if uri != keep => {
-                    Some((uri.clone(), *used, bytes.len()))
-                }
-                _ => None,
-            })
-            .collect();
-        ready.sort_by_key(|(_, used, _)| *used);
-        for (uri, _, size) in ready {
-            if held <= HELD_BYTES * 3 / 4 {
-                break;
+        entries.remove(&uri);
+        held -= size;
+    }
+}
+
+/// Sets a cached file's modification time to now, so trimming the disk
+/// cache keeps it.
+fn touch(path: &Path) {
+    let touched = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(SystemTime::now()));
+    if let Err(error) = touched {
+        log::debug!("could not mark a cached image as used: {error}");
+    }
+}
+
+/// One file in the disk cache.
+#[derive(Clone, Debug, PartialEq)]
+struct CachedFile {
+    path: PathBuf,
+    size: u64,
+    modified: SystemTime,
+}
+
+/// The files to delete so the rest fit in `cap` bytes: the least recently
+/// used first. Trimming goes down to nine tenths of the cap, so the next
+/// start does not trim again straight away.
+fn to_prune(mut files: Vec<CachedFile>, cap: u64) -> Vec<PathBuf> {
+    let mut total: u64 = files.iter().map(|f| f.size).sum();
+    if total <= cap {
+        return Vec::new();
+    }
+    let target = cap / 10 * 9;
+    files.sort_by_key(|f| f.modified);
+    let mut doomed = Vec::new();
+    for file in files {
+        if total <= target {
+            break;
+        }
+        total = total.saturating_sub(file.size);
+        doomed.push(file.path);
+    }
+    doomed
+}
+
+/// Every file under `dir`, the per-workspace folders included.
+fn cached_files(dir: &Path) -> Vec<CachedFile> {
+    let mut files = Vec::new();
+    let mut folders = vec![dir.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                folders.push(entry.path());
+            } else if meta.is_file() {
+                files.push(CachedFile {
+                    path: entry.path(),
+                    size: meta.len(),
+                    modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                });
             }
-            entries.remove(&uri);
-            held -= size;
+        }
+    }
+    files
+}
+
+/// Deletes the least recently used files under `dir` until it holds at
+/// most `cap` bytes.
+fn prune_disk(dir: &Path, cap: u64) {
+    let doomed = to_prune(cached_files(dir), cap);
+    if doomed.is_empty() {
+        return;
+    }
+    log::debug!("trimming the image cache by {} files", doomed.len());
+    for path in doomed {
+        if let Err(error) = std::fs::remove_file(&path) {
+            log::debug!("could not delete a cached image: {error}");
         }
     }
 }
@@ -275,7 +432,7 @@ impl BytesLoader for ImageLoader {
         };
         {
             let mut entries = lock(&self.inner.entries);
-            match entries.get_mut(uri) {
+            let failures = match entries.get_mut(uri) {
                 Some(Entry::Ready { bytes, used }) => {
                     *used = Instant::now();
                     return Ok(BytesPoll::Ready {
@@ -284,12 +441,21 @@ impl BytesLoader for ImageLoader {
                         mime: None,
                     });
                 }
-                Some(Entry::Pending) => return Ok(BytesPoll::Pending { size: None }),
-                Some(Entry::Failed(error)) => return Err(LoadError::Loading(error.clone())),
-                None => {
-                    entries.insert(uri.to_owned(), Entry::Pending);
+                Some(Entry::Pending { .. }) => return Ok(BytesPoll::Pending { size: None }),
+                Some(Entry::Failed {
+                    failure,
+                    at,
+                    failures,
+                }) => {
+                    let due = retry_delay(failure, *failures).is_some_and(|d| at.elapsed() >= d);
+                    if !due {
+                        return Err(LoadError::Loading(failure.message()));
+                    }
+                    *failures
                 }
-            }
+                None => 0,
+            };
+            entries.insert(uri.to_owned(), Entry::Pending { failures });
         }
         let inner = self.inner.clone();
         let ctx = ctx.clone();
@@ -300,9 +466,10 @@ impl BytesLoader for ImageLoader {
             let result = inner.fetch(team.as_deref(), &url).await;
             let mut entries = lock(&inner.entries);
             // A `forget` while fetching drops the result.
-            if !matches!(entries.get(&uri), Some(Entry::Pending)) {
+            let Some(&Entry::Pending { failures }) = entries.get(&uri) else {
                 return;
-            }
+            };
+            let mut retry = None;
             match result {
                 Ok(bytes) => {
                     entries.insert(
@@ -312,15 +479,28 @@ impl BytesLoader for ImageLoader {
                             used: Instant::now(),
                         },
                     );
-                    inner.evict(&mut entries, &uri);
+                    evict(&mut entries, &uri);
                 }
-                Err(error) => {
-                    log::debug!("image failed: {error}");
-                    entries.insert(uri, Entry::Failed(error));
+                Err(failure) => {
+                    let failures = failures.saturating_add(1);
+                    log::debug!("image failed ({failures} times): {}", failure.message());
+                    retry = retry_delay(&failure, failures);
+                    entries.insert(
+                        uri,
+                        Entry::Failed {
+                            failure,
+                            at: Instant::now(),
+                            failures,
+                        },
+                    );
                 }
             }
             drop(entries);
             ctx.request_repaint();
+            // Ask again once the wait is over, if the image is still shown.
+            if let Some(retry) = retry {
+                ctx.request_repaint_after(retry);
+            }
         });
         Ok(BytesPoll::Pending { size: None })
     }
@@ -346,7 +526,7 @@ impl BytesLoader for ImageLoader {
     fn has_pending(&self) -> bool {
         lock(&self.inner.entries)
             .values()
-            .any(|e| matches!(e, Entry::Pending))
+            .any(|e| matches!(e, Entry::Pending { .. }))
     }
 }
 
@@ -408,6 +588,104 @@ mod tests {
         assert!(check_decoded_size(&gif(8000, 8000, 1)).is_err());
         // Something `image` cannot size is left to egui.
         assert_eq!(check_decoded_size(b"<svg/>"), Ok(()));
+    }
+
+    #[test]
+    fn failed_fetches_are_retried_later_and_refusals_never() {
+        let fetch = Failure::Fetch("HTTP 503".into());
+        assert_eq!(retry_delay(&fetch, 1), Some(Duration::from_secs(5)));
+        assert_eq!(retry_delay(&fetch, 2), Some(Duration::from_secs(10)));
+        assert_eq!(retry_delay(&fetch, 4), Some(Duration::from_secs(40)));
+        assert_eq!(retry_delay(&fetch, 9), Some(Duration::from_secs(600)));
+        assert_eq!(
+            retry_delay(&fetch, u32::MAX),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(retry_delay(&Failure::Refused("too large".into()), 1), None);
+        assert_eq!(retry_delay(&Failure::SignedOut, 1), None);
+    }
+
+    fn ready(size: usize, age: u64, now: Instant) -> Entry {
+        Entry::Ready {
+            bytes: vec![0; size].into(),
+            used: now.checked_sub(Duration::from_secs(age)).unwrap_or(now),
+        }
+    }
+
+    #[test]
+    fn held_bytes_are_evicted_least_recently_used_first() {
+        let now = Instant::now();
+        let third = HELD_BYTES / 3 + 1;
+        let mut entries = HashMap::from([
+            ("old".to_owned(), ready(third, 30, now)),
+            ("middle".to_owned(), ready(third, 20, now)),
+            ("new".to_owned(), ready(third, 10, now)),
+            ("pending".to_owned(), Entry::Pending { failures: 0 }),
+        ]);
+        evict(&mut entries, "new");
+        assert!(!entries.contains_key("old"));
+        assert!(entries.contains_key("middle") && entries.contains_key("new"));
+        assert!(entries.contains_key("pending"));
+        // The image just fetched stays even when it is the oldest.
+        let mut entries = HashMap::from([
+            ("kept".to_owned(), ready(HELD_BYTES + 1, 99, now)),
+            ("other".to_owned(), ready(1, 1, now)),
+        ]);
+        evict(&mut entries, "kept");
+        assert!(entries.contains_key("kept"));
+        assert!(!entries.contains_key("other"));
+    }
+
+    fn file(name: &str, size: u64, age: u64) -> CachedFile {
+        CachedFile {
+            path: PathBuf::from(name),
+            size,
+            modified: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000 - age),
+        }
+    }
+
+    #[test]
+    fn the_disk_cache_is_trimmed_least_recently_used_first() {
+        let files = vec![
+            file("new", 40, 1),
+            file("oldest", 40, 30),
+            file("old", 40, 20),
+        ];
+        assert!(to_prune(files.clone(), 120).is_empty(), "within the cap");
+        assert_eq!(to_prune(files.clone(), 100), [PathBuf::from("oldest")]);
+        // Down to nine tenths of the cap: 80 > 72, so two go.
+        assert_eq!(
+            to_prune(files, 80),
+            [PathBuf::from("oldest"), PathBuf::from("old")]
+        );
+        assert!(to_prune(Vec::new(), 0).is_empty());
+    }
+
+    #[test]
+    fn pruning_reaches_private_folders() {
+        let dir = crate::paths::TestDir::new("image-cache");
+        let private = dir.0.join("private").join("T01");
+        std::fs::create_dir_all(&private).expect("dirs");
+        let old = private.join("old");
+        let new = dir.0.join("new");
+        std::fs::write(&old, [0; 100]).expect("write");
+        std::fs::write(&new, [0; 100]).expect("write");
+        let stale = SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .and_then(|f| f.set_modified(stale))
+            .expect("age");
+        assert_eq!(cached_files(&dir.0).len(), 2);
+        prune_disk(&dir.0, 150);
+        assert!(!old.exists(), "the older, private file goes");
+        assert!(new.exists());
+        // Using a file makes it the newest.
+        touch(&new);
+        let modified = std::fs::metadata(&new)
+            .and_then(|m| m.modified())
+            .expect("mtime");
+        assert!(modified > stale);
     }
 
     #[test]
