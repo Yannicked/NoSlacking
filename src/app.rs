@@ -25,6 +25,9 @@ use crate::settings::{Appearance, Settings, WorkspaceMeta};
 use crate::theme::{self, Catalog, Palette};
 
 mod desktop;
+mod popout;
+
+pub use popout::Popout;
 
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(5);
@@ -1027,6 +1030,8 @@ pub struct App {
     pub scroll_to_bottom: HashSet<String>,
     /// Focus the composer next frame.
     pub focus_composer: bool,
+    /// Conversations open in windows of their own.
+    pub popouts: Vec<Popout>,
     /// Focus the field of the dialog or picker just opened, once: asking
     /// every frame would keep Tab from reaching its buttons.
     pub focus_overlay: bool,
@@ -1174,6 +1179,7 @@ impl App {
             prepended: None,
             scroll_to_bottom: HashSet::new(),
             focus_composer: true,
+            popouts: Vec::new(),
             focus_overlay: false,
             jumps: Vec::new(),
             search: crate::search::Search::default(),
@@ -2339,6 +2345,7 @@ impl App {
         match action {
             // Where you are.
             Action::SelectWorkspace(team) => self.select_workspace(team),
+            Action::PopOut(channel) => self.pop_out(channel),
             Action::OpenConversation(channel) => self.open_conversation(&channel),
             Action::OpenThread { channel, ts } => self.open_thread(channel, ts),
             Action::CloseThread => self.thread = None,
