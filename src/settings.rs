@@ -91,6 +91,8 @@ pub struct Settings {
     pub enter_sends: bool,
     /// How channels are ordered in their sidebar sections.
     pub sidebar_sort: crate::sidebar::Sort,
+    /// Notifications and the rest of the desktop integration.
+    pub desktop: crate::desktop::DesktopSettings,
 }
 
 impl Default for Settings {
@@ -110,6 +112,7 @@ impl Default for Settings {
             zoom: 1.0,
             enter_sends: true,
             sidebar_sort: crate::sidebar::Sort::Name,
+            desktop: crate::desktop::DesktopSettings::default(),
         }
     }
 }
@@ -199,6 +202,7 @@ impl Settings {
             zoom,
             enter_sends,
             sidebar_sort,
+            desktop,
         );
         // One damaged workspace must not sign you out of the others, so
         // these are read entry by entry.
@@ -275,6 +279,7 @@ impl Settings {
     pub fn remove_workspace(&mut self, team: &str) {
         self.workspaces.retain(|w| w.team_id != team);
         self.last_conversation.remove(team);
+        self.desktop.forget_workspace(team);
         if self.active_workspace.as_deref() == Some(team) {
             self.active_workspace = self.workspaces.first().map(|w| w.team_id.clone());
         }

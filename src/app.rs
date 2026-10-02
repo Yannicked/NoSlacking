@@ -24,6 +24,8 @@ use crate::paths::AppDirs;
 use crate::settings::{Appearance, Settings, WorkspaceMeta};
 use crate::theme::{self, Catalog, Palette};
 
+mod desktop;
+
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(5);
 /// Read markers are sent at most this often per conversation.
@@ -157,6 +159,8 @@ pub struct WorkspaceState {
     /// Raised whenever people arrive, so lookups built from `users` know
     /// when to rebuild.
     users_version: u64,
+    /// Notification choices and the like for this workspace.
+    pub desktop: crate::desktop::TeamState,
 }
 
 impl WorkspaceState {
@@ -178,6 +182,7 @@ impl WorkspaceState {
             requested_bots: HashSet::new(),
             requested_conversations: HashSet::new(),
             users_version: 0,
+            desktop: crate::desktop::TeamState::default(),
         }
     }
 
@@ -890,6 +895,10 @@ pub struct App {
     settings_due: crate::settings::Debounce,
     saver: crate::settings::Saver,
     quit: bool,
+    /// Shows desktop notifications; `None` in the demo or without them.
+    notifier: Option<crate::notify::Notifier>,
+    /// What the window should do next frame for the desktop.
+    window_requests: desktop::WindowRequests,
 }
 
 impl App {
@@ -936,6 +945,7 @@ impl App {
                 user_id: meta.user_id.clone(),
             });
             state.active = settings.last_conversation.get(&meta.team_id).cloned();
+            state.desktop = settings.desktop.team_state(&meta.team_id);
             workspaces.push(state);
         }
         let page = if workspaces.is_empty() && !options.demo {
@@ -987,6 +997,8 @@ impl App {
             settings_due: crate::settings::Debounce::default(),
             saver: crate::settings::Saver::new(),
             quit: false,
+            notifier: desktop::notifier(waker, options.demo),
+            window_requests: desktop::WindowRequests::default(),
         };
         app.start_theme_scan();
         app
@@ -1133,6 +1145,7 @@ impl App {
             self.start_theme_scan();
         }
         self.flush_marks();
+        self.desktop_frame();
         let now = Instant::now();
         self.toasts.retain(|t| t.until > now);
         if self.settings_due.take_due(now) {
@@ -1151,6 +1164,7 @@ impl App {
             self.mark_active_read();
         }
         self.window_focused = focused;
+        self.desktop_window(&ctx);
         crate::ui::show(self, ui);
         // Applying an action may queue another (editing the last message).
         for _ in 0..4 {
@@ -1386,6 +1400,7 @@ impl App {
             None => {
                 let mut state = WorkspaceState::new(info);
                 state.active = self.settings.last_conversation.get(&team).cloned();
+                state.desktop = self.settings.desktop.team_state(&team);
                 self.workspaces.push(state);
             }
         }
@@ -1483,6 +1498,11 @@ impl App {
 
     fn message(&mut self, team: &str, channel: &str, message: Message, changed: bool) {
         let viewing = self.is_viewing(team, channel);
+        let note = if changed {
+            None
+        } else {
+            self.note_for(team, channel, &message, viewing)
+        };
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
@@ -1508,6 +1528,9 @@ impl App {
         }
         if viewing {
             self.waker.wake();
+        }
+        if let Some(note) = note {
+            self.notify(note);
         }
     }
 
@@ -1926,6 +1949,7 @@ impl App {
             Action::DismissError => self.toasts.clear(),
             // Leaving the app: links, folders and the clipboard.
             Action::OpenUrl(url) => self.open_url(&url),
+            Action::NotifyLevel { channel, level } => self.set_notify_level(&channel, level),
             Action::OpenFolder(path) => {
                 if let Err(error) = open::that_detached(&path) {
                     let error = error.to_string();
