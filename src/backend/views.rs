@@ -12,7 +12,7 @@ use super::{Event, Sink};
 use crate::model::{Message, Ts};
 use crate::slack::search::MessagesAnswer;
 use crate::slack::{Client, SlackError, types};
-use crate::views::{self, Activity, Command, Followed, Reason};
+use crate::views::{self, Activity, Command, Followed, Reason, Reminder, Saved};
 
 /// How many items of the activity feed are read.
 const FEED_LIMIT: usize = 50;
@@ -30,6 +30,8 @@ const THREADS_LIMIT: usize = 25;
 const SEARCHED_THREADS: usize = 15;
 /// The most replies read of one thread found by searching.
 const THREAD_PAGE: usize = 200;
+/// How many saved messages are listed.
+const SAVED_LIMIT: usize = 50;
 
 /// Runs one command and reports back. Every command is answered, so a view
 /// waiting on it never waits for ever.
@@ -82,6 +84,44 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
             }
             views::Event::Nothing
         }
+        Command::Saved => match saved(&client).await {
+            Ok((list, starred)) => views::Event::Saved {
+                result: Ok(list),
+                starred,
+            },
+            Err(error) => views::Event::Saved {
+                result: Err(describe(&error)),
+                starred: false,
+            },
+        },
+        Command::Reminders => views::Event::Reminders {
+            result: client
+                .call::<RemindersList>("reminders.list", &[])
+                .await
+                .map(reminders)
+                .map_err(|e| describe(&e)),
+        },
+        Command::Save { channel, ts, save } => match keep(&client, &channel, &ts, save).await {
+            Ok(()) => views::Event::Nothing,
+            Err(error) => views::Event::SaveFailed {
+                channel,
+                ts,
+                save,
+                error: describe(&error),
+            },
+        },
+        Command::CompleteReminder { id } => match client
+            .act::<serde_json::Value>("reminders.complete", &[("reminder", id.clone())])
+            .await
+        {
+            // Already done elsewhere: nothing to undo.
+            Ok(_) => views::Event::Nothing,
+            Err(SlackError::Api(code)) if code == "already_complete" => views::Event::Nothing,
+            Err(error) => views::Event::CompleteFailed {
+                id,
+                error: describe(&error),
+            },
+        },
     };
     reply(&sink, &team, event);
 }
@@ -91,6 +131,174 @@ fn reply(sink: &Sink, team: &str, event: views::Event) {
         team: team.to_owned(),
         event,
     });
+}
+
+// ---- later ------------------------------------------------------------
+
+/// `saved.list`, the web client's Later list. Each item names a message.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct SavedList {
+    saved_items: Vec<SavedItem>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct SavedItem {
+    item_id: String,
+    item_type: String,
+    ts: String,
+    /// `in_progress`, `completed` or `archived`.
+    state: String,
+    is_archived: bool,
+}
+
+/// `stars.list`: the starred items of older Slack, with their messages.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct StarsList {
+    items: Vec<StarItem>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct StarItem {
+    #[serde(rename = "type")]
+    kind: String,
+    channel: String,
+    message: Option<types::Message>,
+}
+
+/// `reminders.list`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct RemindersList {
+    reminders: Vec<ReminderItem>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ReminderItem {
+    id: String,
+    text: String,
+    time: Option<i64>,
+    recurring: bool,
+    /// When it was completed; 0 or absent while it is not.
+    complete_ts: Option<i64>,
+}
+
+/// The messages a Later list names that are still to do, in its order.
+fn saved_references(list: SavedList) -> Vec<(String, Ts)> {
+    list.saved_items
+        .into_iter()
+        .filter(|item| item.item_type == "message" && !item.item_id.is_empty())
+        .filter(|item| !item.ts.is_empty() && !item.is_archived)
+        .filter(|item| item.state != "completed" && item.state != "archived")
+        .map(|item| (item.item_id, Ts::new(item.ts)))
+        .collect()
+}
+
+/// The starred messages of a `stars.list` answer.
+fn starred(list: StarsList) -> Vec<Saved> {
+    list.items
+        .into_iter()
+        .filter(|item| item.kind == "message" && !item.channel.is_empty())
+        .filter_map(|item| {
+            Some(Saved {
+                message: item.message?.into_model()?,
+                channel: item.channel,
+            })
+        })
+        .collect()
+}
+
+/// The reminders not yet complete, soonest first.
+fn reminders(list: RemindersList) -> Vec<Reminder> {
+    let mut out: Vec<Reminder> = list
+        .reminders
+        .into_iter()
+        .filter(|r| !r.id.is_empty() && r.complete_ts.unwrap_or(0) == 0)
+        .map(|r| Reminder {
+            id: r.id,
+            text: r.text,
+            time: r.time.filter(|t| *t > 0),
+            recurring: r.recurring,
+        })
+        .collect();
+    out.sort_by_key(|r| (r.time.is_none(), r.time));
+    out
+}
+
+/// Your saved messages: Later for a browser session, else (or when Later
+/// cannot be read) the older starred messages. Answers whether they are
+/// the starred ones.
+async fn saved(client: &Client) -> Result<(Vec<Saved>, bool), SlackError> {
+    if client.token().is_session() {
+        match client
+            .call::<SavedList>("saved.list", &[("limit", SAVED_LIMIT.to_string())])
+            .await
+        {
+            Ok(list) => {
+                let filled = futures_util::future::join_all(
+                    saved_references(list).into_iter().take(FILL_LIMIT).map(
+                        |(channel, ts)| async move {
+                            match fetch_message(client, &channel, &ts).await {
+                                Ok(Some(message)) => Some(Saved { channel, message }),
+                                Ok(None) => None,
+                                Err(error) => {
+                                    log::debug!("could not read a saved message: {error}");
+                                    None
+                                }
+                            }
+                        },
+                    ),
+                )
+                .await;
+                return Ok((filled.into_iter().flatten().collect(), false));
+            }
+            Err(error) => log::info!("saved.list: {error}; reading starred messages instead"),
+        }
+    }
+    let list: StarsList = client
+        .call("stars.list", &[("limit", SAVED_LIMIT.to_string())])
+        .await?;
+    Ok((starred(list), true))
+}
+
+/// Saves a message for later (or takes it off): with Later for a browser
+/// session, else (or when Later refuses) with a star. Being already as
+/// asked is no failure.
+async fn keep(client: &Client, channel: &str, ts: &Ts, save: bool) -> Result<(), SlackError> {
+    let settled = |result: Result<serde_json::Value, SlackError>, done: &[&str]| match result {
+        Err(SlackError::Api(code)) if done.contains(&code.as_str()) => Ok(()),
+        other => other.map(|_| ()),
+    };
+    if client.token().is_session() {
+        let method = if save { "saved.add" } else { "saved.delete" };
+        let result = client
+            .act::<serde_json::Value>(
+                method,
+                &[
+                    ("item_type", "message".to_owned()),
+                    ("item_id", channel.to_owned()),
+                    ("ts", ts.0.clone()),
+                ],
+            )
+            .await;
+        match settled(result, &["already_saved", "not_saved", "item_not_found"]) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.is_auth() => return Err(error),
+            Err(error) => log::info!("{method}: {error}; starring instead"),
+        }
+    }
+    let method = if save { "stars.add" } else { "stars.remove" };
+    let result = client
+        .act::<serde_json::Value>(
+            method,
+            &[("channel", channel.to_owned()), ("timestamp", ts.0.clone())],
+        )
+        .await;
+    settled(result, &["already_starred", "not_starred"])
 }
 
 // ---- threads ----------------------------------------------------------
@@ -677,6 +885,48 @@ mod tests {
             replied_thread("C1", &parent, vec![message("1.0", "U0")], "U0"),
             None
         );
+    }
+
+    #[test]
+    fn later_lists_what_is_still_to_do() {
+        let list: SavedList = serde_json::from_str(
+            r#"{"ok":true,"saved_items":[
+              {"item_id":"C1","item_type":"message","ts":"2.000100","state":"in_progress","date_due":0},
+              {"item_id":"C1","item_type":"message","ts":"1.000100","state":"completed"},
+              {"item_id":"C2","item_type":"message","ts":"3.000100","state":"in_progress","is_archived":true},
+              {"item_id":"F1","item_type":"file","ts":"","state":"in_progress"}
+            ],"response_metadata":{"next_cursor":""}}"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            saved_references(list),
+            [("C1".to_owned(), Ts::new("2.000100"))]
+        );
+        let stars: StarsList = serde_json::from_str(
+            r#"{"ok":true,"items":[
+              {"type":"message","channel":"C1","message":{"type":"message","ts":"5.000100","user":"U1","text":"star"}},
+              {"type":"file","file":{"id":"F1"}}
+            ]}"#,
+        )
+        .expect("parses");
+        let starred = starred(stars);
+        assert_eq!(starred.len(), 1);
+        assert_eq!(starred[0].message.text, "star");
+    }
+
+    #[test]
+    fn reminders_leave_out_what_is_done() {
+        let list: RemindersList = serde_json::from_str(
+            r#"{"ok":true,"reminders":[
+              {"id":"Rm2","text":"later","time":200,"complete_ts":0},
+              {"id":"Rm1","text":"sooner","time":100,"recurring":false},
+              {"id":"Rm3","text":"done","time":50,"complete_ts":60},
+              {"id":"Rm4","text":"weekly","recurring":true}
+            ]}"#,
+        )
+        .expect("parses");
+        let ids: Vec<String> = reminders(list).into_iter().map(|r| r.id).collect();
+        assert_eq!(ids, ["Rm1", "Rm2", "Rm4"]);
     }
 
     #[test]

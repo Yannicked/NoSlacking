@@ -1,5 +1,5 @@
-//! The views at the top of the sidebar (All unreads, Threads, Activity) and
-//! the pane each shows in place of the conversation.
+//! The views at the top of the sidebar (All unreads, Threads, Activity,
+//! Later) and the pane each shows in place of the conversation.
 
 use egui::{CornerRadius, Margin, RichText, Sense, Stroke, Vec2};
 
@@ -23,7 +23,20 @@ fn icon(view: View) -> Icon {
         View::Activity => Icon::AtSign,
         View::Unreads => Icon::Inbox,
         View::Threads => Icon::Messages,
+        View::Later => Icon::Bookmark,
     }
+}
+
+/// Where [`super::show`] leaves the messages saved for later in the open
+/// workspace, for the message toolbars.
+pub fn saved_id() -> egui::Id {
+    egui::Id::new("saved-for-later")
+}
+
+/// Whether a message is saved for later, as far as is known.
+pub fn is_saved(ui: &egui::Ui, channel: &str, ts: &Ts) -> bool {
+    ui.data(|d| d.get_temp::<std::sync::Arc<std::collections::HashSet<(String, Ts)>>>(saved_id()))
+        .is_some_and(|saved| saved.contains(&(channel.to_owned(), ts.clone())))
 }
 
 /// What a view's sidebar row counts: unread activity, unread
@@ -37,6 +50,8 @@ fn count(view: View, workspace: &WorkspaceState, views: Option<&TeamViews>) -> u
             .filter(|c| !c.archived && workspace.is_unread(c))
             .count(),
         View::Threads => views.map_or(0, TeamViews::unread_threads),
+        // A reminder that is due shows in Slackbot's messages already.
+        View::Later => 0,
     }
 }
 
@@ -148,7 +163,8 @@ pub fn entries(
 }
 
 /// Shortcuts that open the views, as Slack's: Ctrl+Shift+M for Activity,
-/// Ctrl+Shift+A for All unreads, Ctrl+Shift+T for Threads.
+/// Ctrl+Shift+A for All unreads, Ctrl+Shift+T for Threads, Ctrl+Shift+S
+/// for Later.
 pub fn keys(app: &mut App, ctx: &egui::Context) {
     if app.overlay_open() || app.workspaces.is_empty() {
         return;
@@ -170,6 +186,7 @@ fn shortcut(view: View) -> egui::Key {
         View::Activity => egui::Key::M,
         View::Unreads => egui::Key::A,
         View::Threads => egui::Key::T,
+        View::Later => egui::Key::S,
     }
 }
 
@@ -199,6 +216,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 View::Activity => activity(ui, &palette, workspace, data, actions),
                 View::Unreads => unreads(ui, &palette, workspace, data, actions),
                 View::Threads => threads(ui, &palette, workspace, data, actions),
+                View::Later => later(ui, &palette, workspace, data, actions),
             }
         });
 }
@@ -216,6 +234,7 @@ fn header(
         View::Activity => data.activity.loading,
         View::Unreads => data.unread.values().any(|f| f.loading),
         View::Threads => data.threads.loading,
+        View::Later => data.saved.loading || data.reminders.loading,
     };
     egui::Panel::top("view-header")
         .exact_size(52.0 + inset)
@@ -961,4 +980,203 @@ fn threads(
             }
         }
     });
+}
+
+/// A row of the Later list.
+#[derive(Clone, Copy)]
+enum LaterRow {
+    /// "Saved messages" or "Reminders".
+    Heading(bool),
+    Saved(usize),
+    Reminder(usize),
+    /// A list with nothing in it, or still on its way.
+    Empty(bool),
+}
+
+/// Messages saved for later, then your reminders.
+fn later(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    workspace: &WorkspaceState,
+    data: &TeamViews,
+    actions: &mut Vec<Action>,
+) {
+    let errors = [
+        data.saved.error.as_deref().map(|error| {
+            tf(
+                "Could not load the saved messages: {error}",
+                &[("error", error)],
+            )
+        }),
+        data.reminders
+            .error
+            .as_deref()
+            .map(|error| tf("Could not load the reminders: {error}", &[("error", error)])),
+    ];
+    for error in errors.into_iter().flatten() {
+        egui::Frame::new()
+            .fill(palette.danger.gamma_multiply(0.12))
+            .inner_margin(Margin::symmetric(20, 8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new(&error)
+                        .font(theme::regular(13.0))
+                        .color(palette.text),
+                );
+            });
+    }
+    let saved = data.saved.value.as_deref().unwrap_or_default();
+    let reminders = data.reminders.value.as_deref().unwrap_or_default();
+    let mut rows = vec![LaterRow::Heading(true)];
+    if saved.is_empty() {
+        rows.push(LaterRow::Empty(true));
+    }
+    rows.extend((0..saved.len()).map(LaterRow::Saved));
+    rows.push(LaterRow::Heading(false));
+    if reminders.is_empty() {
+        rows.push(LaterRow::Empty(false));
+    }
+    rows.extend((0..reminders.len()).map(LaterRow::Reminder));
+    let keys: Vec<u64> = rows
+        .iter()
+        .map(|row| match *row {
+            LaterRow::Heading(first) => key(("heading", first)),
+            LaterRow::Saved(i) => key((&saved[i].channel, saved[i].message.ts.as_str())),
+            LaterRow::Reminder(i) => key(("reminder", &reminders[i].id)),
+            LaterRow::Empty(first) => key(("empty", first)),
+        })
+        .collect();
+    let guesses: Vec<f32> = rows
+        .iter()
+        .map(|row| match *row {
+            LaterRow::Saved(i) => card_guess(&saved[i].message),
+            LaterRow::Reminder(_) => 56.0,
+            LaterRow::Heading(_) | LaterRow::Empty(_) => 40.0,
+        })
+        .collect();
+    list(ui, "later", &keys, &guesses, |ui, index| {
+        match rows[index] {
+            LaterRow::Heading(first) => {
+                ui.add_space(12.0);
+                egui::Frame::new()
+                    .inner_margin(Margin::symmetric(20, 4))
+                    .show(ui, |ui| {
+                        let text = match (first, data.starred) {
+                            (true, false) => t("Saved for later"),
+                            (true, true) => t("Starred messages"),
+                            (false, _) => t("Reminders"),
+                        };
+                        super::section_label(ui, palette, &text);
+                    });
+            }
+            LaterRow::Empty(first) => {
+                egui::Frame::new()
+                    .inner_margin(Margin::symmetric(20, 6))
+                    .show(ui, |ui| {
+                        let fetch_waiting = if first {
+                            data.saved.waiting()
+                        } else {
+                            data.reminders.waiting()
+                        };
+                        if fetch_waiting {
+                            ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
+                        } else {
+                            let text = if first {
+                                t("Nothing saved. Save a message from its ⋯ menu.")
+                            } else {
+                                t("No reminders. Ask Slack with /remind.")
+                            };
+                            ui.label(
+                                RichText::new(text)
+                                    .font(theme::regular(13.5))
+                                    .color(palette.dim),
+                            );
+                        }
+                    });
+            }
+            LaterRow::Saved(i) => {
+                let item = &saved[i];
+                let above = place(workspace, &item.channel);
+                card(
+                    ui,
+                    palette,
+                    workspace,
+                    jump(&item.channel, &item.message),
+                    &item.message,
+                    Some(&above),
+                    false,
+                    actions,
+                    |ui, actions| {
+                        if theme::icon_button(ui, palette, Icon::X, 14.0, &t("Remove from Later"))
+                            .clicked()
+                        {
+                            actions.push(Action::Views(Views::Save {
+                                channel: item.channel.clone(),
+                                ts: item.message.ts.clone(),
+                                save: false,
+                            }));
+                        }
+                    },
+                );
+            }
+            LaterRow::Reminder(i) => reminder_row(ui, palette, workspace, &reminders[i], actions),
+        }
+    });
+}
+
+/// One reminder: what, when, and a button to mark it complete.
+fn reminder_row(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    workspace: &WorkspaceState,
+    reminder: &crate::views::Reminder,
+    actions: &mut Vec<Action>,
+) {
+    let inner = egui::Frame::new()
+        .inner_margin(Margin::symmetric(20, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let (spot, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                Icon::Bell.image(palette.secondary, 16.0).paint_at(ui, spot);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let rich = Rich::new(palette, workspace).size(14.0);
+                    rich::show(ui, &rich, &reminder.text, false, actions);
+                    let due = reminder
+                        .time
+                        .map(|seconds| when(&Ts::new(format!("{seconds}.000000"))));
+                    let line = match (due, reminder.recurring) {
+                        (Some(due), true) => tf("Next on {when}, repeating", &[("when", &due)]),
+                        (Some(due), false) => tf("Due {when}", &[("when", &due)]),
+                        (None, true) => t("Repeating").into_owned(),
+                        (None, false) => String::new(),
+                    };
+                    if !line.is_empty() {
+                        ui.label(
+                            RichText::new(line)
+                                .font(theme::regular(12.5))
+                                .color(palette.dim),
+                        );
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    if theme::icon_button(ui, palette, Icon::Check, 15.0, &t("Mark as complete"))
+                        .clicked()
+                    {
+                        actions.push(Action::Views(Views::CompleteReminder {
+                            id: reminder.id.clone(),
+                        }));
+                    }
+                });
+            });
+        });
+    let rect = inner.response.rect;
+    ui.painter().hline(
+        (rect.left() + 20.0)..=(rect.right() - 20.0),
+        rect.bottom(),
+        Stroke::new(1.0, palette.outline.gamma_multiply(0.6)),
+    );
 }
