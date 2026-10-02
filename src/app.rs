@@ -94,7 +94,7 @@ pub struct SectionDialog {
 }
 
 /// The fields of the sign-in page.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct SetupForm {
     pub client_id: String,
     pub client_secret: String,
@@ -104,8 +104,22 @@ pub struct SetupForm {
     /// Session sign-in: the workspace address and the `d` cookie.
     pub session_workspace: String,
     pub session_cookie: String,
+    /// Browser sign-in: the `slack://` link Slack's page hands over.
+    pub session_link: String,
     /// Whether the "use your own Slack app" section is expanded.
     pub show_app: bool,
+}
+
+/// The form holds secrets as they are typed; only the plain fields print.
+impl std::fmt::Debug for SetupForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetupForm")
+            .field("client_id", &self.client_id)
+            .field("session_workspace", &self.session_workspace)
+            .field("show_manual", &self.show_manual)
+            .field("show_app", &self.show_app)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One signed-in workspace and everything loaded for it.
@@ -1769,6 +1783,13 @@ impl App {
                     cookie: self.setup.session_cookie.trim().to_owned(),
                     workspace_url: self.setup.session_workspace.trim().to_owned(),
                 });
+            }
+            Action::SignInLink => {
+                self.sign_in = None;
+                // The link is a one-time secret: read it once, then forget it.
+                let link = std::mem::take(&mut self.setup.session_link);
+                self.backend
+                    .send(Command::SignInLink(link.trim().to_owned()));
             }
             Action::PasteToken => {
                 let token = self.setup.user_token.trim().to_owned();

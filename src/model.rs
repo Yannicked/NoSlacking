@@ -633,6 +633,8 @@ pub enum Action {
     // that might be printed.
     /// Signs in with the session cookie and workspace from the form.
     SignInSession,
+    /// Signs in with the pasted `slack://` link from the browser sign-in.
+    SignInLink,
     /// Signs in with the user token from the form.
     PasteToken,
     /// Saves the Slack app's credentials from the form.

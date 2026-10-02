@@ -19,6 +19,7 @@ use crate::images::ImageLoader;
 use crate::model::{Conversation, ConversationKind, Message, Ts, User, Workspace};
 use crate::paths::AppDirs;
 use crate::settings::{Redirect, WorkspaceMeta};
+use crate::slack::magic::TeamResult;
 use crate::slack::socket::{self, SocketEvent};
 use crate::slack::{Client, SlackError, Token, types};
 
@@ -502,6 +503,7 @@ impl Worker {
                 cookie,
                 workspace_url,
             } => self.sign_in_session(cookie, &workspace_url),
+            Command::SignInLink(link) => self.sign_in_link(&link),
             Command::SignOut(team) => self.sign_out(&team),
             Command::Focus { team, channel } => {
                 self.focus = Some((team, channel));
@@ -633,6 +635,84 @@ impl Worker {
                 })
                 .map_err(|e| describe(&e));
             let _ = internal.send(Internal::SignedIn(result));
+        });
+    }
+
+    /// Signs in to every workspace a pasted `slack://` sign-in link names:
+    /// redeems its tokens for the account's session cookie, then signs in to
+    /// each team with that cookie like [`Self::sign_in_session`].
+    fn sign_in_link(&mut self, link: &str) {
+        let Some(sets) = crate::slack::magic::parse_link(link) else {
+            self.sink.send(Event::SignIn(SignIn::Failed(
+                "That is not a Slack sign-in link. Copy the slack:// link the browser offers to open."
+                    .into(),
+            )));
+            return;
+        };
+        let internal = self.internal.clone();
+        let sink = self.sink.clone();
+        self.sink.send(Event::SignIn(SignIn::Exchanging));
+        tokio::spawn(async move {
+            let mut signed = 0;
+            let mut problems = Vec::new();
+            for set in sets {
+                let redeemed = match crate::slack::magic::redeem(&set).await {
+                    Ok(redeemed) => redeemed,
+                    Err(error) => {
+                        problems.push(describe(&error));
+                        continue;
+                    }
+                };
+                for team in redeemed.teams {
+                    match team {
+                        TeamResult::SignedIn { url } => {
+                            let Some(cookie) = redeemed.cookie.as_deref() else {
+                                problems.push("Slack signed in but set no session cookie".into());
+                                continue;
+                            };
+                            let result = crate::slack::session::derive(cookie, &url)
+                                .await
+                                .map(|session| SignedIn {
+                                    team_id: session.team_id,
+                                    user_id: session.user_id,
+                                    token: session.token,
+                                })
+                                .map_err(|e| describe(&e));
+                            match result {
+                                Ok(session) => {
+                                    signed += 1;
+                                    let _ = internal.send(Internal::SignedIn(Ok(session)));
+                                }
+                                Err(error) => problems.push(error),
+                            }
+                        }
+                        // SSO and similar: the workspace wants the browser
+                        // again; its page then offers a new link to paste.
+                        TeamResult::Browser { url } => {
+                            if crate::mrkdwn::is_openable(&url)
+                                && let Err(error) = open::that_detached(&url)
+                            {
+                                log::warn!("could not open the browser: {error}");
+                            }
+                            sink.send(Event::Notice(
+                                "A workspace needs one more step in the browser; paste the new link it offers."
+                                    .into(),
+                            ));
+                        }
+                        TeamResult::Failed { reason } => problems.push(reason),
+                    }
+                }
+            }
+            if signed == 0 {
+                let error = if problems.is_empty() {
+                    "Slack signed in to no workspace with that link.".to_owned()
+                } else {
+                    format!("Could not sign in: {}", problems.join("; "))
+                };
+                let _ = internal.send(Internal::SignedIn(Err(error)));
+            } else if !problems.is_empty() {
+                log::warn!("some workspaces did not sign in: {}", problems.join("; "));
+            }
         });
     }
 

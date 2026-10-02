@@ -40,6 +40,9 @@ pub enum Command {
         cookie: String,
         workspace_url: String,
     },
+    /// Signs in with the `slack://` link Slack's browser sign-in hands to
+    /// you (see [`crate::slack::magic`]).
+    SignInLink(String),
     SignOut(String),
     /// The conversation on screen, for polling when Socket Mode is down.
     Focus {
@@ -139,6 +142,7 @@ impl std::fmt::Debug for Command {
             Self::CancelSignIn => f.write_str("CancelSignIn"),
             Self::Callback(_) => f.debug_tuple("Callback").field(&REDACTED).finish(),
             Self::PasteToken(_) => f.debug_tuple("PasteToken").field(&REDACTED).finish(),
+            Self::SignInLink(_) => f.debug_tuple("SignInLink").field(&REDACTED).finish(),
             Self::SignInSession { workspace_url, .. } => f
                 .debug_struct("SignInSession")
                 .field("cookie", &REDACTED)
