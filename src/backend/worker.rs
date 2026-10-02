@@ -1414,24 +1414,33 @@ pub fn describe(error: &SlackError) -> String {
 ///
 /// `page` fetches the page at a cursor (none for the first) and answers its
 /// items and the next cursor; `each` takes every page's items as they come,
-/// so a caller can show them early and keeps what arrived before a failure.
-/// The walk ends at an empty cursor, at the first error, or after
+/// so a caller can show them early and keeps what arrived before a failure,
+/// and answers whether to go on. The walk ends at an empty cursor, at a
+/// cursor Slack already gave (some undocumented listings answer every page
+/// with the same one), when `each` says stop, at the first error, or after
 /// `max_pages`, which is logged: a listing cut short looks complete
 /// otherwise.
 async fn paginate<T, Fut>(
     what: &str,
     max_pages: usize,
     mut page: impl FnMut(Option<String>) -> Fut,
-    mut each: impl FnMut(Vec<T>),
+    mut each: impl FnMut(Vec<T>) -> bool,
 ) -> Result<(), SlackError>
 where
     Fut: std::future::Future<Output = Result<(Vec<T>, Option<String>), SlackError>>,
 {
     let mut cursor = None;
+    let mut given = HashSet::new();
     for _ in 0..max_pages {
         let (items, next) = page(cursor.take()).await?;
-        each(items);
+        if !each(items) {
+            return Ok(());
+        }
         match next.filter(|next| !next.is_empty()) {
+            Some(next) if !given.insert(next.clone()) => {
+                log::debug!("{what}: Slack repeated a cursor; that was the last page");
+                return Ok(());
+            }
             Some(next) => cursor = Some(next),
             None => return Ok(()),
         }
@@ -1614,7 +1623,10 @@ async fn conversations(
                 Ok((page.channels, next))
             }
         },
-        |channels| list.extend(channels.into_iter().map(types::Channel::into_model)),
+        |channels| {
+            list.extend(channels.into_iter().map(types::Channel::into_model));
+            true
+        },
     )
     .await;
     if let Err(error) = walked {
@@ -1652,7 +1664,20 @@ async fn sections(client: Client, team: String, sink: Sink) {
                 Ok((page.channel_sections, page.cursor))
             }
         },
-        |sections| all.extend(sections),
+        // Slack has been seen answering every page with the same sections
+        // and a fresh cursor: keep each section once, and stop at a page
+        // that brings nothing new.
+        |sections| {
+            let before = all.len();
+            for section in sections {
+                if !all.iter().any(|s: &types::ChannelSection| {
+                    s.channel_section_id == section.channel_section_id
+                }) {
+                    all.push(section);
+                }
+            }
+            all.len() > before
+        },
     )
     .await;
     if let Err(error) = walked {
@@ -1698,7 +1723,10 @@ async fn sections(client: Client, team: String, sink: Sink) {
                     Ok((page.items, next))
                 }
             },
-            |page| items.extend(page),
+            |page| {
+                items.extend(page);
+                true
+            },
         )
         .await;
         match walked {
@@ -1888,6 +1916,7 @@ async fn users(client: Client, team: String, dirs: AppDirs, sink: Sink) {
                 team: team.clone(),
                 users,
             });
+            true
         },
     )
     .await;
@@ -2104,7 +2133,10 @@ async fn thread(client: Client, team: String, channel: String, ts: Ts, sink: Sin
                 Ok((page.messages, next))
             }
         },
-        |page| messages.extend(page.into_iter().filter_map(types::Message::into_model)),
+        |page| {
+            messages.extend(page.into_iter().filter_map(types::Message::into_model));
+            true
+        },
     )
     .await;
     if let Err(error) = walked {
@@ -2802,10 +2834,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paginate_stops_when_slack_repeats_itself() {
+        // The same cursor every time: the second page is the last.
+        let mut asked = 0;
+        let walked = paginate(
+            "t",
+            10,
+            |_| {
+                asked += 1;
+                std::future::ready(Ok((vec![1], Some("same".to_owned()))))
+            },
+            |_| true,
+        )
+        .await;
+        assert_eq!(walked, Ok(()));
+        assert_eq!(asked, 2);
+        // A caller that has seen it all before says stop, even though the
+        // cursors keep changing.
+        let asked = std::cell::Cell::new(0);
+        let mut taken = 0;
+        let walked = paginate(
+            "t",
+            10,
+            |_| {
+                asked.set(asked.get() + 1);
+                std::future::ready(Ok((vec![0], Some(asked.get().to_string()))))
+            },
+            |_| {
+                taken += 1;
+                taken < 2
+            },
+        )
+        .await;
+        assert_eq!(walked, Ok(()));
+        assert_eq!(asked.get(), 2);
+    }
+
+    #[tokio::test]
     async fn paginate_follows_cursors_to_the_end() {
         let mut asked = Vec::new();
         let mut seen = Vec::new();
-        let walked = paginate("t", 10, pages(3, None, &mut asked), |p| seen.extend(p)).await;
+        let walked = paginate("t", 10, pages(3, None, &mut asked), |p| {
+            seen.extend(p);
+            true
+        })
+        .await;
         assert_eq!(walked, Ok(()));
         assert_eq!(seen, [0, 1, 2, 3]);
         assert_eq!(
@@ -2818,12 +2891,20 @@ mod tests {
     async fn paginate_stops_at_the_cap_and_at_errors() {
         let mut asked = Vec::new();
         let mut seen = Vec::new();
-        let walked = paginate("t", 2, pages(100, None, &mut asked), |p| seen.extend(p)).await;
+        let walked = paginate("t", 2, pages(100, None, &mut asked), |p| {
+            seen.extend(p);
+            true
+        })
+        .await;
         assert_eq!(walked, Ok(()));
         assert_eq!(seen, [0, 1]);
         let mut asked = Vec::new();
         let mut seen = Vec::new();
-        let walked = paginate("t", 10, pages(5, Some(2), &mut asked), |p| seen.extend(p)).await;
+        let walked = paginate("t", 10, pages(5, Some(2), &mut asked), |p| {
+            seen.extend(p);
+            true
+        })
+        .await;
         assert_eq!(walked, Err(SlackError::RateLimited));
         // What came before the failure was handed over.
         assert_eq!(seen, [0, 1]);
