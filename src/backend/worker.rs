@@ -706,6 +706,15 @@ impl Worker {
                     },
                 }),
             },
+            Command::Views { team, command } => match self.team(&team) {
+                Some((client, sink)) => {
+                    tokio::spawn(super::views::run(client, team, command, sink));
+                }
+                None => self.sink.send(Event::Views {
+                    event: command.failed(NOT_SIGNED_IN.to_owned()),
+                    team,
+                }),
+            },
         }
     }
 

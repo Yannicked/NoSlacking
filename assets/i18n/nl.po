@@ -1384,3 +1384,207 @@ msgstr "deploy, storing"
 
 msgid "Remove"
 msgstr "Verwijderen"
+
+msgid "Activity"
+msgstr "Activiteit"
+
+msgid "Could not load this list: {error}"
+msgstr "Deze lijst kon niet worden geladen: {error}"
+
+msgid "Mentioned everyone in {place}"
+msgstr "Iedereen vermeld in {place}"
+
+msgid "Mentioned you in {place}"
+msgstr "Jou vermeld in {place}"
+
+msgid "Nothing new mentions you."
+msgstr "Niets nieuws vermeldt jou."
+
+msgid "Refresh"
+msgstr "Vernieuwen"
+
+msgid "Replied to your thread in {place}"
+msgstr "Gereageerd op je thread in {place}"
+
+msgid "a conversation"
+msgstr "een gesprek"
+
+msgid "Found by searching for your name; replies to your threads show as they arrive."
+msgstr "Gevonden door op je naam te zoeken; reacties op je threads verschijnen zodra ze binnenkomen."
+
+msgid "{name}, {count} new"
+msgstr "{name}, {count} nieuw"
+
+msgid "All unreads"
+msgstr "Alle ongelezen"
+
+msgid "You are all caught up."
+msgstr "Je bent helemaal bij."
+
+msgid "{count} conversation with unread messages"
+msgid_plural "{count} conversations with unread messages"
+msgstr[0] "{count} gesprek met ongelezen berichten"
+msgstr[1] "{count} gesprekken met ongelezen berichten"
+
+msgid "Mark all as read"
+msgstr "Alles als gelezen markeren"
+
+msgid "Could not load the messages: {error}"
+msgstr "De berichten konden niet worden geladen: {error}"
+
+msgid "Open the conversation for the rest"
+msgstr "Open het gesprek voor de rest"
+
+msgid "Open the conversation"
+msgstr "Gesprek openen"
+
+msgid "Mark as read"
+msgstr "Als gelezen markeren"
+msgid "Threads"
+msgstr "Threads"
+
+msgid "Threads you replied in, found by searching."
+msgstr "Threads waarin je reageerde, gevonden door te zoeken."
+
+msgid "No threads yet. Reply in one to follow it."
+msgstr "Nog geen threads. Reageer in een thread om die te volgen."
+
+msgid "{count} new reply"
+msgid_plural "{count} new replies"
+msgstr[0] "{count} nieuwe reactie"
+msgstr[1] "{count} nieuwe reacties"
+
+msgid "Reply"
+msgstr "Antwoorden"
+
+msgid "See all {count} reply"
+msgid_plural "See all {count} replies"
+msgstr[0] "Bekijk {count} reactie"
+msgstr[1] "Bekijk alle {count} reacties"
+
+msgid "Open the thread"
+msgstr "Thread openen"
+msgid "Later"
+msgstr "Later"
+
+msgid "Saved for later"
+msgstr "Bewaard voor later"
+
+msgid "Removed from Later"
+msgstr "Uit Later gehaald"
+
+msgid "Could not save the message: {error}"
+msgstr "Het bericht kon niet worden bewaard: {error}"
+
+msgid "Could not remove the message from Later: {error}"
+msgstr "Het bericht kon niet uit Later worden gehaald: {error}"
+
+msgid "Could not complete the reminder: {error}"
+msgstr "De herinnering kon niet worden afgerond: {error}"
+
+msgid "Could not load the saved messages: {error}"
+msgstr "De bewaarde berichten konden niet worden geladen: {error}"
+
+msgid "Could not load the reminders: {error}"
+msgstr "De herinneringen konden niet worden geladen: {error}"
+
+msgid "Starred messages"
+msgstr "Berichten met een ster"
+
+msgid "Reminders"
+msgstr "Herinneringen"
+
+msgid "Nothing saved. Save a message from its ⋯ menu."
+msgstr "Niets bewaard. Bewaar een bericht via het ⋯-menu."
+
+msgid "No reminders. Ask Slack with /remind."
+msgstr "Geen herinneringen. Vraag Slack erom met /remind."
+
+msgid "Remove from Later"
+msgstr "Uit Later halen"
+
+msgid "Next on {when}, repeating"
+msgstr "Volgende keer {when}, herhalend"
+
+msgid "Due {when}"
+msgstr "Gepland voor {when}"
+
+msgid "Repeating"
+msgstr "Herhalend"
+
+msgid "Mark as complete"
+msgstr "Als afgerond markeren"
+
+msgid "More actions"
+msgstr "Meer acties"
+
+msgid "Save for later"
+msgstr "Bewaren voor later"
+msgid "Scheduled"
+msgstr "Gepland"
+
+msgid "A slash command cannot be scheduled."
+msgstr "Een slash-opdracht kan niet worden ingepland."
+
+msgid "Scheduled for {when}"
+msgstr "Ingepland voor {when}"
+
+msgid "Could not schedule the message: {error}"
+msgstr "Het bericht kon niet worden ingepland: {error}"
+
+msgid "Could not cancel the scheduled message: {error}"
+msgstr "Het geplande bericht kon niet worden geannuleerd: {error}"
+
+msgid "Write the date as 2026-03-31."
+msgstr "Schrijf de datum als 2026-03-31."
+
+msgid "Write the time as 14:30."
+msgstr "Schrijf de tijd als 14:30."
+
+msgid "That time has passed."
+msgstr "Dat tijdstip is al voorbij."
+
+msgid "Slack schedules at most 120 days ahead."
+msgstr "Slack plant hoogstens 120 dagen vooruit."
+
+msgid "The message is empty."
+msgstr "Het bericht is leeg."
+
+msgid "Send later"
+msgstr "Later versturen"
+
+msgid "In 30 minutes"
+msgstr "Over 30 minuten"
+
+msgid "Tomorrow at 9:00"
+msgstr "Morgen om 9:00"
+
+msgid "Custom time…"
+msgstr "Zelf een tijd kiezen…"
+
+msgid "See scheduled messages"
+msgstr "Geplande berichten bekijken"
+
+msgid "Nothing scheduled. Pick a time from the clock beside Send."
+msgstr "Niets ingepland. Kies een tijd met de klok naast Versturen."
+
+msgid "To {place}, {when}"
+msgstr "Naar {place}, {when}"
+
+msgid "Do not send it"
+msgstr "Niet versturen"
+
+msgid "Change the scheduled message"
+msgstr "Gepland bericht wijzigen"
+
+msgid "Send at a time of your choosing"
+msgstr "Versturen op een tijd naar keuze"
+
+msgid "Date"
+msgstr "Datum"
+
+msgid "Time"
+msgstr "Tijd"
+
+msgid "Schedule"
+msgstr "Inplannen"

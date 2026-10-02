@@ -550,6 +550,17 @@ pub fn show(
                 {
                     send = true;
                 }
+                // Sending later, from a menu beside the button.
+                let later = theme::icon_button(ui, palette, Icon::Clock, 15.0, &t("Send later"));
+                egui::Popup::menu(&later).show(|ui| {
+                    super::views::send_later_menu(
+                        ui,
+                        palette,
+                        ready,
+                        composer.thread.as_ref(),
+                        actions,
+                    );
+                });
             });
         });
     });

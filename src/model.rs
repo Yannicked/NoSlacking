@@ -782,6 +782,9 @@ pub enum Action {
     /// Something about people: your typing, your status (see
     /// [`crate::people`]).
     People(crate::people::Action),
+    /// Opens or works a view at the top of the sidebar (see
+    /// [`crate::views`]).
+    Views(crate::views::Action),
 }
 
 #[cfg(test)]

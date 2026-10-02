@@ -5,6 +5,8 @@ use std::collections::HashMap;
 
 use tokio::sync::mpsc;
 
+mod views;
+
 use crate::backend::{Command, Event, Sink, Socket};
 use crate::credentials::AppCredentials;
 use crate::model::{
@@ -996,6 +998,11 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
             }
             Command::People { team, command } => {
                 for event in crate::backend::people::demo(&team, command) {
+                    sink.send(event);
+                }
+            }
+            Command::Views { team, command } => {
+                for event in views::answer(&team, command) {
                     sink.send(event);
                 }
             }

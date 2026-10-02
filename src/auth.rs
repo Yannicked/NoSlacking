@@ -58,6 +58,8 @@ pub const USER_SCOPES: &[&str] = &[
     "bookmarks:read",
     "users.profile:write",
     "users:write",
+    "reminders:read",
+    "reminders:write",
 ];
 
 pub fn loopback_redirect(port: u16) -> String {

@@ -988,6 +988,8 @@ pub struct App {
     pub convos: crate::convos::State,
     /// Watching the people on screen (see [`crate::people`]).
     pub people: crate::people::State,
+    /// The views at the top of the sidebar and what they list.
+    pub views: crate::views::State,
     /// Where the "New" line goes: the read marker when the open
     /// conversation was opened, by `team/channel`.
     pub read_line: Option<(String, Option<Ts>)>,
@@ -1137,6 +1139,7 @@ impl App {
             section_dialog: None,
             convos: crate::convos::State::default(),
             people: crate::people::State::default(),
+            views: crate::views::State::default(),
             read_line: None,
             sidebar_filter: String::new(),
             demo: options.demo,
@@ -1587,6 +1590,7 @@ impl App {
             } => self.settled(&team, &channel, change, result),
             Event::Convos { team, event } => crate::convos::handle(self, &team, event),
             Event::People { team, event } => crate::people::handle(self, &team, event),
+            Event::Views { team, event } => crate::views::handle(self, &team, event),
         }
     }
 
@@ -1749,6 +1753,7 @@ impl App {
         };
         if !changed {
             self.run_hooks(team, channel, &message);
+            crate::views::arrived(self, team, channel, &message);
         }
         let Some(workspace) = self.workspace_mut(team) else {
             return;
@@ -1846,6 +1851,8 @@ impl App {
     fn is_viewing(&self, team: &str, channel: &str) -> bool {
         self.page == Page::Main
             && self.window_focused
+            // A view in place of the conversation hides it.
+            && self.views.open.is_none()
             && self.active_team().as_deref() == Some(team)
             && self.active_workspace().and_then(|w| w.active.as_deref()) == Some(channel)
     }
@@ -1866,7 +1873,7 @@ impl App {
 
     /// Clears a conversation's unread state here and tells Slack, at most
     /// every few seconds.
-    fn mark_read(&mut self, team: &str, channel: &str) {
+    pub(crate) fn mark_read(&mut self, team: &str, channel: &str) {
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
@@ -1959,6 +1966,7 @@ impl App {
         self.thread = None;
         self.editing = None;
         self.page = Page::Main;
+        self.views.open = None;
         self.scroll_to_bottom
             .insert(Self::draft_key(&team, channel, None));
         // An anchor kept for another conversation's older page.
@@ -2492,6 +2500,7 @@ impl App {
             }
             Action::Convos(action) => crate::convos::apply(self, action),
             Action::People(action) => crate::people::apply(self, action),
+            Action::Views(action) => crate::views::apply(self, action),
         }
     }
 
@@ -2500,6 +2509,7 @@ impl App {
         self.save_settings();
         self.thread = None;
         self.page = Page::Main;
+        self.views.open = None;
         self.prepended = None;
         if let Some(channel) = self.workspace_mut(&team).and_then(|w| w.active.clone()) {
             self.scroll_to_bottom
@@ -2694,6 +2704,7 @@ impl App {
             self.remember_read_line(team, channel);
         }
         self.page = Page::Main;
+        self.views.open = None;
         let list = Self::draft_key(team, channel, None);
         // A jump replaces any other in the same list, and the end of the
         // list no longer pulls the view down to it.
@@ -2900,6 +2911,7 @@ impl App {
             || self.search.open
             || self.convos.overlay_open()
             || self.people.status.is_some()
+            || self.views.dialog.is_some()
     }
 
     /// Changes the sidebar at once, and in Slack, which then sends back the

@@ -21,6 +21,7 @@ mod selection;
 mod settings;
 mod sidebar;
 mod thread;
+mod views;
 
 use egui::{Color32, CornerRadius, Rect, Sense, Vec2};
 
@@ -48,10 +49,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .unwrap_or_default(),
     );
     ui.data_mut(|d| d.insert_temp(drafts_id(), drafts));
+    let view_open = app.views.open.is_some();
+    ui.data_mut(|d| d.insert_temp(views::open_id(), view_open));
+    let saved = std::sync::Arc::new(
+        app.active_team()
+            .and_then(|team| app.views.team(&team))
+            .map(|v| v.saved_keys.clone())
+            .unwrap_or_default(),
+    );
+    ui.data_mut(|d| d.insert_temp(views::saved_id(), saved));
     // First, so Esc leaves a selected message before it closes the thread.
     selection::keys(app, ui.ctx());
     keys::global(app, ui.ctx());
     browse::keys(app, ui.ctx());
+    views::keys(app, ui.ctx());
     match app.page {
         Page::SignIn => login::show(app, ui),
         Page::Settings => {
@@ -63,15 +74,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             sidebar::show(app, ui);
             if app.thread.is_some() {
                 thread::show(app, ui);
-            } else if app.convos.details.is_some() {
+            } else if app.convos.details.is_some() && app.views.open.is_none() {
                 details::show(app, ui);
             }
-            conversation::show(app, ui);
+            if app.views.open.is_some() {
+                views::show(app, ui);
+            } else {
+                conversation::show(app, ui);
+            }
         }
     }
     overlays::show(app, ui.ctx());
     search::show(app, ui.ctx());
     browse::show(app, ui.ctx());
+    views::dialog(app, ui.ctx());
     rich::end_frame();
 }
 
@@ -169,6 +185,16 @@ pub fn day_label(ts: &crate::model::Ts) -> String {
     } else {
         long_date(&t, date, date.year() != today.year())
     }
+}
+
+/// A moment given in seconds since the epoch, as a list shows it: "Today
+/// at 14:03", "Monday, March 3 at 09:00".
+pub fn moment_label(seconds: i64) -> String {
+    let ts = crate::model::Ts::new(format!("{seconds}.000000"));
+    crate::i18n::tf(
+        "{date} at {time}",
+        &[("date", &day_label(&ts)), ("time", &short_time(&ts))],
+    )
 }
 
 /// The full moment of a message, for the tooltip over its time:
