@@ -150,15 +150,11 @@ pub async fn run(
     }
 }
 
+/// Whether Slack refused the app-level token itself, so reconnecting
+/// cannot help until a new one is saved: any sign-in error, or a token
+/// that is not an app-level token at all.
 fn is_fatal(code: &str) -> bool {
-    matches!(
-        code,
-        "invalid_auth"
-            | "not_authed"
-            | "token_revoked"
-            | "not_allowed_token_type"
-            | "invalid_token"
-    )
+    client::is_auth_code(code) || matches!(code, "not_allowed_token_type" | "invalid_token")
 }
 
 /// One socket, from open to close. `Ok` carries why Slack asked us to
@@ -262,6 +258,16 @@ mod tests {
             (None, Meaning::Reconnect("refresh_requested".into()))
         );
         assert_eq!(read_frame("garbage"), (None, Meaning::Ignore));
+    }
+
+    #[test]
+    fn refused_tokens_are_fatal_and_outages_are_not() {
+        for code in ["invalid_auth", "token_revoked", "not_allowed_token_type"] {
+            assert!(is_fatal(code), "{code}");
+        }
+        for code in ["ratelimited", "internal_error", "channel_not_found"] {
+            assert!(!is_fatal(code), "{code}");
+        }
     }
 
     #[test]

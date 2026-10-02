@@ -35,17 +35,30 @@ pub enum SlackError {
     Decode(String),
 }
 
+/// The error codes that mean a token no longer works and the workspace
+/// needs signing in again. The one list for every check, so the sign-out
+/// logic, the messages and the sockets cannot disagree.
+pub const AUTH_ERRORS: &[&str] = &[
+    "invalid_auth",
+    "not_authed",
+    "token_revoked",
+    "account_inactive",
+    "token_expired",
+    // A rotating token's refresh token was refused: nothing can renew it.
+    "invalid_refresh_token",
+    "invalid_grant",
+];
+
+/// Whether `code` is one of [`AUTH_ERRORS`].
+pub fn is_auth_code(code: &str) -> bool {
+    AUTH_ERRORS.contains(&code)
+}
+
 impl SlackError {
     /// Whether the token no longer works and the workspace needs signing in
     /// again.
     pub fn is_auth(&self) -> bool {
-        matches!(
-            self,
-            Self::Api(code) if matches!(
-                code.as_str(),
-                "invalid_auth" | "not_authed" | "token_revoked" | "account_inactive" | "token_expired"
-            )
-        )
+        matches!(self, Self::Api(code) if is_auth_code(code))
     }
 
     pub fn code(&self) -> Option<&str> {
@@ -536,6 +549,9 @@ mod tests {
             .expect_err("fails");
         assert_eq!(error, SlackError::Api("invalid_auth".into()));
         assert!(error.is_auth());
+        assert!(SlackError::Api("invalid_refresh_token".into()).is_auth());
+        assert!(SlackError::Api("invalid_grant".into()).is_auth());
+        assert!(!SlackError::RateLimited.is_auth());
         assert!(!SlackError::Api("channel_not_found".into()).is_auth());
         assert!(!SlackError::Api("missing_scope".into()).is_auth());
         assert!(decode::<serde_json::Value>(b"<html>").is_err());
