@@ -433,6 +433,7 @@ pub fn show(
     }
 
     uploads(ui, composer, actions);
+    staged(ui, palette, draft, actions);
 
     let frame = egui::Frame::new()
         .fill(palette.surface)
@@ -533,7 +534,7 @@ pub fn show(
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let ready = !draft.text.trim().is_empty();
+                let ready = !draft.text.trim().is_empty() || !draft.attachments.is_empty();
                 let (rect, response) =
                     ui.allocate_exact_size(Vec2::new(36.0, 28.0), Sense::click());
                 let fill = if ready {
@@ -584,12 +585,60 @@ pub fn show(
             });
         });
     });
-    if send && !draft.text.trim().is_empty() {
+    if send && (!draft.text.trim().is_empty() || !draft.attachments.is_empty()) {
         actions.push(Action::Send {
             text: draft.text.clone(),
             thread: composer.thread.clone(),
             broadcast: draft.broadcast,
         });
+    }
+}
+
+/// The files waiting to go with the message, each with a button to take
+/// it out again.
+fn staged(ui: &mut egui::Ui, palette: &Palette, draft: &mut Draft, actions: &mut Vec<Action>) {
+    let mut removed = None;
+    ui.horizontal_wrapped(|ui| {
+        for (index, path) in draft.attachments.iter().enumerate() {
+            let name = path.file_name().map_or_else(
+                || path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            egui::Frame::new()
+                .fill(palette.surface)
+                .stroke(Stroke::new(1.0, palette.outline))
+                .corner_radius(CornerRadius::same(theme::RADIUS_SMALL))
+                .inner_margin(Margin::symmetric(8, 4))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let (icon, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                        Icon::Paperclip
+                            .image(palette.secondary, 14.0)
+                            .paint_at(ui, icon);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&name)
+                                    .font(theme::regular(12.5))
+                                    .color(palette.text),
+                            )
+                            .truncate(),
+                        );
+                        let remove = theme::icon_button(
+                            ui,
+                            palette,
+                            Icon::X,
+                            12.0,
+                            &tf("Remove {name}", &[("name", &name)]),
+                        );
+                        if remove.clicked() {
+                            removed = Some(index);
+                        }
+                    });
+                });
+        }
+    });
+    if let Some(index) = removed {
+        actions.push(Action::Unstage(draft.attachments.remove(index)));
     }
 }
 

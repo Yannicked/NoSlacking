@@ -97,6 +97,9 @@ pub struct Draft {
     /// Whether suggestions were showing when last drawn, so Esc closes
     /// them and not the thread.
     pub suggesting: bool,
+    /// Files waiting in the composer, sent with the message (its text
+    /// becomes their comment) rather than the moment they were added.
+    pub attachments: Vec<PathBuf>,
 }
 
 /// A file on its way to Slack, shown under the composer it was sent from.
@@ -1327,7 +1330,7 @@ impl App {
             }
         }
         while let Ok((target, path)) = self.uploads.1.try_recv() {
-            self.start_upload(target, path, String::new());
+            self.stage(target, path);
         }
         self.copy_image_frame(ctx);
         if self.catalog.poll() {
@@ -2016,6 +2019,22 @@ impl App {
         };
         let key = Self::draft_key(&team, &channel, thread.as_ref());
         let draft = self.drafts.remove(&key).unwrap_or_default();
+        if !draft.attachments.is_empty() {
+            // Files go with the message: its text is the first file's
+            // comment, as Slack shows a message with files.
+            let wire = crate::emoji::tone_shortcodes(
+                &to_wire(text.trim_end(), &draft.mentions),
+                self.settings.skin_tone,
+            );
+            self.used_emoji(&crate::emoji::used_in(&wire));
+            let target = (team, channel, thread);
+            let mut comment = wire;
+            for path in draft.attachments {
+                self.start_upload(target.clone(), path, std::mem::take(&mut comment));
+            }
+            self.scroll_to_bottom.insert(key);
+            return;
+        }
         let mut text = text;
         if let Some((command, args)) = crate::slash::parse(&text) {
             match command.as_str() {
@@ -2186,9 +2205,36 @@ impl App {
         Some((team, channel, thread))
     }
 
+    /// A file for the composer: one with a comment goes now; one without
+    /// waits in the composer, to go with the message.
     fn upload(&mut self, thread: Option<Ts>, path: PathBuf, comment: String) {
         if let Some(target) = self.upload_target(thread) {
-            self.start_upload(target, path, comment);
+            if comment.is_empty() {
+                self.stage(target, path);
+            } else {
+                self.start_upload(target, path, comment);
+            }
+        }
+    }
+
+    /// Adds a file to the composer of `target`, once.
+    fn stage(&mut self, (team, channel, thread): UploadTarget, path: PathBuf) {
+        let key = Self::draft_key(&team, &channel, thread.as_ref());
+        let draft = self.drafts.entry(key).or_default();
+        if !draft.attachments.contains(&path) {
+            draft.attachments.push(path);
+        }
+        self.focus_composer = true;
+    }
+
+    /// A file taken out of a composer before sending: a pasted picture is
+    /// a copy of ours, so it goes.
+    fn unstage(&self, path: &std::path::Path) {
+        if path.starts_with(self.dirs.pasted())
+            && let Err(error) = std::fs::remove_file(path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            log::debug!("could not remove a pasted image: {error}");
         }
     }
 
@@ -2433,6 +2479,7 @@ impl App {
                 comment,
             } => self.upload(thread, path, comment),
             Action::PickUpload { thread } => self.pick_upload(thread),
+            Action::Unstage(path) => self.unstage(&path),
             Action::PasteImage { thread } => self.paste_image(thread),
             Action::CopyImage(uris) => self.copying = uris,
             Action::CancelUpload(id) => {
