@@ -355,6 +355,7 @@ fastframe_icons::icons! {
         Check => lucide "check",
         CheckCheck => "check-check",
         ChevronDown => lucide "chevron-down",
+        ChevronLeft => lucide "chevron-left",
         ChevronRight => lucide "chevron-right",
         CircleAlert => lucide "circle-alert",
         Code => "code",
@@ -377,6 +378,7 @@ fastframe_icons::icons! {
         Pencil => lucide "pencil",
         Pin => lucide "pin",
         PinOff => lucide "pin-off",
+        Play => lucide "play",
         Plus => lucide "plus",
         Refresh => lucide "refresh-cw",
         Reply => "reply",
@@ -393,6 +395,8 @@ fastframe_icons::icons! {
         User => lucide "user",
         Users => lucide "users",
         X => lucide "x",
+        ZoomIn => "zoom-in",
+        ZoomOut => "zoom-out",
     }
 }
 

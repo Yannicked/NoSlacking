@@ -354,7 +354,7 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
         rich::show(ui, &rich, &message.text, message.edited, actions);
     }
     for file in &message.files {
-        file_view(ui, row, file, actions);
+        file_view(ui, row, message, file, actions);
     }
     for attachment in &message.attachments {
         attachment_view(ui, row, attachment, actions);
@@ -513,7 +513,13 @@ fn edit(
     });
 }
 
-fn file_view(ui: &mut egui::Ui, row: &Row<'_>, file: &File, actions: &mut Vec<Action>) {
+fn file_view(
+    ui: &mut egui::Ui,
+    row: &Row<'_>,
+    message: &Message,
+    file: &File,
+    actions: &mut Vec<Action>,
+) {
     let palette = row.palette;
     let team = &row.workspace.info.team_id;
     if file.is_image()
@@ -535,14 +541,19 @@ fn file_view(ui: &mut egui::Ui, row: &Row<'_>, file: &File, actions: &mut Vec<Ac
             .on_hover_cursor(egui::CursorIcon::ZoomIn)
             .on_hover_text(&file.name);
         if response.clicked() {
-            let full = file
-                .url_private
-                .as_deref()
-                .filter(|_| !file.mimetype.contains("gif") || file.size < 8 * 1024 * 1024)
-                .map_or(uri, |url| super::image_uri(team, url));
-            actions.push(Action::Preview {
-                uri: full,
-                name: file.name.clone(),
+            // In the thread panel the viewer steps through the thread's
+            // pictures; a parent is its own thread.
+            let thread = row.in_thread.then(|| {
+                message
+                    .thread_ts
+                    .clone()
+                    .unwrap_or_else(|| message.ts.clone())
+            });
+            actions.push(Action::ViewImage {
+                channel: row.channel.to_owned(),
+                thread,
+                ts: message.ts.clone(),
+                file: file.id.clone(),
             });
         }
         return;
