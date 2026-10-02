@@ -6,6 +6,7 @@
 
 pub mod app;
 pub mod auth;
+pub mod autostart;
 pub mod backend;
 pub mod badge;
 pub mod credentials;

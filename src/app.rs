@@ -1012,6 +1012,7 @@ impl App {
         };
         app.start_theme_scan();
         app.start_tray();
+        app.refresh_autostart();
         app
     }
 
