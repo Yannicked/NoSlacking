@@ -1621,3 +1621,6 @@ msgstr "Afbeelding gekopieerd"
 
 msgid "Could not copy the image: {error}"
 msgstr "De afbeelding kon niet worden gekopieerd: {error}"
+
+msgid "Remove {name}"
+msgstr "{name} verwijderen"

@@ -719,6 +719,8 @@ pub enum Action {
     PasteImage {
         thread: Option<Ts>,
     },
+    /// A file was taken out of a composer before sending.
+    Unstage(std::path::PathBuf),
     /// Puts a picture on the clipboard, from the first of these image
     /// loader URIs that loads (the full picture, then its thumbnail).
     CopyImage(Vec<String>),

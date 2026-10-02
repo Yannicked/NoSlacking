@@ -545,11 +545,25 @@ impl DemoSetup {
                 }
             }
             // A file on its way, with its progress and Cancel.
-            Some("upload") => app.actions.push(Action::Upload {
+            // A file waiting in the composer, not sent yet.
+            Some("attach") => app.actions.push(Action::Upload {
                 thread: None,
                 path: "release-notes.pdf".into(),
                 comment: String::new(),
             }),
+            Some("upload") => {
+                app.actions.push(Action::Upload {
+                    thread: None,
+                    path: "release-notes.pdf".into(),
+                    comment: String::new(),
+                });
+                // Files wait in the composer until the message is sent.
+                app.actions.push(Action::Send {
+                    text: String::new(),
+                    thread: None,
+                    broadcast: false,
+                });
+            }
             // Picking people for a group message, one already picked.
             Some(view @ ("details" | "members" | "files" | "pins" | "bookmarks")) => {
                 use noslacking::convos::{Action as Convos, Tab};
