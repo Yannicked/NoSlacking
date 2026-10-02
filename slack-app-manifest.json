@@ -31,7 +31,8 @@
         "files:read",
         "files:write",
         "emoji:read",
-        "team:read"
+        "team:read",
+        "search:read"
       ]
     }
   },

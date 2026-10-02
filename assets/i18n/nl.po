@@ -801,3 +801,56 @@ msgstr "Start met het venster open."
 
 msgid "Start when you log in"
 msgstr "Starten wanneer je inlogt"
+
+msgid "Load newer messages"
+msgstr "Nieuwere berichten laden"
+
+msgid "That conversation is not open to you here"
+msgstr "Dat gesprek is hier niet voor je open"
+
+msgid "Link copied"
+msgstr "Link gekopieerd"
+
+msgid "This message has no link yet"
+msgstr "Dit bericht heeft nog geen link"
+
+msgid "Copy link"
+msgstr "Link kopiëren"
+
+msgid "Search ({shortcut})"
+msgstr "Zoeken ({shortcut})"
+
+msgid "Search messages and files"
+msgstr "Zoek in berichten en bestanden"
+
+msgid "Narrow it down with from:@name, in:#channel, before:2025-01-31, after:2025-01-01 or has:link"
+msgstr "Verfijn met from:@naam, in:#kanaal, before:2025-01-31, after:2025-01-01 of has:link"
+
+msgid "Newest"
+msgstr "Nieuwste"
+
+msgid "Most relevant"
+msgstr "Meest relevant"
+
+msgid "Searching needs the search:read permission, which this sign-in lacks. Sign in to the workspace again to allow it; with your own Slack app, update it from the manifest first."
+msgstr "Zoeken vraagt de toestemming search:read, die deze aanmelding niet heeft. Log opnieuw in bij de werkruimte om die te geven; met je eigen Slack-app werk je die eerst bij vanuit het manifest."
+
+msgid "Could not search: {error}"
+msgstr "Zoeken lukte niet: {error}"
+
+msgid "No results."
+msgstr "Geen resultaten."
+
+msgid "{count} result"
+msgid_plural "{count} results"
+msgstr[0] "{count} resultaat"
+msgstr[1] "{count} resultaten"
+
+msgid "in a thread"
+msgstr "in een thread"
+
+msgid "Jump to newest"
+msgstr "Naar nieuwste"
+
+msgid "Jump to unread"
+msgstr "Naar ongelezen"

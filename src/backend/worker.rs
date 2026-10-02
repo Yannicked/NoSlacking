@@ -549,6 +549,36 @@ impl Worker {
                 cursor,
             } => self.load_history(team, channel, Some(cursor)),
             Command::LoadThread { team, channel, ts } => self.load_thread(team, channel, ts),
+            Command::LoadAround { team, channel, ts } => match self.team(&team) {
+                Some((client, sink)) => {
+                    tokio::spawn(super::around::around(client, team, channel, ts, sink));
+                }
+                None => self.history_unavailable(team, channel),
+            },
+            Command::Search {
+                query,
+                page,
+                request,
+            } => match self.team(&query.team) {
+                Some((client, sink)) => {
+                    tokio::spawn(super::search::search(client, query, page, request, sink));
+                }
+                None => self.sink.send(Event::Search {
+                    team: query.team,
+                    request,
+                    result: Err(crate::search::Failure::Other(NOT_SIGNED_IN.to_owned())),
+                }),
+            },
+            Command::LoadNewer {
+                team,
+                channel,
+                after,
+            } => match self.team(&team) {
+                Some((client, sink)) => {
+                    tokio::spawn(super::around::newer(client, team, channel, after, sink));
+                }
+                None => self.history_unavailable(team, channel),
+            },
             Command::Send {
                 team,
                 channel,
@@ -1201,6 +1231,13 @@ impl Worker {
             if self.browser_sign_in_pending() && crate::slack::magic::parse_link(&url).is_some() {
                 self.browser_sign_in = None;
                 self.sign_in_link(&url);
+            } else if let Some(link) = crate::links::parse_deep(&url).filter(|link| {
+                link.team
+                    .as_ref()
+                    .is_some_and(|t| self.teams.contains_key(t))
+            }) {
+                // A link to a conversation of a workspace signed in here.
+                self.sink.send(Event::DeepLink(link));
             } else {
                 log::info!("ignoring a slack:// link with no browser sign-in in progress");
             }
@@ -2904,6 +2941,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deep_links_reach_the_interface_only_for_signed_in_workspaces() {
+        let (mut worker, events) = worker();
+        worker.waiting = None;
+        team(&mut worker, "TA", session());
+        worker.command(Command::Callback("slack://channel?team=TB&id=C1".into()));
+        assert!(events.try_iter().next().is_none(), "not signed in here");
+        worker.command(Command::Callback("slack://channel?team=TA&id=C1".into()));
+        let events: Vec<Event> = events.try_iter().collect();
+        assert!(
+            matches!(&events[..], [Event::DeepLink(link)] if link.team.as_deref() == Some("TA")),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn commands_for_an_unknown_workspace_get_an_answer() {
         let (mut worker, events) = worker();
         worker.waiting = None;
@@ -2925,11 +2977,17 @@ mod tests {
             team: "TX".into(),
             channel: "C1".into(),
         });
+        worker.command(Command::LoadAround {
+            team: "TX".into(),
+            channel: "C1".into(),
+            ts: Ts::new("1.0"),
+        });
         let events: Vec<Event> = events.try_iter().collect();
         assert!(
             matches!(&events[..], [
                 Event::Sent { local, result: Err(_), .. },
                 Event::Settled { change: Change::Delete { .. }, result: Err(_), .. },
+                Event::HistoryFailed { .. },
                 Event::HistoryFailed { .. },
             ] if local.as_str() == "local-1"),
             "{events:?}"

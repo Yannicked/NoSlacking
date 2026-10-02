@@ -470,6 +470,13 @@ pub struct Timeline {
     pub loading: bool,
     /// Whether the first page has arrived.
     pub loaded: bool,
+    /// Whether newer messages exist on the server than the newest one
+    /// here: the list was opened around an older message, and does not
+    /// reach the present until newer pages are read.
+    pub has_newer: bool,
+    /// The message whose surroundings are on their way, after a jump to
+    /// it: they replace the list when they arrive.
+    pub around: Option<Ts>,
 }
 
 impl Timeline {
@@ -545,6 +552,21 @@ pub enum Action {
     },
     CloseThread,
     LoadOlder,
+    /// Brings the open conversation's "New" line into view.
+    JumpToUnread,
+    /// Brings the open conversation's newest messages into view.
+    JumpToNewest,
+    /// Reads the page after the newest message loaded, in a list opened
+    /// around an older message.
+    LoadNewer,
+    /// Shows a message of the open workspace in its conversation, with the
+    /// messages around it, and highlights it. `thread` is its thread's
+    /// parent when it is a reply, which then opens beside it.
+    JumpTo {
+        channel: String,
+        ts: Ts,
+        thread: Option<Ts>,
+    },
     Send {
         text: String,
         thread: Option<Ts>,
@@ -601,6 +623,12 @@ pub enum Action {
         name: String,
     },
     OpenSwitcher,
+    /// Opens the search window.
+    OpenSearch,
+    /// Searches for what is typed in the search window.
+    RunSearch,
+    /// Reads the next page of the search results.
+    SearchMore,
     /// Changes the sidebar here and in Slack.
     Sidebar(crate::sidebar::SidebarEdit),
     /// Asks for a section name: a new section (taking `channel` along), or
@@ -622,6 +650,12 @@ pub enum Action {
         name: String,
     },
     OpenUrl(String),
+    /// Copies a message's permalink; `thread` is its parent for a reply.
+    CopyLink {
+        channel: String,
+        ts: Ts,
+        thread: Option<Ts>,
+    },
     OpenProfile(String),
     Copy(String),
     ShowSettings,

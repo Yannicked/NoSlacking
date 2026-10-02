@@ -1097,7 +1097,7 @@ fn toolbar(
     actions: &mut Vec<Action>,
 ) {
     let palette = row.palette;
-    let mut buttons = 3 + usize::from(!row.in_thread);
+    let mut buttons = 4 + usize::from(!row.in_thread);
     if me {
         buttons += 2;
     }
@@ -1185,6 +1185,13 @@ fn toolbar(
         }
         if theme::icon_button(ui, palette, Icon::Copy, 16.0, &t("Copy text (C)")).clicked() {
             actions.push(Action::Copy(plain_text(row.workspace, message)));
+        }
+        if theme::icon_button(ui, palette, Icon::Link, 16.0, &t("Copy link")).clicked() {
+            actions.push(Action::CopyLink {
+                channel: row.channel.to_owned(),
+                ts: message.ts.clone(),
+                thread: message.thread_ts.clone(),
+            });
         }
         if me {
             if theme::icon_button(ui, palette, Icon::Pencil, 16.0, &t("Edit message (E)")).clicked()

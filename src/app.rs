@@ -497,8 +497,13 @@ impl WorkspaceState {
         let newest = messages.iter().map(|m| m.ts.clone()).max();
         let timeline = self.timelines.entry(channel.to_owned()).or_default();
         let first = !timeline.loaded;
-        timeline.merge(messages);
-        timeline.loading = false;
+        // The newest page does not join a stretch of older history opened
+        // around a message: it would leave a gap between them unseen.
+        let joins = older || !timeline.has_newer;
+        timeline.merge(if joins { messages } else { Vec::new() });
+        // Messages around one jumped to are still coming, and will replace
+        // these: nothing else may be asked for until then.
+        timeline.loading = timeline.around.is_some();
         if older || first {
             timeline.has_more = has_more;
             timeline.cursor = cursor;
@@ -512,9 +517,71 @@ impl WorkspaceState {
         (arrived, first)
     }
 
+    /// The messages around one jumped to, which replace the list: the
+    /// stretch it held may lie far from them. `older` is whether there is
+    /// history before them, and its cursor. Returns whom to fetch.
+    fn around_arrived(
+        &mut self,
+        channel: &str,
+        messages: Vec<Message>,
+        older: (bool, Option<String>),
+        has_newer: bool,
+    ) -> Arrived {
+        let arrived = self.arrived_in(&messages);
+        let timeline = self.timelines.entry(channel.to_owned()).or_default();
+        // Messages still being sent stay; they go after everything real.
+        let local: Vec<Message> = timeline
+            .messages
+            .iter()
+            .filter(|m| m.ts.is_local())
+            .cloned()
+            .collect();
+        timeline.messages = messages;
+        for message in local {
+            timeline.upsert(message);
+        }
+        (timeline.has_more, timeline.cursor) = older;
+        timeline.has_newer = has_newer;
+        timeline.loaded = true;
+        timeline.loading = false;
+        timeline.around = None;
+        arrived
+    }
+
+    /// The page after the newest message of a list of older history.
+    /// Returns whom to fetch.
+    fn newer_arrived(&mut self, channel: &str, messages: Vec<Message>, has_newer: bool) -> Arrived {
+        let arrived = self.arrived_in(&messages);
+        let newest = messages.iter().map(|m| m.ts.clone()).max();
+        let timeline = self.timelines.entry(channel.to_owned()).or_default();
+        timeline.merge(messages);
+        timeline.has_newer = has_newer;
+        timeline.loading = false;
+        if let (Some(newest), Some(conversation)) = (newest, self.conversation_mut(channel))
+            && conversation.latest.as_ref().is_none_or(|l| *l < newest)
+        {
+            conversation.latest = Some(newest);
+        }
+        arrived
+    }
+
+    /// The authors, repliers and apps of `messages` not known yet.
+    fn arrived_in(&self, messages: &[Message]) -> Arrived {
+        Arrived {
+            users: self.unknown_users(messages.iter().flat_map(|m| {
+                m.user
+                    .as_deref()
+                    .into_iter()
+                    .chain(m.reply_users.iter().map(String::as_str))
+            })),
+            bots: self.unknown_bots(messages.iter()),
+        }
+    }
+
     fn history_failed(&mut self, channel: &str) {
         if let Some(timeline) = self.timelines.get_mut(channel) {
             timeline.loading = false;
+            timeline.around = None;
         }
     }
 
@@ -599,7 +666,11 @@ impl WorkspaceState {
             remove_echoed_local(timeline, &message, from_me);
             let new = timeline.find_mut(&message.ts).is_none();
             let ts = message.ts.clone();
-            timeline.upsert(message);
+            // A list of older history shows new messages once it is read up
+            // to them, not after a gap.
+            if !(new && timeline.has_newer) {
+                timeline.upsert(message);
+            }
             if new && let Some(conversation) = self.conversation_mut(channel) {
                 if conversation.latest.as_ref().is_none_or(|l| *l < ts) {
                     conversation.latest = Some(ts.clone());
@@ -895,6 +966,10 @@ pub struct App {
     /// Focus the field of the dialog or picker just opened, once: asking
     /// every frame would keep Tab from reaching its buttons.
     pub focus_overlay: bool,
+    /// The search window and its results.
+    pub search: crate::search::Search,
+    /// Messages being brought into view, at most one per list.
+    pub jumps: Vec<crate::jump::Jump>,
     local_counter: u64,
     uploads: (mpsc::Sender<PickedFile>, mpsc::Receiver<PickedFile>),
     marks: HashMap<(String, String), (Ts, Instant)>,
@@ -999,6 +1074,8 @@ impl App {
             scroll_to_bottom: HashSet::new(),
             focus_composer: true,
             focus_overlay: false,
+            jumps: Vec::new(),
+            search: crate::search::Search::default(),
             local_counter: 0,
             uploads: mpsc::channel(),
             marks: HashMap::new(),
@@ -1259,6 +1336,11 @@ impl App {
             Event::Notice(text) => self.toast(text, false),
             Event::Dnd { team, dnd } => self.dnd_arrived(&team, dnd),
             Event::SlackPrefs { team, prefs } => self.prefs_arrived(&team, prefs),
+            Event::DeepLink(link) => {
+                if !self.follow(&link) {
+                    self.toast(t("That conversation is not open to you here"), true);
+                }
+            }
             // A workspace's conversations, people, apps and sidebar.
             Event::Conversations {
                 team,
@@ -1313,6 +1395,49 @@ impl App {
                     tf("Could not load messages: {error}", &[("error", &error)]),
                     true,
                 );
+            }
+            Event::Around {
+                team,
+                channel,
+                ts,
+                messages,
+                has_older,
+                cursor,
+                has_newer,
+            } => {
+                if let Some(workspace) = self.workspace_mut(&team) {
+                    let arrived = workspace.around_arrived(
+                        &channel,
+                        messages,
+                        (has_older, cursor),
+                        has_newer,
+                    );
+                    log::debug!("loaded the messages around {} in {channel}", ts.as_str());
+                    self.fetch_arrived(&team, arrived);
+                }
+                // An anchor kept for the list as it was is stale now.
+                self.prepended = None;
+            }
+            Event::Search {
+                team,
+                request,
+                result,
+            } => {
+                if self.search.query.as_ref().is_some_and(|q| q.team == team) {
+                    self.search.arrived(request, result);
+                }
+            }
+            Event::Newer {
+                team,
+                channel,
+                messages,
+                has_newer,
+            } => {
+                if let Some(workspace) = self.workspace_mut(&team) {
+                    let arrived = workspace.newer_arrived(&channel, messages, has_newer);
+                    self.fetch_arrived(&team, arrived);
+                }
+                self.mark_if_viewing(&team, &channel);
             }
             Event::Thread {
                 team,
@@ -1766,6 +1891,11 @@ impl App {
         if wire.trim().is_empty() {
             return;
         }
+        if thread.is_none() {
+            // What you send goes at the end, which a list of older history
+            // does not show.
+            self.show_newest(&team, &channel);
+        }
         let local = self.next_local();
         let Some(workspace) = self.workspace_mut(&team) else {
             return;
@@ -1909,6 +2039,24 @@ impl App {
             Action::OpenThread { channel, ts } => self.open_thread(channel, ts),
             Action::CloseThread => self.thread = None,
             Action::LoadOlder => self.load_older(),
+            Action::LoadNewer => self.load_newer(),
+            Action::JumpToNewest => {
+                if let Some(team) = self.active_team()
+                    && let Some(channel) = self.active_workspace().and_then(|w| w.active.clone())
+                {
+                    self.show_newest(&team, &channel);
+                }
+            }
+            Action::JumpToUnread => self.jump_to_unread(),
+            Action::JumpTo {
+                channel,
+                ts,
+                thread,
+            } => {
+                if let Some(team) = self.active_team() {
+                    self.jump_to(&team, &channel, ts, thread);
+                }
+            }
             Action::ShowSettings => self.page = Page::Settings,
             Action::HideSettings => {
                 self.page = if self.workspaces.is_empty() {
@@ -1961,6 +2109,26 @@ impl App {
                 self.switcher = Some((String::new(), 0));
             }
             Action::OpenProfile(user) => self.profile = Some(user),
+            Action::OpenSearch => self.open_search(),
+            Action::RunSearch => {
+                let started = self.active_team().and_then(|team| self.search.start(&team));
+                if let Some((query, request)) = started {
+                    self.backend.send(Command::Search {
+                        query,
+                        page: 1,
+                        request,
+                    });
+                }
+            }
+            Action::SearchMore => {
+                if let Some((query, page, request)) = self.search.more() {
+                    self.backend.send(Command::Search {
+                        query,
+                        page,
+                        request,
+                    });
+                }
+            }
             Action::DismissError => self.toasts.clear(),
             // Leaving the app: links, folders and the clipboard.
             Action::OpenUrl(url) => self.open_url(&url),
@@ -1976,6 +2144,11 @@ impl App {
                     );
                 }
             }
+            Action::CopyLink {
+                channel,
+                ts,
+                thread,
+            } => self.copy_link(ctx, &channel, &ts, thread.as_ref()),
             Action::Copy(text) => {
                 ctx.copy_text(text);
                 self.toast(t("Copied").into_owned(), false);
@@ -2083,6 +2256,185 @@ impl App {
         }
     }
 
+    /// Brings the newest messages of a conversation into view. A list of
+    /// older history is dropped for the newest page, read afresh.
+    pub fn show_newest(&mut self, team: &str, channel: &str) {
+        let list = Self::draft_key(team, channel, None);
+        self.jumps.retain(|j| j.list != list);
+        self.scroll_to_bottom.insert(list);
+        let detached = self
+            .workspace_mut(team)
+            .and_then(|w| w.timelines.get_mut(channel))
+            .filter(|t| t.has_newer);
+        if let Some(timeline) = detached {
+            timeline.messages.retain(|m| m.ts.is_local());
+            *timeline = Timeline {
+                messages: std::mem::take(&mut timeline.messages),
+                ..Timeline::default()
+            };
+            self.prepended = None;
+            self.ensure_loaded(team, channel);
+        }
+    }
+
+    /// Opens the search window, as it was left: results for another
+    /// workspace than the one on screen are dropped.
+    fn open_search(&mut self) {
+        let team = self.active_team();
+        if self
+            .search
+            .query
+            .as_ref()
+            .is_some_and(|q| Some(&q.team) != team.as_ref())
+        {
+            self.search = crate::search::Search {
+                text: std::mem::take(&mut self.search.text),
+                scope: self.search.scope,
+                sort: self.search.sort,
+                ..crate::search::Search::default()
+            };
+        }
+        self.search.open = true;
+        self.search.focus = true;
+    }
+
+    /// Brings the open conversation's "New" line into view: the first
+    /// message after the one you had read when it opened, loading the
+    /// history around it when it is further back than the list reaches.
+    fn jump_to_unread(&mut self) {
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        let Some(workspace) = self.active_workspace() else {
+            return;
+        };
+        let Some(channel) = workspace.active.clone() else {
+            return;
+        };
+        let list = Self::draft_key(&team, &channel, None);
+        let Some(read) = self
+            .read_line
+            .as_ref()
+            .filter(|(key, _)| *key == list)
+            .and_then(|(_, ts)| ts.clone())
+        else {
+            return;
+        };
+        let timeline = workspace.timelines.get(&channel);
+        let reaches = timeline
+            .is_some_and(|t| !t.has_more || t.messages.first().is_some_and(|m| m.ts <= read));
+        let first = timeline.and_then(|t| first_unread(t, &read, &workspace.info.user_id));
+        match first {
+            Some(ts) if reaches => {
+                self.jumps.retain(|j| j.list != list);
+                self.scroll_to_bottom.remove(&list);
+                self.jumps.push(crate::jump::Jump::new(list, ts, false));
+            }
+            // Further back than the list goes: the messages around the
+            // last one read, with the line just after it.
+            _ => {
+                self.jump_to(&team, &channel, read, None);
+                if let Some(jump) = self.jumps.iter_mut().find(|j| j.list == list) {
+                    jump.highlight = false;
+                }
+            }
+        }
+    }
+
+    /// Asks for the page after the newest message of the open list, when
+    /// it holds older history.
+    fn load_newer(&mut self) {
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        let Some(workspace) = self.workspace_mut(&team) else {
+            return;
+        };
+        let Some(channel) = workspace.active.clone() else {
+            return;
+        };
+        if let Some(timeline) = workspace.timelines.get_mut(&channel)
+            && timeline.has_newer
+            && !timeline.loading
+            && let Some(after) = timeline.newest().cloned()
+        {
+            timeline.loading = true;
+            self.backend.send(Command::LoadNewer {
+                team,
+                channel,
+                after,
+            });
+        }
+    }
+
+    /// Shows message `ts` of `channel` in `team` with the messages around
+    /// it, and lights it up. A reply (`thread` names its parent) shows its
+    /// parent in the conversation and itself in the thread beside it.
+    pub fn jump_to(&mut self, team: &str, channel: &str, ts: Ts, thread: Option<Ts>) {
+        if self.workspace_mut(team).is_none() {
+            return;
+        }
+        if self.active_team().as_deref() != Some(team) {
+            self.select_workspace(team.to_owned());
+        }
+        let reply = thread.filter(|parent| *parent != ts);
+        // What the conversation's own list shows: the message, or for a
+        // reply its parent.
+        let anchor = reply.clone().unwrap_or_else(|| ts.clone());
+        let opening = self.active_workspace().and_then(|w| w.active.as_deref()) != Some(channel);
+        if opening {
+            if let Some(workspace) = self.workspace_mut(team) {
+                workspace.active = Some(channel.to_owned());
+            }
+            self.settings
+                .last_conversation
+                .insert(team.to_owned(), channel.to_owned());
+            self.save_settings();
+            self.thread = None;
+            self.editing = None;
+            self.prepended = None;
+            self.remember_read_line(team, channel);
+        }
+        self.page = Page::Main;
+        let list = Self::draft_key(team, channel, None);
+        // A jump replaces any other in the same list, and the end of the
+        // list no longer pulls the view down to it.
+        self.scroll_to_bottom.remove(&list);
+        self.jumps.retain(|j| j.list != list);
+        let Some(workspace) = self.workspace_mut(team) else {
+            return;
+        };
+        let timeline = workspace.timelines.entry(channel.to_owned()).or_default();
+        let loaded = timeline.loaded && timeline.messages.iter().any(|m| m.ts == anchor);
+        if !loaded {
+            // What is there stays until the stretch around this message
+            // replaces it; meanwhile no newest page is asked for.
+            timeline.loading = true;
+            timeline.around = Some(anchor.clone());
+            self.backend.send(Command::LoadAround {
+                team: team.to_owned(),
+                channel: channel.to_owned(),
+                ts: anchor.clone(),
+            });
+        }
+        self.backend.send(Command::Focus {
+            team: team.to_owned(),
+            channel: Some(channel.to_owned()),
+        });
+        self.jumps
+            .push(crate::jump::Jump::new(list, anchor, reply.is_none()));
+        if let Some(parent) = reply {
+            let thread_list = Self::draft_key(team, channel, Some(&parent));
+            self.jumps.retain(|j| j.list != thread_list);
+            self.jumps
+                .push(crate::jump::Jump::new(thread_list, ts, true));
+            self.open_thread(channel.to_owned(), parent);
+        }
+        if opening {
+            self.mark_read(team, channel);
+        }
+    }
+
     fn open_picker(&mut self, target: PickerTarget) {
         self.focus_overlay = true;
         self.picker_query.clear();
@@ -2110,8 +2462,8 @@ impl App {
     }
 
     fn open_url(&mut self, url: &str) {
-        if let Some(channel) = slack_link_channel(url, self.active_workspace()) {
-            self.open_conversation(&channel);
+        if crate::links::parse_web(url).is_some_and(|link| self.follow(&link)) {
+            // A link into a signed-in workspace opens here.
         } else if !mrkdwn::is_openable(url) {
             // Attachments and blocks carry URLs a bot chose.
             self.toast(t("Only web and mail links can be opened"), true);
@@ -2121,6 +2473,64 @@ impl App {
                 tf("Could not open the link: {error}", &[("error", &error)]),
                 true,
             );
+        }
+    }
+
+    /// Opens what a link into Slack names, in the workspace it is for.
+    /// Returns whether that workspace is signed in here and has it.
+    fn follow(&mut self, link: &crate::links::Link) -> bool {
+        use crate::links::Target;
+        let Some(workspace) = self
+            .workspaces
+            .iter()
+            .find(|w| link.is_for(&w.info.team_id, &w.info.domain))
+        else {
+            return false;
+        };
+        let team = workspace.info.team_id.clone();
+        let known = |channel: &str| workspace.conversation(channel).is_some();
+        match &link.target {
+            Target::Workspace => {
+                self.select_workspace(team);
+            }
+            Target::Conversation(channel) if known(channel) => {
+                if self.active_team().as_deref() != Some(team.as_str()) {
+                    self.select_workspace(team);
+                }
+                self.open_conversation(channel);
+            }
+            Target::Message {
+                channel,
+                ts,
+                thread,
+            } if known(channel) => {
+                self.jump_to(&team, channel, ts.clone(), thread.clone());
+            }
+            Target::User(user) => {
+                if self.active_team().as_deref() != Some(team.as_str()) {
+                    self.select_workspace(team);
+                }
+                match self.direct_message(user) {
+                    Some(channel) => self.open_conversation(&channel),
+                    None => self.profile = Some(user.clone()),
+                }
+            }
+            Target::Conversation(_) | Target::Message { .. } => return false,
+        }
+        true
+    }
+
+    /// Copies the permalink of a message of the open workspace.
+    fn copy_link(&mut self, ctx: &egui::Context, channel: &str, ts: &Ts, thread: Option<&Ts>) {
+        let link = self
+            .active_workspace()
+            .and_then(|w| crate::links::permalink(&w.info.domain, channel, ts, thread));
+        match link {
+            Some(link) => {
+                ctx.copy_text(link);
+                self.toast(t("Link copied"), false);
+            }
+            None => self.toast(t("This message has no link yet"), true),
         }
     }
 
@@ -2161,6 +2571,7 @@ impl App {
             || self.preview.is_some()
             || self.confirm_delete.is_some()
             || self.section_dialog.is_some()
+            || self.search.open
     }
 
     /// Changes the sidebar at once, and in Slack, which then sends back the
@@ -2295,6 +2706,18 @@ fn remove_echoed_local(timeline: &mut Timeline, message: &Message, from_me: bool
     {
         timeline.messages.remove(position);
     }
+}
+
+/// The message the "New" line goes above: the first in the
+/// conversation's own list after `read` that is not yours, as the list
+/// draws it.
+fn first_unread(timeline: &Timeline, read: &Ts, me: &str) -> Option<Ts> {
+    timeline
+        .messages
+        .iter()
+        .filter(|m| m.in_channel() && !m.ts.is_local())
+        .find(|m| m.ts > *read && m.user.as_deref() != Some(me))
+        .map(|m| m.ts.clone())
 }
 
 /// What `@here`, `@channel` and `@everyone` become for Slack.
@@ -2466,19 +2889,6 @@ pub fn to_editable(
     }
     let text = pieces.iter().map(|p| p.shown.as_str()).collect();
     (text, mentions)
-}
-
-/// The conversation a link to this workspace's Slack points at
-/// (`https://acme.slack.com/archives/C123/p…`).
-fn slack_link_channel(url: &str, workspace: Option<&WorkspaceState>) -> Option<String> {
-    let workspace = workspace?;
-    if workspace.info.domain.is_empty() {
-        return None;
-    }
-    let prefix = format!("https://{}.slack.com/archives/", workspace.info.domain);
-    let rest = url.strip_prefix(&prefix)?;
-    let channel = rest.split(['/', '?']).next()?;
-    workspace.conversation(channel).map(|c| c.id.clone())
 }
 
 impl fastframe_shell::Resident for App {
@@ -3067,5 +3477,75 @@ mod tests {
         // Nor in a conversation that is not loaded at all.
         w.message_changed("C2", old);
         assert!(!w.timelines.contains_key("C2"));
+    }
+
+    #[test]
+    fn a_stretch_of_older_history_stands_apart_from_the_newest() {
+        let mut w = workspace();
+        w.conversations.push(conversation("1.0", "9.0", 0, 0));
+        w.history_arrived(
+            "C1",
+            vec![message("8.0", None), message("9.0", None)],
+            true,
+            Some("c".into()),
+            false,
+        );
+        w.add_local(
+            "C1",
+            local_message("U1", &Ts::new("local-1"), "hi", &None, false),
+        );
+        // Jumping to an old message replaces the list, keeping what is
+        // still being sent.
+        w.around_arrived(
+            "C1",
+            vec![message("2.0", None), message("3.0", None)],
+            (true, Some("older".into())),
+            true,
+        );
+        let order = |w: &WorkspaceState| -> Vec<String> {
+            w.timelines["C1"]
+                .messages
+                .iter()
+                .map(|m| m.ts.0.clone())
+                .collect()
+        };
+        assert_eq!(order(&w), ["2.0", "3.0", "local-1"]);
+        let timeline = &w.timelines["C1"];
+        assert!(timeline.has_newer && timeline.has_more);
+        assert_eq!(timeline.cursor.as_deref(), Some("older"));
+        // Neither the newest page (a poll) nor a new message joins it.
+        w.history_arrived("C1", vec![message("9.0", None)], false, None, false);
+        w.message_arrived("C1", message("10.0", None), false);
+        assert_eq!(order(&w), ["2.0", "3.0", "local-1"]);
+        assert_eq!(
+            w.conversation("C1").and_then(|c| c.latest.clone()),
+            Some(Ts::new("10.0"))
+        );
+        // An older page still does, and so do newer pages, up to the end.
+        w.history_arrived("C1", vec![message("1.0", None)], false, None, true);
+        w.newer_arrived("C1", vec![message("4.0", None)], false);
+        assert_eq!(order(&w), ["1.0", "2.0", "3.0", "4.0", "local-1"]);
+        assert!(!w.timelines["C1"].has_newer);
+        w.message_arrived("C1", message("11.0", None), false);
+        assert_eq!(w.timelines["C1"].messages.len(), 6);
+    }
+
+    #[test]
+    fn the_new_line_goes_above_the_first_message_from_someone_else() {
+        let mut timeline = Timeline::default();
+        let mut mine = message("2.0", None);
+        mine.user = Some("U1".into());
+        let mut reply = message("3.0", Some("1.0"));
+        reply.user = Some("U2".into());
+        let mut theirs = message("4.0", None);
+        theirs.user = Some("U2".into());
+        for m in [message("1.0", None), mine, reply, theirs] {
+            timeline.upsert(m);
+        }
+        assert_eq!(
+            first_unread(&timeline, &Ts::new("1.0"), "U1"),
+            Some(Ts::new("4.0"))
+        );
+        assert_eq!(first_unread(&timeline, &Ts::new("4.0"), "U1"), None);
     }
 }

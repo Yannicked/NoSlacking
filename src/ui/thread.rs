@@ -30,8 +30,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         actions,
         editing,
         selected,
+        jumps,
         ..
     } = app;
+    // A reply being brought into view here.
+    let now = std::time::Instant::now();
+    let jump = jumps.iter().find(|j| j.list == key).cloned();
+    let steering = jump.as_ref().is_some_and(crate::jump::Jump::steering);
+    let light = jump.as_ref().map_or(0.0, |j| j.light(now));
+    let to_bottom = to_bottom && !steering;
+    let mut target: Option<(f32, f32)> = None;
     let Some(workspace) = crate::app::active_in(workspaces, settings) else {
         // Put the draft back: it was taken out to be edited.
         app.drafts.insert(key, draft);
@@ -146,7 +154,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     let output = egui::ScrollArea::vertical()
                         .id_salt(("thread", &channel, ts.as_str()))
                         .auto_shrink([false, false])
-                        .stick_to_bottom(true)
+                        .stick_to_bottom(!steering)
                         .show_viewport(ui, |ui, viewport| {
                             ui.spacing_mut().item_spacing.y = 0.0;
                             let replies: Vec<_> = timeline
@@ -181,6 +189,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                 400.0,
                             );
                             heights.sweep();
+                            if let Some(jump) = &jump {
+                                target = replies
+                                    .iter()
+                                    .position(|reply| reply.ts == jump.ts)
+                                    .map(|index| (plan.tops[index + 1], plan.tops[index + 2]));
+                            }
                             let moved =
                                 rows::show(ui, &mut heights, &entries, &plan, |ui, index| {
                                     if index == 0 {
@@ -230,6 +244,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                         }
                                     } else {
                                         let reply = replies[index - 1];
+                                        let background = ui.painter().add(egui::Shape::Noop);
+                                        let top = ui.cursor().top();
                                         message::show(
                                             ui,
                                             &row,
@@ -238,6 +254,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                             editing,
                                             actions,
                                         );
+                                        if light > 0.0
+                                            && jump.as_ref().is_some_and(|j| j.ts == reply.ts)
+                                        {
+                                            super::conversation::paint_light(
+                                                ui, background, top, &palette, light,
+                                            );
+                                        }
                                     }
                                 });
                             ui.add_space(12.0);
@@ -255,7 +278,25 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     let moved = output.inner;
                     let offset = output.state.offset.y;
                     let bottom = (output.content_size.y - output.inner_rect.height()).max(0.0);
-                    if !to_bottom && moved.abs() > 0.5 && offset < bottom - 1.0 {
+                    let view = output.inner_rect.height();
+                    if let Some(index) = jumps.iter().position(|j| j.list == key) {
+                        let loading = timeline.is_none_or(|t| t.loading || !t.loaded);
+                        let jump = &mut jumps[index];
+                        let wanted = jump.steer(target, offset, view, bottom, loading, now);
+                        if let Some(wanted) = wanted {
+                            let mut state = output.state;
+                            state.offset.y = wanted;
+                            state.store(ui.ctx(), output.id);
+                        }
+                        if jump.done(now) {
+                            jumps.remove(index);
+                        } else {
+                            ui.ctx().request_repaint();
+                        }
+                    }
+                    if steering {
+                        // The jump moved the view; nothing else may this frame.
+                    } else if !to_bottom && moved.abs() > 0.5 && offset < bottom - 1.0 {
                         let mut state = output.state;
                         state.offset.y = (offset + moved).clamp(0.0, bottom);
                         state.store(ui.ctx(), output.id);
