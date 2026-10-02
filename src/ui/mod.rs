@@ -3,6 +3,7 @@
 
 mod browse;
 mod composer;
+mod context;
 mod conversation;
 mod desktop;
 mod details;

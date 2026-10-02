@@ -246,8 +246,15 @@ pub fn show(
     if let Some(selected) = selected {
         keyboard_row(ui, row, message, selected, rect);
     }
+    if !is_editing && message.delivery == Delivery::Sent {
+        context_menu(ui, row, message, me, rect, actions);
+    }
     let menu_open =
-        egui::Popup::is_id_open(ui.ctx(), more_id(row.channel, &message.ts, row.in_thread));
+        egui::Popup::is_id_open(ui.ctx(), more_id(row.channel, &message.ts, row.in_thread))
+            || egui::Popup::is_id_open(
+                ui.ctx(),
+                context_id(row.channel, &message.ts, row.in_thread),
+            );
     let hovered =
         (ui.rect_contains_pointer(rect) || selected.is_some() || menu_open) && !is_editing;
     if hovered {
@@ -689,15 +696,32 @@ fn file_view(
             )
             .on_hover_cursor(egui::CursorIcon::ZoomIn)
             .on_hover_text(&file.name);
+        // In the thread panel the viewer steps through the thread's
+        // pictures; a parent is its own thread.
+        let thread = row.in_thread.then(|| {
+            message
+                .thread_ts
+                .clone()
+                .unwrap_or_else(|| message.ts.clone())
+        });
+        if response.hovered() {
+            super::context::hover(
+                ui,
+                super::context::Target::Image {
+                    channel: row.channel.to_owned(),
+                    thread: thread.clone(),
+                    ts: message.ts.clone(),
+                    file: file.id.clone(),
+                    name: file.name.clone(),
+                    download: file
+                        .url_private
+                        .clone()
+                        .or_else(|| file.download_url.clone()),
+                    permalink: file.permalink.clone(),
+                },
+            );
+        }
         if response.clicked() {
-            // In the thread panel the viewer steps through the thread's
-            // pictures; a parent is its own thread.
-            let thread = row.in_thread.then(|| {
-                message
-                    .thread_ts
-                    .clone()
-                    .unwrap_or_else(|| message.ts.clone())
-            });
             actions.push(Action::ViewImage {
                 channel: row.channel.to_owned(),
                 thread,
@@ -1760,6 +1784,136 @@ fn toolbar(
                     channel: row.channel.to_owned(),
                     ts: message.ts.clone(),
                 });
+            }
+        }
+    });
+}
+
+/// The id of a message's right-click menu.
+fn context_id(channel: &str, ts: &crate::model::Ts, in_thread: bool) -> egui::Id {
+    row_id(channel, ts, in_thread).with("context")
+}
+
+/// Opens the right-click menu when the message is right-clicked, anywhere
+/// on it (its text and pictures included), and shows it while open.
+fn context_menu(
+    ui: &mut egui::Ui,
+    row: &Row<'_>,
+    message: &Message,
+    me: bool,
+    rect: egui::Rect,
+    actions: &mut Vec<Action>,
+) {
+    use super::context::Target;
+    let id = context_id(row.channel, &message.ts, row.in_thread);
+    let target_id = id.with("target");
+    let opened = ui.input(|i| i.pointer.secondary_clicked()) && ui.rect_contains_pointer(rect);
+    if opened {
+        // What was under the pointer when it was clicked, not later.
+        let target = super::context::hovered(ui.ctx());
+        ui.data_mut(|d| d.insert_temp(target_id, target));
+    }
+    let target: Option<Target> = ui.data(|d| d.get_temp(target_id)).flatten();
+    egui::Popup::new(
+        id,
+        ui.ctx().clone(),
+        egui::PopupAnchor::PointerFixed,
+        ui.layer_id(),
+    )
+    .kind(egui::PopupKind::Menu)
+    .layout(Layout::top_down_justified(Align::Min))
+    .style(egui::containers::menu::menu_style)
+    .open_memory(opened.then_some(egui::SetOpenCommand::Bool(true)))
+    .show(|ui| {
+        match &target {
+            Some(Target::Link(url)) => {
+                if ui.button(t("Open link")).clicked() {
+                    actions.push(Action::OpenUrl(url.clone()));
+                    ui.close();
+                }
+                if ui.button(t("Copy link address")).clicked() {
+                    actions.push(Action::Copy(url.clone()));
+                    ui.close();
+                }
+                ui.separator();
+            }
+            Some(Target::Image {
+                channel,
+                thread,
+                ts,
+                file,
+                name,
+                download,
+                permalink,
+            }) => {
+                if ui.button(t("Open image")).clicked() {
+                    actions.push(Action::ViewImage {
+                        channel: channel.clone(),
+                        thread: thread.clone(),
+                        ts: ts.clone(),
+                        file: file.clone(),
+                    });
+                    ui.close();
+                }
+                if let Some(url) = download
+                    && ui.button(t("Save image")).clicked()
+                {
+                    actions.push(Action::Download {
+                        url: url.clone(),
+                        name: name.clone(),
+                    });
+                    ui.close();
+                }
+                if let Some(page) = permalink
+                    && ui.button(t("Open in browser")).clicked()
+                {
+                    actions.push(Action::OpenUrl(page.clone()));
+                    ui.close();
+                }
+                ui.separator();
+            }
+            None => {}
+        }
+        if ui.button(t("Add reaction")).clicked() {
+            actions.push(Action::PickReaction {
+                channel: row.channel.to_owned(),
+                ts: message.ts.clone(),
+            });
+            ui.close();
+        }
+        if !row.in_thread && ui.button(t("Reply in thread")).clicked() {
+            actions.push(Action::OpenThread {
+                channel: row.channel.to_owned(),
+                ts: message
+                    .thread_ts
+                    .clone()
+                    .unwrap_or_else(|| message.ts.clone()),
+            });
+            ui.close();
+        }
+        if ui.button(t("Copy text")).clicked() {
+            actions.push(Action::Copy(plain_text(row.workspace, message)));
+            ui.close();
+        }
+        more_menu(ui, row, message, actions);
+        if me {
+            ui.separator();
+            if ui.button(t("Edit message")).clicked() {
+                let channel = row.channel.to_owned();
+                let ts = message.ts.clone();
+                actions.push(if row.in_thread {
+                    Action::StartEditInThread { channel, ts }
+                } else {
+                    Action::StartEdit { channel, ts }
+                });
+                ui.close();
+            }
+            if ui.button(t("Delete message")).clicked() {
+                actions.push(Action::AskDelete {
+                    channel: row.channel.to_owned(),
+                    ts: message.ts.clone(),
+                });
+                ui.close();
             }
         }
     });
