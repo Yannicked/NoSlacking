@@ -318,6 +318,18 @@ impl Worker {
         }
     }
 
+    /// The gated sink of a signed-in workspace, or a closed one.
+    fn sink_for(&self, team: &str) -> Sink {
+        match self.teams.get(team) {
+            Some(t) => t.sink.clone(),
+            None => {
+                let (sink, gate) = self.sink.gated();
+                gate.close();
+                sink
+            }
+        }
+    }
+
     /// A workspace's client and the sink for its tasks.
     fn team(&self, team: &str) -> Option<(Client, Sink)> {
         self.teams
@@ -378,6 +390,11 @@ impl Worker {
                 boot,
             },
         );
+        tokio::spawn(super::desktop::dnd_info(
+            client.clone(),
+            workspace.team_id.clone(),
+            self.sink_for(&workspace.team_id),
+        ));
         // Signing in again replaces the old sign-in and its tasks.
         if let Some(old) = replaced {
             old.shut();
@@ -588,6 +605,16 @@ impl Worker {
                 }
             }
             Command::Reconnect => self.reconnect(),
+            Command::Snooze { team, minutes } => {
+                if let Some((client, sink)) = self.team(&team) {
+                    tokio::spawn(super::desktop::snooze(client, team, minutes, sink));
+                }
+            }
+            Command::FetchDnd { team } => {
+                if let Some((client, sink)) = self.team(&team) {
+                    tokio::spawn(super::desktop::dnd_info(client, team, sink));
+                }
+            }
         }
     }
 
@@ -2521,6 +2548,12 @@ fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> {
         | "channel_sections_channels_removed"
         | "star_added"
         | "star_removed" => out.push(Translated::RefreshSections),
+        // Your own Do Not Disturb changed, here or in another client.
+        "dnd_updated" => {
+            if let Some(dnd) = super::desktop::dnd_event(event) {
+                out.push(Translated::Event(Event::Dnd { team, dnd }));
+            }
+        }
         // Read on another device (or in another window): the read marker
         // moves, so unread counts here follow. The interface only ever moves
         // a marker forward, so an older mark arriving late changes nothing.

@@ -5,6 +5,7 @@
 //! [`Event`]s and wakes the window for each one, so egui sleeps when
 //! nothing happens.
 
+pub mod desktop;
 pub mod worker;
 
 use std::collections::HashMap;
@@ -137,6 +138,16 @@ pub enum Command {
         channel: String,
     },
     Reconnect,
+    /// Snoozes notifications in Slack for this many minutes, or with
+    /// `None` ends the snooze.
+    Snooze {
+        team: String,
+        minutes: Option<u32>,
+    },
+    /// Asks Slack for the Do Not Disturb state again.
+    FetchDnd {
+        team: String,
+    },
 }
 
 /// Prints every field except the secrets: a pasted token, the session
@@ -291,6 +302,12 @@ impl std::fmt::Debug for Command {
                 .field("channel", channel)
                 .finish(),
             Self::Reconnect => f.write_str("Reconnect"),
+            Self::Snooze { team, minutes } => f
+                .debug_struct("Snooze")
+                .field("team", team)
+                .field("minutes", minutes)
+                .finish(),
+            Self::FetchDnd { team } => f.debug_struct("FetchDnd").field("team", team).finish(),
         }
     }
 }
@@ -443,6 +460,11 @@ pub enum Event {
     Socket(Socket),
     Error(String),
     Notice(String),
+    /// Your Do Not Disturb state in a workspace.
+    Dnd {
+        team: String,
+        dnd: crate::dnd::Dnd,
+    },
 }
 
 /// The interface's end of the bridge.

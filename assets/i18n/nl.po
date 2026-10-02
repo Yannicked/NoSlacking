@@ -708,3 +708,40 @@ msgstr "Meldingen voor"
 
 msgid "Default ({level})"
 msgstr "Standaard ({level})"
+
+# Desktop integration: do not disturb.
+msgid "For 20 minutes"
+msgstr "20 minuten"
+
+msgid "For 1 hour"
+msgstr "1 uur"
+
+msgid "For 2 hours"
+msgstr "2 uur"
+
+msgid "Until tomorrow"
+msgstr "Tot morgen"
+
+msgid "until {time}"
+msgstr "tot {time}"
+
+msgid "until tomorrow at {time}"
+msgstr "tot morgen {time}"
+
+msgid "until {date} at {time}"
+msgstr "tot {date} {time}"
+
+msgid "Notifications paused {until}"
+msgstr "Meldingen gepauzeerd {until}"
+
+msgid "Do not disturb {until}"
+msgstr "Niet storen {until}"
+
+msgid "Notifications on"
+msgstr "Meldingen aan"
+
+msgid "Pause notifications"
+msgstr "Meldingen pauzeren"
+
+msgid "Resume notifications"
+msgstr "Meldingen hervatten"

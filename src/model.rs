@@ -654,6 +654,9 @@ pub enum Action {
         channel: String,
         level: Option<crate::notify::Level>,
     },
+    /// Snoozes notifications in the open workspace, or with `None` ends
+    /// the snooze.
+    Snooze(Option<crate::dnd::Snooze>),
 }
 
 #[cfg(test)]

@@ -67,6 +67,7 @@ impl DesktopSettings {
                 .iter()
                 .filter_map(|(key, level)| Some((key.strip_prefix(&prefix)?.to_owned(), *level)))
                 .collect(),
+            ..TeamState::default()
         }
     }
 
@@ -94,6 +95,10 @@ pub struct TeamState {
     /// Your own levels, by conversation: this workspace's part of
     /// [`DesktopSettings::levels`], which stays the saved copy.
     pub levels: HashMap<String, Level>,
+    /// Do Not Disturb, as Slack last said or as you set it here.
+    pub dnd: crate::dnd::Dnd,
+    /// Slack was asked for the stretch after the one that passed.
+    pub dnd_asked: bool,
 }
 
 impl TeamState {

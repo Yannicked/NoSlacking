@@ -1245,6 +1245,7 @@ impl App {
             Event::Socket(socket) => self.socket_changed(socket),
             Event::Error(error) => self.toast(error, true),
             Event::Notice(text) => self.toast(text, false),
+            Event::Dnd { team, dnd } => self.dnd_arrived(&team, dnd),
             // A workspace's conversations, people, apps and sidebar.
             Event::Conversations {
                 team,
@@ -1951,6 +1952,7 @@ impl App {
             // Leaving the app: links, folders and the clipboard.
             Action::OpenUrl(url) => self.open_url(&url),
             Action::NotifyLevel { channel, level } => self.set_notify_level(&channel, level),
+            Action::Snooze(choice) => self.snooze(choice),
             Action::OpenFolder(path) => {
                 if let Err(error) = open::that_detached(&path) {
                     let error = error.to_string();
