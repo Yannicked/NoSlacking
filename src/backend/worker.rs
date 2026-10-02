@@ -108,6 +108,17 @@ impl Team {
     }
 }
 
+/// A message to post, as `Command::Send` carries it.
+struct Outgoing {
+    team: String,
+    channel: String,
+    text: String,
+    thread: Option<Ts>,
+    broadcast: bool,
+    /// The interface's id for its optimistic copy.
+    local: Ts,
+}
+
 /// A real-time socket the worker started, and what it last reported.
 ///
 /// Each start gets a fresh `generation`. A socket that was replaced can
@@ -201,11 +212,11 @@ impl Worker {
                 command = commands.recv() => match command {
                     Some(command) => match &mut self.waiting {
                         Some(waiting) => waiting.push(command),
-                        None => self.command(command).await,
+                        None => self.command(command),
                     },
                     None => break,
                 },
-                Some(message) = internal.recv() => self.internal(message).await,
+                Some(message) = internal.recv() => self.internal(message),
                 _ = poll.tick() => self.poll(),
             }
         }
@@ -249,7 +260,7 @@ impl Worker {
     }
 
     /// Opens what the keyring held, then the commands that waited for it.
-    async fn loaded(
+    fn loaded(
         &mut self,
         app: Result<Option<AppCredentials>, crate::credentials::Error>,
         workspaces: Vec<(WorkspaceMeta, Stored)>,
@@ -294,7 +305,7 @@ impl Worker {
         }
         self.restart_socket();
         for command in self.waiting.take().unwrap_or_default() {
-            self.command(command).await;
+            self.command(command);
         }
     }
 
@@ -478,101 +489,31 @@ impl Worker {
         }
     }
 
-    async fn command(&mut self, command: Command) {
+    /// Dispatches one command to its handler. Nothing here waits on the
+    /// network: each handler starts a task and returns.
+    fn command(&mut self, command: Command) {
         match command {
-            Command::SaveApp(app) => {
-                // Saved in the background; the new app is used at once.
-                let credentials = self.credentials.clone();
-                let sink = self.sink.clone();
-                let saved = app.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = credentials.save_app(&saved).await {
-                        sink.send(Event::KeyringError(error.to_string()));
-                    }
-                });
-                // Clients pick up the new client secret for refreshes. They
-                // keep their token and refresh lock, which every clone
-                // shares, so a refresh in flight cannot race a second one.
-                let oauth = app.oauth();
-                for team in self.teams.values() {
-                    team.client.set_app(oauth.clone());
-                }
-                self.app = Some(app);
-                self.restart_socket();
-            }
+            Command::SaveApp(app) => self.save_app(app),
             Command::StartSignIn { redirect, port } => self.start_sign_in(redirect, port),
-            Command::CancelSignIn => {
-                self.flow = None;
-                if let Some(listener) = self.listener.take() {
-                    listener.abort();
-                }
-            }
+            Command::CancelSignIn => self.cancel_sign_in(),
             Command::Callback(url) => self.callback(url),
-            Command::PasteToken(token) => {
-                let http = self.http.clone();
-                let internal = self.internal.clone();
-                self.sink.send(Event::SignIn(SignIn::Exchanging));
-                tokio::spawn(async move {
-                    let result = validate(&http, Token::plain(token.trim())).await;
-                    let _ = internal.send(Internal::SignedIn(result));
-                });
-            }
+            Command::PasteToken(token) => self.paste_token(token),
             Command::SignInSession {
                 cookie,
                 workspace_url,
-            } => {
-                let Some(workspace_url) =
-                    crate::slack::session::normalize_workspace(&workspace_url)
-                else {
-                    self.sink.send(Event::SignIn(SignIn::Failed(
-                        "Enter your workspace's Slack address, such as acme.slack.com.".into(),
-                    )));
-                    return;
-                };
-                let internal = self.internal.clone();
-                self.sink.send(Event::SignIn(SignIn::Exchanging));
-                tokio::spawn(async move {
-                    let result = crate::slack::session::derive(cookie.trim(), &workspace_url)
-                        .await
-                        .map(|signed| SignedIn {
-                            team_id: signed.team_id,
-                            user_id: signed.user_id,
-                            token: signed.token,
-                        })
-                        .map_err(|e| describe(&e));
-                    let _ = internal.send(Internal::SignedIn(result));
-                });
-            }
+            } => self.sign_in_session(cookie, &workspace_url),
             Command::SignOut(team) => self.sign_out(&team),
             Command::Focus { team, channel } => {
                 self.focus = Some((team, channel));
                 self.report_socket();
             }
-            Command::LoadHistory { team, channel } => {
-                if let Some((client, sink)) = self.team(&team) {
-                    tokio::spawn(history(client, team, channel, None, sink));
-                } else {
-                    self.history_unavailable(team, channel);
-                }
-            }
+            Command::LoadHistory { team, channel } => self.load_history(team, channel, None),
             Command::LoadOlder {
                 team,
                 channel,
                 cursor,
-            } => {
-                if let Some((client, sink)) = self.team(&team) {
-                    tokio::spawn(history(client, team, channel, Some(cursor), sink));
-                } else {
-                    self.history_unavailable(team, channel);
-                }
-            }
-            Command::LoadThread { team, channel, ts } => {
-                if let Some((client, sink)) = self.team(&team) {
-                    tokio::spawn(thread(client, team, channel, ts, sink));
-                } else {
-                    self.not_signed_in("load the thread");
-                }
-            }
+            } => self.load_history(team, channel, Some(cursor)),
+            Command::LoadThread { team, channel, ts } => self.load_thread(team, channel, ts),
             Command::Send {
                 team,
                 channel,
@@ -580,47 +521,14 @@ impl Worker {
                 thread,
                 broadcast,
                 local,
-            } => {
-                if let Some((client, sink)) = self.team(&team) {
-                    tokio::spawn(async move {
-                        let mut params = vec![("channel", channel.clone()), ("text", text)];
-                        if let Some(thread) = &thread {
-                            params.push(("thread_ts", thread.0.clone()));
-                            if broadcast {
-                                params.push(("reply_broadcast", "true".into()));
-                            }
-                        }
-                        let result = client
-                            .act::<types::Posted>("chat.postMessage", &params)
-                            .await
-                            .map_err(|e| describe(&e))
-                            .and_then(|posted| {
-                                let mut message = posted
-                                    .message
-                                    .and_then(types::Message::into_model)
-                                    .ok_or_else(|| "Slack did not return the message".to_owned())?;
-                                if message.ts.as_str().is_empty() {
-                                    message.ts = Ts::new(posted.ts);
-                                }
-                                Ok(message)
-                            });
-                        sink.send(Event::Sent {
-                            team,
-                            channel,
-                            local,
-                            result,
-                        });
-                    });
-                } else {
-                    // Fail the optimistic message, or it stays pending.
-                    self.sink.send(Event::Sent {
-                        team,
-                        channel,
-                        local,
-                        result: Err(NOT_SIGNED_IN.to_owned()),
-                    });
-                }
-            }
+            } => self.send(Outgoing {
+                team,
+                channel,
+                text,
+                thread,
+                broadcast,
+                local,
+            }),
             Command::Edit {
                 team,
                 channel,
@@ -644,170 +552,322 @@ impl Worker {
                 ts,
                 name,
                 add,
-            } => {
-                let Some((client, sink)) = self.team(&team) else {
-                    self.not_signed_in("change the reaction");
-                    return;
-                };
-                let user = self
-                    .teams
-                    .get(&team)
-                    .map(|t| t.user_id.clone())
-                    .unwrap_or_default();
-                tokio::spawn(async move {
-                    let method = if add {
-                        "reactions.add"
-                    } else {
-                        "reactions.remove"
-                    };
-                    let params = [
-                        ("channel", channel.clone()),
-                        ("timestamp", ts.0.clone()),
-                        ("name", name.clone()),
-                    ];
-                    match client.act::<Value>(method, &params).await {
-                        Ok(_) => {}
-                        Err(SlackError::Api(code))
-                            if code == "already_reacted" || code == "no_reaction" => {}
-                        Err(error) => {
-                            // Undo the optimistic change.
-                            sink.send(Event::Reaction {
-                                team,
-                                channel,
-                                ts,
-                                name,
-                                user,
-                                added: !add,
-                            });
-                            sink.send(Event::Error(format!(
-                                "Could not change the reaction: {}",
-                                describe(&error)
-                            )));
-                        }
-                    }
-                });
-            }
+            } => self.react(team, channel, ts, name, add),
             Command::Upload {
                 team,
                 channel,
                 thread,
                 path,
                 comment,
-            } => {
-                let Some((client, sink)) = self.team(&team) else {
-                    self.not_signed_in("upload the file");
-                    return;
-                };
-                let poll_after = !self.is_live(&team);
-                tokio::spawn(async move {
-                    let name = path
-                        .file_name()
-                        .map_or_else(|| "file".to_owned(), |n| n.to_string_lossy().into_owned());
-                    // The size comes from the open file, so it is the size
-                    // of what gets streamed, not of whatever the path named
-                    // a moment earlier.
-                    let opened = match tokio::fs::File::open(&path).await {
-                        Ok(file) => file.metadata().await.map(|meta| (file, meta)),
-                        Err(error) => Err(error),
-                    };
-                    let (file, size) = match opened {
-                        Ok((_, meta)) if !meta.is_file() => {
-                            sink.send(Event::Error(format!("{name} is not a file.")));
-                            return;
-                        }
-                        Ok((file, meta)) => (file, meta.len()),
-                        Err(error) => {
-                            sink.send(Event::Error(format!("Could not read {name}: {error}")));
-                            return;
-                        }
-                    };
-                    if size > MAX_UPLOAD {
-                        sink.send(Event::Error(format!(
-                            "{name} is larger than Slack's 1 GB limit."
-                        )));
-                        return;
-                    }
-                    sink.send(Event::Notice(format!("Uploading {name}…")));
-                    match client
-                        .upload(
-                            &channel,
-                            thread.as_ref().map(Ts::as_str),
-                            &name,
-                            file,
-                            size,
-                            &comment,
-                        )
-                        .await
-                    {
-                        Ok(()) => {
-                            sink.send(Event::Notice(format!("Uploaded {name}")));
-                            if poll_after {
-                                history(client, team, channel, None, sink).await;
-                            }
-                        }
-                        Err(error) => sink.send(Event::Error(format!(
-                            "Could not upload {name}: {}",
-                            describe(&error)
-                        ))),
-                    }
-                });
-            }
-            Command::Download { team, url, name } => {
-                let Some((client, sink)) = self.team(&team) else {
-                    self.not_signed_in(&format!("download {name}"));
-                    return;
-                };
-                tokio::spawn(async move {
-                    match download(&client, &url, &name).await {
-                        Ok(path) => sink.send(Event::Notice(format!("Saved {}", path.display()))),
-                        Err(error) => sink.send(Event::Error(error)),
-                    }
-                });
-            }
-            // Sent on its own as conversations are read; a workspace that
-            // is signed out has nothing to mark, and saying so on every
-            // click would only be noise.
-            Command::Mark { team, channel, ts } if self.teams.contains_key(&team) => self.act(
-                &team,
-                "conversations.mark",
-                vec![("channel", channel), ("ts", ts.0)],
-                &["not_in_channel", "channel_not_found"],
-            ),
-            Command::Mark { team, .. } => log::debug!("not marking read in {team}: signed out"),
+            } => self.upload(team, channel, thread, path, comment),
+            Command::Download { team, url, name } => self.download(&team, url, name),
+            Command::Mark { team, channel, ts } => self.mark(&team, channel, ts),
             Command::FetchUsers { team, ids } => self.fetch_users(team, ids),
             Command::FetchBots { team, ids } => self.fetch_bots(team, ids),
-            Command::Sidebar { team, calls } => {
-                if let Some((client, sink)) = self.team(&team) {
-                    tokio::spawn(edit_sidebar(client, team, calls, sink));
-                } else {
-                    self.not_signed_in("change the sidebar");
-                }
-            }
+            Command::Sidebar { team, calls } => self.edit_sidebar(team, calls),
             Command::FetchConversation { team, channel } => {
                 if let Some((client, sink)) = self.team(&team) {
                     tokio::spawn(conversation_info(client, team, channel, sink));
+                } else {
+                    log::debug!("not fetching {channel} in {team}: signed out");
                 }
             }
-            Command::Reconnect => {
-                self.restart_socket();
-                let session_teams: Vec<(String, Client)> = self
-                    .teams
-                    .iter()
-                    .filter(|(_, team)| team.client.token().is_session())
-                    .map(|(id, team)| (id.clone(), team.client.clone()))
-                    .collect();
-                for (id, client) in session_teams {
-                    self.start_rtm(&id, client);
-                }
-                for (id, team) in &self.teams {
-                    tokio::spawn(conversations(
-                        team.client.clone(),
-                        id.clone(),
-                        self.dirs.clone(),
-                        team.sink.clone(),
-                    ));
+            Command::Reconnect => self.reconnect(),
+        }
+    }
+
+    fn save_app(&mut self, app: AppCredentials) {
+        // Saved in the background; the new app is used at once.
+        let credentials = self.credentials.clone();
+        let sink = self.sink.clone();
+        let saved = app.clone();
+        tokio::spawn(async move {
+            if let Err(error) = credentials.save_app(&saved).await {
+                sink.send(Event::KeyringError(error.to_string()));
+            }
+        });
+        // Clients pick up the new client secret for refreshes. They keep
+        // their token and refresh lock, which every clone shares, so a
+        // refresh in flight cannot race a second one.
+        let oauth = app.oauth();
+        for team in self.teams.values() {
+            team.client.set_app(oauth.clone());
+        }
+        self.app = Some(app);
+        self.restart_socket();
+    }
+
+    fn cancel_sign_in(&mut self) {
+        self.flow = None;
+        if let Some(listener) = self.listener.take() {
+            listener.abort();
+        }
+    }
+
+    fn paste_token(&mut self, token: String) {
+        let http = self.http.clone();
+        let internal = self.internal.clone();
+        self.sink.send(Event::SignIn(SignIn::Exchanging));
+        tokio::spawn(async move {
+            let result = validate(&http, Token::plain(token.trim())).await;
+            let _ = internal.send(Internal::SignedIn(result));
+        });
+    }
+
+    fn sign_in_session(&mut self, cookie: String, workspace_url: &str) {
+        let Some(workspace_url) = crate::slack::session::normalize_workspace(workspace_url) else {
+            self.sink.send(Event::SignIn(SignIn::Failed(
+                "Enter your workspace's Slack address, such as acme.slack.com.".into(),
+            )));
+            return;
+        };
+        let internal = self.internal.clone();
+        self.sink.send(Event::SignIn(SignIn::Exchanging));
+        tokio::spawn(async move {
+            let result = crate::slack::session::derive(cookie.trim(), &workspace_url)
+                .await
+                .map(|signed| SignedIn {
+                    team_id: signed.team_id,
+                    user_id: signed.user_id,
+                    token: signed.token,
+                })
+                .map_err(|e| describe(&e));
+            let _ = internal.send(Internal::SignedIn(result));
+        });
+    }
+
+    /// The newest page of history, or the one before `cursor`.
+    fn load_history(&self, team: String, channel: String, cursor: Option<String>) {
+        if let Some((client, sink)) = self.team(&team) {
+            tokio::spawn(history(client, team, channel, cursor, sink));
+        } else {
+            self.history_unavailable(team, channel);
+        }
+    }
+
+    fn load_thread(&self, team: String, channel: String, ts: Ts) {
+        if let Some((client, sink)) = self.team(&team) {
+            tokio::spawn(thread(client, team, channel, ts, sink));
+        } else {
+            self.not_signed_in("load the thread");
+        }
+    }
+
+    /// Posts a message; the answer settles the interface's optimistic copy.
+    fn send(&self, outgoing: Outgoing) {
+        let Some((client, sink)) = self.team(&outgoing.team) else {
+            // Fail the optimistic message, or it stays pending.
+            self.sink.send(Event::Sent {
+                team: outgoing.team,
+                channel: outgoing.channel,
+                local: outgoing.local,
+                result: Err(NOT_SIGNED_IN.to_owned()),
+            });
+            return;
+        };
+        tokio::spawn(async move {
+            let Outgoing {
+                team,
+                channel,
+                text,
+                thread,
+                broadcast,
+                local,
+            } = outgoing;
+            let mut params = vec![("channel", channel.clone()), ("text", text)];
+            if let Some(thread) = &thread {
+                params.push(("thread_ts", thread.0.clone()));
+                if broadcast {
+                    params.push(("reply_broadcast", "true".into()));
                 }
             }
+            let result = client
+                .act::<types::Posted>("chat.postMessage", &params)
+                .await
+                .map_err(|e| describe(&e))
+                .and_then(|posted| {
+                    let mut message = posted
+                        .message
+                        .and_then(types::Message::into_model)
+                        .ok_or_else(|| "Slack did not return the message".to_owned())?;
+                    if message.ts.as_str().is_empty() {
+                        message.ts = Ts::new(posted.ts);
+                    }
+                    Ok(message)
+                });
+            sink.send(Event::Sent {
+                team,
+                channel,
+                local,
+                result,
+            });
+        });
+    }
+
+    fn react(&self, team: String, channel: String, ts: Ts, name: String, add: bool) {
+        let Some((client, sink)) = self.team(&team) else {
+            self.not_signed_in("change the reaction");
+            return;
+        };
+        let user = self
+            .teams
+            .get(&team)
+            .map(|t| t.user_id.clone())
+            .unwrap_or_default();
+        tokio::spawn(async move {
+            let method = if add {
+                "reactions.add"
+            } else {
+                "reactions.remove"
+            };
+            let params = [
+                ("channel", channel.clone()),
+                ("timestamp", ts.0.clone()),
+                ("name", name.clone()),
+            ];
+            match client.act::<Value>(method, &params).await {
+                Ok(_) => {}
+                Err(SlackError::Api(code))
+                    if code == "already_reacted" || code == "no_reaction" => {}
+                Err(error) => {
+                    // Undo the optimistic change.
+                    sink.send(Event::Reaction {
+                        team,
+                        channel,
+                        ts,
+                        name,
+                        user,
+                        added: !add,
+                    });
+                    sink.send(Event::Error(format!(
+                        "Could not change the reaction: {}",
+                        describe(&error)
+                    )));
+                }
+            }
+        });
+    }
+
+    fn upload(
+        &self,
+        team: String,
+        channel: String,
+        thread: Option<Ts>,
+        path: std::path::PathBuf,
+        comment: String,
+    ) {
+        let Some((client, sink)) = self.team(&team) else {
+            self.not_signed_in("upload the file");
+            return;
+        };
+        let poll_after = !self.is_live(&team);
+        tokio::spawn(async move {
+            let name = path
+                .file_name()
+                .map_or_else(|| "file".to_owned(), |n| n.to_string_lossy().into_owned());
+            // The size comes from the open file, so it is the size of what
+            // gets streamed, not of whatever the path named a moment
+            // earlier.
+            let opened = match tokio::fs::File::open(&path).await {
+                Ok(file) => file.metadata().await.map(|meta| (file, meta)),
+                Err(error) => Err(error),
+            };
+            let (file, size) = match opened {
+                Ok((_, meta)) if !meta.is_file() => {
+                    sink.send(Event::Error(format!("{name} is not a file.")));
+                    return;
+                }
+                Ok((file, meta)) => (file, meta.len()),
+                Err(error) => {
+                    sink.send(Event::Error(format!("Could not read {name}: {error}")));
+                    return;
+                }
+            };
+            if size > MAX_UPLOAD {
+                sink.send(Event::Error(format!(
+                    "{name} is larger than Slack's 1 GB limit."
+                )));
+                return;
+            }
+            sink.send(Event::Notice(format!("Uploading {name}…")));
+            let thread = thread.as_ref().map(Ts::as_str);
+            match client
+                .upload(&channel, thread, &name, file, size, &comment)
+                .await
+            {
+                Ok(()) => {
+                    sink.send(Event::Notice(format!("Uploaded {name}")));
+                    // Without a live socket the new file would only show
+                    // at the next poll.
+                    if poll_after {
+                        history(client, team, channel, None, sink).await;
+                    }
+                }
+                Err(error) => sink.send(Event::Error(format!(
+                    "Could not upload {name}: {}",
+                    describe(&error)
+                ))),
+            }
+        });
+    }
+
+    fn download(&self, team: &str, url: String, name: String) {
+        let Some((client, sink)) = self.team(team) else {
+            self.not_signed_in(&format!("download {name}"));
+            return;
+        };
+        tokio::spawn(async move {
+            match download(&client, &url, &name).await {
+                Ok(path) => sink.send(Event::Notice(format!("Saved {}", path.display()))),
+                Err(error) => sink.send(Event::Error(error)),
+            }
+        });
+    }
+
+    /// Moves your read marker. The interface sends this on its own as you
+    /// read; a workspace that is signed out has nothing to mark, and
+    /// saying so on every click would only be noise.
+    fn mark(&self, team: &str, channel: String, ts: Ts) {
+        if !self.teams.contains_key(team) {
+            log::debug!("not marking read in {team}: signed out");
+            return;
+        }
+        self.act(
+            team,
+            "conversations.mark",
+            vec![("channel", channel), ("ts", ts.0)],
+            &["not_in_channel", "channel_not_found"],
+        );
+    }
+
+    fn edit_sidebar(&self, team: String, calls: Vec<crate::sidebar::SidebarCall>) {
+        if let Some((client, sink)) = self.team(&team) {
+            tokio::spawn(edit_sidebar(client, team, calls, sink));
+        } else {
+            self.not_signed_in("change the sidebar");
+        }
+    }
+
+    /// Opens every socket afresh and lists every workspace's conversations
+    /// again, to catch up on anything missed while offline.
+    fn reconnect(&mut self) {
+        self.restart_socket();
+        let session_teams: Vec<(String, Client)> = self
+            .teams
+            .iter()
+            .filter(|(_, team)| team.client.token().is_session())
+            .map(|(id, team)| (id.clone(), team.client.clone()))
+            .collect();
+        for (id, client) in session_teams {
+            self.start_rtm(&id, client);
+        }
+        for (id, team) in &self.teams {
+            tokio::spawn(conversations(
+                team.client.clone(),
+                id.clone(),
+                self.dirs.clone(),
+                team.sink.clone(),
+            ));
         }
     }
 
@@ -1054,9 +1114,9 @@ impl Worker {
         self.report_socket();
     }
 
-    async fn internal(&mut self, message: Internal) {
+    fn internal(&mut self, message: Internal) {
         match message {
-            Internal::Loaded { app, workspaces } => self.loaded(app, workspaces).await,
+            Internal::Loaded { app, workspaces } => self.loaded(app, workspaces),
             // Signed out since: its entries are gone already.
             Internal::FetchFailed { team, .. } if !self.teams.contains_key(&team) => {}
             Internal::FetchFailed { team, users, bots } => {
@@ -2455,33 +2515,27 @@ mod tests {
         let current = live(&mut worker, Socket::Connected);
         let generation = current.generation;
         worker.rtm.insert("TA".into(), current);
-        worker
-            .internal(Internal::Rtm {
-                team: "TA".into(),
-                generation: old,
-                event: RtmEvent::Unavailable("gone".into()),
-            })
-            .await;
+        worker.internal(Internal::Rtm {
+            team: "TA".into(),
+            generation: old,
+            event: RtmEvent::Unavailable("gone".into()),
+        });
         assert!(worker.is_live("TA"));
-        worker
-            .internal(Internal::Rtm {
-                team: "TA".into(),
-                generation,
-                event: RtmEvent::Disconnected("drop".into()),
-            })
-            .await;
+        worker.internal(Internal::Rtm {
+            team: "TA".into(),
+            generation,
+            event: RtmEvent::Disconnected("drop".into()),
+        });
         assert!(!worker.is_live("TA"));
         assert!(worker.rtm.contains_key("TA"));
         // A stale Socket Mode report is ignored the same way.
         let socket = live(&mut worker, Socket::Connected);
         let generation = socket.generation;
         worker.socket = Some(socket);
-        worker
-            .internal(Internal::Socket {
-                generation: generation - 1,
-                event: SocketEvent::Disconnected("old".into()),
-            })
-            .await;
+        worker.internal(Internal::Socket {
+            generation: generation - 1,
+            event: SocketEvent::Disconnected("old".into()),
+        });
         assert_eq!(
             worker.socket.as_ref().map(|s| s.status.clone()),
             Some(Socket::Connected)
@@ -2498,19 +2552,17 @@ mod tests {
             icon: None,
             user_id: "U1".into(),
         };
-        worker
-            .internal(Internal::Loaded {
-                app: Ok(None),
-                workspaces: vec![
-                    (meta("TA"), Stored::Missing),
-                    (
-                        meta("TB"),
-                        Stored::Failed(crate::credentials::Error::Locked),
-                    ),
-                    (meta("TC"), Stored::Skipped),
-                ],
-            })
-            .await;
+        worker.internal(Internal::Loaded {
+            app: Ok(None),
+            workspaces: vec![
+                (meta("TA"), Stored::Missing),
+                (
+                    meta("TB"),
+                    Stored::Failed(crate::credentials::Error::Locked),
+                ),
+                (meta("TC"), Stored::Skipped),
+            ],
+        });
         assert!(worker.waiting.is_none());
         let signed_out: Vec<String> = events
             .try_iter()
@@ -2536,13 +2588,11 @@ mod tests {
                 .insert(("TA".to_owned(), id.to_owned()));
         }
         worker.bots_requested.insert(("TA".into(), "B1".into()));
-        worker
-            .internal(Internal::FetchFailed {
-                team: "TA".into(),
-                users: vec!["U1".into()],
-                bots: vec!["B1".into()],
-            })
-            .await;
+        worker.internal(Internal::FetchFailed {
+            team: "TA".into(),
+            users: vec!["U1".into()],
+            bots: vec!["B1".into()],
+        });
         assert!(!worker.users_requested.contains(&("TA".into(), "U1".into())));
         assert!(worker.users_requested.contains(&("TA".into(), "U2".into())));
         assert!(worker.bots_requested.is_empty());
@@ -2556,29 +2606,23 @@ mod tests {
     async fn commands_for_an_unknown_workspace_get_an_answer() {
         let (mut worker, events) = worker();
         worker.waiting = None;
-        worker
-            .command(Command::Send {
-                team: "TX".into(),
-                channel: "C1".into(),
-                text: "hi".into(),
-                thread: None,
-                broadcast: false,
-                local: Ts::new("local-1"),
-            })
-            .await;
-        worker
-            .command(Command::Delete {
-                team: "TX".into(),
-                channel: "C1".into(),
-                ts: Ts::new("1.0"),
-            })
-            .await;
-        worker
-            .command(Command::LoadHistory {
-                team: "TX".into(),
-                channel: "C1".into(),
-            })
-            .await;
+        worker.command(Command::Send {
+            team: "TX".into(),
+            channel: "C1".into(),
+            text: "hi".into(),
+            thread: None,
+            broadcast: false,
+            local: Ts::new("local-1"),
+        });
+        worker.command(Command::Delete {
+            team: "TX".into(),
+            channel: "C1".into(),
+            ts: Ts::new("1.0"),
+        });
+        worker.command(Command::LoadHistory {
+            team: "TX".into(),
+            channel: "C1".into(),
+        });
         let events: Vec<Event> = events.try_iter().collect();
         assert!(
             matches!(&events[..], [
