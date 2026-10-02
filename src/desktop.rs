@@ -29,6 +29,10 @@ pub struct DesktopSettings {
     /// Conversations muted on this computer, by workspace: for sign-ins
     /// whose Slack preferences cannot be read or changed (your own app).
     pub muted: BTreeMap<String, BTreeSet<String>>,
+    /// Whether to show the tray item, where the desktop has a tray.
+    pub tray: bool,
+    /// Whether closing the window keeps NoSlacking running in the tray.
+    pub close_to_tray: bool,
 }
 
 impl Default for DesktopSettings {
@@ -39,6 +43,8 @@ impl Default for DesktopSettings {
             keywords: Vec::new(),
             levels: BTreeMap::new(),
             muted: BTreeMap::new(),
+            tray: true,
+            close_to_tray: false,
         }
     }
 }

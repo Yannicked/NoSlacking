@@ -81,6 +81,41 @@ pub fn settings_group(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     });
 }
 
+/// The Window group of the settings page: the tray item and closing into
+/// it.
+pub fn window_group(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
+    group(ui, palette, &t("Window"), |ui| {
+        let mut tray = app.settings.desktop.tray;
+        let detail = if tray && !app.has_tray() && !app.demo {
+            t("This desktop shows no tray item.")
+        } else {
+            t("An icon in the system tray or menu bar that shows what is unread.")
+        };
+        row(ui, palette, &t("Show in the tray"), &detail, |ui, name| {
+            ui.checkbox(&mut tray, "").labelled_by(name);
+        });
+        if tray != app.settings.desktop.tray {
+            app.set_tray(tray);
+        }
+        ui.add_enabled_ui(app.has_tray(), |ui| {
+            let mut keep = app.settings.desktop.close_to_tray;
+            row(
+                ui,
+                palette,
+                &t("Keep running in the tray"),
+                &t("Closing the window leaves NoSlacking connected, with notifications. Quit from the tray."),
+                |ui, name| {
+                    ui.checkbox(&mut keep, "").labelled_by(name);
+                },
+            );
+            if keep != app.settings.desktop.close_to_tray {
+                app.settings.desktop.close_to_tray = keep;
+                app.settings_changed();
+            }
+        });
+    });
+}
+
 /// The notification choices for a conversation, for its context menu in
 /// the sidebar.
 pub fn conversation_menu(

@@ -1011,6 +1011,7 @@ impl App {
             desktop: desktop::Desktop::new(options.demo),
         };
         app.start_theme_scan();
+        app.start_tray();
         app
     }
 
@@ -1033,6 +1034,7 @@ impl App {
     /// Called once the window's egui context exists.
     pub fn attach(&mut self, ctx: &egui::Context) {
         self.waker.attach(ctx);
+        self.window_made();
         theme::install(ctx);
         ctx.add_bytes_loader(std::sync::Arc::new(self.backend.images.clone()));
         #[cfg(feature = "demo")]
@@ -2480,20 +2482,27 @@ fn slack_link_channel(url: &str, workspace: Option<&WorkspaceState>) -> Option<S
 
 impl fastframe_shell::Resident for App {
     fn closed(&self) -> Closed {
-        Closed::Quit
+        self.closed_action()
     }
 
     fn window_gone(&mut self) {
         self.waker.detach();
+        self.window_left();
     }
 
     fn headless_frame(&mut self, ctx: &egui::Context) -> Headless {
         self.background_frame(ctx);
         if self.quit {
             Headless::Quit
+        } else if self.wants_window() {
+            Headless::Show
         } else {
             Headless::Wait
         }
+    }
+
+    fn start_hidden(&mut self) -> bool {
+        self.can_start_hidden()
     }
 
     fn shutdown(&mut self) {
