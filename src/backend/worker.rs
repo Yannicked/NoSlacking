@@ -199,18 +199,30 @@ impl Worker {
 
     fn make_client(&self, team: &str, token: Token) -> Client {
         let credentials = self.credentials.clone();
+        let sink = self.sink.clone();
         let team = team.to_owned();
         Client::new(self.http.clone(), token).with_refresh(
             self.app.as_ref().and_then(AppCredentials::oauth),
-            move |token| {
+            move |result| {
                 let credentials = credentials.clone();
-                let token = token.clone();
+                let sink = sink.clone();
                 let team = team.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = credentials.save_token(&team, &token).await {
-                        log::warn!("could not store the renewed token: {error}");
+                // The client waits for this before its next refresh, so
+                // the newest token is always the one saved last.
+                async move {
+                    match result {
+                        Ok(token) => {
+                            if let Err(error) = credentials.save_token(&team, &token).await {
+                                log::warn!("could not store the renewed token: {error}");
+                            }
+                        }
+                        Err(error) if error.is_auth() => sink.send(Event::SignedOut {
+                            team,
+                            reason: Some(describe(&error)),
+                        }),
+                        Err(_) => {}
                     }
-                });
+                }
             },
         )
     }
@@ -356,20 +368,14 @@ impl Worker {
                 if let Err(error) = self.credentials.save_app(&app).await {
                     self.sink.send(Event::KeyringError(error.to_string()));
                 }
-                self.app = Some(app);
-                // Clients pick up the new client secret for refreshes.
-                let teams: Vec<_> = self
-                    .teams
-                    .iter()
-                    .map(|(id, team)| (id.clone(), team.client.token()))
-                    .collect();
-                for (id, token) in teams {
-                    let client = self.make_client(&id, token);
-                    self.images.set_client(&id, client.clone());
-                    if let Some(team) = self.teams.get_mut(&id) {
-                        team.client = client;
-                    }
+                // Clients pick up the new client secret for refreshes. They
+                // keep their token and refresh lock, which every clone
+                // shares, so a refresh in flight cannot race a second one.
+                let oauth = app.oauth();
+                for team in self.teams.values() {
+                    team.client.set_app(oauth.clone());
                 }
+                self.app = Some(app);
                 self.restart_socket();
             }
             Command::StartSignIn { redirect, port } => self.start_sign_in(redirect, port),
