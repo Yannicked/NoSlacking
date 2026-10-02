@@ -27,9 +27,9 @@ use super::client::SlackError;
 /// Where the browser sign-in starts.
 pub const SIGN_IN_URL: &str = "https://app.slack.com/ssb/signin";
 
-/// The user agent Slack's sign-in pages and `auth.loginMagicBulk` expect: a
-/// browser agent ending in `Slack_SSB/<ver>`.
-const DESKTOP_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Sonic Slack_SSB/4.52.162";
+/// NoSlacking's own user agent, as the rest of the client sends: Slack
+/// redeems sign-in tokens for clients that name themselves.
+const USER_AGENT: &str = concat!("NoSlacking/", env!("CARGO_PKG_VERSION"));
 
 /// The host a link names when it names none.
 const DEFAULT_HOST: &str = "slack.com";
@@ -212,7 +212,7 @@ pub async fn redeem(set: &TokenSet) -> Result<Redeemed, SlackError> {
     }
     let jar = Arc::new(Jar::default());
     let http = reqwest::Client::builder()
-        .user_agent(DESKTOP_UA)
+        .user_agent(USER_AGENT)
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(60))
         .cookie_provider(jar.clone())
