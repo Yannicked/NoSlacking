@@ -435,7 +435,6 @@ fn section_menu(
     sections: &[SidebarSection],
     actions: &mut Vec<Action>,
 ) {
-    let at = sections.iter().position(|s| s.id == id);
     response.context_menu(|ui| {
         if ui.button(t("New section…")).clicked() {
             actions.push(Action::NameSection {
@@ -453,8 +452,8 @@ fn section_menu(
                 ui.close();
             }
             ui.separator();
-            let can_up = at.is_some_and(|at| at > 0);
-            let can_down = at.is_some_and(|at| at + 1 < sections.len());
+            let can_up = crate::sidebar::can_shift(sections, id, true);
+            let can_down = crate::sidebar::can_shift(sections, id, false);
             if ui
                 .add_enabled(can_up, egui::Button::new(t("Move up")))
                 .clicked()
