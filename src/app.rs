@@ -418,6 +418,9 @@ impl WorkspaceState {
 /// Where a file goes: the team, the channel and the thread, if any.
 type UploadTarget = (String, String, Option<Ts>);
 
+/// How putting a picture on the clipboard went.
+type CopyResult = Result<(), String>;
+
 /// What a change from the worker leaves for [`App`] to do: the people and
 /// apps it named that are not known yet.
 #[derive(Debug, Default, PartialEq)]
@@ -1012,6 +1015,10 @@ pub struct App {
     pub jumps: Vec<crate::jump::Jump>,
     local_counter: u64,
     uploads: (mpsc::Sender<PickedFile>, mpsc::Receiver<PickedFile>),
+    /// A picture on its way to the clipboard: the image loader URIs still
+    /// to try, best first, and the answers of the threads that copy.
+    copying: Vec<String>,
+    copied: (mpsc::Sender<CopyResult>, mpsc::Receiver<CopyResult>),
     marks: HashMap<(String, String), (Ts, Instant)>,
     pending_marks: HashMap<(String, String), Ts>,
     window_focused: bool,
@@ -1151,6 +1158,8 @@ impl App {
             search: crate::search::Search::default(),
             local_counter: 0,
             uploads: mpsc::channel(),
+            copying: Vec::new(),
+            copied: mpsc::channel(),
             marks: HashMap::new(),
             pending_marks: HashMap::new(),
             window_focused: true,
@@ -1320,6 +1329,7 @@ impl App {
         while let Ok((target, path)) = self.uploads.1.try_recv() {
             self.start_upload(target, path, String::new());
         }
+        self.copy_image_frame(ctx);
         if self.catalog.poll() {
             self.refresh_custom_theme();
         }
@@ -2290,6 +2300,64 @@ impl App {
         });
     }
 
+    /// Brings a picture asked for with "Copy image" to the clipboard: its
+    /// bytes come through the image loader (so a private file is fetched
+    /// with the workspace's token, from Slack only), and a thread decodes
+    /// and offers them.
+    fn copy_image_frame(&mut self, ctx: &egui::Context) {
+        while let Ok(result) = self.copied.1.try_recv() {
+            match result {
+                Ok(()) => self.toast(t("Image copied").into_owned(), false),
+                Err(error) => self.toast(
+                    tf("Could not copy the image: {error}", &[("error", &error)]),
+                    true,
+                ),
+            }
+        }
+        let Some(uri) = self.copying.first().cloned() else {
+            return;
+        };
+        match ctx.try_load_bytes(&uri) {
+            Ok(egui::load::BytesPoll::Ready { bytes, .. }) => {
+                self.copying.clear();
+                let bytes = bytes.to_vec();
+                let answer = self.copied.0.clone();
+                let waker = self.waker.clone();
+                std::thread::spawn(move || {
+                    let pixels = match crate::paste::clipboard_pixels(&bytes) {
+                        Ok(pixels) => pixels,
+                        Err(error) => {
+                            let _ = answer.send(Err(error));
+                            waker.wake();
+                            return;
+                        }
+                    };
+                    // Said before copying: on Linux the copy waits until
+                    // something else takes the clipboard.
+                    let _ = answer.send(Ok(()));
+                    waker.wake();
+                    if let Err(error) = crate::paste::copy_image(pixels) {
+                        log::warn!("could not copy the image: {error}");
+                    }
+                });
+            }
+            Ok(egui::load::BytesPoll::Pending { .. }) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+            Err(error) => {
+                // Too large or gone: the thumbnail on screen is next.
+                self.copying.remove(0);
+                if self.copying.is_empty() {
+                    let error = error.to_string();
+                    self.toast(
+                        tf("Could not copy the image: {error}", &[("error", &error)]),
+                        true,
+                    );
+                }
+            }
+        }
+    }
+
     fn pick_upload(&mut self, thread: Option<Ts>) {
         // Decided now: the dialog may stay open while you switch to
         // another conversation, and the file belongs to this one.
@@ -2366,6 +2434,7 @@ impl App {
             } => self.upload(thread, path, comment),
             Action::PickUpload { thread } => self.pick_upload(thread),
             Action::PasteImage { thread } => self.paste_image(thread),
+            Action::CopyImage(uris) => self.copying = uris,
             Action::CancelUpload(id) => {
                 self.backend.send(Command::CancelUpload { id });
                 self.upload_done(id);

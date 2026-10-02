@@ -55,7 +55,7 @@ fn split(uri: &str) -> Option<(Option<&str>, &str)> {
 /// size suggests (a "decompression bomb"): egui decodes whatever it is
 /// handed, and every frame of a GIF at once. Reading the header and
 /// walking a GIF's blocks costs no decoding.
-fn check_decoded_size(bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn check_decoded_size(bytes: &[u8]) -> Result<(), String> {
     let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;

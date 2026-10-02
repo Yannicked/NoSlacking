@@ -1612,3 +1612,12 @@ msgstr "Beantwoorden in thread"
 
 msgid "Save image"
 msgstr "Afbeelding opslaan"
+
+msgid "Copy image"
+msgstr "Afbeelding kopiëren"
+
+msgid "Image copied"
+msgstr "Afbeelding gekopieerd"
+
+msgid "Could not copy the image: {error}"
+msgstr "De afbeelding kon niet worden gekopieerd: {error}"

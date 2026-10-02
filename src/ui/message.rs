@@ -718,6 +718,12 @@ fn file_view(
                         .clone()
                         .or_else(|| file.download_url.clone()),
                     permalink: file.permalink.clone(),
+                    copy: file
+                        .url_private
+                        .iter()
+                        .map(|full| super::image_uri(team, full))
+                        .chain([uri.clone()])
+                        .collect(),
                 },
             );
         }
@@ -1845,6 +1851,7 @@ fn context_menu(
                 name,
                 download,
                 permalink,
+                copy,
             }) => {
                 if ui.button(t("Open image")).clicked() {
                     actions.push(Action::ViewImage {
@@ -1853,6 +1860,10 @@ fn context_menu(
                         ts: ts.clone(),
                         file: file.clone(),
                     });
+                    ui.close();
+                }
+                if ui.button(t("Copy image")).clicked() {
+                    actions.push(Action::CopyImage(copy.clone()));
                     ui.close();
                 }
                 if let Some(url) = download
