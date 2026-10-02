@@ -197,7 +197,9 @@ pub fn show(
         text.extend(&chars[end..]);
         draft.text = text;
         if let Suggestion::User { id, label, .. } = &suggestion {
-            draft.mentions.push((format!("@{label}"), id.clone()));
+            draft
+                .mentions
+                .push((format!("@{label}"), format!("<@{id}>")));
         }
         let at = start + insert.chars().count();
         if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {
