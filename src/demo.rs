@@ -391,8 +391,26 @@ fn history(channel: &str) -> Vec<Message> {
                     thumb: Some(PICTURE.into()),
                     thumb_size: Some([480.0, 270.0]),
                     permalink: None,
+                    original_size: Some([480.0, 270.0]),
                 }],
                 ..message(NOW - 2400, "U01", "New sidebar spacing, what do you think?")
+            },
+            Message {
+                files: vec![File {
+                    id: "F02".into(),
+                    name: "sidebar-v2-light.png".into(),
+                    title: "sidebar-v2-light.png".into(),
+                    mimetype: "image/png".into(),
+                    size: 51_002,
+                    thumb: Some(PICTURE.into()),
+                    thumb_size: Some([480.0, 270.0]),
+                    original_size: Some([480.0, 270.0]),
+                    permalink: Some(
+                        "https://acme.slack.com/files/U01/F02/sidebar-v2-light.png".into(),
+                    ),
+                    ..File::default()
+                }],
+                ..message(NOW - 2380, "U01", "And in the light theme.")
             },
             message(
                 NOW - 2350,

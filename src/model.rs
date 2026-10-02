@@ -236,7 +236,7 @@ pub struct Reaction {
 }
 
 /// A file shared in a message.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct File {
     pub id: String,
     pub name: String,
@@ -250,6 +250,8 @@ pub struct File {
     pub thumb: Option<String>,
     pub thumb_size: Option<[f32; 2]>,
     pub permalink: Option<String>,
+    /// The picture's own size in pixels, for the image viewer.
+    pub original_size: Option<[f32; 2]>,
 }
 
 impl File {
@@ -623,6 +625,15 @@ pub enum Action {
     Preview {
         uri: String,
         name: String,
+    },
+    /// Opens the image viewer on file `file` of message `ts`, stepping
+    /// through the images of the list it is in: the thread with parent
+    /// `thread`, or else the conversation.
+    ViewImage {
+        channel: String,
+        thread: Option<Ts>,
+        ts: Ts,
+        file: String,
     },
     OpenSwitcher,
     /// Opens the search window.

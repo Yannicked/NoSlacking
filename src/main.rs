@@ -48,7 +48,7 @@ struct Cli {
     demo_hover: Option<String>,
 
     /// Open a view before the screenshot: thread, settings, sign-in,
-    /// switcher, picker, profile, upload or drafts.
+    /// switcher, picker, profile, upload, drafts or lightbox.
     #[cfg(feature = "demo")]
     #[arg(long, value_name = "VIEW")]
     demo_view: Option<String>,
@@ -402,6 +402,9 @@ struct DemoSetup {
     /// Your message to open for editing once its history has arrived:
     /// asked for earlier, the edit finds nothing to edit.
     edit: Option<noslacking::model::Ts>,
+    /// The message whose picture to open in the image viewer once its
+    /// history has arrived.
+    image: Option<noslacking::model::Ts>,
 }
 
 #[cfg(feature = "demo")]
@@ -434,6 +437,7 @@ impl DemoSetup {
             frames: 0,
             asked: false,
             edit: None,
+            image: None,
         }
     }
 
@@ -455,6 +459,19 @@ impl DemoSetup {
             });
             self.edit = None;
         }
+        if let Some(ts) = &self.image
+            && app
+                .active_workspace()
+                .is_some_and(|w| w.find_message("C02", ts).is_some())
+        {
+            app.actions.push(Action::ViewImage {
+                channel: "C02".into(),
+                thread: None,
+                ts: ts.clone(),
+                file: "F01".into(),
+            });
+            self.image = None;
+        }
         if self.frames != 6 {
             return;
         }
@@ -474,6 +491,10 @@ impl DemoSetup {
             Some("profile") => app.actions.push(Action::OpenProfile("U01".into())),
             // Your own message in #engineering, opened for editing.
             Some("edit") => self.edit = Some(Ts::new(format!("{}.000100", 1_790_172_000 - 2000))),
+            // The image viewer, on the first of #engineering's pictures.
+            Some("lightbox") => {
+                self.image = Some(Ts::new(format!("{}.000100", 1_790_172_000 - 2400)));
+            }
             Some("dm") => app.actions.push(Action::OpenConversation("D01".into())),
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             Some("general") => app.actions.push(Action::OpenConversation("C01".into())),

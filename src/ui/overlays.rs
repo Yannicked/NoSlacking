@@ -12,7 +12,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     switcher(app, ctx);
     picker(app, ctx);
     profile(app, ctx);
-    preview(app, ctx);
+    super::lightbox::show(app, ctx);
     confirm_delete(app, ctx);
     section_dialog(app, ctx);
     toasts(app, ctx);
@@ -725,42 +725,6 @@ fn profile(app: &mut App, ctx: &egui::Context) {
         });
     if close || response.should_close() {
         app.profile = None;
-    }
-}
-
-fn preview(app: &mut App, ctx: &egui::Context) {
-    let Some((uri, name)) = app.preview.clone() else {
-        return;
-    };
-    let palette = app.palette;
-    let screen = ctx.content_rect();
-    let mut close = false;
-    let response = egui::Modal::new(egui::Id::new("preview"))
-        .frame(modal_frame(app).inner_margin(Margin::same(10)))
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(&name)
-                        .font(theme::semibold(14.0))
-                        .color(palette.text),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::icon_button(ui, &palette, Icon::X, 16.0, &t("Close")).clicked() {
-                        close = true;
-                    }
-                });
-            });
-            let max = (screen.size() - Vec2::new(120.0, 160.0)).max(Vec2::splat(200.0));
-            ui.add(
-                egui::Image::new(uri)
-                    .fit_to_original_size(1.0)
-                    .max_size(max)
-                    .show_loading_spinner(true)
-                    .corner_radius(CornerRadius::same(theme::RADIUS_SMALL)),
-            );
-        });
-    if close || response.should_close() {
-        app.preview = None;
     }
 }
 

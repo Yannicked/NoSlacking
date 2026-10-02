@@ -8,6 +8,7 @@ mod desktop;
 mod details;
 mod format;
 mod keys;
+mod lightbox;
 mod login;
 mod message;
 mod overlays;

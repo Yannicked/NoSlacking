@@ -212,12 +212,12 @@ impl File {
         .find_map(|(url, w, h)| url.map(|url| (Some(url), w.zip(h).map(|(w, h)| [w, h]))))
         .unwrap_or((None, None));
         // Small GIFs and PNGs come without thumbnails; show the file itself.
+        let original_size = self.original_w.zip(self.original_h).map(|(w, h)| [w, h]);
         let (thumb, size) = match thumb {
             Some(thumb) => (Some(thumb), size),
-            None if self.mimetype.starts_with("image/") && self.size < 4 * 1024 * 1024 => (
-                self.url_private.clone(),
-                self.original_w.zip(self.original_h).map(|(w, h)| [w, h]),
-            ),
+            None if self.mimetype.starts_with("image/") && self.size < 4 * 1024 * 1024 => {
+                (self.url_private.clone(), original_size)
+            }
             None => (None, None),
         };
         Some(model::File {
@@ -231,6 +231,7 @@ impl File {
             thumb,
             thumb_size: size,
             permalink: self.permalink,
+            original_size,
         })
     }
 }
