@@ -1,0 +1,341 @@
+//! The bridge between the interface and Slack.
+//!
+//! A dedicated thread runs a small tokio runtime with the [`worker`]. The
+//! interface sends [`Command`]s and never waits; the worker answers with
+//! [`Event`]s and wakes the window for each one, so egui sleeps when
+//! nothing happens.
+
+pub mod worker;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::mpsc;
+
+pub use fastframe_shell::Waker;
+
+use crate::credentials::{AppCredentials, Credentials};
+use crate::images::ImageLoader;
+use crate::model::{Bot, Conversation, Message, SidebarSection, Ts, User, Workspace};
+use crate::paths::AppDirs;
+use crate::settings::{Redirect, WorkspaceMeta};
+use crate::sidebar::SidebarCall;
+
+#[derive(Debug)]
+pub enum Command {
+    /// Saves the Slack app's credentials and restarts Socket Mode with them.
+    SaveApp(AppCredentials),
+    /// Starts OAuth in the browser.
+    StartSignIn {
+        redirect: Redirect,
+        port: u16,
+    },
+    CancelSignIn,
+    /// A redirect URL handed over by another launch.
+    Callback(String),
+    /// Signs in with a user token copied from the app's settings page.
+    PasteToken(String),
+    /// Signs in by reusing the browser session: the `d` cookie and a
+    /// workspace URL.
+    SignInSession {
+        cookie: String,
+        workspace_url: String,
+    },
+    SignOut(String),
+    /// The conversation on screen, for polling when Socket Mode is down.
+    Focus {
+        team: String,
+        channel: Option<String>,
+    },
+    LoadHistory {
+        team: String,
+        channel: String,
+    },
+    LoadOlder {
+        team: String,
+        channel: String,
+        cursor: String,
+    },
+    LoadThread {
+        team: String,
+        channel: String,
+        ts: Ts,
+    },
+    Send {
+        team: String,
+        channel: String,
+        text: String,
+        thread: Option<Ts>,
+        broadcast: bool,
+        local: Ts,
+    },
+    Edit {
+        team: String,
+        channel: String,
+        ts: Ts,
+        text: String,
+    },
+    Delete {
+        team: String,
+        channel: String,
+        ts: Ts,
+    },
+    React {
+        team: String,
+        channel: String,
+        ts: Ts,
+        name: String,
+        add: bool,
+    },
+    Upload {
+        team: String,
+        channel: String,
+        thread: Option<Ts>,
+        path: PathBuf,
+        comment: String,
+    },
+    Download {
+        team: String,
+        url: String,
+        name: String,
+    },
+    Mark {
+        team: String,
+        channel: String,
+        ts: Ts,
+    },
+    FetchUsers {
+        team: String,
+        ids: Vec<String>,
+    },
+    /// Changes your sidebar in Slack, then fetches it again.
+    Sidebar {
+        team: String,
+        calls: Vec<SidebarCall>,
+    },
+    /// Names and icons of apps that posted without a username.
+    FetchBots {
+        team: String,
+        ids: Vec<String>,
+    },
+    FetchConversation {
+        team: String,
+        channel: String,
+    },
+    Reconnect,
+}
+
+/// Where a sign-in stands.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SignIn {
+    /// The browser is open on this URL.
+    Waiting(String),
+    Exchanging,
+    Failed(String),
+    Done(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Socket {
+    /// No app-level token: messages arrive by polling the open conversation.
+    Off,
+    Connecting,
+    Connected,
+    Disconnected(String),
+    Rejected(String),
+}
+
+#[derive(Debug)]
+pub enum Event {
+    /// The keyring answered: the stored app, if any.
+    AppLoaded(Option<AppCredentials>),
+    KeyringError(String),
+    SignIn(SignIn),
+    /// A workspace is signed in (and these are its current details).
+    WorkspaceReady(Workspace),
+    /// A workspace has no working token any more.
+    SignedOut {
+        team: String,
+        reason: Option<String>,
+    },
+    Conversations {
+        team: String,
+        list: Vec<Conversation>,
+        complete: bool,
+    },
+    Conversation {
+        team: String,
+        conversation: Conversation,
+    },
+    ConversationGone {
+        team: String,
+        channel: String,
+    },
+    Users {
+        team: String,
+        users: Vec<User>,
+    },
+    Bots {
+        team: String,
+        bots: Vec<Bot>,
+    },
+    /// Your sidebar sections, in your order. Only sessions get them; the
+    /// sidebar falls back to Channels and Direct messages without.
+    Sections {
+        team: String,
+        sections: Vec<SidebarSection>,
+    },
+    Emoji {
+        team: String,
+        emoji: HashMap<String, String>,
+    },
+    History {
+        team: String,
+        channel: String,
+        messages: Vec<Message>,
+        has_more: bool,
+        cursor: Option<String>,
+        older: bool,
+    },
+    HistoryFailed {
+        team: String,
+        channel: String,
+        error: String,
+    },
+    Thread {
+        team: String,
+        channel: String,
+        ts: Ts,
+        messages: Vec<Message>,
+    },
+    Message {
+        team: String,
+        channel: String,
+        message: Message,
+    },
+    Deleted {
+        team: String,
+        channel: String,
+        ts: Ts,
+    },
+    Reaction {
+        team: String,
+        channel: String,
+        ts: Ts,
+        name: String,
+        user: String,
+        added: bool,
+    },
+    Sent {
+        team: String,
+        channel: String,
+        local: Ts,
+        result: Result<Message, String>,
+    },
+    /// Someone else read up to `ts` (you, on another device).
+    Read {
+        team: String,
+        channel: String,
+        ts: Ts,
+    },
+    Socket(Socket),
+    Error(String),
+    Notice(String),
+}
+
+/// The interface's end of the bridge.
+pub struct Backend {
+    commands: tokio::sync::mpsc::UnboundedSender<Command>,
+    events: mpsc::Receiver<Event>,
+    pub images: ImageLoader,
+}
+
+impl Backend {
+    pub fn send(&self, command: Command) {
+        if self.commands.send(command).is_err() {
+            log::error!("the Slack worker has stopped");
+        }
+    }
+
+    pub fn try_recv(&self) -> Option<Event> {
+        self.events.try_recv().ok()
+    }
+}
+
+/// Sends events to the interface and wakes it.
+#[derive(Clone)]
+pub struct Sink {
+    sender: mpsc::Sender<Event>,
+    waker: Waker,
+}
+
+impl Sink {
+    pub fn send(&self, event: Event) {
+        let _ = self.sender.send(event);
+        self.waker.wake();
+    }
+}
+
+/// Where the worker gets its data.
+pub enum Source {
+    Slack {
+        dirs: AppDirs,
+        workspaces: Vec<WorkspaceMeta>,
+        credentials_in_memory: bool,
+    },
+    #[cfg(feature = "demo")]
+    Demo,
+}
+
+/// Starts the runtime thread and the worker.
+pub fn spawn(waker: &Waker, source: Source, cache_dir: PathBuf) -> Backend {
+    let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (sender, events) = mpsc::channel();
+    let sink = Sink {
+        sender,
+        waker: waker.clone(),
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("noslacking-runtime")
+        .enable_all()
+        .build();
+    // Without a runtime there is no app to run.
+    let runtime =
+        runtime.unwrap_or_else(|error| panic!("could not start the network runtime: {error}"));
+    let http = crate::slack::client::http();
+    let images = ImageLoader::new(http.clone(), runtime.handle().clone(), cache_dir);
+    let worker_images = images.clone();
+    let handle = runtime.handle().clone();
+    let spawned = std::thread::Builder::new()
+        .name("noslacking-backend".into())
+        .spawn(move || {
+            runtime.block_on(async move {
+                match source {
+                    Source::Slack {
+                        dirs,
+                        workspaces,
+                        credentials_in_memory,
+                    } => {
+                        let credentials = if credentials_in_memory {
+                            Credentials::memory()
+                        } else {
+                            Credentials::native(Some(handle))
+                        };
+                        worker::Worker::new(http, credentials, dirs, sink, worker_images)
+                            .run(workspaces, receiver)
+                            .await;
+                    }
+                    #[cfg(feature = "demo")]
+                    Source::Demo => crate::demo::run(sink, receiver).await,
+                }
+            });
+        });
+    if let Err(error) = spawned {
+        log::error!("could not start the backend thread: {error}");
+    }
+    Backend {
+        commands,
+        events,
+        images,
+    }
+}
