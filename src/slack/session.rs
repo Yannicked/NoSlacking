@@ -12,6 +12,7 @@
 //! undocumented endpoints and is a fallback to the Slack-app sign-in.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use reqwest::cookie::Jar;
 
@@ -41,11 +42,22 @@ pub fn normalize_workspace(input: &str) -> Option<String> {
         .unwrap_or(trimmed);
     // A bare subdomain ("acme") becomes the full host.
     let host = if host.contains('.') {
-        host.to_owned()
+        host.to_ascii_lowercase()
     } else {
-        format!("{host}.slack.com")
+        format!("{}.slack.com", host.to_ascii_lowercase())
     };
-    (!host.is_empty()).then(|| format!("https://{host}"))
+    // The session cookie only works on Slack's own hosts, and the boot page
+    // must come from one: anything else (a port, credentials, a look-alike
+    // domain) is refused rather than fetched.
+    let url = reqwest::Url::parse(&format!("https://{host}")).ok()?;
+    let valid = url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url
+            .host_str()
+            .and_then(|h| h.strip_suffix(".slack.com"))
+            .is_some_and(|sub| !sub.is_empty() && !sub.starts_with('.'));
+    valid.then(|| format!("https://{host}"))
 }
 
 /// A recent desktop Chrome user agent. Slack serves the full web-client boot
@@ -100,6 +112,8 @@ fn seeded_client(cookie: &str) -> Result<reqwest::Client, SlackError> {
     jar.add_cookie_str(&format!("d={cookie}; Domain=.slack.com; Path=/"), &url);
     reqwest::Client::builder()
         .user_agent(BROWSER_UA)
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(60))
         .cookie_provider(jar)
         .build()
         .map_err(|e| SlackError::Network(e.to_string()))
@@ -167,7 +181,23 @@ mod tests {
             normalize_workspace("https://acme.slack.com/messages/"),
             Some("https://acme.slack.com".into())
         );
+        assert_eq!(
+            normalize_workspace("Acme.Enterprise.Slack.com"),
+            Some("https://acme.enterprise.slack.com".into())
+        );
         assert_eq!(normalize_workspace("  "), None);
+        for hostile in [
+            "evil.example",
+            "acme.slack.com.evil.example",
+            "evilslack.com",
+            "slack.com",
+            ".slack.com",
+            "acme.slack.com:8443",
+            "user@acme.slack.com",
+            "https://evil.example/acme.slack.com",
+        ] {
+            assert_eq!(normalize_workspace(hostile), None, "{hostile}");
+        }
     }
 
     #[test]
