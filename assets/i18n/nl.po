@@ -105,3 +105,12 @@ msgstr "Symbolen"
 
 msgid "Flags"
 msgstr "Vlaggen"
+
+msgid "Notify everyone online in this conversation"
+msgstr "Iedereen in dit gesprek die online is een melding sturen"
+
+msgid "Notify every member of this conversation"
+msgstr "Alle leden van dit gesprek een melding sturen"
+
+msgid "Notify everyone in the workspace"
+msgstr "Iedereen in de werkruimte een melding sturen"
