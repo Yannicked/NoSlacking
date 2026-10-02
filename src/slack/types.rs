@@ -488,7 +488,9 @@ pub struct Message {
     pub username: Option<String>,
     pub text: String,
     pub thread_ts: Option<String>,
-    pub reply_count: u32,
+    /// Absent on a message that says nothing about its thread, as some
+    /// edits and trimmed answers do; an explicit 0 means no replies.
+    pub reply_count: Option<u32>,
     pub reply_users: Vec<String>,
     pub latest_reply: Option<String>,
     pub reactions: Vec<Reaction>,
@@ -539,7 +541,8 @@ impl Message {
             bot_id: self.bot_id,
             text,
             thread_ts: self.thread_ts.map(Ts::new),
-            reply_count: self.reply_count,
+            reply_count: self.reply_count.unwrap_or(0),
+            replies_known: self.reply_count.is_some(),
             reply_users: self.reply_users,
             latest_reply: self.latest_reply.map(Ts::new),
             reactions: self
@@ -1015,6 +1018,49 @@ mod tests {
     fn group_dm_names_read_as_people() {
         assert_eq!(group_name("mpdm-ana--bob--carla-1"), "ana, bob, carla");
         assert_eq!(group_name("mpdm-x.y--z-12"), "x.y, z");
+    }
+
+    /// Parses one message as Slack sends it.
+    fn parsed(json: &str) -> model::Message {
+        serde_json::from_str::<Message>(json)
+            .ok()
+            .and_then(Message::into_model)
+            .expect("a message")
+    }
+
+    #[test]
+    fn edits_without_thread_details_keep_the_counts() {
+        let mut timeline = model::Timeline::default();
+        timeline.upsert(parsed(
+            r#"{"type":"message","ts":"1.0","user":"U1","text":"parent","thread_ts":"1.0",
+                "reply_count":2,"reply_users":["U2"],"latest_reply":"3.0"}"#,
+        ));
+        // A `message_changed` copy with the thread left out, with and
+        // without `thread_ts`.
+        let edits = [
+            r#"{"type":"message","ts":"1.0","user":"U1","text":"edited","edited":{"user":"U1","ts":"4.0"}}"#,
+            r#"{"type":"message","ts":"1.0","user":"U1","text":"edited","thread_ts":"1.0","edited":{"user":"U1","ts":"4.0"}}"#,
+        ];
+        for edit in edits {
+            let edit = parsed(edit);
+            assert!(!edit.replies_known);
+            timeline.upsert(edit);
+            let parent = &timeline.messages[0];
+            assert_eq!(parent.text, "edited");
+            assert_eq!(parent.reply_count, 2);
+            assert_eq!(parent.reply_users, ["U2"]);
+            assert_eq!(parent.latest_reply.as_ref().map(Ts::as_str), Some("3.0"));
+            assert_eq!(parent.thread_ts.as_ref().map(Ts::as_str), Some("1.0"));
+        }
+        // Slack's copy after the last reply was deleted: an explicit 0,
+        // even without `thread_ts`, clears the counters.
+        timeline.upsert(parsed(
+            r#"{"type":"message","ts":"1.0","user":"U1","text":"edited","reply_count":0}"#,
+        ));
+        let parent = &timeline.messages[0];
+        assert_eq!(parent.reply_count, 0);
+        assert!(parent.reply_users.is_empty());
+        assert_eq!(parent.latest_reply, None);
     }
 
     #[test]

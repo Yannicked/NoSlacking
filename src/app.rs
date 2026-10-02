@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use fastframe_shell::{Closed, Headless};
 
-use crate::backend::{self, Backend, Command, Event, SignIn, Socket, Source, Waker};
+use crate::backend::{self, Backend, Change, Command, Event, SignIn, Socket, Source, Waker};
 use crate::credentials::AppCredentials;
 use crate::emoji::EmojiSet;
 use crate::i18n::{self, t};
@@ -568,6 +568,27 @@ impl WorkspaceState {
         (arrived, fetch_conversation)
     }
 
+    /// A new copy of a message already sent: an edit, or a thread
+    /// parent's new reply details. It replaces the copies that are loaded
+    /// and nothing else: no counts change, and a message outside the
+    /// loaded history is not pulled in. Returns whom to fetch.
+    fn message_changed(&mut self, channel: &str, message: Message) -> Arrived {
+        let mut loaded = false;
+        for timeline in self.timelines_for_mut(channel) {
+            if timeline.find_mut(&message.ts).is_some() {
+                timeline.upsert(message.clone());
+                loaded = true;
+            }
+        }
+        if !loaded {
+            return Arrived::default();
+        }
+        Arrived {
+            users: self.unknown_users(message.user.as_deref().into_iter()),
+            bots: self.unknown_bots(std::iter::once(&message)),
+        }
+    }
+
     /// Slack answered a send: the optimistic copy `local` gives way to the
     /// real message, or is marked as failed.
     fn sent(&mut self, channel: &str, local: &Ts, result: &Result<Message, String>) {
@@ -626,13 +647,77 @@ impl WorkspaceState {
         timeline.upsert(message);
     }
 
-    /// Shows your edit at once.
-    fn edit_locally(&mut self, channel: &str, ts: &Ts, wire: &str) {
+    /// Shows your edit at once. Returns the message as it was, to put
+    /// back if Slack refuses the edit.
+    fn edit_locally(&mut self, channel: &str, ts: &Ts, wire: &str) -> Option<Message> {
+        let mut before = None;
         for timeline in self.timelines_for_mut(channel) {
             if let Some(message) = timeline.find_mut(ts) {
+                before.get_or_insert_with(|| message.clone());
                 message.text = wire.to_owned();
                 message.edited = true;
             }
+        }
+        before
+    }
+
+    /// Takes back a change Slack refused: the text before your edit, the
+    /// message you deleted, or your reaction toggle.
+    fn undo(&mut self, channel: &str, change: Change) {
+        match change {
+            Change::Edit { ts, text, before } => {
+                let Some(before) = before else { return };
+                for timeline in self.timelines_for_mut(channel) {
+                    // Only while it still shows this edit: a later edit
+                    // or Slack's own copy wins.
+                    if let Some(message) = timeline.find_mut(&ts)
+                        && message.text == text
+                    {
+                        message.text.clone_from(&before.text);
+                        message.edited = before.edited;
+                    }
+                }
+            }
+            Change::Delete { removed, .. } => {
+                if let Some(message) = removed {
+                    self.restore(channel, *message);
+                }
+            }
+            Change::React { ts, name, added } => {
+                let me = self.info.user_id.clone();
+                self.reaction_changed(channel, &ts, &name, &me, !added);
+            }
+        }
+    }
+
+    /// Shows a deleted message again where it was, undoing
+    /// [`Self::remove_message`]: a reply counts on its parent once more.
+    fn restore(&mut self, channel: &str, message: Message) {
+        // Slack may have sent it again already.
+        if self.find_message(channel, &message.ts).is_some() {
+            return;
+        }
+        if message.is_reply() {
+            let parent = message.thread_ts.clone().unwrap_or_default();
+            let key = (channel.to_owned(), parent.clone());
+            if let Some(thread) = self.threads.get_mut(&key) {
+                thread.upsert(message.clone());
+            }
+            let thread = self.threads.get_mut(&key);
+            let copies = self
+                .timelines
+                .get_mut(channel)
+                .and_then(|t| t.find_mut(&parent))
+                .into_iter()
+                .chain(thread.and_then(|t| t.find_mut(&parent)));
+            for copy in copies {
+                copy.reply_count += 1;
+            }
+        }
+        if message.in_channel()
+            && let Some(timeline) = self.timelines.get_mut(channel)
+        {
+            timeline.upsert(message);
         }
     }
 
@@ -1164,7 +1249,8 @@ impl App {
                 team,
                 channel,
                 message,
-            } => self.message(&team, &channel, message),
+                changed,
+            } => self.message(&team, &channel, message, changed),
             Event::Deleted { team, channel, ts } => self.remove_message(&team, &channel, &ts),
             Event::Reaction {
                 team,
@@ -1189,7 +1275,28 @@ impl App {
                     workspace.read_elsewhere(&channel, ts);
                 }
             }
+            Event::Settled {
+                team,
+                channel,
+                change,
+                result,
+            } => self.settled(&team, &channel, change, result),
         }
+    }
+
+    /// Slack answered an edit, delete or reaction; a refused one is
+    /// undone on screen, and you are told.
+    fn settled(&mut self, team: &str, channel: &str, change: Change, result: Result<(), String>) {
+        let Err(error) = result else { return };
+        let what = match &change {
+            Change::Edit { .. } => t("Could not edit the message"),
+            Change::Delete { .. } => t("Could not delete the message"),
+            Change::React { .. } => t("Could not change the reaction"),
+        };
+        if let Some(workspace) = self.workspace_mut(team) {
+            workspace.undo(channel, change);
+        }
+        self.toast(format!("{what}: {error}"), true);
     }
 
     fn app_loaded(&mut self, app: Option<AppCredentials>) {
@@ -1320,11 +1427,19 @@ impl App {
         }
     }
 
-    fn message(&mut self, team: &str, channel: &str, message: Message) {
+    fn message(&mut self, team: &str, channel: &str, message: Message, changed: bool) {
         let viewing = self.is_viewing(team, channel);
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
+        if changed {
+            let arrived = workspace.message_changed(channel, message);
+            self.fetch_arrived(team, arrived);
+            if viewing {
+                self.waker.wake();
+            }
+            return;
+        }
         let from_me = message.user.as_deref() == Some(workspace.info.user_id.as_str());
         let (arrived, fetch_conversation) = workspace.message_arrived(channel, message, viewing);
         if fetch_conversation {
@@ -1624,14 +1739,15 @@ impl App {
             .map(|e| e.mentions)
             .unwrap_or_default();
         let wire = to_wire(&text, &mentions);
-        if let Some(workspace) = self.workspace_mut(&team) {
-            workspace.edit_locally(&channel, &ts, &wire);
-        }
+        let before = self
+            .workspace_mut(&team)
+            .and_then(|w| w.edit_locally(&channel, &ts, &wire));
         self.backend.send(Command::Edit {
             team,
             channel,
             ts,
             text: wire,
+            before: before.map(Box::new),
         });
     }
 
@@ -1639,9 +1755,18 @@ impl App {
         let Some(team) = self.active_team() else {
             return;
         };
+        let removed = self
+            .active_workspace()
+            .and_then(|w| w.find_message(&channel, &ts))
+            .cloned();
         self.remove_message(&team, &channel, &ts);
         if !ts.is_local() {
-            self.backend.send(Command::Delete { team, channel, ts });
+            self.backend.send(Command::Delete {
+                team,
+                channel,
+                ts,
+                removed: removed.map(Box::new),
+            });
         }
     }
 
@@ -2027,6 +2152,7 @@ fn local_message(
         text: wire.to_owned(),
         thread_ts: thread.clone(),
         reply_count: 0,
+        replies_known: false,
         reply_users: Vec::new(),
         latest_reply: None,
         reactions: Vec::new(),
@@ -2428,6 +2554,7 @@ mod tests {
             text: format!("text {ts}"),
             thread_ts: thread.map(Ts::new),
             reply_count: 0,
+            replies_known: false,
             reply_users: Vec::new(),
             latest_reply: None,
             reactions: Vec::new(),
@@ -2677,5 +2804,144 @@ mod tests {
         assert_eq!(c.last_read, Some(Ts::new("7.0")));
         assert_eq!((c.unread, c.mentions), (2, 1));
         assert!(c.has_unread());
+    }
+
+    #[test]
+    fn a_refused_edit_puts_the_old_text_back() {
+        let mut w = workspace_with_thread();
+        let ts = Ts::new("1.0");
+        let before = w.edit_locally("C1", &ts, "new").map(Box::new);
+        assert!(before.is_some());
+        let edit = Change::Edit {
+            ts: ts.clone(),
+            text: "new".into(),
+            before,
+        };
+        w.undo("C1", edit);
+        for timeline in w.timelines_for("C1") {
+            let parent = &timeline.messages[0];
+            assert_eq!(parent.text, "text 1.0");
+            assert!(!parent.edited);
+        }
+        // A later edit that did go through is not undone.
+        let before = w.edit_locally("C1", &ts, "first").map(Box::new);
+        w.edit_locally("C1", &ts, "second");
+        w.undo(
+            "C1",
+            Change::Edit {
+                ts: ts.clone(),
+                text: "first".into(),
+                before,
+            },
+        );
+        assert_eq!(
+            w.find_message("C1", &ts).map(|m| m.text.as_str()),
+            Some("second")
+        );
+    }
+
+    #[test]
+    fn a_refused_delete_brings_the_message_back() {
+        let mut w = workspace_with_thread();
+        let reply = w.find_message("C1", &Ts::new("2.0")).cloned();
+        w.remove_message("C1", &Ts::new("2.0"));
+        w.undo(
+            "C1",
+            Change::Delete {
+                ts: Ts::new("2.0"),
+                removed: reply.map(Box::new),
+            },
+        );
+        let thread = &w.threads[&("C1".to_owned(), Ts::new("1.0"))];
+        let order: Vec<&str> = thread.messages.iter().map(|m| m.ts.as_str()).collect();
+        assert_eq!(order, ["1.0", "2.0", "3.0"]);
+        assert_eq!(thread.messages[0].reply_count, 2);
+        assert_eq!(w.timelines["C1"].messages[0].reply_count, 2);
+        assert_eq!(
+            w.timelines["C1"].messages.len(),
+            2,
+            "a reply stays in its thread"
+        );
+
+        let plain = w.find_message("C1", &Ts::new("5.0")).cloned();
+        w.remove_message("C1", &Ts::new("5.0"));
+        let undo = Change::Delete {
+            ts: Ts::new("5.0"),
+            removed: plain.map(Box::new),
+        };
+        w.undo("C1", undo.clone());
+        // Twice, as if Slack had sent it back meanwhile: still one copy.
+        w.undo("C1", undo);
+        let order: Vec<&str> = w.timelines["C1"]
+            .messages
+            .iter()
+            .map(|m| m.ts.as_str())
+            .collect();
+        assert_eq!(order, ["1.0", "5.0"]);
+    }
+
+    #[test]
+    fn a_refused_reaction_is_taken_back() {
+        let mut w = workspace_with_thread();
+        let ts = Ts::new("1.0");
+        let added = w.toggle_my_reaction("C1", &ts, "tada");
+        assert_eq!(added, Some(true));
+        w.undo(
+            "C1",
+            Change::React {
+                ts: ts.clone(),
+                name: "tada".into(),
+                added: true,
+            },
+        );
+        assert!(
+            w.timelines_for("C1")
+                .all(|t| t.messages[0].reactions.is_empty())
+        );
+    }
+
+    #[test]
+    fn edits_change_no_counts() {
+        let mut w = workspace_with_thread();
+        w.conversations.push(conversation("1.0", "5.0", 0, 0));
+        // An edited reply that now mentions you, while you look elsewhere.
+        let mut reply = message("2.0", Some("1.0"));
+        reply.user = Some("U2".into());
+        reply.text = "now for <@U1>".into();
+        reply.edited = true;
+        w.message_changed("C1", reply);
+        let thread = &w.threads[&("C1".to_owned(), Ts::new("1.0"))];
+        assert_eq!(thread.messages[1].text, "now for <@U1>");
+        assert_eq!(thread.messages[0].reply_count, 2);
+        assert_eq!(w.timelines["C1"].messages[0].reply_count, 2);
+        let c = w.conversation("C1").expect("C1");
+        assert_eq!((c.mentions, c.latest.clone()), (0, Some(Ts::new("5.0"))));
+        assert_eq!(w.timelines["C1"].messages.len(), 2);
+
+        // A parent's new thread details replace the loaded copies.
+        let mut parent = message("1.0", Some("1.0"));
+        parent.reply_count = 3;
+        parent.replies_known = true;
+        w.message_changed("C1", parent);
+        assert_eq!(w.timelines["C1"].messages[0].reply_count, 3);
+    }
+
+    #[test]
+    fn edits_outside_the_loaded_history_stay_out() {
+        let mut w = workspace_with_thread();
+        w.conversations.push(conversation("1.0", "5.0", 0, 0));
+        let mut old = message("0.5", None);
+        old.edited = true;
+        let arrived = w.message_changed("C1", old.clone());
+        assert_eq!(arrived, Arrived::default());
+        let order: Vec<&str> = w.timelines["C1"]
+            .messages
+            .iter()
+            .map(|m| m.ts.as_str())
+            .collect();
+        assert_eq!(order, ["1.0", "5.0"]);
+        // Nor in a conversation that is not loaded at all.
+        w.message_changed("C2", old);
+        assert!(!w.timelines.contains_key("C2"));
     }
 }

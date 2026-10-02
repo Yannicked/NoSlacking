@@ -68,17 +68,26 @@ pub enum Command {
         broadcast: bool,
         local: Ts,
     },
+    /// Saves an edit already shown on screen.
     Edit {
         team: String,
         channel: String,
         ts: Ts,
         text: String,
+        /// The message as it was before the edit, if it was loaded, to
+        /// put back if Slack refuses.
+        before: Option<Box<Message>>,
     },
+    /// Deletes a message already taken off the screen.
     Delete {
         team: String,
         channel: String,
         ts: Ts,
+        /// The message as it was, if it was loaded, to show again if
+        /// Slack refuses.
+        removed: Option<Box<Message>>,
     },
+    /// Adds or takes back your reaction, already toggled on screen.
     React {
         team: String,
         channel: String,
@@ -192,18 +201,26 @@ impl std::fmt::Debug for Command {
                 channel,
                 ts,
                 text,
+                before,
             } => f
                 .debug_struct("Edit")
                 .field("team", team)
                 .field("channel", channel)
                 .field("ts", ts)
                 .field("text", text)
+                .field("before", &before.is_some())
                 .finish(),
-            Self::Delete { team, channel, ts } => f
+            Self::Delete {
+                team,
+                channel,
+                ts,
+                removed,
+            } => f
                 .debug_struct("Delete")
                 .field("team", team)
                 .field("channel", channel)
                 .field("ts", ts)
+                .field("removed", &removed.is_some())
                 .finish(),
             Self::React {
                 team,
@@ -268,6 +285,25 @@ impl std::fmt::Debug for Command {
             Self::Reconnect => f.write_str("Reconnect"),
         }
     }
+}
+
+/// A change to a message that the interface shows before Slack confirms
+/// it, with what it takes to undo it if Slack refuses.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Change {
+    /// You edited `ts` to `text`; `before` is the message as it was.
+    Edit {
+        ts: Ts,
+        text: String,
+        before: Option<Box<Message>>,
+    },
+    /// You deleted `ts`; `removed` is the message as it was.
+    Delete {
+        ts: Ts,
+        removed: Option<Box<Message>>,
+    },
+    /// You added (or took back) your reaction `name` on `ts`.
+    React { ts: Ts, name: String, added: bool },
 }
 
 /// Where a sign-in stands.
@@ -353,10 +389,15 @@ pub enum Event {
         ts: Ts,
         messages: Vec<Message>,
     },
+    /// A message, live.
     Message {
         team: String,
         channel: String,
         message: Message,
+        /// A new copy of a message Slack already sent (an edit, or a
+        /// parent's thread details), not a new one: it changes no counts
+        /// and only replaces a loaded copy.
+        changed: bool,
     },
     Deleted {
         team: String,
@@ -376,6 +417,14 @@ pub enum Event {
         channel: String,
         local: Ts,
         result: Result<Message, String>,
+    },
+    /// Slack answered an edit, delete or reaction. On an error the
+    /// interface undoes the change it already showed.
+    Settled {
+        team: String,
+        channel: String,
+        change: Change,
+        result: Result<(), String>,
     },
     /// Someone else read up to `ts` (you, on another device).
     Read {

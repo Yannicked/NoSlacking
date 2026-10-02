@@ -206,6 +206,7 @@ fn message(seconds: u64, user: &str, text: &str) -> Message {
         text: text.into(),
         thread_ts: None,
         reply_count: 0,
+        replies_known: false,
         reply_users: Vec::new(),
         latest_reply: None,
         reactions: Vec::new(),
@@ -358,6 +359,7 @@ fn history(channel: &str) -> Vec<Message> {
             Message {
                 thread_ts: Some(ts(THREAD)),
                 reply_count: 3,
+                replies_known: true,
                 reply_users: vec!["U01".into(), "U04".into()],
                 latest_reply: Some(ts(NOW - 1200)),
                 reactions: vec![
