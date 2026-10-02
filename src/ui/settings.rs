@@ -239,6 +239,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
 
     super::desktop::settings_group(app, ui, palette);
     super::desktop::window_group(app, ui, palette);
+    super::hooks::settings_group(app, ui, palette);
 
     group(ui, palette, &t("Workspaces"), |ui| {
         let workspaces: Vec<(String, String, Option<String>)> = app

@@ -1291,3 +1291,33 @@ msgstr "Gedeeld met een andere organisatie"
 
 msgid "External"
 msgstr "Extern"
+
+msgid "Scripting hooks"
+msgstr "Scripthooks"
+
+msgid "Run hooks"
+msgstr "Hooks uitvoeren"
+
+msgid "Runs your programs on new messages, with the message as JSON on their input. Each may run for {seconds} seconds."
+msgstr "Voert je programma's uit bij nieuwe berichten, met het bericht als JSON op hun invoer. Elk mag {seconds} seconden draaien."
+
+msgid "Add a hook"
+msgstr "Hook toevoegen"
+
+msgid "Programs run directly, not through a shell. Put quotes around a path with spaces."
+msgstr "Programma's draaien rechtstreeks, niet via een shell. Zet aanhalingstekens om een pad met spaties."
+
+msgid "Program"
+msgstr "Programma"
+
+msgid "/path/to/program --flag"
+msgstr "/pad/naar/programma --optie"
+
+msgid "Mentions of you"
+msgstr "Vermeldingen van jou"
+
+msgid "deploy, outage"
+msgstr "deploy, storing"
+
+msgid "Remove"
+msgstr "Verwijderen"
