@@ -20,7 +20,12 @@ cargo run --features demo # a pretend Slack, offline
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
+cargo deny check          # advisories, licenses, sources (cargo install cargo-deny)
 ```
+
+A new dependency must use a license allowed in `deny.toml` and come from
+crates.io; the only git sources allowed are the fastframe crates and the
+egui and winit forks.
 
 Keep the layered design: UI reads the model and pushes actions; the worker
 owns the network. See `AGENTS.md`.
