@@ -361,6 +361,118 @@ fn order(rows: &mut [&Conversation], sort: Sort, titled: &impl Fn(&Conversation)
     }
 }
 
+/// Everything [`layout`] reads, folded into one number, so a frame can tell
+/// cheaply whether the sidebar's shape changed. That is a walk over the
+/// conversations without sorting or allocating, where [`layout`] sorts by
+/// lower-cased titles and builds maps. It covers what `titled` may read: a
+/// conversation's name and, for a direct message, the person's label.
+pub fn fingerprint(
+    sections: Option<&[SidebarSection]>,
+    conversations: &[Conversation],
+    users: &HashMap<String, User>,
+    sort: Sort,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::mem::discriminant(&sort).hash(&mut hasher);
+    // Section titles are translated.
+    std::mem::discriminant(&crate::i18n::locale()).hash(&mut hasher);
+    match sections {
+        Some(sections) => {
+            sections.len().hash(&mut hasher);
+            for section in sections {
+                section.id.hash(&mut hasher);
+                std::mem::discriminant(&section.kind).hash(&mut hasher);
+                section.name.hash(&mut hasher);
+                section.emoji.hash(&mut hasher);
+                section.channel_ids.hash(&mut hasher);
+            }
+        }
+        None => usize::MAX.hash(&mut hasher),
+    }
+    conversations.len().hash(&mut hasher);
+    for conversation in conversations {
+        conversation.id.hash(&mut hasher);
+        conversation.name.hash(&mut hasher);
+        conversation.kind.hash(&mut hasher);
+        conversation.latest.hash(&mut hasher);
+        conversation.user.hash(&mut hasher);
+        if let Some(user) = conversation.user.as_deref().and_then(|id| users.get(id)) {
+            user.label().hash(&mut hasher);
+            user.is_bot.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// One section of a remembered layout, its rows as indices into the
+/// conversations it was made from.
+#[derive(Clone, Debug)]
+struct Placed {
+    id: Option<String>,
+    kind: SectionKind,
+    title: String,
+    rows: Vec<usize>,
+}
+
+/// [`layout`], remembered until its [`fingerprint`] changes: the sidebar
+/// is drawn every frame, but its shape changes only when a conversation,
+/// a section or a name does.
+#[derive(Clone, Debug, Default)]
+pub struct Memo {
+    key: Option<u64>,
+    placed: std::sync::Arc<[Placed]>,
+}
+
+impl Memo {
+    /// The same as [`layout`] with these arguments; `titled` must read only
+    /// what [`fingerprint`] covers.
+    pub fn layout<'a>(
+        &mut self,
+        sections: Option<&[SidebarSection]>,
+        conversations: &'a [Conversation],
+        users: &HashMap<String, User>,
+        titled: impl Fn(&Conversation) -> String,
+        sort: Sort,
+    ) -> Vec<Shown<'a>> {
+        let key = fingerprint(sections, conversations, users, sort);
+        if self.key != Some(key) {
+            let index: HashMap<&str, usize> = conversations
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.id.as_str(), i))
+                .collect();
+            self.placed = layout(sections, conversations, users, titled, sort)
+                .into_iter()
+                .map(|shown| Placed {
+                    id: shown.id,
+                    kind: shown.kind,
+                    title: shown.title,
+                    rows: shown
+                        .conversations
+                        .iter()
+                        .filter_map(|c| index.get(c.id.as_str()).copied())
+                        .collect(),
+                })
+                .collect();
+            self.key = Some(key);
+        }
+        self.placed
+            .iter()
+            .map(|placed| Shown {
+                id: placed.id.clone(),
+                kind: placed.kind,
+                title: placed.title.clone(),
+                conversations: placed
+                    .rows
+                    .iter()
+                    .filter_map(|&i| conversations.get(i))
+                    .collect(),
+            })
+            .collect()
+    }
+}
+
 /// The section a conversation is shown in, for "Move to".
 pub fn section_of(shown: &[Shown<'_>], channel: &str) -> Option<String> {
     shown
@@ -556,6 +668,59 @@ mod tests {
 
     fn ids<'a>(shown: &Shown<'a>) -> Vec<&'a str> {
         shown.conversations.iter().map(|c| c.id.as_str()).collect()
+    }
+
+    fn all_ids<'a>(shown: &[Shown<'a>]) -> Vec<Vec<&'a str>> {
+        shown.iter().map(ids).collect()
+    }
+
+    #[test]
+    fn the_memo_matches_a_fresh_layout_and_follows_changes() {
+        let (sections, mut conversations, users) = sample();
+        let mut memo = Memo::default();
+        let titled = |c: &Conversation| c.name.clone();
+        let fresh = |conversations: &[Conversation]| {
+            let shown = layout(Some(&sections), conversations, &users, titled, Sort::Name);
+            shown
+                .iter()
+                .map(|s| s.conversations.iter().map(|c| c.id.clone()).collect())
+                .collect::<Vec<Vec<String>>>()
+        };
+        let remembered = memo.layout(Some(&sections), &conversations, &users, titled, Sort::Name);
+        assert_eq!(all_ids(&remembered), fresh(&conversations));
+        let key = memo.key;
+        // A redraw with nothing changed keeps the remembered layout.
+        memo.layout(Some(&sections), &conversations, &users, titled, Sort::Name);
+        assert_eq!(memo.key, key);
+        // A rename reorders; a new message reorders direct messages.
+        conversations[0].name = "aardvark".into();
+        conversations[4].latest = Some(Ts::new("99.0"));
+        let remembered = memo.layout(Some(&sections), &conversations, &users, titled, Sort::Name);
+        assert_ne!(memo.key, key);
+        assert_eq!(all_ids(&remembered), fresh(&conversations));
+        assert_eq!(ids(&remembered[2]), ["C1", "C4"]);
+    }
+
+    #[test]
+    fn the_fingerprint_sees_what_layout_reads() {
+        let (mut sections, conversations, mut users) = sample();
+        let key = |sections: &[SidebarSection], users: &HashMap<String, User>, sort| {
+            fingerprint(Some(sections), &conversations, users, sort)
+        };
+        let before = key(&sections, &users, Sort::Name);
+        assert_eq!(before, key(&sections, &users, Sort::Name));
+        assert_ne!(before, key(&sections, &users, Sort::Recent));
+        assert_ne!(
+            before,
+            fingerprint(None, &conversations, &users, Sort::Name)
+        );
+        sections[1].channel_ids.push("C1".into());
+        let moved = key(&sections, &users, Sort::Name);
+        assert_ne!(before, moved);
+        if let Some(bot) = users.get_mut("UD3") {
+            bot.display_name = "Deployer".into();
+        }
+        assert_ne!(moved, key(&sections, &users, Sort::Name));
     }
 
     #[test]

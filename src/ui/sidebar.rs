@@ -297,13 +297,18 @@ fn list(
 ) {
     let filter = filter.trim();
     let sections = workspace.sections.as_deref();
-    let shown = sidebar::layout(
-        sections,
-        &workspace.conversations,
-        &workspace.users,
-        |c| workspace.title(c),
-        sort,
-    );
+    // Remembered per workspace: sorting every conversation each frame is
+    // the sidebar's main cost, and the order rarely changes.
+    let memo_id = egui::Id::new(("sidebar-layout", workspace.info.team_id.as_str()));
+    let shown = ui.data_mut(|d| {
+        d.get_temp_mut_or_default::<sidebar::Memo>(memo_id).layout(
+            sections,
+            &workspace.conversations,
+            &workspace.users,
+            |c| workspace.title(c),
+            sort,
+        )
+    });
     for section in &shown {
         let rows: Vec<&Conversation> = section
             .conversations
