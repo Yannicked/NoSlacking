@@ -355,6 +355,9 @@ struct DemoSetup {
     /// Where to click, once.
     click: Option<egui::Pos2>,
     started: std::time::Instant,
+    /// Your message to open for editing once its history has arrived:
+    /// asked for earlier, the edit finds nothing to edit.
+    edit: Option<noslacking::model::Ts>,
 }
 
 #[cfg(feature = "demo")]
@@ -379,6 +382,7 @@ impl DemoSetup {
             view: cli.demo_view.clone(),
             frames: 0,
             asked: false,
+            edit: None,
         }
     }
 
@@ -388,6 +392,17 @@ impl DemoSetup {
         // Let the pretend workspace arrive and #engineering open first.
         if self.frames == 3 {
             app.actions.push(Action::OpenConversation("C02".into()));
+        }
+        if let Some(ts) = &self.edit
+            && app
+                .active_workspace()
+                .is_some_and(|w| w.find_message("C02", ts).is_some())
+        {
+            app.actions.push(Action::StartEdit {
+                channel: "C02".into(),
+                ts: ts.clone(),
+            });
+            self.edit = None;
         }
         if self.frames != 6 {
             return;
@@ -407,10 +422,7 @@ impl DemoSetup {
             }),
             Some("profile") => app.actions.push(Action::OpenProfile("U01".into())),
             // Your own message in #engineering, opened for editing.
-            Some("edit") => app.actions.push(Action::StartEdit {
-                channel: "C02".into(),
-                ts: Ts::new(format!("{}.000100", 1_790_172_000 - 2000)),
-            }),
+            Some("edit") => self.edit = Some(Ts::new(format!("{}.000100", 1_790_172_000 - 2000))),
             Some("dm") => app.actions.push(Action::OpenConversation("D01".into())),
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             Some("general") => app.actions.push(Action::OpenConversation("C01".into())),
