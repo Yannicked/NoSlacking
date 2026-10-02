@@ -672,15 +672,40 @@ fn row(
     } else {
         0.0
     };
-    let max_text = rect.width() - 36.0 - 8.0 - badge_width;
+    // A pencil for what you started writing here, as Slack shows it.
+    let drafted = !selected
+        && ui
+            .data(|d| {
+                d.get_temp::<std::sync::Arc<std::collections::HashSet<String>>>(super::drafts_id())
+            })
+            .is_some_and(|drafts| drafts.contains(&conversation.id));
+    let draft_width = if drafted { 20.0 } else { 0.0 };
+    let max_text = rect.width() - 36.0 - 8.0 - badge_width - draft_width;
     // One line, cut with an ellipsis.
     theme::focus_ring(ui, &response, palette, theme::RADIUS_SMALL + 2);
     theme::describe_selected(
         &response,
         egui::WidgetType::SelectableLabel,
         selected,
-        &spoken(&title, unread, conversation.mentions),
+        &if drafted {
+            tf(
+                "{name}, draft",
+                &[("name", &spoken(&title, unread, conversation.mentions))],
+            )
+        } else {
+            spoken(&title, unread, conversation.mentions)
+        },
     );
+    if drafted {
+        let pencil = egui::Rect::from_center_size(
+            egui::pos2(
+                rect.right() - badge_width - 4.0 - draft_width / 2.0,
+                rect.center().y,
+            ),
+            Vec2::splat(13.0),
+        );
+        Icon::Pencil.image(palette.dim, 13.0).paint_at(ui, pencil);
+    }
     let mut job = egui::text::LayoutJob::simple_singleline(title, font, text_color);
     job.wrap = egui::text::TextWrapping::truncate_at_width(max_text);
     let galley = ui.painter().layout_job(job);

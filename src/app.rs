@@ -80,7 +80,7 @@ pub struct Selected {
 }
 
 /// An unsent message.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Draft {
     pub text: String,
     /// Mentions picked from the suggestions: the text inserted and the
@@ -109,6 +109,17 @@ pub struct Upload {
     pub total: u64,
     /// A pasted image's temporary file, removed once the upload ends.
     pasted: Option<PathBuf>,
+}
+
+/// A draft can say anything; its debug form says only how long it is.
+impl std::fmt::Debug for Draft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Draft")
+            .field("chars", &self.text.chars().count())
+            .field("mentions", &self.mentions.len())
+            .field("broadcast", &self.broadcast)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The "name this section" dialog.
@@ -907,6 +918,13 @@ pub struct App {
     /// When changed settings are next written, and the thread that writes them.
     settings_due: crate::settings::Debounce,
     saver: crate::settings::Saver,
+    /// Drafts are kept across restarts (not in the demo): when they are
+    /// next written, what they looked like when last checked, and the
+    /// thread that writes them.
+    keep_drafts: bool,
+    drafts_due: crate::settings::Debounce,
+    drafts_seen: u64,
+    drafts_writer: crate::drafts::Writer,
     quit: bool,
 }
 
@@ -965,6 +983,23 @@ impl App {
             // Pasted images left by a run that ended mid-upload.
             let _ = std::fs::remove_dir_all(dirs.pasted());
         }
+        let drafts: HashMap<String, Draft> = if options.demo {
+            HashMap::new()
+        } else {
+            crate::drafts::load(&dirs.drafts_file())
+                .into_iter()
+                .map(|(key, saved)| {
+                    let draft = Draft {
+                        text: saved.text,
+                        mentions: saved.mentions,
+                        broadcast: saved.broadcast,
+                        ..Draft::default()
+                    };
+                    (key, draft)
+                })
+                .collect()
+        };
+        let drafts_seen = crate::drafts::fingerprint(draft_views(&drafts));
         let mut app = Self {
             dirs,
             settings,
@@ -982,7 +1017,7 @@ impl App {
             setup: SetupForm::default(),
             socket: Socket::Off,
             thread: None,
-            drafts: HashMap::new(),
+            drafts,
             editing: None,
             selected: None,
             toasts: Vec::new(),
@@ -1010,6 +1045,10 @@ impl App {
             window_focused: true,
             settings_due: crate::settings::Debounce::default(),
             saver: crate::settings::Saver::new(),
+            keep_drafts: !options.demo,
+            drafts_due: crate::settings::Debounce::default(),
+            drafts_seen,
+            drafts_writer: crate::drafts::Writer::new(),
             quit: false,
         };
         app.start_theme_scan();
@@ -1129,6 +1168,27 @@ impl App {
         self.save_settings();
     }
 
+    /// Notices drafts that changed since the last frame and writes them
+    /// once typing pauses. The composers change drafts in place, so a
+    /// fingerprint is how the app hears of it.
+    fn watch_drafts(&mut self, now: Instant) {
+        if !self.keep_drafts {
+            return;
+        }
+        let seen = crate::drafts::fingerprint(draft_views(&self.drafts));
+        if seen != self.drafts_seen {
+            self.drafts_seen = seen;
+            self.drafts_due.poke(now);
+            self.waker.wake_after(crate::settings::SAVE_AFTER);
+        }
+        if self.drafts_due.take_due(now) {
+            let drafts = crate::drafts::snapshot(draft_views(&self.drafts));
+            self.drafts_writer.save(drafts, &self.dirs.drafts_file());
+        } else if self.drafts_due.pending() {
+            self.waker.wake_after(crate::settings::SAVE_AFTER);
+        }
+    }
+
     // ---- per-frame work -------------------------------------------------
 
     /// Everything that must happen whether or not a window is open.
@@ -1153,6 +1213,7 @@ impl App {
         self.flush_marks();
         let now = Instant::now();
         self.toasts.retain(|t| t.until > now);
+        self.watch_drafts(now);
         if self.settings_due.take_due(now) {
             self.saver.save(&self.settings, &self.dirs.settings_file());
         } else if self.settings_due.pending() {
@@ -1430,6 +1491,9 @@ impl App {
                 }
             }
             None => {
+                // What you were writing there goes with the sign-in.
+                let prefix = format!("{team}/");
+                self.drafts.retain(|key, _| !key.starts_with(&prefix));
                 self.workspaces.retain(|w| w.info.team_id != team);
                 self.settings.remove_workspace(team);
                 self.save_settings();
@@ -2340,11 +2404,41 @@ impl App {
         self.settings_due.clear();
         self.saver
             .save_now(&self.settings, &self.dirs.settings_file());
+        if self.keep_drafts {
+            self.drafts_due.clear();
+            let drafts = crate::drafts::snapshot(draft_views(&self.drafts));
+            self.drafts_writer
+                .save_now(drafts, &self.dirs.drafts_file());
+        }
+    }
+
+    /// The conversations in `team` with a draft, in it or one of its
+    /// threads, for the sidebar's pencil.
+    pub fn channels_with_drafts(&self, team: &str) -> HashSet<String> {
+        let prefix = format!("{team}/");
+        self.drafts
+            .iter()
+            .filter(|(_, draft)| !draft.text.trim().is_empty())
+            .filter_map(|(key, _)| key.strip_prefix(&prefix))
+            .map(|rest| rest.split('/').next().unwrap_or(rest).to_owned())
+            .collect()
     }
 
     pub fn request_quit(&mut self) {
         self.quit = true;
     }
+}
+
+/// The drafts as [`crate::drafts`] reads them.
+fn draft_views(drafts: &HashMap<String, Draft>) -> impl Iterator<Item = crate::drafts::View<'_>> {
+    drafts.iter().map(|(key, draft)| {
+        (
+            key.as_str(),
+            draft.text.as_str(),
+            draft.mentions.as_slice(),
+            draft.broadcast,
+        )
+    })
 }
 
 /// Fills in what a fresher copy of a conversation lacks, and keeps the

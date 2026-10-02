@@ -10,6 +10,7 @@ pub mod backend;
 pub mod credentials;
 #[cfg(feature = "demo")]
 pub mod demo;
+pub mod drafts;
 pub mod emoji;
 #[cfg(feature = "highlight")]
 pub mod highlight;
