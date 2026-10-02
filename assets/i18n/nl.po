@@ -662,3 +662,29 @@ msgstr "Inloglink"
 
 msgid "Sign in there as usual; NoSlacking finishes by itself. If your browser asks, let it open NoSlacking. If nothing happens, paste the slack:// link from the page here (open the page source with Ctrl+U and search for magic-login)."
 msgstr "Log daar zoals gewoonlijk in; NoSlacking rondt het daarna zelf af. Als je browser het vraagt, laat hem NoSlacking openen. Gebeurt er niets, plak dan hier de slack://-link van de pagina (open de paginabron met Ctrl+U en zoek naar magic-login)."
+msgid "Could not open the conversation: {error}"
+msgstr "Het gesprek kon niet worden geopend: {error}"
+
+msgid "New message"
+msgstr "Nieuw bericht"
+
+msgid "New message ({shortcut})"
+msgstr "Nieuw bericht ({shortcut})"
+
+msgid "Remove {name}"
+msgstr "{name} verwijderen"
+
+msgid "A group message has at most {count} other people"
+msgstr "Een groepsbericht heeft hoogstens {count} andere mensen"
+
+msgid "Type a name"
+msgstr "Typ een naam"
+
+msgid "Add someone else"
+msgstr "Voeg nog iemand toe"
+
+msgid "Nobody by that name."
+msgstr "Niemand met die naam."
+
+msgid "Start group message"
+msgstr "Groepsbericht starten"

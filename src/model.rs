@@ -648,6 +648,8 @@ pub enum Action {
     CancelSignIn,
     /// Opens a folder in the system's file manager.
     OpenFolder(PathBuf),
+    /// Starts, finds or looks after a conversation (see [`crate::convos`]).
+    Convos(crate::convos::Action),
 }
 
 #[cfg(test)]

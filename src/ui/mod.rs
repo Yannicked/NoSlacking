@@ -1,6 +1,7 @@
 //! The interface: a workspace rail, the conversation list, the open
 //! conversation and, when one is open, its thread.
 
+mod browse;
 mod composer;
 mod conversation;
 mod keys;
@@ -23,6 +24,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // First, so Esc leaves a selected message before it closes the thread.
     selection::keys(app, ui.ctx());
     keys::global(app, ui.ctx());
+    browse::keys(app, ui.ctx());
     match app.page {
         Page::SignIn => login::show(app, ui),
         Page::Settings => {
@@ -39,6 +41,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
     overlays::show(app, ui.ctx());
+    browse::show(app, ui.ctx());
     rich::end_frame();
 }
 
