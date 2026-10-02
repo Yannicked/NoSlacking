@@ -346,6 +346,7 @@ fastframe_icons::icons! {
         Archive => "archive",
         ArrowDown => "arrow-down",
         ArrowLeft => lucide "arrow-left",
+        ArrowUp => "arrow-up",
         AtSign => "at-sign",
         Bell => "bell",
         BellOff => "bell-off",

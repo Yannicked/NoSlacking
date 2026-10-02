@@ -709,3 +709,9 @@ msgstr[1] "{count} resultaten"
 
 msgid "in a thread"
 msgstr "in een thread"
+
+msgid "Jump to newest"
+msgstr "Naar nieuwste"
+
+msgid "Jump to unread"
+msgstr "Naar ongelezen"
