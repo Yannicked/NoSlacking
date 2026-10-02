@@ -259,6 +259,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         editing,
         read_line,
         selected,
+        jumps,
         ..
     } = app;
     let Some(workspace) = crate::app::active_in(workspaces, settings) else {
@@ -268,12 +269,21 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         return;
     };
     let timeline = workspace.timelines.get(channel);
+    // A message being brought into view here: it steers the list, so the
+    // end of the list must not pull the view down meanwhile.
+    let now = std::time::Instant::now();
+    let jump = jumps.iter().find(|j| j.list == scroll_key).cloned();
+    let steering = jump.as_ref().is_some_and(crate::jump::Jump::steering);
+    let to_bottom = to_bottom && !steering;
+    // A list of older history has no end to hold on to.
+    let detached = timeline.is_some_and(|t| t.has_newer);
+    let mut target: Option<(f32, f32)> = None;
     let height_id = egui::Id::new(("content-height", &scroll_key));
     let previous_height: Option<f32> = ui.data(|d| d.get_temp(height_id));
     let mut area = egui::ScrollArea::vertical()
         .id_salt(("messages", &scroll_key))
         .auto_shrink([false, false])
-        .stick_to_bottom(true);
+        .stick_to_bottom(!steering && !detached);
     let offset_id = egui::Id::new(("scroll-offset", &scroll_key));
     if let Some(offset) = ui.data_mut(|d| d.remove_temp::<f32>(offset_id)) {
         area = area.vertical_scroll_offset(offset);
@@ -341,6 +351,9 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
             });
             previous = Some(message);
         }
+        if timeline.has_newer {
+            items.push(Item::Bottom);
+        }
         let entries: Vec<rows::Entry> = items
             .iter()
             .map(|item| item.entry(timeline.has_more))
@@ -352,6 +365,15 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
             MARGIN,
         );
         heights.sweep();
+        if let Some(jump) = &jump {
+            target = items
+                .iter()
+                .position(
+                    |item| matches!(item, Item::Message { message, .. } if message.ts == jump.ts),
+                )
+                .map(|index| (plan.tops[index], plan.tops[index + 1]));
+        }
+        let light = jump.as_ref().map_or(0.0, |j| j.light(now));
         moved = rows::show(
             ui,
             &mut heights,
@@ -359,6 +381,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
             &plan,
             |ui, index| match &items[index] {
                 Item::Top => top(ui, workspace, conversation, timeline, &palette, actions),
+                Item::Bottom => bottom_row(ui, timeline, &palette, actions),
                 Item::Message {
                     message,
                     lead,
@@ -371,7 +394,12 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
                     if *unread {
                         new_line(ui, &palette);
                     }
+                    let background = ui.painter().add(egui::Shape::Noop);
+                    let top = ui.cursor().top();
                     message::show(ui, &row, message, *lead, editing, actions);
+                    if light > 0.0 && jump.as_ref().is_some_and(|j| j.ts == message.ts) {
+                        paint_light(ui, background, top, &palette, light);
+                    }
                 }
             },
         );
@@ -404,7 +432,26 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     } else if (content - last_content).abs() < 0.5 {
         pinned = offset >= bottom - 2.0;
     }
-    if pinned {
+    // A jump holds the view itself.
+    if steering || detached {
+        pinned = false;
+    }
+    if let Some(index) = jumps.iter().position(|j| j.list == scroll_key) {
+        let loading = timeline.is_none_or(|t| t.loading || !t.loaded || t.around.is_some());
+        let view = output.inner_rect.height();
+        let jump = &mut jumps[index];
+        if let Some(wanted) = jump.steer(target, offset, view, bottom, loading, now) {
+            ui.data_mut(|d| d.insert_temp(offset_id, wanted));
+        }
+        if jump.done(now) {
+            jumps.remove(index);
+        } else {
+            ui.ctx().request_repaint();
+        }
+    }
+    if steering {
+        // The jump moved the view; nothing else may this frame.
+    } else if pinned {
         if offset < bottom - 1.0 {
             ui.data_mut(|d| d.insert_temp(offset_id, bottom));
             ui.ctx().request_repaint();
@@ -430,6 +477,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     // Near the top: fetch the page before. Not on the frame that jumps to the
     // bottom, whose offset still reads from before the jump.
     if !to_bottom
+        && !steering
         && !pinned
         && offset < 120.0
         && let Some(timeline) = timeline
@@ -439,6 +487,16 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         && content > output.inner_rect.height()
     {
         actions.push(Action::LoadOlder);
+    }
+    // Near the end of older history: read on towards the present.
+    if !steering
+        && offset > bottom - 120.0
+        && let Some(timeline) = timeline
+        && timeline.loaded
+        && timeline.has_newer
+        && !timeline.loading
+    {
+        actions.push(Action::LoadNewer);
     }
 }
 
@@ -450,6 +508,8 @@ const MARGIN: f32 = 400.0;
 enum Item<'a> {
     /// "Load older messages", or the beginning of the conversation.
     Top,
+    /// Newer messages to load, in a list of older history.
+    Bottom,
     Message {
         message: &'a crate::model::Message,
         lead: Lead,
@@ -464,6 +524,10 @@ impl Item<'_> {
             Item::Top => rows::Entry {
                 key: egui::Id::new("top").value(),
                 guess: if has_more { 52.0 } else { 120.0 },
+            },
+            Item::Bottom => rows::Entry {
+                key: egui::Id::new("bottom").value(),
+                guess: 52.0,
             },
             Item::Message {
                 message,
@@ -547,6 +611,55 @@ fn top(
     } else {
         beginning(ui, workspace, conversation, palette);
     }
+}
+
+/// Lights up the message just drawn from `top` down, behind it in the
+/// slot `background`, as strongly as `light` (0 to 1): the message a jump
+/// brought into view.
+pub(super) fn paint_light(
+    ui: &egui::Ui,
+    background: egui::layers::ShapeIdx,
+    top: f32,
+    palette: &crate::theme::Palette,
+    light: f32,
+) {
+    let rect = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
+    ui.painter().set(
+        background,
+        egui::Shape::rect_filled(
+            rect,
+            CornerRadius::ZERO,
+            palette.accent.gamma_multiply(0.22 * light),
+        ),
+    );
+}
+
+/// The end of a list of older history: newer messages to load.
+fn bottom_row(
+    ui: &mut egui::Ui,
+    timeline: &crate::model::Timeline,
+    palette: &crate::theme::Palette,
+    actions: &mut Vec<Action>,
+) {
+    ui.add_space(12.0);
+    ui.vertical_centered(|ui| {
+        if timeline.loading {
+            ui.add(egui::Spinner::new().size(18.0).color(palette.dim));
+        } else if ui
+            .add(
+                egui::Button::new(
+                    RichText::new(t("Load newer messages"))
+                        .font(theme::medium(13.0))
+                        .color(palette.secondary),
+                )
+                .fill(palette.surface),
+            )
+            .clicked()
+        {
+            actions.push(Action::LoadNewer);
+        }
+    });
+    ui.add_space(12.0);
 }
 
 fn beginning(

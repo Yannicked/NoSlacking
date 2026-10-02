@@ -525,6 +525,22 @@ impl Worker {
                 cursor,
             } => self.load_history(team, channel, Some(cursor)),
             Command::LoadThread { team, channel, ts } => self.load_thread(team, channel, ts),
+            Command::LoadAround { team, channel, ts } => match self.team(&team) {
+                Some((client, sink)) => {
+                    tokio::spawn(super::around::around(client, team, channel, ts, sink));
+                }
+                None => self.history_unavailable(team, channel),
+            },
+            Command::LoadNewer {
+                team,
+                channel,
+                after,
+            } => match self.team(&team) {
+                Some((client, sink)) => {
+                    tokio::spawn(super::around::newer(client, team, channel, after, sink));
+                }
+                None => self.history_unavailable(team, channel),
+            },
             Command::Send {
                 team,
                 channel,
@@ -2831,11 +2847,17 @@ mod tests {
             team: "TX".into(),
             channel: "C1".into(),
         });
+        worker.command(Command::LoadAround {
+            team: "TX".into(),
+            channel: "C1".into(),
+            ts: Ts::new("1.0"),
+        });
         let events: Vec<Event> = events.try_iter().collect();
         assert!(
             matches!(&events[..], [
                 Event::Sent { local, result: Err(_), .. },
                 Event::Settled { change: Change::Delete { .. }, result: Err(_), .. },
+                Event::HistoryFailed { .. },
                 Event::HistoryFailed { .. },
             ] if local.as_str() == "local-1"),
             "{events:?}"

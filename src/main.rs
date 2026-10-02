@@ -487,6 +487,18 @@ impl DemoSetup {
             Some("dm") => app.actions.push(Action::OpenConversation("D01".into())),
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             Some("general") => app.actions.push(Action::OpenConversation("C01".into())),
+            // An old message of #general, shown in context and lit up.
+            Some("jump") => app.actions.push(Action::JumpTo {
+                channel: "C01".into(),
+                ts: noslacking::demo::long_history_ts(20),
+                thread: None,
+            }),
+            // A reply: its thread opens beside the conversation.
+            Some("jump-reply") => app.actions.push(Action::JumpTo {
+                channel: "C02".into(),
+                ts: Ts::new(format!("{}.000100", 1_790_172_000 - 2500)),
+                thread: Some(parent),
+            }),
             _ => {}
         }
     }

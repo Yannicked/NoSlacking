@@ -485,8 +485,13 @@ impl WorkspaceState {
         let newest = messages.iter().map(|m| m.ts.clone()).max();
         let timeline = self.timelines.entry(channel.to_owned()).or_default();
         let first = !timeline.loaded;
-        timeline.merge(messages);
-        timeline.loading = false;
+        // The newest page does not join a stretch of older history opened
+        // around a message: it would leave a gap between them unseen.
+        let joins = older || !timeline.has_newer;
+        timeline.merge(if joins { messages } else { Vec::new() });
+        // Messages around one jumped to are still coming, and will replace
+        // these: nothing else may be asked for until then.
+        timeline.loading = timeline.around.is_some();
         if older || first {
             timeline.has_more = has_more;
             timeline.cursor = cursor;
@@ -500,9 +505,71 @@ impl WorkspaceState {
         (arrived, first)
     }
 
+    /// The messages around one jumped to, which replace the list: the
+    /// stretch it held may lie far from them. `older` is whether there is
+    /// history before them, and its cursor. Returns whom to fetch.
+    fn around_arrived(
+        &mut self,
+        channel: &str,
+        messages: Vec<Message>,
+        older: (bool, Option<String>),
+        has_newer: bool,
+    ) -> Arrived {
+        let arrived = self.arrived_in(&messages);
+        let timeline = self.timelines.entry(channel.to_owned()).or_default();
+        // Messages still being sent stay; they go after everything real.
+        let local: Vec<Message> = timeline
+            .messages
+            .iter()
+            .filter(|m| m.ts.is_local())
+            .cloned()
+            .collect();
+        timeline.messages = messages;
+        for message in local {
+            timeline.upsert(message);
+        }
+        (timeline.has_more, timeline.cursor) = older;
+        timeline.has_newer = has_newer;
+        timeline.loaded = true;
+        timeline.loading = false;
+        timeline.around = None;
+        arrived
+    }
+
+    /// The page after the newest message of a list of older history.
+    /// Returns whom to fetch.
+    fn newer_arrived(&mut self, channel: &str, messages: Vec<Message>, has_newer: bool) -> Arrived {
+        let arrived = self.arrived_in(&messages);
+        let newest = messages.iter().map(|m| m.ts.clone()).max();
+        let timeline = self.timelines.entry(channel.to_owned()).or_default();
+        timeline.merge(messages);
+        timeline.has_newer = has_newer;
+        timeline.loading = false;
+        if let (Some(newest), Some(conversation)) = (newest, self.conversation_mut(channel))
+            && conversation.latest.as_ref().is_none_or(|l| *l < newest)
+        {
+            conversation.latest = Some(newest);
+        }
+        arrived
+    }
+
+    /// The authors, repliers and apps of `messages` not known yet.
+    fn arrived_in(&self, messages: &[Message]) -> Arrived {
+        Arrived {
+            users: self.unknown_users(messages.iter().flat_map(|m| {
+                m.user
+                    .as_deref()
+                    .into_iter()
+                    .chain(m.reply_users.iter().map(String::as_str))
+            })),
+            bots: self.unknown_bots(messages.iter()),
+        }
+    }
+
     fn history_failed(&mut self, channel: &str) {
         if let Some(timeline) = self.timelines.get_mut(channel) {
             timeline.loading = false;
+            timeline.around = None;
         }
     }
 
@@ -585,7 +652,11 @@ impl WorkspaceState {
             remove_echoed_local(timeline, &message, from_me);
             let new = timeline.find_mut(&message.ts).is_none();
             let ts = message.ts.clone();
-            timeline.upsert(message);
+            // A list of older history shows new messages once it is read up
+            // to them, not after a gap.
+            if !(new && timeline.has_newer) {
+                timeline.upsert(message);
+            }
             if new && let Some(conversation) = self.conversation_mut(channel) {
                 if conversation.latest.as_ref().is_none_or(|l| *l < ts) {
                     conversation.latest = Some(ts.clone());
@@ -881,6 +952,8 @@ pub struct App {
     /// Focus the field of the dialog or picker just opened, once: asking
     /// every frame would keep Tab from reaching its buttons.
     pub focus_overlay: bool,
+    /// Messages being brought into view, at most one per list.
+    pub jumps: Vec<crate::jump::Jump>,
     local_counter: u64,
     uploads: (mpsc::Sender<PickedFile>, mpsc::Receiver<PickedFile>),
     marks: HashMap<(String, String), (Ts, Instant)>,
@@ -979,6 +1052,7 @@ impl App {
             scroll_to_bottom: HashSet::new(),
             focus_composer: true,
             focus_overlay: false,
+            jumps: Vec::new(),
             local_counter: 0,
             uploads: mpsc::channel(),
             marks: HashMap::new(),
@@ -1284,6 +1358,40 @@ impl App {
                     tf("Could not load messages: {error}", &[("error", &error)]),
                     true,
                 );
+            }
+            Event::Around {
+                team,
+                channel,
+                ts,
+                messages,
+                has_older,
+                cursor,
+                has_newer,
+            } => {
+                if let Some(workspace) = self.workspace_mut(&team) {
+                    let arrived = workspace.around_arrived(
+                        &channel,
+                        messages,
+                        (has_older, cursor),
+                        has_newer,
+                    );
+                    log::debug!("loaded the messages around {} in {channel}", ts.as_str());
+                    self.fetch_arrived(&team, arrived);
+                }
+                // An anchor kept for the list as it was is stale now.
+                self.prepended = None;
+            }
+            Event::Newer {
+                team,
+                channel,
+                messages,
+                has_newer,
+            } => {
+                if let Some(workspace) = self.workspace_mut(&team) {
+                    let arrived = workspace.newer_arrived(&channel, messages, has_newer);
+                    self.fetch_arrived(&team, arrived);
+                }
+                self.mark_if_viewing(&team, &channel);
             }
             Event::Thread {
                 team,
@@ -1728,6 +1836,11 @@ impl App {
         if wire.trim().is_empty() {
             return;
         }
+        if thread.is_none() {
+            // What you send goes at the end, which a list of older history
+            // does not show.
+            self.show_newest(&team, &channel);
+        }
         let local = self.next_local();
         let Some(workspace) = self.workspace_mut(&team) else {
             return;
@@ -1871,6 +1984,16 @@ impl App {
             Action::OpenThread { channel, ts } => self.open_thread(channel, ts),
             Action::CloseThread => self.thread = None,
             Action::LoadOlder => self.load_older(),
+            Action::LoadNewer => self.load_newer(),
+            Action::JumpTo {
+                channel,
+                ts,
+                thread,
+            } => {
+                if let Some(team) = self.active_team() {
+                    self.jump_to(&team, &channel, ts, thread);
+                }
+            }
             Action::ShowSettings => self.page = Page::Settings,
             Action::HideSettings => {
                 self.page = if self.workspaces.is_empty() {
@@ -2039,6 +2162,121 @@ impl App {
                 channel,
                 cursor,
             });
+        }
+    }
+
+    /// Brings the newest messages of a conversation into view. A list of
+    /// older history is dropped for the newest page, read afresh.
+    pub fn show_newest(&mut self, team: &str, channel: &str) {
+        let list = Self::draft_key(team, channel, None);
+        self.jumps.retain(|j| j.list != list);
+        self.scroll_to_bottom.insert(list);
+        let detached = self
+            .workspace_mut(team)
+            .and_then(|w| w.timelines.get_mut(channel))
+            .filter(|t| t.has_newer);
+        if let Some(timeline) = detached {
+            timeline.messages.retain(|m| m.ts.is_local());
+            *timeline = Timeline {
+                messages: std::mem::take(&mut timeline.messages),
+                ..Timeline::default()
+            };
+            self.prepended = None;
+            self.ensure_loaded(team, channel);
+        }
+    }
+
+    /// Asks for the page after the newest message of the open list, when
+    /// it holds older history.
+    fn load_newer(&mut self) {
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        let Some(workspace) = self.workspace_mut(&team) else {
+            return;
+        };
+        let Some(channel) = workspace.active.clone() else {
+            return;
+        };
+        if let Some(timeline) = workspace.timelines.get_mut(&channel)
+            && timeline.has_newer
+            && !timeline.loading
+            && let Some(after) = timeline.newest().cloned()
+        {
+            timeline.loading = true;
+            self.backend.send(Command::LoadNewer {
+                team,
+                channel,
+                after,
+            });
+        }
+    }
+
+    /// Shows message `ts` of `channel` in `team` with the messages around
+    /// it, and lights it up. A reply (`thread` names its parent) shows its
+    /// parent in the conversation and itself in the thread beside it.
+    pub fn jump_to(&mut self, team: &str, channel: &str, ts: Ts, thread: Option<Ts>) {
+        if self.workspace_mut(team).is_none() {
+            return;
+        }
+        if self.active_team().as_deref() != Some(team) {
+            self.select_workspace(team.to_owned());
+        }
+        let reply = thread.filter(|parent| *parent != ts);
+        // What the conversation's own list shows: the message, or for a
+        // reply its parent.
+        let anchor = reply.clone().unwrap_or_else(|| ts.clone());
+        let opening = self.active_workspace().and_then(|w| w.active.as_deref()) != Some(channel);
+        if opening {
+            if let Some(workspace) = self.workspace_mut(team) {
+                workspace.active = Some(channel.to_owned());
+            }
+            self.settings
+                .last_conversation
+                .insert(team.to_owned(), channel.to_owned());
+            self.save_settings();
+            self.thread = None;
+            self.editing = None;
+            self.prepended = None;
+            self.remember_read_line(team, channel);
+        }
+        self.page = Page::Main;
+        let list = Self::draft_key(team, channel, None);
+        // A jump replaces any other in the same list, and the end of the
+        // list no longer pulls the view down to it.
+        self.scroll_to_bottom.remove(&list);
+        self.jumps.retain(|j| j.list != list);
+        let Some(workspace) = self.workspace_mut(team) else {
+            return;
+        };
+        let timeline = workspace.timelines.entry(channel.to_owned()).or_default();
+        let loaded = timeline.loaded && timeline.messages.iter().any(|m| m.ts == anchor);
+        if !loaded {
+            // What is there stays until the stretch around this message
+            // replaces it; meanwhile no newest page is asked for.
+            timeline.loading = true;
+            timeline.around = Some(anchor.clone());
+            self.backend.send(Command::LoadAround {
+                team: team.to_owned(),
+                channel: channel.to_owned(),
+                ts: anchor.clone(),
+            });
+        }
+        self.backend.send(Command::Focus {
+            team: team.to_owned(),
+            channel: Some(channel.to_owned()),
+        });
+        self.jumps
+            .push(crate::jump::Jump::new(list, anchor, reply.is_none()));
+        if let Some(parent) = reply {
+            let thread_list = Self::draft_key(team, channel, Some(&parent));
+            self.jumps.retain(|j| j.list != thread_list);
+            self.jumps
+                .push(crate::jump::Jump::new(thread_list, ts, true));
+            self.open_thread(channel.to_owned(), parent);
+        }
+        if opening {
+            self.mark_read(team, channel);
         }
     }
 
@@ -3019,5 +3257,56 @@ mod tests {
         // Nor in a conversation that is not loaded at all.
         w.message_changed("C2", old);
         assert!(!w.timelines.contains_key("C2"));
+    }
+
+    #[test]
+    fn a_stretch_of_older_history_stands_apart_from_the_newest() {
+        let mut w = workspace();
+        w.conversations.push(conversation("1.0", "9.0", 0, 0));
+        w.history_arrived(
+            "C1",
+            vec![message("8.0", None), message("9.0", None)],
+            true,
+            Some("c".into()),
+            false,
+        );
+        w.add_local(
+            "C1",
+            local_message("U1", &Ts::new("local-1"), "hi", &None, false),
+        );
+        // Jumping to an old message replaces the list, keeping what is
+        // still being sent.
+        w.around_arrived(
+            "C1",
+            vec![message("2.0", None), message("3.0", None)],
+            (true, Some("older".into())),
+            true,
+        );
+        let order = |w: &WorkspaceState| -> Vec<String> {
+            w.timelines["C1"]
+                .messages
+                .iter()
+                .map(|m| m.ts.0.clone())
+                .collect()
+        };
+        assert_eq!(order(&w), ["2.0", "3.0", "local-1"]);
+        let timeline = &w.timelines["C1"];
+        assert!(timeline.has_newer && timeline.has_more);
+        assert_eq!(timeline.cursor.as_deref(), Some("older"));
+        // Neither the newest page (a poll) nor a new message joins it.
+        w.history_arrived("C1", vec![message("9.0", None)], false, None, false);
+        w.message_arrived("C1", message("10.0", None), false);
+        assert_eq!(order(&w), ["2.0", "3.0", "local-1"]);
+        assert_eq!(
+            w.conversation("C1").and_then(|c| c.latest.clone()),
+            Some(Ts::new("10.0"))
+        );
+        // An older page still does, and so do newer pages, up to the end.
+        w.history_arrived("C1", vec![message("1.0", None)], false, None, true);
+        w.newer_arrived("C1", vec![message("4.0", None)], false);
+        assert_eq!(order(&w), ["1.0", "2.0", "3.0", "4.0", "local-1"]);
+        assert!(!w.timelines["C1"].has_newer);
+        w.message_arrived("C1", message("11.0", None), false);
+        assert_eq!(w.timelines["C1"].messages.len(), 6);
     }
 }

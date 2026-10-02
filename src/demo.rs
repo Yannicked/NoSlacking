@@ -465,6 +465,39 @@ fn history(channel: &str) -> Vec<Message> {
     }
 }
 
+/// Everything a conversation holds, oldest first.
+fn all_history(channel: &str) -> Vec<Message> {
+    if channel == "C01" {
+        long_history()
+    } else {
+        history(channel)
+    }
+}
+
+/// The messages around `ts`, as [`Command::LoadAround`] answers: up to a
+/// short page either side, whether there is more each way, and the cursor
+/// for older pages (as [`long_page`] reads it).
+fn around(channel: &str, ts: &Ts) -> (Vec<Message>, bool, Option<String>, bool) {
+    let all = all_history(channel);
+    let at = all.partition_point(|m| m.ts < *ts);
+    let start = at.saturating_sub(SIDE);
+    let end = (at + SIDE + 1).min(all.len());
+    let cursor = (start > 0 && channel == "C01").then(|| start.to_string());
+    (all[start..end].to_vec(), start > 0, cursor, end < all.len())
+}
+
+/// How many messages [`around`] reads either side.
+const SIDE: usize = 15;
+
+/// The timestamp of message `index` of #general's long history, for
+/// jumping to it.
+pub fn long_history_ts(index: usize) -> Ts {
+    long_history()
+        .get(index)
+        .map(|m| m.ts.clone())
+        .unwrap_or_default()
+}
+
 fn thread() -> Vec<Message> {
     let mut parent = history("C02")
         .into_iter()
@@ -581,6 +614,35 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                     has_more: cursor.is_some(),
                     cursor,
                     older: true,
+                });
+            }
+            Command::LoadAround { team, channel, ts } => {
+                tokio::time::sleep(LATENCY).await;
+                let (messages, has_older, cursor, has_newer) = around(&channel, &ts);
+                sink.send(Event::Around {
+                    team,
+                    channel,
+                    ts,
+                    messages,
+                    has_older,
+                    cursor,
+                    has_newer,
+                });
+            }
+            Command::LoadNewer {
+                team,
+                channel,
+                after,
+            } => {
+                tokio::time::sleep(LATENCY).await;
+                let all = all_history(&channel);
+                let start = all.partition_point(|m| m.ts <= after);
+                let end = (start + PAGE).min(all.len());
+                sink.send(Event::Newer {
+                    team,
+                    channel,
+                    messages: all[start..end].to_vec(),
+                    has_newer: end < all.len(),
                 });
             }
             Command::LoadHistory { team, channel } => sink.send(Event::History {
