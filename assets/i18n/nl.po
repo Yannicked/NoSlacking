@@ -788,3 +788,16 @@ msgstr "Blijven draaien in het systeemvak"
 
 msgid "Closing the window leaves NoSlacking connected, with notifications. Quit from the tray."
 msgstr "Als je het venster sluit, blijft NoSlacking verbonden, met meldingen. Sluit af via het systeemvak."
+
+# Desktop integration: starting at login.
+msgid "Could not change starting at login: {error}"
+msgstr "Starten bij inloggen kon niet worden gewijzigd: {error}"
+
+msgid "Starts in the tray, without a window."
+msgstr "Start in het systeemvak, zonder venster."
+
+msgid "Starts with its window open."
+msgstr "Start met het venster open."
+
+msgid "Start when you log in"
+msgstr "Starten wanneer je inlogt"

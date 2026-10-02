@@ -33,6 +33,8 @@ pub struct DesktopSettings {
     pub tray: bool,
     /// Whether closing the window keeps NoSlacking running in the tray.
     pub close_to_tray: bool,
+    /// Whether NoSlacking starts when you log in (see [`crate::autostart`]).
+    pub start_on_login: bool,
 }
 
 impl Default for DesktopSettings {
@@ -45,6 +47,7 @@ impl Default for DesktopSettings {
             muted: BTreeMap::new(),
             tray: true,
             close_to_tray: false,
+            start_on_login: false,
         }
     }
 }

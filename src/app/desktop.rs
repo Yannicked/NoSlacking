@@ -33,6 +33,8 @@ pub struct Desktop {
     hide: bool,
     /// Requests from later launches (show the window, open a link).
     launches: Option<std::sync::mpsc::Receiver<crate::single_instance::Request>>,
+    /// Why the login entry could not be changed, from its thread.
+    autostart: Option<std::sync::mpsc::Receiver<String>>,
 }
 
 impl Desktop {
@@ -222,6 +224,21 @@ impl App {
         }
         self.tray_requests();
         self.launch_requests();
+        let failures: Vec<String> = self
+            .desktop
+            .autostart
+            .as_ref()
+            .map(|r| r.try_iter().collect())
+            .unwrap_or_default();
+        for error in failures {
+            self.toast(
+                crate::i18n::tf(
+                    "Could not change starting at login: {error}",
+                    &[("error", &error)],
+                ),
+                true,
+            );
+        }
         if let Some(tray) = &mut self.desktop.tray {
             tray.set_unread(unread(&self.workspaces));
         }
@@ -271,6 +288,44 @@ impl App {
             && let Some(tray) = &mut self.desktop.tray
         {
             tray.attach();
+        }
+    }
+
+    /// Writes (or removes) the login entry off this thread: on Windows it
+    /// runs reg.exe. Failures come back as a toast.
+    fn apply_autostart(&mut self, enabled: bool) {
+        if self.demo {
+            return;
+        }
+        let (sender, failures) = std::sync::mpsc::channel();
+        self.desktop.autostart = Some(failures);
+        let waker = self.waker.clone();
+        let spawned = std::thread::Builder::new()
+            .name("autostart".into())
+            .spawn(move || {
+                if let Err(error) = crate::autostart::set(enabled) {
+                    log::warn!("could not change starting at login: {error}");
+                    let _ = sender.send(error);
+                    waker.wake();
+                }
+            });
+        if let Err(error) = spawned {
+            log::warn!("could not change starting at login: {error}");
+        }
+    }
+
+    /// Turns starting at login on or off.
+    pub fn set_start_on_login(&mut self, on: bool) {
+        self.settings.desktop.start_on_login = on;
+        self.apply_autostart(on);
+        self.save_settings();
+    }
+
+    /// Rewrites the login entry at start-up, so it names this executable
+    /// even after the app was moved or updated.
+    pub(super) fn refresh_autostart(&mut self) {
+        if self.settings.desktop.start_on_login {
+            self.apply_autostart(true);
         }
     }
 

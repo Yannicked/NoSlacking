@@ -113,6 +113,24 @@ pub fn window_group(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 app.settings_changed();
             }
         });
+        let mut login = app.settings.desktop.start_on_login;
+        let detail = if app.has_tray() && app.settings.desktop.close_to_tray {
+            t("Starts in the tray, without a window.")
+        } else {
+            t("Starts with its window open.")
+        };
+        row(
+            ui,
+            palette,
+            &t("Start when you log in"),
+            &detail,
+            |ui, name| {
+                ui.checkbox(&mut login, "").labelled_by(name);
+            },
+        );
+        if login != app.settings.desktop.start_on_login {
+            app.set_start_on_login(login);
+        }
     });
 }
 
