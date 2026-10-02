@@ -1588,3 +1588,27 @@ msgstr "Tijd"
 
 msgid "Schedule"
 msgstr "Inplannen"
+
+msgid "Copy link address"
+msgstr "Linkadres kopiëren"
+
+msgid "Copy text"
+msgstr "Tekst kopiëren"
+
+msgid "Delete message"
+msgstr "Bericht verwijderen"
+
+msgid "Edit message"
+msgstr "Bericht bewerken"
+
+msgid "Open image"
+msgstr "Afbeelding openen"
+
+msgid "Open link"
+msgstr "Link openen"
+
+msgid "Reply in thread"
+msgstr "Beantwoorden in thread"
+
+msgid "Save image"
+msgstr "Afbeelding opslaan"

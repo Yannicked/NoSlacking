@@ -294,7 +294,11 @@ fn flow(
                     let shown = label.clone().unwrap_or_else(|| shorten(url));
                     let text = styled(rich, &shown, *style, size).color(palette.link);
                     let tip = (label.is_some()).then_some(url.as_str());
-                    if clickable(ui, text, tip).clicked() {
+                    let response = clickable(ui, text, tip);
+                    if response.hovered() {
+                        super::context::hover(ui, super::context::Target::Link(url.clone()));
+                    }
+                    if response.clicked() {
                         actions.push(Action::OpenUrl(url.clone()));
                     }
                 }
