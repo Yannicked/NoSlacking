@@ -832,6 +832,45 @@ pub fn order_sections(sections: Vec<ChannelSection>) -> Vec<model::SidebarSectio
     out
 }
 
+/// `client.counts`: the read state of every conversation at once.
+/// Undocumented; the web client's own call, answered for browser sessions.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ClientCounts {
+    pub channels: Vec<CountEntry>,
+    pub mpims: Vec<CountEntry>,
+    pub ims: Vec<CountEntry>,
+}
+
+/// One conversation in [`ClientCounts`].
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct CountEntry {
+    pub id: String,
+    pub last_read: String,
+    pub latest: String,
+    pub mention_count: u32,
+    pub has_unreads: bool,
+}
+
+impl ClientCounts {
+    /// Every conversation's entry, by id.
+    pub fn by_id(self) -> std::collections::HashMap<String, CountEntry> {
+        self.channels
+            .into_iter()
+            .chain(self.mpims)
+            .chain(self.ims)
+            .filter(|entry| !entry.id.is_empty())
+            .map(|entry| (entry.id.clone(), entry))
+            .collect()
+    }
+}
+
+/// A timestamp Slack sent, unless it is empty or Slack's all-zero "never".
+pub fn real_ts(ts: &str) -> Option<Ts> {
+    (!ts.is_empty() && ts != "0000000000.000000").then(|| Ts::new(ts))
+}
+
 /// `stars.list`: what you starred. Only conversations matter here.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]

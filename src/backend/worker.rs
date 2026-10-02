@@ -1736,22 +1736,112 @@ async fn users(client: Client, team: String, dirs: AppDirs, sink: Sink) {
     }
 }
 
-/// Reads each conversation's read marker and newest message, direct
-/// messages first. Slack has no single call for this, so it trickles in.
-async fn unread_sweep(client: Client, team: String, mut list: Vec<Conversation>, sink: Sink) {
+/// Reads each conversation's read marker and newest message.
+///
+/// A browser session asks `client.counts`, the web client's own call, for
+/// all of them at once. Anything it does not cover, and every OAuth
+/// workspace, falls back to one or two calls per conversation, direct
+/// messages first, skipping conversations whose state is already known.
+/// A rate limit pauses the sweep rather than skipping conversations.
+async fn unread_sweep(client: Client, team: String, list: Vec<Conversation>, sink: Sink) {
+    let mut list = if client.token().is_session() {
+        match client
+            .call::<types::ClientCounts>("client.counts", &[])
+            .await
+        {
+            Ok(counts) => {
+                let counts = counts.by_id();
+                let mut rest = Vec::new();
+                for mut conversation in list {
+                    match counts.get(&conversation.id) {
+                        Some(count) => {
+                            apply_count(&mut conversation, count);
+                            sink.send(Event::Conversation {
+                                team: team.clone(),
+                                conversation,
+                            });
+                        }
+                        None => rest.push(conversation),
+                    }
+                }
+                rest
+            }
+            Err(error) => {
+                log::info!("client.counts unavailable ({error}); reading each conversation");
+                list
+            }
+        }
+    } else {
+        list
+    };
+    list.retain(|c| c.latest.is_none() || c.last_read.is_none());
     list.sort_by_key(|c| match c.kind {
         ConversationKind::Direct | ConversationKind::Group => 0,
         ConversationKind::Private => 1,
         ConversationKind::Channel => 2,
     });
     for conversation in list {
-        conversation_info(client.clone(), team.clone(), conversation.id, sink.clone()).await;
+        let mut pause = SWEEP_PAUSE;
+        for attempt in 1.. {
+            match fetch_conversation(&client, &team, &conversation.id, &sink).await {
+                Err(SlackError::RateLimited) if attempt < SWEEP_ATTEMPTS => {
+                    log::debug!("unread sweep rate limited; pausing for {pause:?}");
+                    tokio::time::sleep(pause).await;
+                    pause *= 2;
+                }
+                Err(error) => {
+                    log_fetch_failure("conversations.info", &conversation.id, &error);
+                    break;
+                }
+                Ok(()) => break,
+            }
+        }
     }
 }
 
+/// How long the unread sweep first waits out a rate limit, and how many
+/// times it tries one conversation.
+const SWEEP_PAUSE: Duration = Duration::from_secs(15);
+const SWEEP_ATTEMPTS: u32 = 4;
+
+/// Puts `client.counts`' read state for one conversation onto it.
+fn apply_count(conversation: &mut Conversation, count: &types::CountEntry) {
+    if let Some(last_read) = types::real_ts(&count.last_read) {
+        conversation.last_read = Some(last_read);
+    }
+    if let Some(latest) = types::real_ts(&count.latest) {
+        conversation.latest = Some(latest);
+    }
+    conversation.mentions = count.mention_count;
+}
+
+/// Logs a failed background fetch: quietly for a passing failure, more
+/// loudly when Slack refused, which points at something to fix.
+fn log_fetch_failure(method: &str, id: &str, error: &SlackError) {
+    if worth_retrying(error) {
+        log::debug!("{method} {id}: {error}");
+    } else {
+        log::info!("{method} {id}: {error}");
+    }
+}
+
+/// Fetches one conversation's details and sends them on.
 async fn conversation_info(client: Client, team: String, channel: String, sink: Sink) {
+    if let Err(error) = fetch_conversation(&client, &team, &channel, &sink).await {
+        log_fetch_failure("conversations.info", &channel, &error);
+    }
+}
+
+/// One conversation's details, with its newest message when the details
+/// lack it; a conversation that is gone is reported as gone.
+async fn fetch_conversation(
+    client: &Client,
+    team: &str,
+    channel: &str,
+    sink: &Sink,
+) -> Result<(), SlackError> {
     match client
-        .call::<types::ChannelInfo>("conversations.info", &[("channel", channel.clone())])
+        .call::<types::ChannelInfo>("conversations.info", &[("channel", channel.to_owned())])
         .await
     {
         Ok(info) => {
@@ -1760,18 +1850,26 @@ async fn conversation_info(client: Client, team: String, channel: String, sink: 
                 && let Ok(page) = client
                     .call::<types::HistoryPage>(
                         "conversations.history",
-                        &[("channel", channel.clone()), ("limit", "1".into())],
+                        &[("channel", channel.to_owned()), ("limit", "1".into())],
                     )
                     .await
             {
                 conversation.latest = page.messages.first().map(|m| Ts::new(m.ts.clone()));
             }
-            sink.send(Event::Conversation { team, conversation });
+            sink.send(Event::Conversation {
+                team: team.to_owned(),
+                conversation,
+            });
+            Ok(())
         }
         Err(SlackError::Api(code)) if code == "channel_not_found" => {
-            sink.send(Event::ConversationGone { team, channel });
+            sink.send(Event::ConversationGone {
+                team: team.to_owned(),
+                channel: channel.to_owned(),
+            });
+            Ok(())
         }
-        Err(error) => log::debug!("conversations.info {channel}: {error}"),
+        Err(error) => Err(error),
     }
 }
 
@@ -2570,6 +2668,36 @@ mod tests {
         assert_eq!(walked, Err(SlackError::RateLimited));
         // What came before the failure was handed over.
         assert_eq!(seen, [0, 1]);
+    }
+
+    #[test]
+    fn counts_fill_in_the_read_state() {
+        let counts: types::ClientCounts = serde_json::from_str(
+            r#"{"ok":true,
+                "channels":[{"id":"C1","last_read":"1.0","latest":"2.0","mention_count":3,"has_unreads":true}],
+                "mpims":[{"id":"G1","last_read":"0000000000.000000","latest":"","mention_count":0}],
+                "ims":[{"id":"D1","last_read":"5.0","latest":"5.0"}]}"#,
+        )
+        .expect("parses");
+        let counts = counts.by_id();
+        assert_eq!(counts.len(), 3);
+        let mut channel = serde_json::from_str::<types::Channel>(r#"{"id":"C1","name":"general"}"#)
+            .expect("parses")
+            .into_model();
+        apply_count(&mut channel, &counts["C1"]);
+        assert_eq!(channel.last_read, Some(Ts::new("1.0")));
+        assert_eq!(channel.latest, Some(Ts::new("2.0")));
+        assert_eq!(channel.mentions, 3);
+        assert!(channel.has_unread());
+        // Slack's "never" markers are no read state at all.
+        let mut group = Conversation {
+            id: "G1".into(),
+            ..channel.clone()
+        };
+        group.last_read = None;
+        group.latest = None;
+        apply_count(&mut group, &counts["G1"]);
+        assert_eq!((group.last_read, group.latest), (None, None));
     }
 
     #[test]
