@@ -55,11 +55,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
         socket,
         ..
     } = app;
-    let Some(workspace) = workspaces
-        .iter()
-        .find(|w| Some(&w.info.team_id) == settings.active_workspace.as_ref())
-        .or_else(|| workspaces.first())
-    else {
+    let Some(workspace) = crate::app::active_in(workspaces, settings) else {
         return;
     };
     let Some(conversation) = workspace.conversation(channel) else {
@@ -196,11 +192,7 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         actions,
         ..
     } = app;
-    let Some(workspace) = workspaces
-        .iter()
-        .find(|w| Some(&w.info.team_id) == settings.active_workspace.as_ref())
-        .or_else(|| workspaces.first())
-    else {
+    let Some(workspace) = crate::app::active_in(workspaces, settings) else {
         // Put the draft back: it was taken out to be edited.
         app.drafts.insert(key, draft);
         return;
@@ -266,11 +258,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         read_line,
         ..
     } = app;
-    let Some(workspace) = workspaces
-        .iter()
-        .find(|w| Some(&w.info.team_id) == settings.active_workspace.as_ref())
-        .or_else(|| workspaces.first())
-    else {
+    let Some(workspace) = crate::app::active_in(workspaces, settings) else {
         return;
     };
     let Some(conversation) = workspace.conversation(channel) else {
