@@ -92,6 +92,7 @@ pub const GROUPS: &[Group] = &[
             line("Delete your message", &["Delete", "Backspace"]),
             line("Copy the text", &["C"]),
             line("Mark unread from here", &["U"]),
+            line("Share message…", &["S"]),
             line("Back to the composer", &["Escape"]),
         ],
     },
