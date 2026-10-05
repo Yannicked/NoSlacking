@@ -480,6 +480,30 @@ pub struct Message {
     pub broadcast: bool,
     /// Pinned to its conversation.
     pub pinned: bool,
+    /// The id the sending client gave the message (see
+    /// [`new_client_msg_id`]). Slack keeps it, so a message you send here
+    /// comes back from Slack carrying the id of its optimistic copy.
+    pub client_msg_id: Option<String>,
+}
+
+/// A fresh id for a message about to be sent, in the form Slack's own
+/// clients use: a random (version 4) UUID, in lower case.
+pub fn new_client_msg_id() -> String {
+    use rand::Rng as _;
+    let mut bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    // The version and variant bits that make it a version 4 UUID.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
 }
 
 impl Message {
@@ -931,6 +955,7 @@ mod tests {
             delivery: Delivery::Sent,
             broadcast: false,
             pinned: false,
+            client_msg_id: None,
         }
     }
 

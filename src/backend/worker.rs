@@ -196,6 +196,7 @@ struct Outgoing {
     broadcast: bool,
     /// The interface's id for its optimistic copy.
     local: Ts,
+    client_msg_id: Option<String>,
 }
 
 /// A real-time socket the worker started, and what it last reported.
@@ -727,6 +728,7 @@ impl Worker {
                 thread,
                 broadcast,
                 local,
+                client_msg_id,
             } => self.send(Outgoing {
                 team,
                 channel,
@@ -734,6 +736,7 @@ impl Worker {
                 thread,
                 broadcast,
                 local,
+                client_msg_id,
             }),
             Command::Edit {
                 team,
@@ -902,8 +905,9 @@ impl Worker {
                 thread,
                 broadcast,
                 local,
+                client_msg_id,
             } = outgoing;
-            let params = post_params(&channel, text, thread.as_ref(), broadcast);
+            let params = post_params(&channel, text, thread.as_ref(), broadcast, client_msg_id);
             let result = client
                 .act::<types::Posted>("chat.postMessage", &params)
                 .await
@@ -1536,9 +1540,13 @@ fn post_params(
     text: String,
     thread: Option<&Ts>,
     broadcast: bool,
+    client_msg_id: Option<String>,
 ) -> Vec<(&'static str, String)> {
     let unfurl = crate::links::has_message_link(&text);
     let mut params = vec![("channel", channel.to_owned()), ("text", text)];
+    if let Some(id) = client_msg_id {
+        params.push(("client_msg_id", id));
+    }
     if unfurl {
         params.push(("unfurl_links", "true".into()));
     }
@@ -1915,19 +1923,29 @@ mod tests {
     fn a_shared_message_asks_slack_to_unfurl_its_link() {
         let shared = "Look\n<https://acme.slack.com/archives/C1/p1700000000000100>";
         assert_eq!(
-            post_params("C2", shared.into(), None, false),
+            post_params("C2", shared.into(), None, false, None),
             [
                 ("channel", "C2".to_owned()),
                 ("text", shared.to_owned()),
                 ("unfurl_links", "true".to_owned()),
             ]
         );
-        let plain = post_params("C2", "hi".into(), Some(&Ts::new("1.000100")), true);
+        let plain = post_params(
+            "C2",
+            "hi".into(),
+            Some(&Ts::new("1.000100")),
+            true,
+            Some("4f1e6b2a-0c3d-4e5f-8a9b-1c2d3e4f5a6b".into()),
+        );
         assert_eq!(
             plain,
             [
                 ("channel", "C2".to_owned()),
                 ("text", "hi".to_owned()),
+                (
+                    "client_msg_id",
+                    "4f1e6b2a-0c3d-4e5f-8a9b-1c2d3e4f5a6b".to_owned()
+                ),
                 ("thread_ts", "1.000100".to_owned()),
                 ("reply_broadcast", "true".to_owned()),
             ],
@@ -1946,6 +1964,7 @@ mod tests {
             thread: None,
             broadcast: false,
             local: Ts::new("local-1"),
+            client_msg_id: None,
         });
         worker.command(Command::Delete {
             team: "TX".into(),

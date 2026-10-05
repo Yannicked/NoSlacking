@@ -552,6 +552,7 @@ pub fn bare_message(ts: Ts, user: Option<String>, text: String, thread: Option<T
         delivery: Delivery::Sent,
         broadcast: false,
         pinned: false,
+        client_msg_id: None,
     }
 }
 

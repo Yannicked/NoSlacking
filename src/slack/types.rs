@@ -614,6 +614,8 @@ pub struct Message {
     /// The huddle a `huddle_thread` message stands for: who is in it, and
     /// whether it has ended.
     pub room: Option<Value>,
+    /// The id the sending client gave it, if any.
+    pub client_msg_id: Option<String>,
 }
 
 impl Message {
@@ -681,6 +683,7 @@ impl Message {
             delivery: Delivery::Sent,
             broadcast,
             pinned: !self.pinned_to.is_empty(),
+            client_msg_id: self.client_msg_id.filter(|id| !id.is_empty()),
         })
     }
 }
@@ -1263,6 +1266,32 @@ pub struct Authorization {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_message_keeps_its_client_id() {
+        let page: Vec<Message> = serde_json::from_str(
+            r#"[
+                {"type":"message","ts":"1.0","user":"U1","text":"hi",
+                 "client_msg_id":"4f1e6b2a-0c3d-4e5f-8a9b-1c2d3e4f5a6b"},
+                {"type":"message","ts":"2.0","user":"U1","text":"hi","client_msg_id":""},
+                {"type":"message","ts":"3.0","user":"U1","text":"hi"}
+            ]"#,
+        )
+        .expect("parses");
+        let ids: Vec<Option<String>> = page
+            .into_iter()
+            .filter_map(Message::into_model)
+            .map(|m| m.client_msg_id)
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                Some("4f1e6b2a-0c3d-4e5f-8a9b-1c2d3e4f5a6b".to_owned()),
+                None,
+                None
+            ]
+        );
+    }
 
     #[test]
     fn nulls_do_not_lose_a_page() {

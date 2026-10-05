@@ -495,8 +495,12 @@ impl App {
         // The echo of a message you deleted while it was sending.
         if self
             .workspace_mut(team)
-            .is_some_and(|w| w.is_suppressed(channel, &message.ts))
+            .is_some_and(|w| w.is_suppressed(channel, &message.ts) || w.is_cancelled_echo(&message))
         {
+            // Settled by the workspace, so its send is still deleted.
+            if let Some(workspace) = self.workspace_mut(team) {
+                workspace.message_arrived(channel, message, false);
+            }
             return;
         }
         let viewing = self.is_viewing(team, channel);
@@ -554,17 +558,21 @@ impl App {
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
-        if let SendOutcome::Cancelled { delete } = workspace.sent(channel, local, &result) {
+        match workspace.sent(channel, local, &result) {
             // Deleted while it was sending: take it back now it is posted.
-            if let Some(ts) = delete {
-                self.backend.send(Command::Delete {
-                    team: team.to_owned(),
-                    channel: channel.to_owned(),
-                    ts,
-                    removed: None,
-                });
+            SendOutcome::Cancelled { delete } => {
+                if let Some(ts) = delete {
+                    self.backend.send(Command::Delete {
+                        team: team.to_owned(),
+                        channel: channel.to_owned(),
+                        ts,
+                        removed: None,
+                    });
+                }
+                return;
             }
-            return;
+            SendOutcome::Posted => return,
+            SendOutcome::Settled => {}
         }
         if let Err(error) = result {
             self.toast(

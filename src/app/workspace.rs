@@ -64,10 +64,13 @@ pub struct WorkspaceState {
     /// again), and it must count once.
     counted_mentions: VecDeque<(String, Ts)>,
     /// The optimistic copies of messages Slack has not answered for yet, by
-    /// their local id. An echo of the same text
-    /// can take a copy's place before its own answer comes; the answer
-    /// still settles it from here.
+    /// their local id. An echo can take a copy's place before its own
+    /// answer comes; the answer still settles it from here.
     sending: HashMap<Ts, Message>,
+    /// Sends whose echo came, matched by client id, before Slack's answer:
+    /// their local id and the real ts. The echo proves the message went,
+    /// whatever the answer says.
+    echoed: HashMap<Ts, Ts>,
     /// Messages you deleted while they were still sending, by local id:
     /// the send cannot be called back, so the message is deleted once
     /// Slack answers.
@@ -85,6 +88,10 @@ pub(super) enum SendOutcome {
     /// You deleted it while it was sending; `delete` is the message to
     /// delete in Slack, if it was posted.
     Cancelled { delete: Option<Ts> },
+    /// Slack answered with an error, but the message's echo had already
+    /// shown that it was posted (a timed-out answer, say): it shows as
+    /// sent, and there is nothing to report.
+    Posted,
 }
 
 /// How many announced messages [`WorkspaceState::seen`] remembers. A copy
@@ -122,6 +129,7 @@ impl WorkspaceState {
             counted_replies: VecDeque::new(),
             counted_mentions: VecDeque::new(),
             sending: HashMap::new(),
+            echoed: HashMap::new(),
             cancelled: HashSet::new(),
             suppressed: HashSet::new(),
         }
@@ -877,6 +885,9 @@ impl WorkspaceState {
         if self.is_suppressed(channel, &message.ts) {
             return (Arrived::default(), false);
         }
+        if self.echo_arrived(channel, &message) {
+            return (Arrived::default(), false);
+        }
         let mut arrived = Arrived {
             users: self.unknown_users(message.user.as_deref().into_iter()),
             bots: self.unknown_bots(std::iter::once(&message)),
@@ -935,6 +946,48 @@ impl WorkspaceState {
             arrived.users.clear();
         }
         (arrived, fetch_conversation)
+    }
+
+    /// Notes an echo of a message sent from here, known by its client id:
+    /// its send is settled by it (see [`Self::sent`]). True when that send
+    /// was one you deleted meanwhile, whose echo is not to show.
+    fn echo_arrived(&mut self, channel: &str, message: &Message) -> bool {
+        let Some(id) = &message.client_msg_id else {
+            return false;
+        };
+        if message.user.as_deref() != Some(self.info.user_id.as_str()) {
+            return false;
+        }
+        let Some(local) = self.sent_from_here(id) else {
+            return false;
+        };
+        self.sending.remove(&local);
+        self.echoed.insert(local.clone(), message.ts.clone());
+        if self.cancelled.contains(&local) {
+            self.suppressed
+                .insert((channel.to_owned(), message.ts.clone()));
+            return true;
+        }
+        false
+    }
+
+    /// The local id of the send still waiting for Slack whose client id
+    /// is `id`.
+    fn sent_from_here(&self, id: &str) -> Option<Ts> {
+        self.sending
+            .iter()
+            .find(|(_, copy)| copy.client_msg_id.as_deref() == Some(id))
+            .map(|(local, _)| local.clone())
+    }
+
+    /// Whether a message is the echo of one you deleted while it was
+    /// sending, known by its client id before Slack has answered.
+    pub(super) fn is_cancelled_echo(&self, message: &Message) -> bool {
+        message
+            .client_msg_id
+            .as_deref()
+            .and_then(|id| self.sent_from_here(id))
+            .is_some_and(|local| self.cancelled.contains(&local))
     }
 
     /// Keeps only the newest messages that came live in a conversation
@@ -1039,15 +1092,27 @@ impl WorkspaceState {
         local: &Ts,
         result: &Result<Message, Failure>,
     ) -> SendOutcome {
+        let echoed = self.echoed.remove(local);
         if self.cancelled.remove(local) {
             self.sending.remove(local);
-            let delete = result.as_ref().ok().map(|message| message.ts.clone());
+            let delete = result
+                .as_ref()
+                .ok()
+                .map(|message| message.ts.clone())
+                .or(echoed);
             if let Some(ts) = &delete {
                 // Its echo may be here already.
                 self.suppressed.insert((channel.to_owned(), ts.clone()));
                 self.remove_message(channel, ts);
             }
             return SendOutcome::Cancelled { delete };
+        }
+        if echoed.is_some() && result.is_err() {
+            // Its echo stands in for the answer, and is shown already.
+            for timeline in self.timelines_for_mut(channel) {
+                timeline.messages.retain(|m| &m.ts != local);
+            }
+            return SendOutcome::Posted;
         }
         let mut found = false;
         for timeline in self.timelines_for_mut(channel) {
@@ -1114,9 +1179,11 @@ impl WorkspaceState {
             .find_message(channel, local)
             .is_some_and(|m| m.delivery == Delivery::Sending);
         if sending {
+            // Its entry stays until Slack answers, so its echo is known.
             self.cancelled.insert(local.clone());
+        } else {
+            self.sending.remove(local);
         }
-        self.sending.remove(local);
     }
 
     /// Whether a message is one you deleted while it was sending, whose
@@ -1332,23 +1399,18 @@ impl WorkspaceState {
         add
     }
 
-    /// Marks a failed message as sending again. Returns its text, thread
-    /// and broadcast flag, to send once more.
-    pub(super) fn retry_local(
-        &mut self,
-        channel: &str,
-        local: &Ts,
-    ) -> Option<(String, Option<Ts>, bool)> {
+    /// Marks a failed message as sending again. Returns it, to send once
+    /// more under the same client id.
+    pub(super) fn retry_local(&mut self, channel: &str, local: &Ts) -> Option<Message> {
         let mut found = None;
         for timeline in self.timelines_for_mut(channel) {
             if let Some(message) = timeline.find_mut(local) {
                 message.delivery = Delivery::Sending;
-                found = Some((
-                    message.text.clone(),
-                    message.thread_ts.clone(),
-                    message.broadcast,
-                ));
+                found = Some(message.clone());
             }
+        }
+        if let Some(message) = &found {
+            self.sending.insert(local.clone(), message.clone());
         }
         found
     }
@@ -1495,6 +1557,7 @@ pub(super) fn local_message(
         delivery: Delivery::Sending,
         broadcast,
         pinned: false,
+        client_msg_id: Some(crate::model::new_client_msg_id()),
     }
 }
 
@@ -1512,18 +1575,26 @@ fn add_replies(parent: &mut Message, live: &[&Message], extra: u32) {
     }
 }
 
-/// A sent message's own echo replaces its optimistic copy. Matched by
-/// text, so an echo of a message already here (its answer came first) is
-/// not one: it would take the place of another copy of the same text.
+/// A sent message's own echo replaces its optimistic copy. An echo with
+/// a client id takes only the copy with that id: one that failed, too, as
+/// the echo shows it went after all. One with an id no copy has (sent
+/// from another device) takes nothing. Without an id it is matched by
+/// text, as long as it is not of a message already here (its answer came
+/// first), which would take the place of another copy of the same text.
 fn remove_echoed_local(timeline: &mut Timeline, message: &Message, from_me: bool) {
     if !from_me || timeline.messages.iter().any(|m| m.ts == message.ts) {
         return;
     }
-    if let Some(position) = timeline
-        .messages
-        .iter()
-        .position(|m| m.ts.is_local() && m.delivery == Delivery::Sending && m.text == message.text)
-    {
+    let position = match &message.client_msg_id {
+        Some(id) => timeline
+            .messages
+            .iter()
+            .position(|m| m.ts.is_local() && m.client_msg_id.as_ref() == Some(id)),
+        None => timeline.messages.iter().position(|m| {
+            m.ts.is_local() && m.delivery == Delivery::Sending && m.text == message.text
+        }),
+    };
+    if let Some(position) = position {
         timeline.messages.remove(position);
     }
 }
@@ -1629,6 +1700,7 @@ mod tests {
             delivery: Delivery::Sent,
             broadcast: false,
             pinned: false,
+            client_msg_id: None,
         }
     }
 
@@ -1949,9 +2021,14 @@ mod tests {
         w.sent("C1", &Ts::new("local-1"), &Err(Failure::RateLimited));
         let failed = &w.timelines["C1"].messages[0];
         assert_eq!(failed.delivery, Delivery::Failed(Failure::RateLimited));
+        let failed_id = failed.client_msg_id.clone();
+        let retried = w
+            .retry_local("C1", &Ts::new("local-1"))
+            .expect("the failed copy");
+        assert_eq!(retried.text, "hi");
         assert_eq!(
-            w.retry_local("C1", &Ts::new("local-1")),
-            Some(("hi".to_owned(), None, false))
+            retried.client_msg_id, failed_id,
+            "a retry keeps its client id"
         );
         assert_eq!(w.timelines["C1"].messages[0].delivery, Delivery::Sending);
         assert_eq!(w.retry_local("C1", &Ts::new("local-9")), None);
@@ -2791,5 +2868,113 @@ mod tests {
             Some(Ts::new("4.0"))
         );
         assert_eq!(first_unread(&timeline, &Ts::new("4.0"), "U1"), None);
+    }
+
+    /// Slack's copy of local message `local`, as `ts`: same text, same
+    /// client id.
+    fn echo_of(w: &WorkspaceState, local: &str, ts: &str) -> Message {
+        let copy = &w.sending[&Ts::new(local)];
+        Message {
+            client_msg_id: copy.client_msg_id.clone(),
+            ..mine(ts, &copy.text)
+        }
+    }
+
+    #[test]
+    fn client_ids_are_version_4_uuids() {
+        let id = crate::model::new_client_msg_id();
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            [8, 4, 4, 4, 12]
+        );
+        assert!(
+            id.chars()
+                .all(|c| c == '-' || c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+        assert!(parts[2].starts_with('4'));
+        assert!(matches!(parts[3].as_bytes()[0], b'8' | b'9' | b'a' | b'b'));
+        assert_ne!(id, crate::model::new_client_msg_id());
+    }
+
+    #[test]
+    fn an_echo_takes_the_copy_with_its_client_id_not_its_text() {
+        // Two "ok"s; the second's echo comes first and takes only its own
+        // copy, so the first still settles normally when it fails.
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "ok", None);
+        sending(&mut w, "local-2", "ok", None);
+        let echo = echo_of(&w, "local-2", "5.0");
+        w.message_arrived("C1", echo, true);
+        assert_eq!(
+            texts(&w.timelines["C1"]),
+            [("5.0", "ok"), ("local-1", "ok")]
+        );
+        w.sent("C1", &Ts::new("local-2"), &Ok(mine("5.0", "ok")));
+        w.sent("C1", &Ts::new("local-1"), &Err(Failure::RateLimited));
+        let timeline = &w.timelines["C1"];
+        assert_eq!(texts(timeline), [("5.0", "ok"), ("local-1", "ok")]);
+        assert_eq!(
+            timeline.messages[1].delivery,
+            Delivery::Failed(Failure::RateLimited)
+        );
+    }
+
+    #[test]
+    fn an_echo_with_a_client_id_from_elsewhere_takes_no_copy() {
+        // "ok" typed on your phone while an "ok" is sending here.
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "ok", None);
+        let elsewhere = Message {
+            client_msg_id: Some(crate::model::new_client_msg_id()),
+            ..mine("5.0", "ok")
+        };
+        w.message_arrived("C1", elsewhere, true);
+        assert_eq!(
+            texts(&w.timelines["C1"]),
+            [("5.0", "ok"), ("local-1", "ok")]
+        );
+        assert_eq!(w.timelines["C1"].messages[1].delivery, Delivery::Sending);
+    }
+
+    #[test]
+    fn an_echo_shows_a_send_went_even_when_its_answer_failed() {
+        // Slack's answer timed out, but the message was posted.
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "hi", None);
+        let echo = echo_of(&w, "local-1", "5.0");
+        w.message_arrived("C1", echo, true);
+        let outcome = w.sent("C1", &Ts::new("local-1"), &Err(Failure::RateLimited));
+        assert_eq!(outcome, SendOutcome::Posted);
+        assert_eq!(texts(&w.timelines["C1"]), [("5.0", "hi")]);
+        assert_eq!(w.timelines["C1"].messages[0].delivery, Delivery::Sent);
+        // Answered the other way round: the failed copy gives way to the
+        // late echo.
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "hi", None);
+        let echo = echo_of(&w, "local-1", "5.0");
+        w.sent("C1", &Ts::new("local-1"), &Err(Failure::RateLimited));
+        w.message_arrived("C1", echo, true);
+        assert_eq!(texts(&w.timelines["C1"]), [("5.0", "hi")]);
+    }
+
+    #[test]
+    fn the_echo_of_a_send_you_deleted_never_shows() {
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "oops", None);
+        let echo = echo_of(&w, "local-1", "5.0");
+        w.cancel_local("C1", &Ts::new("local-1"));
+        w.remove_message("C1", &Ts::new("local-1"));
+        assert!(w.is_cancelled_echo(&echo));
+        w.message_arrived("C1", echo, true);
+        assert!(texts(&w.timelines["C1"]).is_empty());
+        // Even when Slack's answer then fails, the posted message goes.
+        let outcome = w.sent("C1", &Ts::new("local-1"), &Err(Failure::RateLimited));
+        assert_eq!(
+            outcome,
+            SendOutcome::Cancelled {
+                delete: Some(Ts::new("5.0"))
+            }
+        );
     }
 }

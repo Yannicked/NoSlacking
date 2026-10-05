@@ -244,6 +244,7 @@ fn message(seconds: u64, user: &str, text: &str) -> Message {
         delivery: Delivery::Sent,
         broadcast: false,
         pinned: false,
+        client_msg_id: None,
     }
 }
 

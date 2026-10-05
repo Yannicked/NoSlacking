@@ -104,6 +104,9 @@ pub enum Command {
         thread: Option<Ts>,
         broadcast: bool,
         local: Ts,
+        /// The id of the optimistic copy, sent along so Slack's copy of
+        /// the message can be told apart from another with the same text.
+        client_msg_id: Option<String>,
     },
     /// Saves an edit already shown on screen.
     Edit {
@@ -322,6 +325,7 @@ impl std::fmt::Debug for Command {
                 thread,
                 broadcast,
                 local,
+                client_msg_id,
             } => f
                 .debug_struct("Send")
                 .field("team", team)
@@ -330,6 +334,7 @@ impl std::fmt::Debug for Command {
                 .field("thread", thread)
                 .field("broadcast", broadcast)
                 .field("local", local)
+                .field("client_msg_id", client_msg_id)
                 .finish(),
             Self::Edit {
                 team,

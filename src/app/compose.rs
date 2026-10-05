@@ -110,6 +110,7 @@ impl App {
             return;
         };
         let message = local_message(&workspace.info.user_id, &local, &wire, &thread, broadcast);
+        let client_msg_id = message.client_msg_id.clone();
         workspace.add_local(&channel, message);
         self.scroll_to_bottom
             .insert(Self::draft_key(&team, &channel, thread.as_ref()));
@@ -120,6 +121,7 @@ impl App {
             thread,
             broadcast,
             local,
+            client_msg_id,
         });
     }
 
@@ -168,14 +170,15 @@ impl App {
         let found = self
             .workspace_mut(&team)
             .and_then(|w| w.retry_local(channel, local));
-        if let Some((text, thread, broadcast)) = found {
+        if let Some(message) = found {
             self.backend.send(Command::Send {
                 team,
                 channel: channel.to_owned(),
-                text,
-                thread,
-                broadcast,
+                text: message.text,
+                thread: message.thread_ts,
+                broadcast: message.broadcast,
                 local: local.clone(),
+                client_msg_id: message.client_msg_id,
             });
         }
     }

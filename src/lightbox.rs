@@ -227,6 +227,7 @@ mod tests {
             delivery: crate::model::Delivery::Sent,
             broadcast: false,
             pinned: false,
+            client_msg_id: None,
         }
     }
 
