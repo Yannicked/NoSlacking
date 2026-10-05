@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 mod views;
 
-use crate::backend::{Command, Event, Sink, Socket};
+use crate::backend::{Command, Event, Sink, Socket, UploadGate};
 use crate::credentials::AppCredentials;
 use crate::model::{
     Attachment, Bot, Conversation, ConversationKind, Delivery, File, Message, Reaction,
@@ -847,7 +847,7 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
         }
     });
     let mut sent = 0;
-    let mut uploads: HashMap<u64, tokio::task::AbortHandle> = HashMap::new();
+    let mut uploads: HashMap<u64, (tokio::task::AbortHandle, UploadGate)> = HashMap::new();
     while let Some(command) = commands.recv().await {
         match command {
             // #general pages like the real API, slowly, to exercise loading
@@ -956,37 +956,51 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                     result: Ok(message),
                 });
             }
-            // A slow pretend upload, so its progress and Cancel show.
+            // A slow pretend upload, so its progress, Cancel and the last
+            // step (when Cancel goes) all show.
             Command::Upload { id, path, .. } => {
                 let sink = sink.clone();
-                let task = tokio::spawn(async move {
-                    const TOTAL: u64 = 2_400_000;
-                    for step in 0..=40 {
-                        sink.send(Event::UploadProgress {
-                            id,
-                            sent: TOTAL * step / 40,
-                            total: TOTAL,
-                        });
-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    }
-                    sink.send(Event::Notice(format!(
-                        "Demo: would upload {}",
-                        path.display()
-                    )));
-                    sink.send(Event::UploadDone { id });
-                });
-                uploads.insert(id, task.abort_handle());
+                let gate = UploadGate::default();
+                let task = {
+                    let gate = gate.clone();
+                    tokio::spawn(async move {
+                        const TOTAL: u64 = 2_400_000;
+                        for step in 0..=40 {
+                            sink.send(Event::UploadProgress {
+                                id,
+                                sent: TOTAL * step / 40,
+                                total: TOTAL,
+                            });
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        }
+                        if !gate.finish() {
+                            return;
+                        }
+                        sink.send(Event::UploadFinishing { id });
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        sink.send(Event::Notice(format!(
+                            "Demo: would upload {}",
+                            path.display()
+                        )));
+                        sink.send(Event::UploadDone { id });
+                    })
+                };
+                uploads.insert(id, (task.abort_handle(), gate));
             }
             // Every command works, as far as the demo can tell.
             Command::Slash { command, .. } => sink.send(Event::Slash {
                 command,
                 result: Ok(None),
             }),
+            // Like the worker: too late once the last step began.
             Command::CancelUpload { id } => {
-                if let Some(task) = uploads.remove(&id) {
+                if let Some((task, gate)) = uploads.remove(&id)
+                    && !task.is_finished()
+                    && gate.cancel()
+                {
                     task.abort();
+                    sink.send(Event::UploadCancelled { id });
                 }
-                sink.send(Event::UploadDone { id });
             }
             Command::Download { name, .. } => {
                 sink.send(Event::Notice(format!("Demo: would save {name}")));

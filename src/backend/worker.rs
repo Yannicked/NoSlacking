@@ -17,7 +17,7 @@ use super::fetch::{
     boot, conversation_info, conversations, edit_sidebar, history, sections, thread,
     workspace_details,
 };
-use super::files::{download, file_name, open_file, upload};
+use super::files::{UploadGate, download, file_name, open_file, upload};
 use super::translate::{Translated, str_of, translate};
 use super::{Change, Command, Event, Gate, SignIn, Sink, Socket};
 use crate::auth::{Flow, SignedIn};
@@ -168,8 +168,8 @@ pub struct Worker {
     /// because its token is still being read. `None` once started.
     waiting: Option<Vec<Command>>,
     /// Uploads still running, by the interface's id, so they can be
-    /// cancelled.
-    uploads: HashMap<u64, tokio::task::AbortHandle>,
+    /// cancelled while their gate allows it.
+    uploads: HashMap<u64, (tokio::task::AbortHandle, UploadGate)>,
     /// Presence and the like for the people on screen.
     people: super::people::Hub,
 }
@@ -651,12 +651,7 @@ impl Worker {
                 command,
                 text,
             } => self.slash(team, channel, command, text),
-            Command::CancelUpload { id } => {
-                if let Some(task) = self.uploads.remove(&id) {
-                    task.abort();
-                }
-                self.sink.send(Event::UploadDone { id });
-            }
+            Command::CancelUpload { id } => self.cancel_upload(id),
             Command::Download { team, url, name } => self.download(&team, url, name),
             Command::OpenFile { team, url, name } => self.open_file(&team, url, name),
             Command::Mark { team, channel, ts } => self.mark(&team, channel, ts),
@@ -855,15 +850,40 @@ impl Worker {
             return;
         };
         let poll_after = !self.is_live(&team);
-        self.uploads.retain(|_, task| !task.is_finished());
-        let task = tokio::spawn(async move {
-            upload(
-                id, client, team, channel, thread, path, comment, poll_after, &sink,
-            )
-            .await;
-            sink.send(Event::UploadDone { id });
-        });
-        self.uploads.insert(id, task.abort_handle());
+        self.uploads.retain(|_, (task, _)| !task.is_finished());
+        let gate = UploadGate::default();
+        let task = {
+            let gate = gate.clone();
+            tokio::spawn(async move {
+                upload(
+                    id, client, team, channel, thread, path, comment, poll_after, gate, &sink,
+                )
+                .await;
+                sink.send(Event::UploadDone { id });
+            })
+        };
+        self.uploads.insert(id, (task.abort_handle(), gate));
+    }
+
+    /// Stops an upload only while its gate still allows it. Once Slack is
+    /// being told to share the file the cancel is ignored, and the upload
+    /// ends with its own [`Event::UploadDone`], so the interface never
+    /// says "cancelled" about a file that was posted.
+    fn cancel_upload(&mut self, id: u64) {
+        let Some((task, gate)) = self.uploads.remove(&id) else {
+            // Already over: its own UploadDone was sent.
+            return;
+        };
+        if task.is_finished() {
+            return;
+        }
+        if gate.cancel() {
+            task.abort();
+            self.sink.send(Event::UploadCancelled { id });
+        } else {
+            log::debug!("upload {id} is already being shared; not cancelled");
+            self.uploads.insert(id, (task, gate));
+        }
     }
 
     /// Runs a slash command: through its own Web API method where it has

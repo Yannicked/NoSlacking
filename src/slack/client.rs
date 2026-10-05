@@ -453,6 +453,10 @@ impl Client {
     /// Uploads a file with Slack's two-step external upload, streaming
     /// `length` bytes from `file` rather than reading it into memory.
     /// `progress` hears how many bytes have been read for sending so far.
+    ///
+    /// `finish` is asked once the bytes are up, just before Slack is told
+    /// to share the file, which can't be taken back: it answers whether to
+    /// go on. `Ok(false)` means it said no and nothing was posted.
     #[allow(clippy::too_many_arguments)]
     pub async fn upload(
         &self,
@@ -463,7 +467,8 @@ impl Client {
         length: u64,
         comment: &str,
         progress: impl Fn(u64) + Send + Sync + 'static,
-    ) -> Result<(), SlackError> {
+        finish: impl FnOnce() -> bool,
+    ) -> Result<bool, SlackError> {
         let target: types::UploadUrl = self
             .act(
                 "files.getUploadURLExternal",
@@ -485,6 +490,9 @@ impl Client {
         if !response.status().is_success() {
             return Err(SlackError::Http(response.status().as_u16()));
         }
+        if !finish() {
+            return Ok(false);
+        }
         let files = serde_json::json!([{ "id": target.file_id, "title": name }]).to_string();
         let mut params = vec![("files", files), ("channel_id", channel.to_owned())];
         if let Some(thread) = thread {
@@ -494,7 +502,7 @@ impl Client {
             params.push(("initial_comment", comment.to_owned()));
         }
         let _: serde_json::Value = self.act("files.completeUploadExternal", &params).await?;
-        Ok(())
+        Ok(true)
     }
 }
 
