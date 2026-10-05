@@ -143,7 +143,13 @@ pub fn rail(app: &mut App, ui: &mut egui::Ui) {
                     });
                 }
                 if let Some(workspace) = crate::app::active_in(&app.workspaces, &app.settings) {
-                    super::people::me_button(ui, &palette, workspace, &mut app.actions);
+                    super::people::me_button(
+                        ui,
+                        &palette,
+                        workspace,
+                        app.settings.desktop.stay_active,
+                        &mut app.actions,
+                    );
                 }
             });
         });

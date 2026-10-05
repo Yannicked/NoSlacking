@@ -631,6 +631,11 @@ impl App {
         if focused && !self.window_focused {
             self.mark_active_read();
         }
+        // Using the app is what keeps you active in Slack.
+        if focused && (!self.window_focused || ctx.input(|i| crate::people::is_activity(&i.events)))
+        {
+            self.people.saw_input(Instant::now());
+        }
         self.window_focused = focused;
         self.desktop_window(&ctx);
         crate::ui::show(self, ui);

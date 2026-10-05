@@ -113,6 +113,23 @@ pub fn window_group(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 app.settings_changed();
             }
         });
+        let mut always = app.settings.desktop.stay_active;
+        row(
+            ui,
+            palette,
+            &t("Always show as active"),
+            &t(
+                "While NoSlacking is connected, even when you are not using it. Browser sign-ins only.",
+            ),
+            |ui, name| {
+                ui.checkbox(&mut always, "").labelled_by(name);
+            },
+        );
+        if always != app.settings.desktop.stay_active {
+            app.actions.push(crate::model::Action::People(
+                crate::people::Action::StayActive(always),
+            ));
+        }
         let mut login = app.settings.desktop.start_on_login;
         let detail = if app.has_tray() && app.settings.desktop.close_to_tray {
             t("Starts in the tray, without a window.")

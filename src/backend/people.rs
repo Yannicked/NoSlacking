@@ -116,6 +116,18 @@ impl Hub {
             Command::SetStatus { .. } | Command::SetAway(_) => {
                 log::debug!("{command:?} needs the workspace's client");
             }
+            Command::Active => {
+                if let Some(rtm) = self
+                    .teams
+                    .get(team)
+                    .filter(|w| w.live)
+                    .and_then(|w| w.rtm.as_ref())
+                {
+                    // Numbered on the way out, like every frame we send;
+                    // Slack answers a tickle with nothing.
+                    let _ = rtm.send(json!({"type": "tickle"}));
+                }
+            }
             Command::Typing { channel, thread } => {
                 let Some(rtm) = self
                     .teams
@@ -432,7 +444,7 @@ pub fn demo_huddle(team: &str) -> Event {
 #[cfg(feature = "demo")]
 pub fn demo(team: &str, command: Command) -> Vec<Event> {
     match command {
-        Command::Typing { .. } => Vec::new(),
+        Command::Typing { .. } | Command::Active => Vec::new(),
         Command::SetStatus { .. } => vec![Event::People {
             team: team.to_owned(),
             event: people::Event::StatusSet { result: Ok(()) },
@@ -670,6 +682,29 @@ mod tests {
         assert_eq!(frame["type"], "typing");
         assert_eq!(frame["channel"], "C1");
         assert_eq!(frame["thread_ts"], "1.0");
+    }
+
+    #[tokio::test]
+    async fn a_tickle_goes_out_only_over_a_live_socket() {
+        let (sender, mut sent) = tokio::sync::mpsc::unbounded_channel();
+        let mut hub = Hub::default();
+        hub.command("T1", Command::Active);
+        hub.rtm_started("T1", sender);
+        hub.command("T1", Command::Active);
+        assert!(
+            sent.try_recv().is_err(),
+            "nothing before the socket is live"
+        );
+        hub.rtm_live("T1", true);
+        assert_eq!(
+            sent.try_recv().expect("a subscription")["type"],
+            "presence_sub"
+        );
+        hub.command("T1", Command::Active);
+        assert_eq!(
+            sent.try_recv().expect("a tickle"),
+            json!({"type": "tickle"})
+        );
     }
 
     #[tokio::test]

@@ -35,6 +35,9 @@ pub struct DesktopSettings {
     pub close_to_tray: bool,
     /// Whether NoSlacking starts when you log in (see [`crate::autostart`]).
     pub start_on_login: bool,
+    /// Whether Slack keeps showing you as active for as long as NoSlacking
+    /// is connected, used or not (see [`crate::people::TICKLE_EVERY`]).
+    pub stay_active: bool,
 }
 
 impl Default for DesktopSettings {
@@ -50,6 +53,7 @@ impl Default for DesktopSettings {
             // Without a tray, closing quits all the same.
             close_to_tray: true,
             start_on_login: false,
+            stay_active: false,
         }
     }
 }
@@ -221,6 +225,15 @@ pub fn conversation_key(team: &str, channel: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staying_active_is_off_until_asked() {
+        let old: DesktopSettings = serde_json::from_str("{}").expect("an older file");
+        assert!(!old.stay_active);
+        let on: DesktopSettings =
+            serde_json::from_str(r#"{"stay_active": true}"#).expect("a newer file");
+        assert!(on.stay_active);
+    }
 
     #[test]
     fn keywords_are_split_trimmed_and_deduplicated() {
