@@ -478,7 +478,19 @@ pub fn show(
 
     draft.suggesting = !found.is_empty();
     if !found.is_empty() {
-        suggestion_list(ui, palette, &found, draft.selected, &mut accept);
+        // Floating above the composer, over the messages: drawn in line it
+        // grew and shrank the bottom panel with every letter, so the
+        // composer and the whole message list jumped while you typed.
+        let bottom = ui.cursor().min - Vec2::new(0.0, 4.0);
+        let width = ui.available_width();
+        egui::Area::new(egui::Id::new(("composer-suggestions", &composer.key)))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::LEFT_BOTTOM)
+            .fixed_pos(bottom)
+            .show(ui.ctx(), |ui| {
+                ui.set_width(width);
+                suggestion_list(ui, palette, &found, draft.selected, &mut accept);
+            });
     }
 
     if let Some(suggestion) = accept
