@@ -1001,6 +1001,24 @@ impl App {
                     self.jump_to(&team, &channel, ts, thread);
                 }
             }
+            Action::FetchQuote {
+                team,
+                channel,
+                ts,
+                thread,
+            } => {
+                let ask = self
+                    .workspace_mut(&team)
+                    .is_some_and(|w| w.quotes.ask(&channel, &ts));
+                if ask {
+                    self.backend.send(Command::FetchQuote {
+                        team,
+                        channel,
+                        ts,
+                        thread,
+                    });
+                }
+            }
             Action::ShowSettings => self.page = Page::Settings,
             Action::ShowShortcuts => self.shortcuts = true,
             Action::HideSettings => {

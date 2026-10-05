@@ -307,6 +307,14 @@ pub struct Attachment {
     pub original_url: Option<String>,
     pub fields: Vec<AttachmentField>,
     pub blocks: Vec<Value>,
+    // What a message unfurl (`is_msg_unfurl`) says about the message it
+    // quotes. `ts` is kept loose: it is text, but a number must not lose
+    // the whole message.
+    pub author_id: Option<String>,
+    pub author_subname: Option<String>,
+    pub channel_id: Option<String>,
+    pub channel_name: Option<String>,
+    pub ts: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -318,7 +326,47 @@ pub struct AttachmentField {
 }
 
 impl Attachment {
+    /// A message unfurl as the quote it stands for. Slack sends one for a
+    /// link to a Slack message: the author (by id, name and picture), the
+    /// conversation, the message's own `ts` and text, and the link in
+    /// `from_url`. Its footer ("Posted in #general") is left out, as the
+    /// quote says where it was posted itself.
+    fn into_quote(self) -> Option<model::Attachment> {
+        let non_empty = |s: Option<String>| s.filter(|s| !s.trim().is_empty());
+        let url = non_empty(self.from_url)
+            .or(non_empty(self.original_url))
+            .or(non_empty(self.title_link))?;
+        let ts = match self.ts {
+            Some(Value::String(ts)) => Some(ts),
+            Some(Value::Number(ts)) => Some(ts.to_string()),
+            _ => None,
+        }
+        .filter(|ts| !ts.is_empty())
+        .map(Ts::new);
+        let text = non_empty(self.text)
+            .or(non_empty(self.fallback))
+            .unwrap_or_default();
+        Some(model::Attachment {
+            color: self.color.as_deref().and_then(parse_hex),
+            quote: Some(model::Quote {
+                url,
+                channel: non_empty(self.channel_id),
+                channel_name: non_empty(self.channel_name),
+                ts,
+                user: non_empty(self.author_id),
+                author: non_empty(self.author_subname).or(non_empty(self.author_name)),
+                author_icon: non_empty(self.author_icon),
+                text,
+                unavailable: false,
+            }),
+            ..model::Attachment::default()
+        })
+    }
+
     fn into_model(self) -> Option<model::Attachment> {
+        if self.is_msg_unfurl {
+            return self.into_quote();
+        }
         let non_empty = |s: Option<String>| s.filter(|s| !s.trim().is_empty());
         let fields: Vec<model::Field> = self
             .fields
@@ -377,6 +425,7 @@ impl Attachment {
             thumb,
             footer: non_empty(self.footer),
             blocks,
+            quote: None,
         })
     }
 }
@@ -1406,6 +1455,44 @@ mod tests {
             .ok()
             .and_then(Message::into_model)
             .expect("a message")
+    }
+
+    #[test]
+    fn message_unfurls_become_quotes() {
+        // As Slack unfurls a permalink to one of its messages.
+        let message = parsed(
+            r#"{"type":"message","ts":"2.0","user":"U1",
+            "text":"<https://acme.slack.com/archives/C1/p1700000000000100>",
+            "attachments":[{"id":1,"ts":"1700000000.000100","channel_id":"C1",
+            "channel_name":"general","is_msg_unfurl":true,"author_id":"U2",
+            "author_name":"ana","author_subname":"Ana Lima",
+            "author_link":"https://acme.slack.com/team/U2",
+            "author_icon":"https://avatars.slack-edge.com/ana.png",
+            "text":"Hi <@U3> :wave:","fallback":"[Nov 14th] Ana Lima: Hi",
+            "from_url":"https://acme.slack.com/archives/C1/p1700000000000100",
+            "color":"D0D0D0","footer":"Posted in #general","mrkdwn_in":["text"]},
+            {"is_msg_unfurl":true,"text":"no link, so not a quote"}]}"#,
+        );
+        assert_eq!(message.attachments.len(), 1);
+        let quote = message.attachments[0].quote.as_ref().expect("a quote");
+        assert_eq!(
+            quote.url,
+            "https://acme.slack.com/archives/C1/p1700000000000100"
+        );
+        assert_eq!(quote.channel.as_deref(), Some("C1"));
+        assert_eq!(quote.channel_name.as_deref(), Some("general"));
+        assert_eq!(quote.ts, Some(Ts::new("1700000000.000100")));
+        assert_eq!(quote.user.as_deref(), Some("U2"));
+        assert_eq!(quote.author.as_deref(), Some("Ana Lima"));
+        assert_eq!(
+            quote.author_icon.as_deref(),
+            Some("https://avatars.slack-edge.com/ana.png")
+        );
+        assert_eq!(quote.text, "Hi <@U3> :wave:");
+        assert!(!quote.unavailable);
+        // The footer is not drawn as a link card's would be.
+        assert_eq!(message.attachments[0].footer, None);
+        assert!(crate::quotes::own_quotes(&message).is_empty());
     }
 
     #[test]

@@ -76,6 +76,11 @@ pub(super) fn attachment_view(
     attachment: &Attachment,
     actions: &mut Vec<Action>,
 ) {
+    if let Some(quote) = &attachment.quote {
+        // Slack's unfurl of a link to a Slack message.
+        super::quote::quote_view(ui, row, row.workspace, quote, actions);
+        return;
+    }
     let palette = row.palette;
     let team = &row.workspace.info.team_id;
     if let Some(pretext) = &attachment.pretext {

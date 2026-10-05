@@ -151,6 +151,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     let row = Row {
                         palette: &palette,
                         workspace,
+                        workspaces,
                         channel: &channel,
                         in_thread: true,
                         enter_sends: settings.enter_sends,

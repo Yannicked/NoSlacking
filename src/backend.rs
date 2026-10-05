@@ -97,6 +97,14 @@ pub enum Command {
         channel: String,
         after: Ts,
     },
+    /// Message `ts` of `channel` by itself, to quote under a link to it;
+    /// `thread` is its parent for a reply. Answered by [`Event::Quoted`].
+    FetchQuote {
+        team: String,
+        channel: String,
+        ts: Ts,
+        thread: Option<Ts>,
+    },
     Send {
         team: String,
         channel: String,
@@ -317,6 +325,18 @@ impl std::fmt::Debug for Command {
                 .field("team", team)
                 .field("channel", channel)
                 .field("after", after)
+                .finish(),
+            Self::FetchQuote {
+                team,
+                channel,
+                ts,
+                thread,
+            } => f
+                .debug_struct("FetchQuote")
+                .field("team", team)
+                .field("channel", channel)
+                .field("ts", ts)
+                .field("thread", thread)
                 .finish(),
             Self::Send {
                 team,
@@ -619,6 +639,14 @@ pub enum Event {
         has_older: bool,
         cursor: Option<String>,
         has_newer: bool,
+    },
+    /// The message [`Command::FetchQuote`] asked for: it, none when it is
+    /// not there (deleted), or why it could not be read.
+    Quoted {
+        team: String,
+        channel: String,
+        ts: Ts,
+        result: Result<Option<Message>, Failure>,
     },
     /// A page of search results, or why there is none.
     Search {

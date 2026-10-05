@@ -107,6 +107,59 @@ pub async fn newer(client: Client, team: String, channel: String, after: Ts, sin
     }
 }
 
+/// Message `ts` of `channel` by itself, to quote, as [`Event::Quoted`].
+///
+/// A reply is read from its thread (`conversations.replies` of `thread`),
+/// anything else from the history (`conversations.history` ending at it).
+/// Either way Slack answers the nearest messages, so the one asked for is
+/// picked out by its time: a deleted message comes back as none.
+pub async fn quote(
+    client: Client,
+    team: String,
+    channel: String,
+    ts: Ts,
+    thread: Option<Ts>,
+    sink: Sink,
+) {
+    let mut params = vec![
+        ("channel", channel.clone()),
+        ("latest", ts.0.clone()),
+        ("inclusive", "true".to_owned()),
+    ];
+    let method = match &thread {
+        Some(parent) => {
+            // The parent comes first whatever the range, so room for two.
+            params.push(("ts", parent.0.clone()));
+            params.push(("oldest", ts.0.clone()));
+            params.push(("limit", "2".to_owned()));
+            "conversations.replies"
+        }
+        None => {
+            params.push(("limit", "1".to_owned()));
+            "conversations.history"
+        }
+    };
+    let result = client
+        .call::<types::HistoryPage>(method, &params)
+        .await
+        .map(|page| picked(page.messages, &ts))
+        .map_err(|error| failure(&error));
+    sink.send(Event::Quoted {
+        team,
+        channel,
+        ts,
+        result,
+    });
+}
+
+/// The message at `ts` among what Slack answered, if it is there.
+fn picked(messages: Vec<types::Message>, ts: &Ts) -> Option<Message> {
+    messages
+        .into_iter()
+        .filter(|m| m.ts == ts.0)
+        .find_map(types::Message::into_model)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +171,25 @@ mod tests {
         .ok()
         .and_then(types::Message::into_model)
         .expect("a message")
+    }
+
+    #[test]
+    fn a_quote_is_the_message_asked_for_or_none() {
+        let page: types::HistoryPage = serde_json::from_str(
+            r#"{"ok":true,"messages":[
+                {"type":"message","ts":"5.0","user":"U1","text":"parent","thread_ts":"5.0"},
+                {"type":"message","ts":"7.0","user":"U2","text":"reply","thread_ts":"5.0"}
+            ]}"#,
+        )
+        .expect("a page");
+        let reply = picked(page.messages, &Ts::new("7.0")).expect("the reply");
+        assert_eq!(reply.text, "reply");
+        // Deleted: Slack answers the message before it instead.
+        let page: types::HistoryPage = serde_json::from_str(
+            r#"{"ok":true,"messages":[{"type":"message","ts":"4.0","user":"U1","text":"older"}]}"#,
+        )
+        .expect("a page");
+        assert_eq!(picked(page.messages, &Ts::new("5.0")), None);
     }
 
     #[test]
