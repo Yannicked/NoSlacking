@@ -447,15 +447,26 @@ impl Worker {
         }
         if session {
             self.start_rtm(&workspace.team_id, client);
+        } else {
+            // An OAuth sign-in over a browser session: the session's socket
+            // would go on with the old token, so it stops, and people's
+            // presence goes back to polling.
+            self.stop_rtm(&workspace.team_id);
+            self.people.rtm_gone(&workspace.team_id);
         }
         self.report_socket();
     }
 
-    /// Opens (or reopens) the RTM socket for a session workspace.
-    fn start_rtm(&mut self, team: &str, client: Client) {
+    /// Closes a workspace's RTM socket, if it has one.
+    pub(super) fn stop_rtm(&mut self, team: &str) {
         if let Some(old) = self.rtm.remove(team) {
             let _ = old.stop.send(true);
         }
+    }
+
+    /// Opens (or reopens) the RTM socket for a session workspace.
+    fn start_rtm(&mut self, team: &str, client: Client) {
+        self.stop_rtm(team);
         let (stop, stopped) = watch::channel(false);
         let generation = self.generation();
         self.rtm.insert(

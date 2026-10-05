@@ -272,9 +272,7 @@ impl Worker {
     }
 
     pub(super) fn sign_out(&mut self, team: &str) {
-        if let Some(live) = self.rtm.remove(team) {
-            let _ = live.stop.send(true);
-        }
+        self.stop_rtm(team);
         self.people.forget(team);
         if let Some(removed) = self.teams.remove(team) {
             // Before SignedOut goes out: nothing from a task still running
