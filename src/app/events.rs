@@ -343,16 +343,50 @@ impl App {
                 }
             }
             None => {
-                // What you were writing there goes with the sign-in.
-                let prefix = format!("{team}/");
-                self.drafts.retain(|key, _| !key.starts_with(&prefix));
+                let was_active = self.active_team().as_deref() == Some(team);
+                self.forget_team(team);
                 self.workspaces.retain(|w| w.info.team_id != team);
                 self.settings.remove_workspace(team);
                 self.save_settings();
                 if self.workspaces.is_empty() {
                     self.page = Page::SignIn;
+                } else if was_active && let Some(next) = self.active_team() {
+                    self.select_workspace(next);
                 }
             }
+        }
+    }
+
+    /// Drops what the interface holds for a workspace signed out of: what
+    /// you were writing there goes with the sign-in, and what is open of it
+    /// closes, so nothing (a reply in its thread, say) goes to another.
+    fn forget_team(&mut self, team: &str) {
+        let prefix = format!("{team}/");
+        let ours = |key: &str| key.starts_with(&prefix);
+        self.drafts.retain(|key, _| !ours(key));
+        self.jumps.retain(|j| !ours(&j.list));
+        self.scroll_to_bottom.retain(|key| !ours(key));
+        if self.read_line.as_ref().is_some_and(|(key, _)| ours(key)) {
+            self.read_line = None;
+        }
+        if self.prepended.as_ref().is_some_and(|(key, _)| ours(key)) {
+            self.prepended = None;
+        }
+        self.marks.retain(|(t, _), _| t != team);
+        self.pending_marks.retain(|(t, _), _| t != team);
+        self.popouts.retain(|p| p.team != team);
+        self.views.teams.remove(team);
+        self.convos.data.retain(|(t, _), _| t != team);
+        if self.active_team().as_deref() == Some(team) {
+            // What is open names the workspace on screen.
+            self.thread = None;
+            self.editing = None;
+            self.selected = None;
+            self.confirm_delete = None;
+            self.picker = None;
+            self.share = None;
+            self.views.open = None;
+            self.convos.details = None;
         }
     }
 
