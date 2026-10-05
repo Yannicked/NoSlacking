@@ -1,0 +1,62 @@
+# The Flatpak of NoSlacking, built by the release workflow (and locally,
+# see packaging/flatpak/README.md). Flatpak builds offline: the crates come
+# from cargo-sources.json, generated from Cargo.lock at build time.
+id: cloud.yannick.NoSlacking
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: noslacking
+finish-args:
+  # The window, on Wayland or else X11, drawn with the GPU.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # Slack itself.
+  - --share=network
+  # Desktop notifications, and the keyring that holds the tokens.
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.freedesktop.secrets
+  # The tray item: its watcher, and the StatusNotifierItem name it takes.
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --own-name=org.kde.*
+  # "Save" puts files in Downloads.
+  - --filesystem=xdg-download
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/noslacking/cargo
+    CARGO_NET_OFFLINE: 'true'
+modules:
+  - name: noslacking
+    buildsystem: simple
+    build-commands:
+      - cargo --offline fetch --manifest-path Cargo.toml --verbose
+      - cargo --offline build --release --locked
+      - install -Dm755 target/release/noslacking /app/bin/noslacking
+      - install -Dm644 packaging/applications/cloud.yannick.NoSlacking.desktop
+        /app/share/applications/cloud.yannick.NoSlacking.desktop
+      - install -Dm644 packaging/metainfo/cloud.yannick.NoSlacking.metainfo.xml
+        /app/share/metainfo/cloud.yannick.NoSlacking.metainfo.xml
+      - install -Dm644 packaging/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg
+        /app/share/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg
+      - for size in 32 48 64 128 256 512; do
+          install -Dm644 packaging/icons/hicolor/${size}x${size}/apps/cloud.yannick.NoSlacking.png
+          /app/share/icons/hicolor/${size}x${size}/apps/cloud.yannick.NoSlacking.png;
+        done
+    sources:
+      # The checkout, without what is built or local to one machine (a
+      # .cargo/config.toml naming a linker the SDK lacks, say).
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - .git
+          - .claude
+          - .cargo
+          - packaging/flatpak/build
+          - packaging/flatpak/repo
+          - packaging/flatpak/.flatpak-builder
+      - cargo-sources.json

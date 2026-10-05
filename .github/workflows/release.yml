@@ -1,7 +1,7 @@
 name: Release
 
 # Pushing a tag like v0.2.0 builds every platform and publishes a GitHub
-# release with the archives, and .deb and .rpm packages, attached. The tag must match the version in
+# release with the archives, .deb and .rpm packages and a Flatpak attached. The tag must match the version in
 # Cargo.toml.
 on:
   push:
@@ -74,6 +74,52 @@ jobs:
             dist/*.rpm
           if-no-files-found: error
 
+  # The Flatpak, as a single-file bundle for `flatpak install`. Flatpak
+  # builds offline: the crate list comes from Cargo.lock, made here with
+  # flatpak-builder-tools' generator at a fixed commit.
+  flatpak:
+    name: flatpak x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      GENERATOR_REV: 74697c75b630d7330e77250fc13cb5ea688d9479
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Flatpak, the runtime and the Rust SDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub \
+            org.freedesktop.Platform//26.08 org.freedesktop.Sdk//26.08 \
+            org.freedesktop.Sdk.Extension.rust-stable//26.08
+      - name: Crate sources
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet aiohttp==3.14.3 tomlkit==0.15.1
+          curl -fsSL -o "$RUNNER_TEMP/flatpak-cargo-generator.py" \
+            "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/$GENERATOR_REV/cargo/flatpak-cargo-generator.py"
+          "$RUNNER_TEMP/venv/bin/python" "$RUNNER_TEMP/flatpak-cargo-generator.py" \
+            Cargo.lock -o packaging/flatpak/cargo-sources.json
+      - name: Build
+        run: |
+          flatpak-builder --user --disable-rofiles-fuse --force-clean \
+            --state-dir=packaging/flatpak/.flatpak-builder \
+            --repo=packaging/flatpak/repo \
+            packaging/flatpak/build packaging/flatpak/cloud.yannick.NoSlacking.yml
+      - name: Bundle
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          flatpak build-bundle packaging/flatpak/repo \
+            "dist/noslacking-$version-linux-x86_64.flatpak" cloud.yannick.NoSlacking \
+            --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flatpak
+          path: dist/*.flatpak
+          if-no-files-found: error
+
   macos:
     name: macos universal
     runs-on: macos-latest
@@ -134,7 +180,7 @@ jobs:
 
   publish:
     name: publish
-    needs: [linux, macos, windows]
+    needs: [linux, flatpak, macos, windows]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
