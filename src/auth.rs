@@ -31,7 +31,9 @@ pub const SCHEME: &str = "noslacking";
 /// Slack's own scheme: its browser sign-in finishes with a `slack://`
 /// link, and "Open in Slack" links use it too.
 pub const SLACK_SCHEME: &str = "slack";
-/// Every scheme NoSlacking registers itself for.
+/// Every scheme NoSlacking registers itself for. macOS takes them from the
+/// bundle's Info.plist instead.
+#[cfg(any(target_os = "linux", windows))]
 const SCHEMES: [&str; 2] = [SCHEME, SLACK_SCHEME];
 pub const SCHEME_REDIRECT: &str = "noslacking://oauth/callback";
 
