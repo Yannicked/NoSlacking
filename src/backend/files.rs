@@ -169,7 +169,7 @@ pub(super) async fn download(
         .ok()
         .flatten()
         .ok_or_else(|| Problem::new(saving(name), Failure::NoDownloadsFolder))?;
-    save(client, url, name, &dir).await
+    save(client, url, name, &dir, false).await
 }
 
 /// Downloads a file into the private cache (see
@@ -195,10 +195,14 @@ pub(super) async fn open_file(
     let path = if have {
         saved
     } else {
-        tokio::fs::create_dir_all(&dir)
+        // The workspace's file is yours alone, like the rest of its cache.
+        let folder = dir.clone();
+        tokio::task::spawn_blocking(move || crate::paths::create_private_dir(&folder))
             .await
+            .map_err(std::io::Error::other)
+            .and_then(|created| created)
             .map_err(|error| Problem::new(saving(name), Failure::Other(error.to_string())))?;
-        save(client, url, name, &dir).await?
+        save(client, url, name, &dir, true).await?
     };
     tokio::task::spawn_blocking(move || open::that_detached(&path))
         .await
@@ -208,12 +212,15 @@ pub(super) async fn open_file(
 }
 
 /// Streams `url` into a new file named after `name` in `dir`, numbered if
-/// the name is taken, and returns where it went.
+/// the name is taken, and returns where it went. A `private` file (one
+/// kept in the workspace's cache) is readable by you alone on Unix; a
+/// download keeps the usual permissions, like any file you save.
 async fn save(
     client: &Client,
     url: &str,
     name: &str,
     dir: &std::path::Path,
+    private: bool,
 ) -> Result<std::path::PathBuf, Problem> {
     use tokio::io::AsyncWriteExt as _;
     let downloading = |why| {
@@ -232,9 +239,10 @@ async fn save(
         |error: std::io::Error| Problem::new(saving(name), Failure::Other(error.to_string()));
     let dir = dir.to_path_buf();
     let safe = safe_name(name);
-    let (part, mut file) = create_unique(&dir, |n| format!(".{}.part", numbered(&safe, n)))
-        .await
-        .map_err(unsaved)?;
+    let (part, mut file) =
+        create_unique(&dir, private, |n| format!(".{}.part", numbered(&safe, n)))
+            .await
+            .map_err(unsaved)?;
     let written: Result<(), Problem> = async {
         let mut size = 0u64;
         while let Some(chunk) = response
@@ -259,7 +267,7 @@ async fn save(
     }
     // Claim the final name with create_new, so no other file can take it
     // between the check and the rename, then move the download onto it.
-    let claimed = create_unique(&dir, |n| numbered(&safe, n)).await;
+    let claimed = create_unique(&dir, private, |n| numbered(&safe, n)).await;
     let renamed = match claimed {
         Ok((path, reserved)) => {
             drop(reserved);
@@ -308,19 +316,24 @@ fn downloads_dir() -> Option<std::path::PathBuf> {
 
 /// Creates the first of `name(0)`, `name(1)`, … that does not exist yet in
 /// `dir`. `create_new` makes taking the name and creating the file one
-/// step, so two downloads of the same name cannot both get it.
+/// step, so two downloads of the same name cannot both get it. A
+/// `private` file is created readable by you alone on Unix.
 async fn create_unique(
     dir: &std::path::Path,
+    private: bool,
     name: impl Fn(u32) -> String,
 ) -> std::io::Result<(std::path::PathBuf, tokio::fs::File)> {
     for n in 0..10_000 {
         let path = dir.join(name(n));
-        match tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .await
-        {
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if private {
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        match options.open(&path).await {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
@@ -517,16 +530,29 @@ mod tests {
     async fn a_taken_name_is_never_reused() {
         let dir = std::env::temp_dir().join(format!("noslacking-names-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
-        let first = create_unique(&dir, |n| numbered("a.txt", n))
+        let first = create_unique(&dir, false, |n| numbered("a.txt", n))
             .await
             .expect("first");
-        let second = create_unique(&dir, |n| numbered("a.txt", n))
+        let second = create_unique(&dir, false, |n| numbered("a.txt", n))
             .await
             .expect("second");
         assert_eq!(first.0, dir.join("a.txt"));
         assert_eq!(second.0, dir.join("a (1).txt"));
         drop((first, second));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_file_kept_for_a_player_is_yours_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::paths::TestDir::new("open-private");
+        let (path, file) = create_unique(&dir.0, true, |n| numbered("clip.mp4", n))
+            .await
+            .expect("created");
+        drop(file);
+        let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]
