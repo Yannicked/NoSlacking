@@ -76,7 +76,7 @@ impl App {
                 let focused = ui.input(|i| i.viewport().focused.unwrap_or(false));
                 let borrowed = self.borrow_for(&popout);
                 if focused {
-                    self.mark_read(&popout.team, &popout.channel);
+                    self.mark_seen(&popout.team, &popout.channel);
                 }
                 crate::ui::popout(self, ui);
                 let ctx = ui.ctx().clone();
