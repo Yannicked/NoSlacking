@@ -129,6 +129,11 @@ pub fn plan(heights: impl IntoIterator<Item = f32>, min: f32, max: f32, margin: 
 /// each turned out to be. Returns how much taller the rows above the
 /// anchor turned out than planned (negative for shorter): what the view
 /// must scroll by to keep the anchor still.
+///
+/// When a row drawn turns out another height than planned (one never drawn
+/// before, or one whose picture just loaded), the whole frame is asked to
+/// be drawn again before it is shown: placed by guesses, the list would
+/// show for one frame where it does not end up, and jump.
 pub fn show(
     ui: &mut egui::Ui,
     heights: &mut Heights,
@@ -139,6 +144,7 @@ pub fn show(
     let total = plan.tops.last().copied().unwrap_or(0.0);
     ui.add_space(plan.tops[plan.draw.start]);
     let mut moved = 0.0;
+    let mut settled = true;
     for index in plan.draw.clone() {
         let entry = &entries[index];
         let top = ui.cursor().top();
@@ -149,9 +155,14 @@ pub fn show(
         if index < plan.anchor {
             moved += height - planned;
         }
+        settled &= (height - planned).abs() < 0.5;
         heights.record(entry, height);
     }
     ui.add_space(total - plan.tops[plan.draw.end]);
+    if !settled {
+        // egui allows a frame only so many passes, so this cannot loop.
+        ui.ctx().request_discard("a list's rows changed height");
+    }
     moved
 }
 
