@@ -216,9 +216,7 @@ pub async fn exchange(
     let access: types::OauthAccess = client::decode(&bytes)?;
     let team_id = access.team.id.clone();
     let user_id = access.authed_user.id.clone();
-    let token = client::token_from(access).ok_or_else(|| {
-        SlackError::Decode("Slack returned no user token; check the app's user scopes".into())
-    })?;
+    let token = client::token_from(access).ok_or(SlackError::NoUserToken)?;
     Ok(SignedIn {
         team_id,
         user_id,

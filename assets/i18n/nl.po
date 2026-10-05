@@ -1840,6 +1840,9 @@ msgstr "Slack weigerde de aanmelding: {code}"
 msgid "Slack sent no authorization code."
 msgstr "Slack stuurde geen autorisatiecode."
 
+msgid "Slack sent no user token; check the app's user scopes."
+msgstr "Slack stuurde geen gebruikerstoken; controleer de gebruikersscopes van de app."
+
 msgid "it only works when you sign in with your browser"
 msgstr "dat werkt alleen als je je aanmeldt met je browser"
 

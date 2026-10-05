@@ -37,6 +37,9 @@ pub enum SlackError {
     /// A browser-session sign-in did not work, before Slack's API had a say.
     #[error("session sign-in: {0:?}")]
     Session(super::session::Refusal),
+    /// An OAuth sign-in's answer held no user token.
+    #[error("no user token")]
+    NoUserToken,
 }
 
 /// The error codes that mean a token no longer works and the workspace

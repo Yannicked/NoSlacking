@@ -110,6 +110,9 @@ pub enum Failure {
     Refused(String),
     /// Slack's redirect carried no authorization code.
     NoCode,
+    /// Slack's sign-in answer held no user token: the app asks for no
+    /// user scopes.
+    NoUserToken,
     /// A slash command only Slack's own runner takes, which needs a
     /// browser session's sign-in.
     NeedsSession,
@@ -253,6 +256,7 @@ impl Failure {
                 return fill(&t("Slack refused the sign-in: {code}"), &[("code", code)]);
             }
             Self::NoCode => t("Slack sent no authorization code."),
+            Self::NoUserToken => t("Slack sent no user token; check the app's user scopes."),
             Self::NeedsSession => t("it only works when you sign in with your browser"),
             Self::NoInvitee => t("name someone to invite with @"),
             Self::BadProxy => t("the proxy URL cannot be used; check it in Settings"),
@@ -489,6 +493,7 @@ mod tests {
             Failure::Cancelled,
             Failure::Refused("invalid_scope".into()),
             Failure::NoCode,
+            Failure::NoUserToken,
             Failure::NeedsSession,
             Failure::NoInvitee,
             Failure::BadProxy,
