@@ -172,6 +172,9 @@ mod tests {
     /// A path in front (`crate::i18n::t`) ends in `:`, which is no part of
     /// a name, so those calls count too; `format` or `at` do not.
     fn messages_in(code: &str) -> Vec<String> {
+        // A Windows checkout may end the lines with CRLF, which would keep
+        // a `\` line continuation's break in the text.
+        let code = &code.replace("\r\n", "\n");
         let mut out = Vec::new();
         for name in ["t", "tf", "tn"] {
             for (at, _) in code.match_indices(name) {
@@ -192,6 +195,13 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn a_windows_checkout_reads_like_any_other() {
+        let lf = "t(\"one \\\n     two\")";
+        assert_eq!(messages_in(lf), ["one two"]);
+        assert_eq!(messages_in(&lf.replace('\n', "\r\n")), ["one two"]);
     }
 
     #[test]
