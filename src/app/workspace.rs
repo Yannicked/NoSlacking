@@ -437,9 +437,14 @@ impl WorkspaceState {
         if !older && timeline.cached {
             // Slack's own newest page replaces the cached copy whole: the
             // copy may hold messages deleted since, or end before a gap.
+            // What is newer than both the page and the copy came live
+            // while the page was on its way, and stays.
+            let line = max_ts(newest.clone(), timeline.cached_newest.take());
             timeline.cached = false;
             timeline.loaded = false;
-            timeline.messages.retain(|m| m.ts.is_local());
+            timeline
+                .messages
+                .retain(|m| m.ts.is_local() || line.as_ref().is_none_or(|line| m.ts > *line));
         }
         let first = !timeline.loaded;
         // The newest page does not join a stretch of older history opened
@@ -651,9 +656,11 @@ impl WorkspaceState {
         {
             return None;
         }
+        let newest = messages.iter().map(|m| m.ts.clone()).max();
         let (arrived, _) = self.history_arrived(channel, messages, has_more, cursor, false);
         if let Some(timeline) = self.timelines.get_mut(channel) {
             timeline.cached = true;
+            timeline.cached_newest = newest;
             // Older pages wait for Slack's newest one, whose cursor counts.
             timeline.loading = true;
         }
@@ -685,6 +692,9 @@ impl WorkspaceState {
         }
         (timeline.has_more, timeline.cursor) = older;
         timeline.has_newer = has_newer;
+        if !has_newer {
+            timeline.release_held();
+        }
         timeline.loaded = true;
         timeline.loading = false;
         timeline.around = None;
@@ -704,6 +714,11 @@ impl WorkspaceState {
         let timeline = self.timelines.entry(channel.to_owned()).or_default();
         timeline.merge(messages);
         timeline.has_newer = has_newer;
+        if !has_newer {
+            // Messages that came live on the way here; the page asked for
+            // may not have had them yet.
+            timeline.release_held();
+        }
         timeline.loading = false;
         if let (Some(newest), Some(conversation)) = (newest, self.conversation_mut(channel))
             && conversation.latest.as_ref().is_none_or(|l| *l < newest)
@@ -733,7 +748,9 @@ impl WorkspaceState {
         }
     }
 
-    /// A whole thread, parent first.
+    /// A whole thread, parent first. Replies loaded here that are newer
+    /// than all of it came live while it was on its way, and stay, as do
+    /// replies still being sent.
     pub(super) fn thread_arrived(
         &mut self,
         channel: &str,
@@ -744,11 +761,34 @@ impl WorkspaceState {
             users: self.unknown_users(messages.iter().filter_map(|m| m.user.as_deref())),
             bots: self.unknown_bots(messages.iter()),
         };
+        let key = (channel.to_owned(), ts.clone());
+        let newest = messages.iter().map(|m| m.ts.clone()).max();
+        let kept: Vec<Message> = self
+            .threads
+            .get(&key)
+            .into_iter()
+            .flat_map(|t| t.messages.iter())
+            .filter(|m| m.ts.is_local() || newest.as_ref().is_some_and(|n| m.ts > *n))
+            .cloned()
+            .collect();
+        let live: Vec<&Message> = kept
+            .iter()
+            .filter(|m| !m.ts.is_local() && m.is_reply())
+            .collect();
+        let extra = u32::try_from(live.len()).unwrap_or(u32::MAX);
         // The thread's own copy of its parent carries Slack's count, which
         // corrects whatever was counted here; failing that, the replies
-        // that came are the count.
+        // that came are the count. Either way, live replies past the page
+        // add to it.
         let replies = messages.iter().filter(|m| m.ts != ts).count() as u32;
-        let fresh = messages.iter().find(|m| m.ts == ts && m.replies_known);
+        let mut messages = messages;
+        let fresh = messages
+            .iter_mut()
+            .find(|m| m.ts == ts && m.replies_known)
+            .map(|fresh| {
+                add_replies(fresh, &live, extra);
+                fresh.clone()
+            });
         if let Some(parent) = self
             .timelines
             .get_mut(channel)
@@ -761,21 +801,14 @@ impl WorkspaceState {
                     parent.reply_users.clone_from(&fresh.reply_users);
                     parent.latest_reply.clone_from(&fresh.latest_reply);
                 }
-                None => parent.reply_count = replies,
+                None => parent.reply_count = replies.saturating_add(extra),
             }
         }
-        let timeline = self.threads.entry((channel.to_owned(), ts)).or_default();
+        let timeline = self.threads.entry(key).or_default();
         timeline.loading = false;
         timeline.loaded = true;
-        // Keep replies still being sent.
-        let local: Vec<Message> = timeline
-            .messages
-            .iter()
-            .filter(|m| m.ts.is_local())
-            .cloned()
-            .collect();
         timeline.messages = messages;
-        for message in local {
+        for message in kept {
             timeline.upsert(message);
         }
         arrived
@@ -816,7 +849,9 @@ impl WorkspaceState {
             let ts = message.ts.clone();
             // A list of older history shows new messages once it is read up
             // to them, not after a gap.
-            if !(new && timeline.has_newer) {
+            if new && timeline.has_newer {
+                timeline.hold(message);
+            } else {
                 timeline.upsert(message);
             }
             if new && from_me {
@@ -911,6 +946,9 @@ impl WorkspaceState {
             if timeline.find_mut(&message.ts).is_some() {
                 timeline.upsert(message.clone());
                 loaded = true;
+            }
+            if let Some(held) = timeline.held.iter_mut().find(|m| m.ts == message.ts) {
+                held.clone_from(&message);
             }
         }
         if !loaded {
@@ -1317,6 +1355,20 @@ pub(super) fn local_message(
         delivery: Delivery::Sending,
         broadcast,
         pinned: false,
+    }
+}
+
+/// Counts `live` replies, `extra` of them, on a copy of their parent
+/// that Slack's count does not cover yet.
+fn add_replies(parent: &mut Message, live: &[&Message], extra: u32) {
+    parent.reply_count = parent.reply_count.saturating_add(extra);
+    for reply in live {
+        parent.latest_reply = max_ts(parent.latest_reply.take(), Some(reply.ts.clone()));
+        if let Some(user) = &reply.user
+            && !parent.reply_users.contains(user)
+        {
+            parent.reply_users.push(user.clone());
+        }
     }
 }
 
@@ -2161,10 +2213,76 @@ mod tests {
         // An older page still does, and so do newer pages, up to the end.
         w.history_arrived("C1", vec![message("1.0", None)], false, None, true);
         w.newer_arrived("C1", vec![message("4.0", None)], false);
-        assert_eq!(order(&w), ["1.0", "2.0", "3.0", "4.0", "local-1"]);
+        // 10.0 came live on the way, and joins once the list gets there.
+        assert_eq!(order(&w), ["1.0", "2.0", "3.0", "4.0", "10.0", "local-1"]);
         assert!(!w.timelines["C1"].has_newer);
         w.message_arrived("C1", message("11.0", None), false);
-        assert_eq!(w.timelines["C1"].messages.len(), 6);
+        assert_eq!(w.timelines["C1"].messages.len(), 7);
+    }
+
+    #[test]
+    fn a_message_held_while_behind_follows_its_edits_and_deletes() {
+        let mut w = workspace();
+        w.conversations.push(conversation("1.0", "9.0", 0, 0));
+        w.around_arrived("C1", vec![message("2.0", None)], (false, None), true);
+        w.message_arrived("C1", message("10.0", None), false);
+        w.message_arrived("C1", message("11.0", None), false);
+        w.message_changed("C1", mine("10.0", "edited"));
+        w.remove_message("C1", &Ts::new("11.0"));
+        w.newer_arrived("C1", vec![message("3.0", None)], false);
+        assert_eq!(
+            texts(&w.timelines["C1"]),
+            [("2.0", "text 2.0"), ("3.0", "text 3.0"), ("10.0", "edited")]
+        );
+    }
+
+    #[test]
+    fn slacks_page_keeps_what_came_live_over_the_cached_copy() {
+        let mut w = workspace();
+        w.conversations.push(conversation("1.0", "9.0", 0, 0));
+        w.cached_history_arrived(
+            "C1",
+            vec![message("5.0", None), message("6.0", None)],
+            false,
+            None,
+        );
+        // 7.0 comes live while Slack's page is on its way; 6.0 was deleted.
+        w.message_arrived("C1", theirs("7.0"), false);
+        w.history_arrived("C1", vec![message("5.0", None)], false, None, false);
+        let timeline = &w.timelines["C1"];
+        assert_eq!(stamps(&timeline.messages), ["5.0", "7.0"]);
+        assert!(!timeline.cached && timeline.cached_newest.is_none());
+    }
+
+    #[test]
+    fn a_reply_that_came_live_outlives_the_thread_page() {
+        let mut w = workspace_with_thread();
+        // Slack's page was asked for before 4.0 was sent.
+        w.message_arrived("C1", theirs_in_thread("4.0"), true);
+        let mut parent = message("1.0", Some("1.0"));
+        parent.reply_count = 2;
+        parent.replies_known = true;
+        parent.latest_reply = Some(Ts::new("3.0"));
+        let page = vec![
+            parent,
+            message("2.0", Some("1.0")),
+            message("3.0", Some("1.0")),
+        ];
+        w.thread_arrived("C1", Ts::new("1.0"), page);
+        let thread = &w.threads[&("C1".to_owned(), Ts::new("1.0"))];
+        assert_eq!(stamps(&thread.messages), ["1.0", "2.0", "3.0", "4.0"]);
+        assert_eq!(counts(&w), (3, 3));
+        let parent = &w.timelines["C1"].messages[0];
+        assert_eq!(parent.latest_reply, Some(Ts::new("4.0")));
+        assert!(parent.reply_users.iter().any(|u| u == "U2"));
+    }
+
+    /// A reply in C1's thread 1.0 from someone else.
+    fn theirs_in_thread(ts: &str) -> Message {
+        Message {
+            user: Some("U2".into()),
+            ..message(ts, Some("1.0"))
+        }
     }
 
     /// A message in C1 from someone else.
