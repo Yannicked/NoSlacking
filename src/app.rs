@@ -220,7 +220,7 @@ pub struct App {
     pub page: Page,
     pub app_credentials: Option<AppCredentials>,
     pub app_loaded: bool,
-    pub keyring_error: Option<String>,
+    pub keyring_error: Option<crate::failure::Keyring>,
     pub workspaces: Vec<WorkspaceState>,
     pub sign_in: Option<SignIn>,
     pub setup: SetupForm,

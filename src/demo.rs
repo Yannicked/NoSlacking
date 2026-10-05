@@ -13,6 +13,7 @@ use crate::model::{
     Attachment, Bot, Conversation, ConversationKind, Delivery, File, Message, Reaction,
     SectionKind, SidebarSection, Ts, User, UserGroup, Workspace,
 };
+use crate::notice::Notice;
 
 pub const TEAM: &str = "TDEMO";
 pub const ME: &str = "U00";
@@ -996,10 +997,9 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                         }
                         sink.send(Event::UploadFinishing { id });
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        sink.send(Event::Notice(format!(
-                            "Demo: would upload {}",
-                            path.display()
-                        )));
+                        sink.send(Event::Notice(Notice::DemoUpload {
+                            path: path.display().to_string(),
+                        }));
                         sink.send(Event::UploadDone { id });
                     })
                 };
@@ -1021,10 +1021,10 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                 }
             }
             Command::Download { name, .. } => {
-                sink.send(Event::Notice(format!("Demo: would save {name}")));
+                sink.send(Event::Notice(Notice::DemoSave { name }));
             }
             Command::OpenFile { name, .. } => {
-                sink.send(Event::Notice(format!("Demo: would play {name}")));
+                sink.send(Event::Notice(Notice::DemoOpen { name }));
             }
             Command::Convos { team, command } => {
                 for event in crate::backend::convos::demo(&team, command) {

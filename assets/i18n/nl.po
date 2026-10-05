@@ -1887,3 +1887,32 @@ msgstr "Kan noslacking://-links niet registreren ({error}). Probeer de loopback-
 
 msgid "Mark unread"
 msgstr "Als ongelezen markeren"
+
+# What the keyring said when it failed.
+msgid "the keyring is locked"
+msgstr "de sleutelbos is vergrendeld"
+
+msgid "no keyring is available"
+msgstr "er is geen sleutelbos beschikbaar"
+
+msgid "a stored secret is damaged"
+msgstr "een bewaard geheim is beschadigd"
+
+# Notices from the worker, shown as a toast.
+msgid "Uploaded {name}"
+msgstr "{name} geüpload"
+
+msgid "Saved {path}"
+msgstr "{path} opgeslagen"
+
+msgid "A workspace needs one more step in the browser; paste the new link it offers."
+msgstr "Een werkruimte vraagt nog één stap in de browser; plak de nieuwe link die daar verschijnt."
+
+msgid "Demo: would upload {path}"
+msgstr "Demo: zou {path} uploaden"
+
+msgid "Demo: would save {name}"
+msgstr "Demo: zou {name} opslaan"
+
+msgid "Demo: would play {name}"
+msgstr "Demo: zou {name} afspelen"

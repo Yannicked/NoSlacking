@@ -70,6 +70,16 @@ pub enum Error {
     Damaged,
 }
 
+impl From<Error> for crate::failure::Keyring {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::Locked => Self::Locked,
+            Error::Unavailable => Self::Unavailable,
+            Error::Damaged => Self::Damaged,
+        }
+    }
+}
+
 trait Store: Send {
     fn read(&mut self, key: &str) -> Result<Option<Vec<u8>>, Error>;
     fn write(&mut self, key: &str, secret: &[u8]) -> Result<(), Error>;

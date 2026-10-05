@@ -26,6 +26,7 @@ use crate::credentials::{AppCredentials, Credentials};
 use crate::failure::{Doing, Failure, Problem};
 use crate::images::ImageLoader;
 use crate::model::{Ts, Workspace};
+use crate::notice::Notice;
 use crate::offline::Cache;
 use crate::paths::AppDirs;
 use crate::settings::WorkspaceMeta;
@@ -327,7 +328,7 @@ impl Worker {
             }
             Err(error) => {
                 self.sink.send(Event::AppLoaded(None));
-                self.sink.send(Event::KeyringError(error.to_string()));
+                self.sink.send(Event::KeyringError(error.into()));
             }
         }
         for (meta, stored) in workspaces {
@@ -345,8 +346,8 @@ impl Worker {
                 }
                 Stored::Missing => Failure::NoSavedSignIn,
                 Stored::Failed(error) => {
-                    self.sink.send(Event::KeyringError(error.to_string()));
-                    Failure::KeyringUnread(Some(error.to_string()))
+                    self.sink.send(Event::KeyringError(error.into()));
+                    Failure::KeyringUnread(Some(error.into()))
                 }
                 Stored::Skipped => Failure::KeyringUnread(None),
             };
@@ -936,7 +937,9 @@ impl Worker {
         };
         tokio::spawn(async move {
             match download(&client, &url, &name).await {
-                Ok(path) => sink.send(Event::Notice(format!("Saved {}", path.display()))),
+                Ok(path) => sink.send(Event::Notice(Notice::Saved {
+                    path: path.display().to_string(),
+                })),
                 Err(error) => sink.send(Event::Error(error)),
             }
         });
@@ -1179,7 +1182,7 @@ impl Worker {
                 tokio::spawn(async move {
                     if let Err(error) = credentials.save_token(&signed.team_id, &signed.token).await
                     {
-                        sink.send(Event::KeyringError(error.to_string()));
+                        sink.send(Event::KeyringError(error.into()));
                     }
                     let client = Client::new(http, signed.token.clone());
                     let meta = workspace_details(&client, &signed.team_id, &signed.user_id).await;
@@ -1222,8 +1225,11 @@ impl Worker {
     fn socket_event(&mut self, event: SocketEvent) {
         let status = match event {
             SocketEvent::Connected => Socket::Connected,
-            SocketEvent::Disconnected(reason) => Socket::Disconnected(reason),
-            SocketEvent::Rejected(reason) => Socket::Rejected(reason),
+            SocketEvent::Disconnected(error) => Socket::Disconnected(failure(&error)),
+            // Slack's own code, shown as it is: the usual words for a
+            // refused token speak of signing in again, which is not what an
+            // app-level token needs.
+            SocketEvent::Rejected(code) => Socket::Rejected(Failure::Slack(code)),
             SocketEvent::Event { team, event } => {
                 self.dispatch_event(&team, &event);
                 return;
@@ -1242,9 +1248,9 @@ impl Worker {
                 self.people.rtm_live(team, true);
                 Socket::Connected
             }
-            RtmEvent::Disconnected(reason) => {
+            RtmEvent::Disconnected(error) => {
                 self.people.rtm_live(team, false);
-                Socket::Disconnected(reason)
+                Socket::Disconnected(failure(&error))
             }
             RtmEvent::Unavailable(reason) => {
                 // Slack will not give this session a socket. Not an outage:
@@ -1617,7 +1623,7 @@ mod tests {
         worker.internal(Internal::Rtm {
             team: "TA".into(),
             generation,
-            event: RtmEvent::Disconnected("drop".into()),
+            event: RtmEvent::Disconnected(SlackError::Network("drop".into())),
         });
         assert!(!worker.is_live("TA"));
         assert!(worker.rtm.contains_key("TA"));
@@ -1627,7 +1633,7 @@ mod tests {
         worker.socket = Some(socket);
         worker.internal(Internal::Socket {
             generation: generation - 1,
-            event: SocketEvent::Disconnected("old".into()),
+            event: SocketEvent::Disconnected(SlackError::Network("old".into())),
         });
         assert_eq!(
             worker.socket.as_ref().map(|s| s.status.clone()),

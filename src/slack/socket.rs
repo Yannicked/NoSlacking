@@ -28,8 +28,10 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 #[derive(Debug)]
 pub enum SocketEvent {
     Connected,
-    Disconnected(String),
-    /// The app token was refused; reconnecting will not help.
+    /// The connection dropped, for this reason; reconnecting.
+    Disconnected(SlackError),
+    /// The app token was refused, with Slack's code; reconnecting will not
+    /// help.
     Rejected(String),
     Event {
         team: String,
@@ -175,13 +177,11 @@ pub async fn run(
             Ended::Reconnect(reason) => log::info!("Socket Mode reconnecting: {reason}"),
             Ended::RateLimited(wait) => {
                 log::warn!("Socket Mode rate limited for {wait:?}");
-                sink(SocketEvent::Disconnected(
-                    SlackError::RateLimited.to_string(),
-                ));
+                sink(SocketEvent::Disconnected(SlackError::RateLimited));
             }
             Ended::Failed(error) => {
                 log::warn!("Socket Mode connection lost: {error}");
-                sink(SocketEvent::Disconnected(error.to_string()));
+                sink(SocketEvent::Disconnected(error.clone()));
             }
         }
         let wait = wait_before_next(&outcome, started.elapsed(), &mut backoff);

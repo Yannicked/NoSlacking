@@ -45,7 +45,7 @@ pub enum RtmEvent {
     /// Slack said hello: live updates are flowing.
     Connected,
     /// A live connection dropped; reconnecting.
-    Disconnected(String),
+    Disconnected(SlackError),
     /// Slack will not give this session a socket; poll instead. This never
     /// means signed out: the Web API decides that.
     Unavailable(String),
@@ -141,12 +141,12 @@ pub async fn run(
                     Ended::AfterHello(error) => {
                         // A real drop after a working connection: say so.
                         log::info!("RTM connection lost: {error}");
-                        sink(RtmEvent::Disconnected(error.to_string()));
+                        sink(RtmEvent::Disconnected(error));
                     }
                     Ended::Refused(error) => log::info!("RTM attempt refused: {error}"),
                     Ended::Unreachable(error) => {
                         log::info!("RTM could not reach Slack, retrying: {error}");
-                        sink(RtmEvent::Disconnected(error.to_string()));
+                        sink(RtmEvent::Disconnected(error));
                     }
                 }
             }

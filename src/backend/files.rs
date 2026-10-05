@@ -132,7 +132,7 @@ pub(super) async fn upload(
         // Cancelled in time: the worker has already told the interface.
         Ok(false) => {}
         Ok(true) => {
-            sink.send(Event::Notice(format!("Uploaded {name}")));
+            sink.send(Event::Notice(crate::notice::Notice::Uploaded { name }));
             // Without a live socket the new file would only show
             // at the next poll.
             if poll_after {
