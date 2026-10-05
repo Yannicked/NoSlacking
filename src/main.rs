@@ -342,7 +342,7 @@ impl eframe::App for Window {
         self.demo.before_frame(&mut self.app);
         self.app.frame_ui(ui);
         #[cfg(feature = "demo")]
-        self.demo.after_frame(ui.ctx());
+        self.demo.after_frame(ui.ctx(), &mut self.app);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -610,7 +610,7 @@ impl DemoSetup {
         }
     }
 
-    fn after_frame(&mut self, ctx: &egui::Context) {
+    fn after_frame(&mut self, ctx: &egui::Context, app: &mut App) {
         let Some(path) = self.shot.clone() else {
             return;
         };
@@ -643,6 +643,9 @@ impl DemoSetup {
             None => log::error!("the frame did not match {width}x{height}"),
         }
         self.shot = None;
+        // Quit, not just close: with close-to-tray on, closing would only
+        // hide the window, and the shot would never end.
+        app.request_quit();
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }
