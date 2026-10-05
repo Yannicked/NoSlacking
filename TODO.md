@@ -499,7 +499,7 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
 
 ### P2: Everyday gaps against the official client
 
-- [ ] **Mark unread** from the message menu and the keyboard (`u`):
+- [x] **Mark unread** from the message menu and the keyboard (`u`):
       `conversations.mark` with the `ts` just before the message, and the
       read line moves locally. *The read-marker plumbing already exists.*
 - [ ] **User-group mentions in the composer.** `<!subteam^…>` is drawn and

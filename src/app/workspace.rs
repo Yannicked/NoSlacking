@@ -47,6 +47,11 @@ pub struct WorkspaceState {
     /// oldest first. A message can reach us both live and by a poll, in
     /// either order, and must be announced only once.
     seen: VecDeque<(String, Ts)>,
+    /// Conversations you marked unread. Their read marker stays where you
+    /// put it while you keep looking (looking would otherwise read them
+    /// again at once), until you open them anew, mark them read, write
+    /// in them or read further on another device.
+    held_unread: HashSet<String>,
 }
 
 /// How many announced messages [`WorkspaceState::seen`] remembers. A copy
@@ -75,7 +80,19 @@ impl WorkspaceState {
             desktop: crate::desktop::TeamState::default(),
             people: crate::people::TeamPeople::default(),
             seen: VecDeque::new(),
+            held_unread: HashSet::new(),
         }
+    }
+
+    /// Whether you marked `channel` unread and it is to stay so while it
+    /// shows.
+    pub fn holds_unread(&self, channel: &str) -> bool {
+        self.held_unread.contains(channel)
+    }
+
+    /// Lets `channel` be read by looking at it again.
+    pub(super) fn release_unread(&mut self, channel: &str) {
+        self.held_unread.remove(channel);
     }
 
     /// Changes whenever `users` gains or updates someone through the
@@ -306,7 +323,8 @@ impl WorkspaceState {
         for mut conversation in list {
             if let Some(existing) = self.conversation(&conversation.id) {
                 let mut kept = existing.clone();
-                merge_conversation(&mut kept, conversation);
+                let held = self.holds_unread(&kept.id);
+                merge_conversation(&mut kept, conversation, held);
                 conversation = kept;
             }
             merged.push(conversation);
@@ -342,8 +360,9 @@ impl WorkspaceState {
     /// a DM with someone not known yet.
     pub(super) fn conversation_arrived(&mut self, conversation: Conversation) -> Vec<String> {
         let fetch = self.unknown_users(conversation.user.as_deref().into_iter());
+        let held = self.holds_unread(&conversation.id);
         match self.conversation_mut(&conversation.id) {
-            Some(existing) => merge_conversation(existing, conversation),
+            Some(existing) => merge_conversation(existing, conversation, held),
             None => self.conversations.push(conversation),
         }
         fetch
@@ -352,6 +371,7 @@ impl WorkspaceState {
     /// You left a conversation, or it was archived or deleted.
     pub(super) fn conversation_gone(&mut self, channel: &str) {
         self.conversations.retain(|c| c.id != channel);
+        self.held_unread.remove(channel);
         self.timelines.remove(channel);
         self.threads.retain(|(c, _), _| c != channel);
         if self.active.as_deref() == Some(channel) {
@@ -664,6 +684,10 @@ impl WorkspaceState {
             if !(new && timeline.has_newer) {
                 timeline.upsert(message);
             }
+            if new && from_me {
+                // Writing in a conversation reads it, marked unread or not.
+                self.held_unread.remove(channel);
+            }
             if new && let Some(conversation) = self.conversation_mut(channel) {
                 if conversation.latest.as_ref().is_none_or(|l| *l < ts) {
                     conversation.latest = Some(ts.clone());
@@ -767,6 +791,11 @@ impl WorkspaceState {
         }
         if let Ok(message) = result
             && message.in_channel()
+        {
+            self.held_unread.remove(channel);
+        }
+        if let Ok(message) = result
+            && message.in_channel()
             && let Some(conversation) = self.conversation_mut(channel)
         {
             conversation.latest = max_ts(conversation.latest.take(), Some(message.ts.clone()));
@@ -792,10 +821,61 @@ impl WorkspaceState {
     }
 
     /// You read up to `ts`, maybe on another device.
+    /// The echo of your own "Mark unread" comes this way too, with the
+    /// marker already here, and so changes nothing.
     pub(super) fn read_elsewhere(&mut self, channel: &str, ts: Ts) {
-        if let Some(conversation) = self.conversation_mut(channel) {
-            read_up_to(conversation, ts);
+        let Some(conversation) = self.conversation_mut(channel) else {
+            return;
+        };
+        let before = conversation.last_read.clone();
+        read_up_to(conversation, ts);
+        // Read further on another device: no longer to keep unread here.
+        if conversation.last_read != before {
+            self.held_unread.remove(channel);
         }
+    }
+
+    /// Moves `channel`'s read marker back to just before message `ts` (see
+    /// [`unread_marker`]) and counts what is unread from there, as the
+    /// sidebar shows it. The conversation stays unread while it shows (see
+    /// [`Self::holds_unread`]). Returns the marker to tell Slack, or `None`
+    /// for a message not sent yet.
+    pub(super) fn mark_unread(&mut self, channel: &str, ts: &Ts) -> Option<Ts> {
+        if ts.is_local() {
+            return None;
+        }
+        let listed: Vec<&Message> = self
+            .timelines
+            .get(channel)
+            .into_iter()
+            .flat_map(|t| t.messages.iter())
+            .filter(|m| m.in_channel() && !m.ts.is_local())
+            .collect();
+        let marker = unread_marker(&listed, ts)?;
+        let dm = self.conversation(channel).is_some_and(|c| c.kind.is_dm());
+        // A muted direct message counts only what mentions you, as live.
+        let counts_all = dm && !self.desktop.is_muted(channel);
+        let me = self.info.user_id.as_str();
+        // Your own messages are never unread to you, as with the "New" line.
+        let theirs: Vec<&&Message> = listed
+            .iter()
+            .filter(|m| m.ts > marker && m.user.as_deref() != Some(me))
+            .collect();
+        let unread = u32::try_from(theirs.len()).unwrap_or(u32::MAX);
+        let mentions = theirs
+            .iter()
+            .filter(|m| counts_all || self.mentions_me(m))
+            .count();
+        let mentions = u32::try_from(mentions).unwrap_or(u32::MAX);
+        let newest = listed.last().map(|m| m.ts.clone());
+        let conversation = self.conversation_mut(channel)?;
+        conversation.last_read = Some(marker.clone());
+        // The chosen message may be newer than the latest Slack last told.
+        conversation.latest = max_ts(conversation.latest.take(), newest.or(Some(ts.clone())));
+        conversation.unread = unread;
+        conversation.mentions = mentions;
+        self.held_unread.insert(channel.to_owned());
+        Some(marker)
     }
 
     /// Shows a message you are sending before Slack has it.
@@ -969,8 +1049,20 @@ pub fn active_in<'a>(
 }
 
 /// Fills in what a fresher copy of a conversation lacks, and keeps the
-/// newer of each marker.
-fn merge_conversation(existing: &mut Conversation, fresh: Conversation) {
+/// newer of each marker. A conversation you marked unread (`held`) keeps
+/// its read marker and counts: a list asked for before the mark reached
+/// Slack still has the old marker and would read it again.
+fn merge_conversation(existing: &mut Conversation, fresh: Conversation, held: bool) {
+    if held {
+        let kept = (
+            existing.last_read.clone(),
+            existing.unread,
+            existing.mentions,
+        );
+        merge_conversation(existing, fresh, false);
+        (existing.last_read, existing.unread, existing.mentions) = kept;
+        return;
+    }
     let latest = max_ts(existing.latest.take(), fresh.latest.clone());
     let last_read = max_ts(existing.last_read.take(), fresh.last_read.clone());
     let mentions = existing.mentions;
@@ -1010,6 +1102,23 @@ fn read_up_to(conversation: &mut Conversation, ts: Ts) {
         conversation.unread = 0;
         conversation.mentions = 0;
     }
+}
+
+/// Where the read marker goes to make message `ts` and all after it
+/// unread: on the message before it in `listed` (the conversation's own
+/// list, oldest first), which is what Slack's own apps send; when the
+/// message is the first loaded, so the one before is not known, one
+/// microsecond before it. Slack takes any timestamp for
+/// `conversations.mark` and compares messages with it, and no two
+/// messages of a conversation share a microsecond, so that counts
+/// exactly the same messages as read.
+fn unread_marker(listed: &[&Message], ts: &Ts) -> Option<Ts> {
+    let before = listed
+        .iter()
+        .take_while(|m| m.ts < *ts)
+        .last()
+        .map(|m| m.ts.clone());
+    before.or_else(|| ts.just_before())
 }
 
 fn max_ts(a: Option<Ts>, b: Option<Ts>) -> Option<Ts> {
@@ -1105,7 +1214,7 @@ mod tests {
             mentions: 0,
             ..existing.clone()
         };
-        merge_conversation(&mut existing, fresh);
+        merge_conversation(&mut existing, fresh, false);
         assert_eq!(existing.name, "renamed");
         assert_eq!(existing.latest, Some(Ts::new("9.0")));
         assert_eq!(existing.last_read, Some(Ts::new("7.0")));
@@ -1133,13 +1242,13 @@ mod tests {
     #[test]
     fn counts_clear_when_read_elsewhere() {
         let mut existing = conversation("5.0", "9.0", 4, 1);
-        merge_conversation(&mut existing, conversation("9.0", "9.0", 4, 0));
+        merge_conversation(&mut existing, conversation("9.0", "9.0", 4, 0), false);
         assert_eq!(existing.unread, 0);
         assert_eq!(existing.mentions, 0);
         assert!(!existing.has_unread());
         // Still behind: Slack's count stands.
         let mut existing = conversation("5.0", "9.0", 0, 1);
-        merge_conversation(&mut existing, conversation("6.0", "9.0", 3, 0));
+        merge_conversation(&mut existing, conversation("6.0", "9.0", 3, 0), false);
         assert_eq!(existing.unread, 3);
         assert_eq!(existing.mentions, 1);
     }
@@ -1465,6 +1574,92 @@ mod tests {
         );
         assert_eq!(count(&w), [0, 0]);
         assert_eq!(w.toggle_my_reaction("C1", &Ts::new("8.0"), "tada"), None);
+    }
+
+    /// General with messages from someone else at 2.0 to 5.0 (4.0 mentions
+    /// you), all read.
+    fn general_read_through() -> WorkspaceState {
+        let mut w = workspace_in_general();
+        w.conversations[0] = conversation("5.0", "5.0", 0, 0);
+        let timeline = w.timelines.entry("C1".into()).or_default();
+        for ts in ["2.0", "3.0", "4.0", "5.0"] {
+            let mut theirs = message(ts, None);
+            theirs.user = Some("U2".into());
+            if ts == "4.0" {
+                theirs.text = "hey <@U1>".into();
+            }
+            timeline.upsert(theirs);
+        }
+        w
+    }
+
+    #[test]
+    fn marking_unread_moves_the_marker_back() {
+        let mut w = general_read_through();
+        // On the message before: the one marked and all after are unread.
+        assert_eq!(w.mark_unread("C1", &Ts::new("4.0")), Some(Ts::new("3.0")));
+        let c = w.conversation("C1").expect("C1");
+        assert_eq!(c.last_read, Some(Ts::new("3.0")));
+        assert_eq!((c.unread, c.mentions), (2, 1));
+        assert!(w.is_unread(c));
+        assert!(w.holds_unread("C1"));
+        // The "New" line goes above the message marked.
+        let read = c.last_read.clone().expect("marker");
+        assert_eq!(
+            first_unread(&w.timelines["C1"], &read, "U1"),
+            Some(Ts::new("4.0"))
+        );
+        // A message not sent yet cannot be marked.
+        assert_eq!(w.mark_unread("C1", &Ts::new("local-1")), None);
+    }
+
+    #[test]
+    fn marking_the_first_loaded_message_unread_goes_just_before_it() {
+        let mut w = general_read_through();
+        let marker = w.mark_unread("C1", &Ts::new("2.0"));
+        assert_eq!(marker.as_ref().map(Ts::as_str), Some("1.999999"));
+        let c = w.conversation("C1").expect("C1");
+        assert_eq!((c.unread, c.mentions), (4, 1));
+        assert_eq!(
+            first_unread(&w.timelines["C1"], &Ts::new("1.999999"), "U1"),
+            Some(Ts::new("2.0"))
+        );
+    }
+
+    #[test]
+    fn a_conversation_marked_unread_stays_unread_while_it_shows() {
+        let mut w = general_read_through();
+        w.mark_unread("C1", &Ts::new("4.0"));
+        // Slack echoes the mark, and a list asked for before it still has
+        // the old marker: neither reads it again.
+        w.read_elsewhere("C1", Ts::new("3.0"));
+        w.conversations_arrived(vec![conversation("5.0", "5.0", 0, 0)], true);
+        w.conversation_arrived(conversation("5.0", "5.0", 0, 0));
+        let c = w.conversation("C1").expect("C1");
+        assert_eq!(c.last_read, Some(Ts::new("3.0")));
+        assert_eq!(c.unread, 2);
+        // So looking at it (`App::mark_seen`) leaves it be.
+        assert!(w.holds_unread("C1"));
+        // Opening it anew or marking it read lets it go.
+        w.release_unread("C1");
+        assert!(!w.holds_unread("C1"));
+    }
+
+    #[test]
+    fn writing_or_reading_elsewhere_ends_mark_unread() {
+        let mut w = general_read_through();
+        w.mark_unread("C1", &Ts::new("4.0"));
+        w.message_arrived("C1", mine("6.0", "back"), true);
+        assert!(!w.holds_unread("C1"));
+        assert_eq!(
+            w.conversation("C1").and_then(|c| c.last_read.clone()),
+            Some(Ts::new("6.0"))
+        );
+        w.mark_unread("C1", &Ts::new("5.0"));
+        assert!(w.holds_unread("C1"));
+        w.read_elsewhere("C1", Ts::new("6.0"));
+        assert!(!w.holds_unread("C1"));
+        assert!(!w.conversation("C1").is_some_and(|c| c.has_unread()));
     }
 
     #[test]

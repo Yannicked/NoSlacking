@@ -1878,3 +1878,6 @@ msgstr "Kan de proxy niet gebruiken: {error}"
 
 msgid "Could not register noslacking:// links ({error}). Try the loopback redirect in Settings."
 msgstr "Kan noslacking://-links niet registreren ({error}). Probeer de loopback-redirect in Instellingen."
+
+msgid "Mark unread"
+msgstr "Als ongelezen markeren"

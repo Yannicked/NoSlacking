@@ -10,7 +10,8 @@ use crate::theme::{self, Icon};
 use crate::ui::rich::{self, Rich};
 
 /// Quick reactions, react, reply, copy, edit, delete and a "More" menu
-/// (save for later, copy link, pin), over the message's top-right corner.
+/// (save for later, mark unread, copy link, pin), over the message's
+/// top-right corner.
 pub(super) fn toolbar(
     ui: &mut egui::Ui,
     row: &Row<'_>,
@@ -292,6 +293,16 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
             ts: message.ts.clone(),
             save: !saved,
         }));
+        ui.close();
+    }
+    // Slack keeps a thread's read state apart from the conversation's
+    // (`subscriptions.thread.mark`, for its own apps only), so this is for
+    // the conversation's own list.
+    if !row.in_thread && ui.button(t("Mark unread")).clicked() {
+        actions.push(Action::MarkUnread {
+            channel: row.channel.to_owned(),
+            ts: message.ts.clone(),
+        });
         ui.close();
     }
     if ui.button(t("Copy link")).clicked() {

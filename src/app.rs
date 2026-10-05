@@ -680,7 +680,7 @@ impl App {
 
     fn mark_if_viewing(&mut self, team: &str, channel: &str) {
         if self.is_viewing(team, channel) {
-            self.mark_read(team, channel);
+            self.mark_seen(team, channel);
         }
     }
 
@@ -688,16 +688,29 @@ impl App {
         if let Some(team) = self.active_team()
             && let Some(channel) = self.active_workspace().and_then(|w| w.active.clone())
         {
-            self.mark_read(&team, &channel);
+            self.mark_seen(&team, &channel);
+        }
+    }
+
+    /// Reads a conversation because it shows, unless you marked it unread
+    /// since you opened it: that stays until you open it anew, as in Slack.
+    pub(crate) fn mark_seen(&mut self, team: &str, channel: &str) {
+        let held = self
+            .workspace_mut(team)
+            .is_some_and(|w| w.holds_unread(channel));
+        if !held {
+            self.mark_read(team, channel);
         }
     }
 
     /// Clears a conversation's unread state here and tells Slack, at most
-    /// every few seconds.
+    /// every few seconds. Asked for outright (or by opening it), so it
+    /// also undoes a "Mark unread".
     pub(crate) fn mark_read(&mut self, team: &str, channel: &str) {
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
+        workspace.release_unread(channel);
         let newest = workspace
             .timelines
             .get(channel)
@@ -720,6 +733,27 @@ impl App {
         conversation.last_read = Some(latest.clone());
         self.pending_marks
             .insert((team.to_owned(), channel.to_owned()), latest);
+    }
+
+    /// Makes message `ts` of `channel` in the open workspace and all after
+    /// it unread: here at once, in Slack with the next marks sent, and
+    /// with the "New" line moved above it when the conversation shows.
+    fn mark_unread(&mut self, channel: &str, ts: &Ts) {
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        let Some(marker) = self
+            .workspace_mut(&team)
+            .and_then(|w| w.mark_unread(channel, ts))
+        else {
+            return;
+        };
+        // Replaces a read mark not sent yet, which would undo this one.
+        self.pending_marks
+            .insert((team.clone(), channel.to_owned()), marker.clone());
+        if self.active_workspace().and_then(|w| w.active.as_deref()) == Some(channel) {
+            self.read_line = Some((format!("{team}/{channel}"), Some(marker)));
+        }
     }
 
     fn flush_marks(&mut self) {
@@ -982,6 +1016,7 @@ impl App {
                 self.open_picker(PickerTarget::Reaction { channel, ts });
             }
             Action::PickEmoji { draft } => self.open_picker(PickerTarget::Draft(draft)),
+            Action::MarkUnread { channel, ts } => self.mark_unread(&channel, &ts),
             Action::AskDelete { channel, ts } => self.confirm_delete = Some((channel, ts)),
             Action::NameSection { rename, channel } => self.name_section(rename, channel),
             Action::Preview { uri, name } => {

@@ -61,6 +61,21 @@ impl Ts {
         }
     }
 
+    /// The timestamp one microsecond earlier, in Slack's own form
+    /// (`1700000000.000099`): a read marker set there counts this message
+    /// as unread and anything older as read. `None` for a local or
+    /// malformed one, or the very first instant.
+    pub fn just_before(&self) -> Option<Ts> {
+        let Key::Real(secs, micros) = self.key() else {
+            return None;
+        };
+        let (secs, micros) = match micros.checked_sub(1) {
+            Some(micros) => (secs, micros),
+            None => (secs.checked_sub(1)?, 999_999),
+        };
+        Some(Ts(format!("{secs}.{micros:06}")))
+    }
+
     pub fn zoned(&self) -> Option<jiff::Zoned> {
         let ts = jiff::Timestamp::from_second(self.seconds()?).ok()?;
         Some(ts.to_zoned(jiff::tz::TimeZone::system()))
@@ -692,6 +707,13 @@ pub enum Action {
     CancelEdit,
     /// Edits your newest message in the open conversation.
     EditLast,
+    /// Moves the conversation's read marker back to just before message
+    /// `ts`, so it and everything after it is unread again, and keeps it
+    /// there until you leave the conversation and come back.
+    MarkUnread {
+        channel: String,
+        ts: Ts,
+    },
     /// Asks before deleting a message.
     AskDelete {
         channel: String,
@@ -936,6 +958,20 @@ mod tests {
         m.toggle_reaction("tada", "U1", false);
         m.toggle_reaction("tada", "U2", false);
         assert!(m.reactions.is_empty());
+    }
+
+    #[test]
+    fn just_before_is_one_microsecond_earlier() {
+        let before = |ts: &str| Ts::new(ts).just_before().map(|t| t.0);
+        assert_eq!(
+            before("1700000000.000100").as_deref(),
+            Some("1700000000.000099")
+        );
+        // Borrows from the seconds, and reads "5.0" as Slack's "5.000000".
+        assert_eq!(before("5.0").as_deref(), Some("4.999999"));
+        assert!(Ts::new("4.999999") < Ts::new("5.0"));
+        assert_eq!(before("0.000000"), None);
+        assert_eq!(before("local-3"), None);
     }
 
     #[test]

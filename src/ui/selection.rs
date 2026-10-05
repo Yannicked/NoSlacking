@@ -5,8 +5,9 @@
 //! - ↑ / ↓: the message before or after; ↓ past the last, or Esc, goes back
 //!   to the composer.
 //! - R react, T reply in thread, E edit, Delete (or Backspace) delete,
-//!   C copy the text. Editing and deleting are for your own messages, and
-//!   delete still asks first.
+//!   C copy the text, U mark unread from here. Editing and deleting are
+//!   for your own messages, and delete still asks first. Marking unread is
+//!   for the conversation, not a thread (see the message menu).
 //!
 //! The keys work only while no text field has focus, so typing is never
 //! taken; clicking into a field drops the selection.
@@ -49,7 +50,7 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
     let row = super::message::row_id(&selected.channel, &selected.ts, selected.in_thread);
     // Arrows belong to whatever else has focus, a toolbar button say.
     let arrows = focused.is_none_or(|id| id == row);
-    let (up, down, escape, react, thread, edit, delete, copy) = ctx.input_mut(|input| {
+    let (up, down, escape, react, thread, edit, delete, copy, unread) = ctx.input_mut(|input| {
         (
             arrows && take(input, Key::ArrowUp, Modifiers::NONE),
             arrows && take(input, Key::ArrowDown, Modifiers::NONE),
@@ -60,6 +61,7 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
             take(input, Key::Delete, Modifiers::NONE)
                 || take(input, Key::Backspace, Modifiers::NONE),
             take(input, Key::C, Modifiers::NONE),
+            take(input, Key::U, Modifiers::NONE),
         )
     });
     if up || down {
@@ -122,6 +124,12 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
     }
     if delete && mine {
         actions.push(Action::AskDelete {
+            channel: channel.clone(),
+            ts: ts.clone(),
+        });
+    }
+    if unread && !selected.in_thread {
+        actions.push(Action::MarkUnread {
             channel: channel.clone(),
             ts: ts.clone(),
         });
