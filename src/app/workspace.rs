@@ -346,12 +346,14 @@ impl WorkspaceState {
             }
             merged.push(conversation);
         }
-        if !complete {
+        for existing in &self.conversations {
             // A cached list: keep anything already known that it lacks.
-            for existing in &self.conversations {
-                if !merged.iter().any(|c| c.id == existing.id) {
-                    merged.push(existing.clone());
-                }
+            // The full list leaves out what Slack counts as closed (DMs,
+            // say), so one fetched by itself for a message stays too: it
+            // is never fetched again.
+            let keep = !complete || self.requested_conversations.contains(&existing.id);
+            if keep && !merged.iter().any(|c| c.id == existing.id) {
+                merged.push(existing.clone());
             }
         }
         self.conversations = merged;
@@ -1736,6 +1738,29 @@ mod tests {
         assert!(arrived.users.is_empty());
         let (_, fetch) = w.message_arrived("C9", message("6.0", None), false);
         assert!(!fetch);
+    }
+
+    #[test]
+    fn a_conversation_fetched_by_itself_outlives_the_full_list() {
+        let mut w = workspace_in_general();
+        let (_, fetch) = w.message_arrived("D9", theirs("5.0"), false);
+        assert!(fetch);
+        let mut dm = conversation("1.0", "5.0", 0, 0);
+        dm.id = "D9".into();
+        dm.kind = ConversationKind::Direct;
+        w.conversation_arrived(dm);
+        w.active = Some("D9".into());
+        // The full list, which leaves the closed DM out.
+        w.conversations_arrived(vec![conversation("1.0", "1.0", 0, 0)], true);
+        assert!(w.conversation("D9").is_some());
+        assert_eq!(w.active.as_deref(), Some("D9"));
+        // Anything else the list lacks goes.
+        let mut gone = conversation("1.0", "1.0", 0, 0);
+        gone.id = "C7".into();
+        w.conversation_arrived(gone);
+        w.conversations_arrived(vec![conversation("1.0", "1.0", 0, 0)], true);
+        assert!(w.conversation("C7").is_none());
+        assert!(w.conversation("D9").is_some());
     }
 
     #[test]
