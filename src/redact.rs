@@ -13,9 +13,11 @@ pub const REDACTED: &str = "<redacted>";
 
 /// Every token prefix Slack issues: user, bot, rotating (`xoxe.` and
 /// `xoxe-`), app-level, session (`xoxc-`, the `xoxd-` cookie) and the
-/// legacy workspace, refresh and session tokens.
-const PREFIXES: [&str; 9] = [
-    "xoxp-", "xoxb-", "xoxe", "xapp-", "xoxc-", "xoxd-", "xoxa-", "xoxr-", "xoxs-",
+/// legacy workspace, refresh and session tokens, and the one-time sign-in
+/// tokens (`z-app-`) a `slack://` sign-in link carries (see
+/// [`crate::slack::magic`]), which trade for a session like a password.
+const PREFIXES: [&str; 10] = [
+    "xoxp-", "xoxb-", "xoxe", "xapp-", "xoxc-", "xoxd-", "xoxa-", "xoxr-", "xoxs-", "z-app-",
 ];
 
 /// Whether `word` holds a token or a socket URL.
@@ -61,6 +63,8 @@ mod tests {
             "xoxa-2-abc",
             "xoxr-abc",
             "xoxs-abc",
+            "z-app-T0123-abc",
+            "slack://login-v2?0.host=acme.slack.com&0.tokens=z-app-T01-abc_z-app-T02-def",
             "wss://wss-primary.slack.com/link/?ticket=abc",
         ] {
             let redacted = tokens(&format!("failed with {secret} today")).expect("redacted");
