@@ -266,9 +266,8 @@ async fn connection(
                             .unwrap_or("error");
                         return end(hello, true, SlackError::Api(message.to_owned()));
                     }
-                    // Housekeeping frames carry no message.
-                    Some("pong" | "reconnect_url" | "pref_change" | "dnd_updated") | None => {}
-                    Some(_) => sink(RtmEvent::Event(value)),
+                    Some(kind) if !is_housekeeping(kind) => sink(RtmEvent::Event(value)),
+                    _ => {}
                 }
             }
             Frame::Close(frame) => {
@@ -278,6 +277,14 @@ async fn connection(
             _ => {}
         }
     }
+}
+
+/// Whether a frame of this type is only the socket's own bookkeeping, with
+/// nothing for the worker. Preference and Do Not Disturb changes are not:
+/// they are how a session workspace hears of mutes and snoozes made in
+/// another client.
+fn is_housekeeping(kind: &str) -> bool {
+    matches!(kind, "pong" | "reconnect_url")
 }
 
 /// An outgoing frame as text, with the `id` RTM wants on everything a
@@ -299,6 +306,15 @@ mod tests {
         assert_eq!(back["id"], 7);
         assert_eq!(back["channel"], "C1");
         assert_eq!(numbered(serde_json::json!("typing"), 1), None);
+    }
+
+    #[test]
+    fn preference_and_dnd_changes_reach_the_worker() {
+        assert!(!is_housekeeping("pref_change"));
+        assert!(!is_housekeeping("dnd_updated"));
+        assert!(!is_housekeeping("message"));
+        assert!(is_housekeeping("pong"));
+        assert!(is_housekeeping("reconnect_url"));
     }
 
     fn network() -> SlackError {
