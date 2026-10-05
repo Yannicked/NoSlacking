@@ -526,17 +526,17 @@ msgstr "Nieuw"
 msgid "{author}, {time}: {text}"
 msgstr "{author}, {time}: {text}"
 
-msgid "↑↓ Move · R React · T Thread · E Edit · Del Delete · C Copy · Esc Back"
-msgstr "↑↓ Verplaatsen · R Reageren · T Thread · E Bewerken · Del Verwijderen · C Kopiëren · Esc Terug"
+msgid "↑↓ Move · R React · T Thread · E Edit · Del Delete · C Copy · S Share · U Mark unread · Esc Back"
+msgstr "↑↓ Verplaatsen · R Reageren · T Thread · E Bewerken · Del Verwijderen · C Kopiëren · S Delen · U Als ongelezen markeren · Esc Terug"
 
-msgid "↑↓ Move · R React · E Edit · Del Delete · C Copy · Esc Back"
-msgstr "↑↓ Verplaatsen · R Reageren · E Bewerken · Del Verwijderen · C Kopiëren · Esc Terug"
+msgid "↑↓ Move · R React · E Edit · Del Delete · C Copy · S Share · Esc Back"
+msgstr "↑↓ Verplaatsen · R Reageren · E Bewerken · Del Verwijderen · C Kopiëren · S Delen · Esc Terug"
 
-msgid "↑↓ Move · R React · T Thread · C Copy · Esc Back"
-msgstr "↑↓ Verplaatsen · R Reageren · T Thread · C Kopiëren · Esc Terug"
+msgid "↑↓ Move · R React · T Thread · C Copy · S Share · U Mark unread · Esc Back"
+msgstr "↑↓ Verplaatsen · R Reageren · T Thread · C Kopiëren · S Delen · U Als ongelezen markeren · Esc Terug"
 
-msgid "↑↓ Move · R React · C Copy · Esc Back"
-msgstr "↑↓ Verplaatsen · R Reageren · C Kopiëren · Esc Terug"
+msgid "↑↓ Move · R React · C Copy · S Share · Esc Back"
+msgstr "↑↓ Verplaatsen · R Reageren · C Kopiëren · S Delen · Esc Terug"
 
 msgid "APP"
 msgstr "APP"

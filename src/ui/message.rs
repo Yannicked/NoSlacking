@@ -324,12 +324,15 @@ fn keyboard_row(
 fn keys_hint(ui: &mut egui::Ui, row: &Row<'_>, message: &Message) {
     let me = message.user.as_deref() == Some(row.workspace.info.user_id.as_str());
     let hint = match (me, row.in_thread) {
-        (true, false) => {
-            t("↑↓ Move · R React · T Thread · E Edit · Del Delete · C Copy · Esc Back")
+        (true, false) => t(
+            "↑↓ Move · R React · T Thread · E Edit · Del Delete · C Copy · S Share · U Mark unread · Esc Back",
+        ),
+        (true, true) => t("↑↓ Move · R React · E Edit · Del Delete · C Copy · S Share · Esc Back"),
+        (false, false) => {
+            t("↑↓ Move · R React · T Thread · C Copy · S Share · U Mark unread · Esc Back")
         }
-        (true, true) => t("↑↓ Move · R React · E Edit · Del Delete · C Copy · Esc Back"),
-        (false, false) => t("↑↓ Move · R React · T Thread · C Copy · Esc Back"),
-        (false, true) => t("↑↓ Move · R React · C Copy · Esc Back"),
+        // Marking unread works on the conversation, not inside a thread.
+        (false, true) => t("↑↓ Move · R React · C Copy · S Share · Esc Back"),
     };
     ui.label(
         RichText::new(hint)
