@@ -80,11 +80,24 @@ impl Worker {
     /// accepting the link it hands back.
     pub(super) fn start_browser_sign_in(&mut self) {
         self.browser_sign_in = Some(std::time::Instant::now());
-        if let Err(error) = open::that_detached(crate::slack::magic::SIGN_IN_URL) {
-            log::warn!("could not open the browser: {error}");
-            self.sink
-                .send(Event::SignIn(SignIn::Failed(Failure::NoBrowser)));
-        }
+        // The page ends with a slack:// link, so NoSlacking takes those
+        // over now, and only now: at start-up they stay with the official
+        // app. Before the browser opens, so the link cannot come back
+        // first; off the runtime, since it runs xdg-mime or reg.exe.
+        let sink = self.sink.clone();
+        tokio::spawn(async move {
+            let claimed = tokio::task::spawn_blocking(auth::claim_slack_links)
+                .await
+                .unwrap_or_else(|error| Err(error.to_string()));
+            if let Err(error) = claimed {
+                // The link can still be pasted by hand.
+                log::warn!("could not register as the slack:// link handler: {error}");
+            }
+            if let Err(error) = open::that_detached(crate::slack::magic::SIGN_IN_URL) {
+                log::warn!("could not open the browser: {error}");
+                sink.send(Event::SignIn(SignIn::Failed(Failure::NoBrowser)));
+            }
+        });
     }
 
     /// Whether a browser sign-in the user started is still waiting for its
