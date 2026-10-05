@@ -44,8 +44,9 @@ Slack session; neither needs anything registered.
 - **Sign in with your browser.** NoSlacking opens Slack's sign-in page in
   your browser. Sign in as usual (password, emailed code or SSO); when Slack
   hands the sign-in back, the browser passes it to NoSlacking, which
-  registers itself for `slack://` links for this. If your browser does not
-  pass it on, paste the `slack://` link from the page instead.
+  registers itself for `slack://` links when you start this sign-in (and
+  only then, as it takes them over from the Slack app). If your browser does
+  not pass it on, paste the `slack://` link from the page instead.
 - **Paste your session cookie.** Paste your workspace address and the `d`
   cookie from a browser where you are logged in to Slack. The sign-in page
   explains where to find it.

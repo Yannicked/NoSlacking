@@ -45,11 +45,13 @@ impl AppDirs {
         }
     }
 
-    /// Creates the directories.
+    /// Creates the directories. State (the log, the panic log, drafts) and
+    /// the cache (a workspace's files) are yours alone, so on Unix only
+    /// you may open them, whatever files inside them a library creates.
     pub fn ensure(&self) -> std::io::Result<()> {
-        for dir in [&self.config, &self.state, &self.cache] {
-            std::fs::create_dir_all(dir)?;
-        }
+        std::fs::create_dir_all(&self.config)?;
+        create_private_dir(&self.state)?;
+        create_private_dir(&self.cache)?;
         std::fs::create_dir_all(self.images())?;
         std::fs::create_dir_all(self.themes())?;
         Ok(())
@@ -118,6 +120,39 @@ fn sanitize(id: &str) -> String {
     id.chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect()
+}
+
+/// Creates `dir` and any missing folders above it, and on Unix lets only
+/// you open it (0700), tightening one an older version left open. Other
+/// platforms keep the folder's inherited permissions, which on Windows and
+/// macOS already keep other users out of your profile.
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        builder.mode(0o700);
+        builder.create(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    builder.create(dir)
+}
+
+/// Lets only you read the file at `path` (0600) on Unix, for files a
+/// library creates with the usual permissions. Elsewhere it does nothing.
+pub fn make_private(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 /// Writes `bytes` to `path` through a temporary file, so a crash never
@@ -276,6 +311,33 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_folders_and_files_are_the_owners_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode =
+            |path: &Path| std::fs::metadata(path).expect("meta").permissions().mode() & 0o777;
+        let dir = TestDir::new("private");
+        let dirs = AppDirs::under(&dir.0);
+        // A folder an older version left open is tightened too.
+        std::fs::create_dir_all(&dirs.state).expect("state");
+        std::fs::set_permissions(&dirs.state, std::fs::Permissions::from_mode(0o755))
+            .expect("open it");
+        dirs.ensure().expect("ensure");
+        assert_eq!(mode(&dirs.state), 0o700);
+        assert_eq!(mode(&dirs.cache), 0o700);
+        let nested = dir.0.join("a").join("b");
+        create_private_dir(&nested).expect("nested");
+        assert_eq!(mode(&dir.0.join("a")), 0o700);
+        assert_eq!(mode(&nested), 0o700);
+        let log = dirs.log_file();
+        std::fs::write(&log, "x").expect("log");
+        make_private(&log).expect("private");
+        assert_eq!(mode(&log), 0o600);
+        write_private(&nested.join("f"), b"x").expect("write");
+        assert_eq!(mode(&nested.join("f")), 0o600);
     }
 
     #[test]

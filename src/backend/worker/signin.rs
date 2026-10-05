@@ -80,11 +80,24 @@ impl Worker {
     /// accepting the link it hands back.
     pub(super) fn start_browser_sign_in(&mut self) {
         self.browser_sign_in = Some(std::time::Instant::now());
-        if let Err(error) = open::that_detached(crate::slack::magic::SIGN_IN_URL) {
-            log::warn!("could not open the browser: {error}");
-            self.sink
-                .send(Event::SignIn(SignIn::Failed(Failure::NoBrowser)));
-        }
+        // The page ends with a slack:// link, so NoSlacking takes those
+        // over now, and only now: at start-up they stay with the official
+        // app. Before the browser opens, so the link cannot come back
+        // first; off the runtime, since it runs xdg-mime or reg.exe.
+        let sink = self.sink.clone();
+        tokio::spawn(async move {
+            let claimed = tokio::task::spawn_blocking(auth::claim_slack_links)
+                .await
+                .unwrap_or_else(|error| Err(error.to_string()));
+            if let Err(error) = claimed {
+                // The link can still be pasted by hand.
+                log::warn!("could not register as the slack:// link handler: {error}");
+            }
+            if let Err(error) = open::that_detached(crate::slack::magic::SIGN_IN_URL) {
+                log::warn!("could not open the browser: {error}");
+                sink.send(Event::SignIn(SignIn::Failed(Failure::NoBrowser)));
+            }
+        });
     }
 
     /// Whether a browser sign-in the user started is still waiting for its
@@ -174,8 +187,9 @@ impl Worker {
                 .send(Event::SignIn(SignIn::Failed(Failure::NoClientId)));
             return;
         };
-        if let Some(listener) = self.listener.take() {
-            listener.abort();
+        let previous = self.listener.take();
+        if let Some(previous) = &previous {
+            previous.abort();
         }
         let flow = Flow::start(&app, redirect, port);
         match redirect {
@@ -187,25 +201,39 @@ impl Worker {
                         Failure::Other(error),
                     )));
                 }
+                open_browser(&flow.url);
             }
             Redirect::Loopback => {
                 let internal = self.internal.clone();
                 let state = flow.state.clone();
+                let url = flow.url.clone();
                 self.listener = Some(tokio::spawn(async move {
-                    match auth::loopback(port, &state).await {
+                    // The last attempt's listener lets go of the port once
+                    // its task is gone; only then can this one take it.
+                    if let Some(previous) = previous {
+                        let _ = previous.await;
+                    }
+                    // Listen first: with nowhere to land, the browser would
+                    // be sent off for nothing, or to whoever holds the port.
+                    let listened = match auth::bind_loopback(port) {
+                        Ok(listeners) => {
+                            open_browser(&url);
+                            auth::loopback(listeners, &state).await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    match listened {
                         Ok(url) => {
                             let _ = internal.send(Internal::Callback(url));
                         }
                         Err(error) => {
+                            log::warn!("the sign-in listener on port {port} failed: {error}");
                             let _ =
                                 internal.send(Internal::SignInListenerFailed(error.to_string()));
                         }
                     }
                 }));
             }
-        }
-        if let Err(error) = open::that_detached(&flow.url) {
-            log::warn!("could not open the browser: {error}");
         }
         self.sink
             .send(Event::SignIn(SignIn::Waiting(flow.url.clone())));
@@ -310,6 +338,14 @@ impl Worker {
             self.restart_socket();
         }
         self.report_socket();
+    }
+}
+
+/// Opens the sign-in page; the waiting screen shows its address to open by
+/// hand when no browser comes up.
+fn open_browser(url: &str) {
+    if let Err(error) = open::that_detached(url) {
+        log::warn!("could not open the browser: {error}");
     }
 }
 

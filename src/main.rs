@@ -141,6 +141,17 @@ fn main() -> eframe::Result<()> {
         ))
         .redact(noslacking::redact::log_record)
         .init();
+    // The logger creates its file with the usual permissions. The folder
+    // already keeps others out; this also covers a log an older version
+    // left readable.
+    for log in [dirs.log_file(), dirs.panic_log()] {
+        match noslacking::paths::make_private(&log) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                log::debug!("could not make {} private: {error}", log.display());
+            }
+            _ => {}
+        }
+    }
     if let Err(error) = folders {
         log::error!("could not create the app's folders: {error}");
     }
@@ -165,12 +176,13 @@ fn main() -> eframe::Result<()> {
                 if let Request::Open(_) = request {
                     let _ = requests.send(request);
                 }
-                // Be the handler for slack:// and noslacking:// links, so
-                // the browser sign-in comes back here by itself. Off the
-                // main thread: it runs xdg-mime or reg.exe.
+                // Be the handler for noslacking:// links, so an OAuth
+                // sign-in comes back here by itself. slack:// stays with
+                // the official app until a browser sign-in needs it. Off
+                // the main thread: it runs xdg-mime or reg.exe.
                 std::thread::spawn(|| {
                     if let Err(error) = noslacking::auth::register_scheme() {
-                        log::warn!("could not register as the slack:// link handler: {error}");
+                        log::warn!("could not register as the noslacking:// link handler: {error}");
                     }
                 });
                 Some(guard)

@@ -328,7 +328,15 @@ impl Inner {
         }
         .map_err(failure_for)?;
         check_decoded_size(&bytes).map_err(Failure::Refused)?;
-        if let Err(error) = crate::paths::write_atomic(&path, &bytes) {
+        // A workspace's files are as private as its messages: their folder
+        // and the files in it are yours alone. Public images need no such
+        // care.
+        let written = match team {
+            Some(team) => crate::paths::create_private_dir(&self.private_dir(team))
+                .and_then(|()| crate::paths::write_private(&path, &bytes)),
+            None => crate::paths::write_atomic(&path, &bytes),
+        };
+        if let Err(error) = written {
             log::debug!("image not cached: {error}");
         }
         Ok(bytes)
