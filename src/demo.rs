@@ -862,6 +862,7 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                     has_more: cursor.is_some(),
                     cursor,
                     older: false,
+                    polled: false,
                 });
             }
             Command::LoadOlder {
@@ -878,6 +879,7 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                     has_more: cursor.is_some(),
                     cursor,
                     older: true,
+                    polled: false,
                 });
             }
             Command::LoadAround { team, channel, ts } => {
@@ -928,6 +930,7 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                 has_more: false,
                 cursor: None,
                 older: false,
+                polled: false,
             }),
             Command::LoadThread { team, channel, ts } => sink.send(Event::Thread {
                 team,

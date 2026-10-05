@@ -15,6 +15,10 @@ use crate::i18n::{t, tf};
 use crate::model::{Conversation, Message, Ts, Workspace};
 use crate::settings::WorkspaceMeta;
 
+/// The most notifications one poll shows for one conversation: the newest
+/// messages it found. Hooks and the views still see every one.
+const POLLED_NOTES: usize = 3;
+
 impl App {
     pub(super) fn handle(&mut self, event: Event) {
         match event {
@@ -86,7 +90,16 @@ impl App {
                 has_more,
                 cursor,
                 older,
-            } => self.history(&team, &channel, messages, has_more, cursor, older),
+                polled,
+            } => {
+                // Measured before the page joins what is loaded.
+                let fresh = self
+                    .workspace_mut(&team)
+                    .map(|w| w.polled_new(&channel, &messages, older, polled))
+                    .unwrap_or_default();
+                self.history(&team, &channel, messages, has_more, cursor, older);
+                self.announce_polled(&team, &channel, &fresh);
+            }
             Event::CachedHistory {
                 team,
                 channel,
@@ -365,14 +378,47 @@ impl App {
         }
     }
 
+    /// Treats the new messages a poll found (see
+    /// [`WorkspaceState::polled_new`]) as live ones are: hooks, the views'
+    /// lists, and notifications. Only the newest few notify, so a socket
+    /// down for a while does not end in a pile of notifications.
+    fn announce_polled(&mut self, team: &str, channel: &str, fresh: &[Message]) {
+        if fresh.is_empty() {
+            return;
+        }
+        let viewing = self.is_viewing(team, channel);
+        let mut notes = Vec::new();
+        for message in fresh {
+            if !self
+                .workspace_mut(team)
+                .is_some_and(|w| w.first_sight(channel, &message.ts))
+            {
+                continue;
+            }
+            notes.extend(self.note_for(team, channel, message, viewing));
+            self.run_hooks(team, channel, message);
+            crate::views::arrived(self, team, channel, message);
+        }
+        let older = notes.len().saturating_sub(POLLED_NOTES);
+        for note in notes.into_iter().skip(older) {
+            self.notify(note);
+        }
+    }
+
     fn message(&mut self, team: &str, channel: &str, message: Message, changed: bool) {
         let viewing = self.is_viewing(team, channel);
-        let note = if changed {
-            None
-        } else {
+        // A message a poll announced already stays quiet when its live copy
+        // comes too.
+        let fresh = !changed
+            && self
+                .workspace_mut(team)
+                .is_none_or(|w| w.first_sight(channel, &message.ts));
+        let note = if fresh {
             self.note_for(team, channel, &message, viewing)
+        } else {
+            None
         };
-        if !changed {
+        if fresh {
             self.run_hooks(team, channel, &message);
             crate::views::arrived(self, team, channel, &message);
         }

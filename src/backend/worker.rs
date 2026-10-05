@@ -741,6 +741,7 @@ impl Worker {
                 channel,
                 cursor,
                 self.cache.clone(),
+                false,
                 sink,
             ));
         } else {
@@ -1306,6 +1307,7 @@ impl Worker {
                 channel.clone(),
                 None,
                 Cache::disabled(),
+                true,
                 sink,
             )));
         }
