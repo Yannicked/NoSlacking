@@ -59,6 +59,10 @@ pub struct WorkspaceState {
     /// reply comes back as Slack's answer and as its echo, and must count
     /// once whichever order they come in.
     counted_replies: VecDeque<(String, Ts)>,
+    /// The messages already counted as unread mentions, oldest first: a
+    /// poll can count one before its live copy comes (or Slack delivers it
+    /// again), and it must count once.
+    counted_mentions: VecDeque<(String, Ts)>,
 }
 
 /// How many announced messages [`WorkspaceState::seen`] remembers. A copy
@@ -90,6 +94,7 @@ impl WorkspaceState {
             seen: VecDeque::new(),
             held_unread: HashSet::new(),
             counted_replies: VecDeque::new(),
+            counted_mentions: VecDeque::new(),
         }
     }
 
@@ -544,9 +549,30 @@ impl WorkspaceState {
             && (self.mentions_me(message)
                 || (self.conversation(channel).is_some_and(|c| c.kind.is_dm())
                     && !self.desktop.is_muted(channel)));
-        if counts && let Some(conversation) = self.conversation_mut(channel) {
-            conversation.mentions += 1;
+        if counts {
+            self.count_mention(channel, &message.ts);
         }
+    }
+
+    /// Adds an unread mention to `channel` for message `ts`, unless it was
+    /// counted already.
+    fn count_mention(&mut self, channel: &str, ts: &Ts) {
+        if self
+            .counted_mentions
+            .iter()
+            .any(|(c, t)| c == channel && t == ts)
+        {
+            return;
+        }
+        let Some(conversation) = self.conversation_mut(channel) else {
+            return;
+        };
+        conversation.mentions += 1;
+        if self.counted_mentions.len() >= SEEN_LIMIT {
+            self.counted_mentions.pop_front();
+        }
+        self.counted_mentions
+            .push_back((channel.to_owned(), ts.clone()));
     }
 
     /// What a poll learnt about a conversation (see
@@ -795,16 +821,21 @@ impl WorkspaceState {
                 // Writing in a conversation reads it, marked unread or not.
                 self.held_unread.remove(channel);
             }
+            let mut mention = false;
             if new && let Some(conversation) = self.conversation_mut(channel) {
                 if conversation.latest.as_ref().is_none_or(|l| *l < ts) {
                     conversation.latest = Some(ts.clone());
                 }
                 if from_me {
-                    conversation.last_read = Some(ts);
+                    conversation.last_read = Some(ts.clone());
                     conversation.mentions = 0;
-                } else if !viewing && (mentions_me || (conversation.kind.is_dm() && counts_all)) {
-                    conversation.mentions += 1;
+                } else {
+                    mention =
+                        !viewing && (mentions_me || (conversation.kind.is_dm() && counts_all));
                 }
+            }
+            if mention {
+                self.count_mention(channel, &ts);
             }
         }
         let fetch_conversation = !known && self.requested_conversations.insert(channel.to_owned());
@@ -2320,6 +2351,21 @@ mod tests {
         w.count_polled("C1", &theirs("2.0"), false);
         assert_eq!(w.conversation("D1").map(|c| c.mentions), Some(1));
         assert_eq!(w.conversation("C1").map(|c| c.mentions), Some(0));
+    }
+
+    #[test]
+    fn a_polled_mention_counts_once_when_its_live_copy_follows() {
+        let mut w = unopened("2.0");
+        let ping = Message {
+            text: "hey <@U1>".into(),
+            ..theirs("3.0")
+        };
+        w.count_polled("C1", &ping, false);
+        w.polled_unopened("C1", std::slice::from_ref(&ping));
+        // Its live copy, then Socket Mode delivering it again.
+        w.message_arrived("C1", ping.clone(), false);
+        w.message_arrived("C1", ping, false);
+        assert_eq!(w.conversation("C1").map(|c| c.mentions), Some(1));
     }
 
     #[test]
