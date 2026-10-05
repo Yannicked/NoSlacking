@@ -408,6 +408,23 @@ impl Marks {
     /// end the italics inside the link. Walks the line once, taking the
     /// forms and spans as the parser does.
     fn drop_shielded_closers(&mut self, text: &str) {
+        let shields = self.shields(text);
+        if shields.is_empty() {
+            return;
+        }
+        // Both lists are sorted, so one walk along each will do.
+        for closers in &mut self.closers {
+            let mut shield = shields.iter().peekable();
+            closers.retain(|&at| {
+                while shield.next_if(|&&(_, end)| end < at).is_some() {}
+                shield.peek().is_none_or(|&&(start, _)| at < start)
+            });
+        }
+    }
+
+    /// Where the line's `<…>` forms and code spans are, first and last
+    /// byte, in order.
+    fn shields(&self, text: &str) -> Vec<(usize, usize)> {
         let mut shields: Vec<(usize, usize)> = Vec::new();
         let bytes = text.as_bytes();
         let mut i = 0;
@@ -441,17 +458,43 @@ impl Marks {
                 _ => i += 1,
             }
         }
-        if shields.is_empty() {
-            return;
+        shields
+    }
+}
+
+/// Where `text` has fenced blocks, code spans and `<…>` forms, first and
+/// last byte, in order: the places where a `:name:` is not an emoji to
+/// touch, found as [`parse`] finds them.
+pub fn shielded(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    let mut rest = text;
+    loop {
+        // The lines up to the next closed fence, then the fence.
+        let fence = find(rest, "```").and_then(|start| {
+            find(&rest[start + 3..], "```").map(|end| (start, start + 3 + end + 3))
+        });
+        let lines_end = fence.map_or(rest.len(), |(start, _)| start);
+        let mut line_start = offset;
+        for line in rest[..lines_end].split('\n') {
+            // The marker is no part of what the line holds.
+            let inner = quote_marker(line).unwrap_or(line);
+            let skip = line_start + line.len() - inner.len();
+            let marks = Marks::new(inner);
+            out.extend(
+                marks
+                    .shields(inner)
+                    .into_iter()
+                    .map(|(start, end)| (start + skip, end + skip)),
+            );
+            line_start += line.len() + 1;
         }
-        // Both lists are sorted, so one walk along each will do.
-        for closers in &mut self.closers {
-            let mut shield = shields.iter().peekable();
-            closers.retain(|&at| {
-                while shield.next_if(|&&(_, end)| end < at).is_some() {}
-                shield.peek().is_none_or(|&&(start, _)| at < start)
-            });
-        }
+        let Some((start, end)) = fence else {
+            return out;
+        };
+        out.push((offset + start, offset + end - 1));
+        offset += end;
+        rest = &rest[end..];
     }
 }
 
@@ -1412,6 +1455,7 @@ mod tests {
             let blocks = parse(&input);
             let _ = only_emoji(&blocks);
             let _ = plain(&input, |_| Some("@someone".into()));
+            let _ = crate::emoji::tone_shortcodes(&input, 3);
             for block in &blocks {
                 if let Block::Paragraph(inlines) | Block::Quote(inlines) = block {
                     assert!(
