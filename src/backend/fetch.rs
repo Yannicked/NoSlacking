@@ -63,22 +63,46 @@ pub(super) async fn workspace_details(client: &Client, team: &str, user: &str) -
     workspace
 }
 
+/// How a workspace's start-up ([`boot`]) went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Boot {
+    /// Slack answered, and everything was asked for.
+    Done,
+    /// Slack could not be reached (offline, say): nothing past the cached
+    /// lists was loaded, so the start-up has to run again.
+    Unreached,
+    /// The token no longer works.
+    SignedOut,
+}
+
 /// Everything a workspace needs after signing in: cached lists first, then
 /// a check of the token, fresh lists, custom emoji and unread state.
-pub(super) async fn boot(client: Client, workspace: Workspace, cache: Cache, sink: Sink) {
+///
+/// A `retry` after a start-up that could not reach Slack skips the cached
+/// lists, which the interface has, and does not report failing again: the
+/// first failure said it already.
+pub(super) async fn boot(
+    client: Client,
+    workspace: Workspace,
+    cache: Cache,
+    sink: Sink,
+    retry: bool,
+) -> Boot {
     let team = workspace.team_id.clone();
-    if let Some(list) = cache.read::<Vec<Conversation>>(&team, "conversations") {
-        sink.send(Event::Conversations {
-            team: team.clone(),
-            list,
-            complete: false,
-        });
-    }
-    if let Some(users) = cache.read::<Vec<User>>(&team, "users") {
-        sink.send(Event::Users {
-            team: team.clone(),
-            users,
-        });
+    if !retry {
+        if let Some(list) = cache.read::<Vec<Conversation>>(&team, "conversations") {
+            sink.send(Event::Conversations {
+                team: team.clone(),
+                list,
+                complete: false,
+            });
+        }
+        if let Some(users) = cache.read::<Vec<User>>(&team, "users") {
+            sink.send(Event::Users {
+                team: team.clone(),
+                users,
+            });
+        }
     }
     match client.call::<types::AuthTest>("auth.test", &[]).await {
         Ok(_) => {}
@@ -87,16 +111,20 @@ pub(super) async fn boot(client: Client, workspace: Workspace, cache: Cache, sin
                 team,
                 reason: Some(failure(&error)),
             });
-            return;
+            return Boot::SignedOut;
         }
         Err(error) => {
-            sink.send(Event::Error(Problem::new(
-                Doing::Reach {
-                    workspace: workspace.name.clone(),
-                },
-                failure(&error),
-            )));
-            return;
+            if retry {
+                log::info!("{team} still unreachable: {error}");
+            } else {
+                sink.send(Event::Error(Problem::new(
+                    Doing::Reach {
+                        workspace: workspace.name.clone(),
+                    },
+                    failure(&error),
+                )));
+            }
+            return Boot::Unreached;
         }
     }
     let details = workspace_details(&client, &team, &workspace.user_id).await;
@@ -124,6 +152,7 @@ pub(super) async fn boot(client: Client, workspace: Workspace, cache: Cache, sin
         sections(client.clone(), team.clone(), sink.clone()),
         sweep,
     );
+    Boot::Done
 }
 
 /// The workspace's user groups, so `@design` can be typed and drawn.
