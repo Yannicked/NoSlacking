@@ -444,15 +444,18 @@ pub fn show(
             // Shift+Enter is a new line, whatever Enter does: egui's own
             // match ignores Shift, so it is left for the text field.
             let shift = shift_enter(input);
+            // The list's keys take no modifiers: egui's own match would
+            // also take Alt+↑ (next conversation) and Alt+Enter.
+            let take = super::selection::take;
             if !found.is_empty() {
-                if input.consume_key(Modifiers::NONE, Key::ArrowDown) {
+                if take(input, Key::ArrowDown, Modifiers::NONE) {
                     draft.selected = (draft.selected + 1) % found.len();
                 }
-                if input.consume_key(Modifiers::NONE, Key::ArrowUp) {
+                if take(input, Key::ArrowUp, Modifiers::NONE) {
                     draft.selected = (draft.selected + found.len() - 1) % found.len();
                 }
-                if input.consume_key(Modifiers::NONE, Key::Tab)
-                    || (!shift && input.consume_key(Modifiers::NONE, Key::Enter))
+                if take(input, Key::Tab, Modifiers::NONE)
+                    || (!shift && take(input, Key::Enter, Modifiers::NONE))
                 {
                     accept = found.get(draft.selected).cloned();
                 }
@@ -465,7 +468,7 @@ pub fn show(
             }
             if draft.text.is_empty()
                 && composer.thread.is_none()
-                && input.consume_key(Modifiers::NONE, Key::ArrowUp)
+                && take(input, Key::ArrowUp, Modifiers::NONE)
             {
                 actions.push(Action::EditLast);
             }
