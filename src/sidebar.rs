@@ -26,6 +26,87 @@ pub enum Sort {
     Recent,
 }
 
+/// How much a conversation asks for you, for putting unread ones first.
+/// The order of the variants is the order in a section.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Rank {
+    /// A mention of you, or an unread direct message: someone is waiting.
+    Urgent,
+    /// Something new you have not read.
+    Unread,
+    /// Nothing new, or nothing you asked to hear about (a muted channel).
+    #[default]
+    Read,
+}
+
+/// A conversation's [`Rank`], given whether it shows as unread (see
+/// `WorkspaceState::is_unread`, which already leaves muted channels out
+/// unless they mention you).
+pub fn rank(conversation: &Conversation, unread: bool) -> Rank {
+    if !unread {
+        Rank::Read
+    } else if conversation.mentions > 0 || conversation.kind.is_dm() {
+        Rank::Urgent
+    } else {
+        Rank::Unread
+    }
+}
+
+/// The open conversation and the rank it keeps while it stays open.
+///
+/// Opening a conversation reads it, and without this it would leave the
+/// unread rows at once and jump away from under the pointer. It goes to
+/// its new place when another conversation opens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hold {
+    /// The open conversation.
+    pub id: String,
+    /// The rank it is placed by while open.
+    pub rank: Rank,
+}
+
+/// How [`layout`] orders the conversations within each section.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Arrange<'a> {
+    /// Channels by name or by activity; direct messages are always by
+    /// activity.
+    pub sort: Sort,
+    /// Mentions and unread direct messages first, then other unread
+    /// conversations, then the rest, each group in the `sort` order.
+    pub unread_first: bool,
+    /// The open conversation's held rank, used in place of its own.
+    pub hold: Option<&'a Hold>,
+}
+
+impl Arrange<'_> {
+    /// Ordered by `sort` alone, with unread conversations in among the rest.
+    pub fn plain(sort: Sort) -> Self {
+        Arrange {
+            sort,
+            unread_first: false,
+            hold: None,
+        }
+    }
+}
+
+/// What to hold once `active` is the open conversation. The same one open
+/// as before keeps what it held; a newly opened one holds the rank it had
+/// when it was last shown (`seen`), before opening it read it.
+pub fn hold(
+    previous: Option<&Hold>,
+    active: Option<&str>,
+    seen: impl Fn(&str) -> Rank,
+) -> Option<Hold> {
+    let active = active?;
+    match previous {
+        Some(held) if held.id == active => Some(held.clone()),
+        _ => Some(Hold {
+            id: active.to_owned(),
+            rank: seen(active),
+        }),
+    }
+}
+
 /// A change to the sidebar, made here and sent to Slack.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SidebarEdit {
@@ -250,7 +331,6 @@ pub fn title(section: &SidebarSection) -> String {
     }
 }
 
-/// The sections to draw, each with its conversations in order.
 /// Whether a conversation was closed (see `Settings::closed`) and has had
 /// nothing new since.
 pub fn is_closed(
@@ -267,13 +347,19 @@ pub fn is_closed(
         })
 }
 
+/// The sections to draw, each with its conversations in order. `rank`
+/// says how much each conversation asks for you; it matters only when
+/// `arrange` puts unread ones first.
 pub fn layout<'a>(
     sections: Option<&[SidebarSection]>,
     conversations: &'a [Conversation],
     users: &HashMap<String, User>,
     titled: impl Fn(&Conversation) -> String,
-    sort: Sort,
+    rank: impl Fn(&Conversation) -> Rank,
+    arrange: &Arrange<'_>,
 ) -> Vec<Shown<'a>> {
+    let sort = arrange.sort;
+    let order = |rows: &mut [&Conversation], sort: Sort| order(rows, sort, &titled, &rank, arrange);
     let is_bot_dm = |c: &Conversation| {
         c.user
             .as_deref()
@@ -285,8 +371,8 @@ pub fn layout<'a>(
             conversations.iter().filter(|c| !c.kind.is_dm()).collect();
         let mut direct: Vec<&Conversation> =
             conversations.iter().filter(|c| c.kind.is_dm()).collect();
-        order(&mut channels, sort, &titled);
-        order(&mut direct, Sort::Recent, &titled);
+        order(&mut channels, sort);
+        order(&mut direct, Sort::Recent);
         return vec![
             Shown {
                 id: None,
@@ -358,7 +444,7 @@ pub fn layout<'a>(
                 SectionKind::DirectMessages | SectionKind::Apps => Sort::Recent,
                 _ => sort,
             };
-            order(&mut rows, sort, &titled);
+            order(&mut rows, sort);
             Shown {
                 id: Some(section.id.clone()),
                 kind: section.kind,
@@ -369,7 +455,7 @@ pub fn layout<'a>(
         .collect();
     if !stray.is_empty() {
         // Sections came without a catch-all: keep everything reachable.
-        order(&mut stray, sort, &titled);
+        order(&mut stray, sort);
         shown.push(Shown {
             id: None,
             kind: SectionKind::Channels,
@@ -380,10 +466,34 @@ pub fn layout<'a>(
     shown
 }
 
-fn order(rows: &mut [&Conversation], sort: Sort, titled: &impl Fn(&Conversation) -> String) {
+/// Orders one section's rows: by `sort`, then, when unread come first, by
+/// rank. Both sorts are stable, so each rank keeps the `sort` order.
+fn order(
+    rows: &mut [&Conversation],
+    sort: Sort,
+    titled: &impl Fn(&Conversation) -> String,
+    rank: &impl Fn(&Conversation) -> Rank,
+    arrange: &Arrange<'_>,
+) {
     match sort {
         Sort::Name => rows.sort_by_cached_key(|c| titled(c).to_lowercase()),
         Sort::Recent => rows.sort_by(|a, b| b.latest.cmp(&a.latest)),
+    }
+    if arrange.unread_first {
+        rows.sort_by_cached_key(|c| placed_rank(c, rank, arrange.hold));
+    }
+}
+
+/// The rank a conversation is placed by: the held one for the open
+/// conversation, its own for the rest.
+fn placed_rank(
+    conversation: &Conversation,
+    rank: &impl Fn(&Conversation) -> Rank,
+    hold: Option<&Hold>,
+) -> Rank {
+    match hold {
+        Some(held) if held.id == conversation.id => held.rank,
+        _ => rank(conversation),
     }
 }
 
@@ -391,16 +501,20 @@ fn order(rows: &mut [&Conversation], sort: Sort, titled: &impl Fn(&Conversation)
 /// cheaply whether the sidebar's shape changed. That is a walk over the
 /// conversations without sorting or allocating, where [`layout`] sorts by
 /// lower-cased titles and builds maps. It covers what `titled` may read: a
-/// conversation's name and, for a direct message, the person's label.
+/// conversation's name and, for a direct message, the person's label; and
+/// what `rank` answers, which is cheap to ask.
 pub fn fingerprint(
     sections: Option<&[SidebarSection]>,
     conversations: &[Conversation],
     users: &HashMap<String, User>,
-    sort: Sort,
+    rank: impl Fn(&Conversation) -> Rank,
+    arrange: &Arrange<'_>,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::mem::discriminant(&sort).hash(&mut hasher);
+    std::mem::discriminant(&arrange.sort).hash(&mut hasher);
+    arrange.unread_first.hash(&mut hasher);
+    arrange.hold.map(|h| (&h.id, h.rank)).hash(&mut hasher);
     // Section titles are translated.
     std::mem::discriminant(&crate::i18n::locale()).hash(&mut hasher);
     match sections {
@@ -423,6 +537,9 @@ pub fn fingerprint(
         conversation.kind.hash(&mut hasher);
         conversation.latest.hash(&mut hasher);
         conversation.user.hash(&mut hasher);
+        // Hashed even with unread-first off, so the ranks the memo keeps
+        // for holding are never stale when it is turned on.
+        rank(conversation).hash(&mut hasher);
         if let Some(user) = conversation.user.as_deref().and_then(|id| users.get(id)) {
             user.label().hash(&mut hasher);
             user.is_bot.hash(&mut hasher);
@@ -443,32 +560,83 @@ struct Placed {
 
 /// [`layout`], remembered until its [`fingerprint`] changes: the sidebar
 /// is drawn every frame, but its shape changes only when a conversation,
-/// a section or a name does.
+/// a section or a name does. It also keeps the open conversation's
+/// [`Hold`].
 #[derive(Clone, Debug, Default)]
 pub struct Memo {
     key: Option<u64>,
     placed: std::sync::Arc<[Placed]>,
+    /// What the open conversation holds (see [`Memo::hold`]).
+    held: Option<Hold>,
+    /// Each conversation's rank when the layout was last made, leaving
+    /// out the read ones: what a conversation holds once it opens.
+    seen: std::sync::Arc<HashMap<String, Rank>>,
 }
 
 impl Memo {
-    /// The same as [`layout`] with these arguments; `titled` must read only
-    /// what [`fingerprint`] covers.
+    /// Updates and returns the open conversation's [`Hold`], given which
+    /// one is open now. Call it before [`Memo::layout`] each frame, and
+    /// pass what it returns in the [`Arrange`]: a conversation that just
+    /// opened holds the rank the last layout gave it, from before opening
+    /// it marked it read.
+    pub fn hold(
+        &mut self,
+        active: Option<&str>,
+        conversations: &[Conversation],
+        rank: impl Fn(&Conversation) -> Rank,
+    ) -> Option<Hold> {
+        let laid_out = self.key.is_some();
+        let remembered = &self.seen;
+        let seen = |id: &str| {
+            if laid_out {
+                remembered.get(id).copied().unwrap_or_default()
+            } else {
+                // Nothing shown yet (just started): it is as it is.
+                conversations
+                    .iter()
+                    .find(|c| c.id == id)
+                    .map(&rank)
+                    .unwrap_or_default()
+            }
+        };
+        let held = hold(self.held.as_ref(), active, seen);
+        self.held.clone_from(&held);
+        held
+    }
+
+    /// The open conversation's [`Hold`] as the sidebar last kept it, for
+    /// stepping through the sidebar in the order it shows.
+    pub fn held(&self) -> Option<&Hold> {
+        self.held.as_ref()
+    }
+
+    /// The same as [`layout`] with these arguments; `titled` and `rank`
+    /// must read only what [`fingerprint`] covers.
     pub fn layout<'a>(
         &mut self,
         sections: Option<&[SidebarSection]>,
         conversations: &'a [Conversation],
         users: &HashMap<String, User>,
         titled: impl Fn(&Conversation) -> String,
-        sort: Sort,
+        rank: impl Fn(&Conversation) -> Rank,
+        arrange: &Arrange<'_>,
     ) -> Vec<Shown<'a>> {
-        let key = fingerprint(sections, conversations, users, sort);
+        let key = fingerprint(sections, conversations, users, &rank, arrange);
         if self.key != Some(key) {
+            self.seen = std::sync::Arc::new(
+                conversations
+                    .iter()
+                    .map(|c| (c, rank(c)))
+                    .filter(|(_, rank)| *rank != Rank::Read)
+                    .map(|(c, rank)| (c.id.clone(), rank))
+                    .collect(),
+            );
             let index: HashMap<&str, usize> = conversations
                 .iter()
                 .enumerate()
                 .map(|(i, c)| (c.id.as_str(), i))
                 .collect();
-            self.placed = layout(sections, conversations, users, titled, sort)
+            self.placed = layout(sections, conversations, users, titled, &rank, arrange)
                 .into_iter()
                 .map(|shown| Placed {
                     id: shown.id,
@@ -714,28 +882,299 @@ mod tests {
         shown.iter().map(ids).collect()
     }
 
+    /// The rank with nothing muted.
+    fn live(c: &Conversation) -> Rank {
+        rank(c, c.has_unread())
+    }
+
+    /// The rank with C4 and C5 muted, as `WorkspaceState::is_unread` has
+    /// it: a muted one counts only for its mentions.
+    fn muted(c: &Conversation) -> Rank {
+        let muted = c.id == "C4" || c.id == "C5";
+        rank(c, c.has_unread() && (c.mentions > 0 || !muted))
+    }
+
+    /// A conversation read up to `read`, with `mentions` of you.
+    fn read_to(
+        id: &str,
+        name: &str,
+        kind: ConversationKind,
+        latest: &str,
+        read: &str,
+        mentions: u32,
+    ) -> Conversation {
+        Conversation {
+            last_read: Some(Ts::new(read)),
+            mentions,
+            ..conversation(id, name, kind, latest)
+        }
+    }
+
+    /// Read, unread, mentioned and muted channels, with direct messages,
+    /// in a Starred section, one of your own and the catch-alls.
+    fn unread_sample() -> (Vec<SidebarSection>, Vec<Conversation>) {
+        use ConversationKind::{Channel, Direct};
+        let sections = vec![
+            section("S1", SectionKind::Starred, "", &["C7", "C8"]),
+            section("S2", SectionKind::Custom, "Team", &["C9", "C10"]),
+            section("S3", SectionKind::Channels, "", &[]),
+            section("S4", SectionKind::DirectMessages, "", &[]),
+        ];
+        let conversations = vec![
+            read_to("C1", "alpha", Channel, "1.0", "1.0", 0),
+            read_to("C2", "beta", Channel, "5.0", "1.0", 0),
+            read_to("C3", "gamma", Channel, "2.0", "1.0", 1),
+            // Muted and unread: stays with the read ones.
+            read_to("C4", "delta", Channel, "9.0", "1.0", 0),
+            // Muted, but it mentions you: that still counts.
+            read_to("C5", "epsilon", Channel, "4.0", "1.0", 1),
+            read_to("C6", "zeta", Channel, "3.0", "1.0", 0),
+            read_to("C7", "ant", Channel, "1.0", "1.0", 0),
+            read_to("C8", "bee", Channel, "2.0", "1.0", 0),
+            read_to("C9", "cat", Channel, "1.0", "1.0", 0),
+            read_to("C10", "dog", Channel, "2.0", "1.0", 1),
+            read_to("D1", "ann", Direct, "9.0", "9.0", 0),
+            read_to("D2", "bob", Direct, "3.0", "1.0", 0),
+            read_to("D3", "cy", Direct, "5.0", "1.0", 0),
+        ];
+        (sections, conversations)
+    }
+
+    fn arranged(
+        sections: &[SidebarSection],
+        conversations: &[Conversation],
+        arrange: &Arrange<'_>,
+    ) -> Vec<Vec<String>> {
+        let shown = layout(
+            Some(sections),
+            conversations,
+            &HashMap::new(),
+            |c| c.name.clone(),
+            muted,
+            arrange,
+        );
+        shown
+            .iter()
+            .map(|s| s.conversations.iter().map(|c| c.id.clone()).collect())
+            .collect()
+    }
+
+    fn first(sort: Sort) -> Arrange<'static> {
+        Arrange {
+            sort,
+            unread_first: true,
+            hold: None,
+        }
+    }
+
+    #[test]
+    fn ranks_follow_mentions_direct_messages_and_mutes() {
+        let (_, conversations) = unread_sample();
+        let ranks: Vec<(&str, Rank)> = conversations
+            .iter()
+            .map(|c| (c.id.as_str(), muted(c)))
+            .collect();
+        let of = |id: &str| ranks.iter().find(|(c, _)| *c == id).map(|(_, r)| *r);
+        assert_eq!(of("C1"), Some(Rank::Read));
+        assert_eq!(of("C2"), Some(Rank::Unread));
+        assert_eq!(of("C3"), Some(Rank::Urgent), "a mention");
+        assert_eq!(of("C4"), Some(Rank::Read), "muted");
+        assert_eq!(of("C5"), Some(Rank::Urgent), "muted, but a mention");
+        assert_eq!(of("D1"), Some(Rank::Read));
+        assert_eq!(of("D2"), Some(Rank::Urgent), "an unread direct message");
+    }
+
+    #[test]
+    fn unread_come_first_in_every_section_by_name() {
+        let (sections, conversations) = unread_sample();
+        let shown = arranged(&sections, &conversations, &first(Sort::Name));
+        assert_eq!(shown[0], ["C8", "C7"], "Starred too");
+        assert_eq!(shown[1], ["C10", "C9"], "your own sections too");
+        assert_eq!(
+            shown[2],
+            ["C5", "C3", "C2", "C6", "C1", "C4"],
+            "mentions, then unread, then the rest, each by name"
+        );
+        assert_eq!(shown[3], ["D3", "D2", "D1"], "direct messages by activity");
+    }
+
+    #[test]
+    fn unread_come_first_by_recent_activity() {
+        let (sections, conversations) = unread_sample();
+        let shown = arranged(&sections, &conversations, &first(Sort::Recent));
+        assert_eq!(shown[0], ["C8", "C7"]);
+        assert_eq!(shown[2], ["C5", "C3", "C2", "C6", "C4", "C1"]);
+        assert_eq!(shown[3], ["D3", "D2", "D1"]);
+    }
+
+    #[test]
+    fn unread_direct_messages_come_before_newer_read_ones() {
+        let (sections, mut conversations) = unread_sample();
+        // Ann's is the newest, but read; Bob's is older and unread.
+        if let Some(d3) = conversations.iter_mut().find(|c| c.id == "D3") {
+            d3.last_read = d3.latest.clone();
+        }
+        let shown = arranged(&sections, &conversations, &first(Sort::Recent));
+        assert_eq!(shown[3], ["D2", "D1", "D3"]);
+        let plain = arranged(&sections, &conversations, &Arrange::plain(Sort::Recent));
+        assert_eq!(plain[3], ["D1", "D3", "D2"]);
+    }
+
+    #[test]
+    fn with_the_setting_off_the_order_is_as_before() {
+        let (sections, conversations) = unread_sample();
+        let held = Hold {
+            id: "C1".into(),
+            rank: Rank::Urgent,
+        };
+        for sort in [Sort::Name, Sort::Recent] {
+            let off = Arrange {
+                sort,
+                unread_first: false,
+                hold: Some(&held),
+            };
+            assert_eq!(
+                arranged(&sections, &conversations, &off),
+                arranged(&sections, &conversations, &Arrange::plain(sort)),
+            );
+        }
+        let by_name = arranged(&sections, &conversations, &Arrange::plain(Sort::Name));
+        assert_eq!(by_name[2], ["C1", "C2", "C4", "C5", "C3", "C6"]);
+        let by_activity = arranged(&sections, &conversations, &Arrange::plain(Sort::Recent));
+        assert_eq!(by_activity[2], ["C4", "C2", "C5", "C6", "C3", "C1"]);
+    }
+
+    #[test]
+    fn the_open_one_keeps_what_it_held_until_another_opens() {
+        let seen = |id: &str| if id == "C2" { Rank::Unread } else { Rank::Read };
+        let opened = hold(None, Some("C2"), seen);
+        assert_eq!(
+            opened,
+            Some(Hold {
+                id: "C2".into(),
+                rank: Rank::Unread
+            })
+        );
+        // Read now, but still open: it keeps its rank.
+        let still = hold(opened.as_ref(), Some("C2"), |_| Rank::Read);
+        assert_eq!(still, opened);
+        let other = hold(still.as_ref(), Some("C1"), seen);
+        assert_eq!(
+            other.map(|h| (h.id, h.rank)),
+            Some(("C1".into(), Rank::Read))
+        );
+        assert_eq!(hold(opened.as_ref(), None, seen), None);
+    }
+
+    #[test]
+    fn the_open_conversation_stays_put_until_you_switch() {
+        let (sections, mut conversations) = unread_sample();
+        let users = HashMap::new();
+        let mut memo = Memo::default();
+        let frame = |memo: &mut Memo, conversations: &[Conversation], active: Option<&str>| {
+            let held = memo.hold(active, conversations, muted);
+            let shown = memo.layout(
+                Some(&sections),
+                conversations,
+                &users,
+                |c| c.name.clone(),
+                muted,
+                &Arrange {
+                    sort: Sort::Name,
+                    unread_first: true,
+                    hold: held.as_ref(),
+                },
+            );
+            shown
+                .iter()
+                .map(|s| s.conversations.iter().map(|c| c.id.clone()).collect())
+                .collect::<Vec<Vec<String>>>()
+        };
+        let before = frame(&mut memo, &conversations, None);
+        assert_eq!(before[2], ["C5", "C3", "C2", "C6", "C1", "C4"]);
+        // Opening beta reads it at once, before the sidebar draws again.
+        if let Some(beta) = conversations.iter_mut().find(|c| c.id == "C2") {
+            beta.last_read = beta.latest.clone();
+        }
+        let open = frame(&mut memo, &conversations, Some("C2"));
+        assert_eq!(open[2], before[2], "beta stays where it was");
+        // Something new elsewhere does not shake it loose.
+        if let Some(alpha) = conversations.iter_mut().find(|c| c.id == "C1") {
+            alpha.latest = Some(Ts::new("8.0"));
+        }
+        let open = frame(&mut memo, &conversations, Some("C2"));
+        assert_eq!(open[2], ["C5", "C3", "C1", "C2", "C6", "C4"]);
+        // Opening alpha reads it; beta goes down with the read ones and
+        // alpha, opened while unread, keeps its place.
+        if let Some(alpha) = conversations.iter_mut().find(|c| c.id == "C1") {
+            alpha.last_read = alpha.latest.clone();
+        }
+        let switched = frame(&mut memo, &conversations, Some("C1"));
+        assert_eq!(switched[2], ["C5", "C3", "C1", "C6", "C2", "C4"]);
+        // Closing it lets it go too.
+        let closed = frame(&mut memo, &conversations, None);
+        assert_eq!(closed[2], ["C5", "C3", "C6", "C1", "C2", "C4"]);
+    }
+
+    #[test]
+    fn just_started_the_open_one_holds_its_own_rank() {
+        let (_, conversations) = unread_sample();
+        let mut memo = Memo::default();
+        let held = memo.hold(Some("C3"), &conversations, muted);
+        assert_eq!(held.map(|h| h.rank), Some(Rank::Urgent));
+        assert_eq!(memo.held().map(|h| h.id.as_str()), Some("C3"));
+    }
+
     #[test]
     fn the_memo_matches_a_fresh_layout_and_follows_changes() {
         let (sections, mut conversations, users) = sample();
         let mut memo = Memo::default();
         let titled = |c: &Conversation| c.name.clone();
         let fresh = |conversations: &[Conversation]| {
-            let shown = layout(Some(&sections), conversations, &users, titled, Sort::Name);
+            let shown = layout(
+                Some(&sections),
+                conversations,
+                &users,
+                titled,
+                live,
+                &Arrange::plain(Sort::Name),
+            );
             shown
                 .iter()
                 .map(|s| s.conversations.iter().map(|c| c.id.clone()).collect())
                 .collect::<Vec<Vec<String>>>()
         };
-        let remembered = memo.layout(Some(&sections), &conversations, &users, titled, Sort::Name);
+        let remembered = memo.layout(
+            Some(&sections),
+            &conversations,
+            &users,
+            titled,
+            live,
+            &Arrange::plain(Sort::Name),
+        );
         assert_eq!(all_ids(&remembered), fresh(&conversations));
         let key = memo.key;
         // A redraw with nothing changed keeps the remembered layout.
-        memo.layout(Some(&sections), &conversations, &users, titled, Sort::Name);
+        memo.layout(
+            Some(&sections),
+            &conversations,
+            &users,
+            titled,
+            live,
+            &Arrange::plain(Sort::Name),
+        );
         assert_eq!(memo.key, key);
         // A rename reorders; a new message reorders direct messages.
         conversations[0].name = "aardvark".into();
         conversations[4].latest = Some(Ts::new("99.0"));
-        let remembered = memo.layout(Some(&sections), &conversations, &users, titled, Sort::Name);
+        let remembered = memo.layout(
+            Some(&sections),
+            &conversations,
+            &users,
+            titled,
+            live,
+            &Arrange::plain(Sort::Name),
+        );
         assert_ne!(memo.key, key);
         assert_eq!(all_ids(&remembered), fresh(&conversations));
         assert_eq!(ids(&remembered[2]), ["C1", "C4"]);
@@ -745,14 +1184,26 @@ mod tests {
     fn the_fingerprint_sees_what_layout_reads() {
         let (mut sections, conversations, mut users) = sample();
         let key = |sections: &[SidebarSection], users: &HashMap<String, User>, sort| {
-            fingerprint(Some(sections), &conversations, users, sort)
+            fingerprint(
+                Some(sections),
+                &conversations,
+                users,
+                live,
+                &Arrange::plain(sort),
+            )
         };
         let before = key(&sections, &users, Sort::Name);
         assert_eq!(before, key(&sections, &users, Sort::Name));
         assert_ne!(before, key(&sections, &users, Sort::Recent));
         assert_ne!(
             before,
-            fingerprint(None, &conversations, &users, Sort::Name)
+            fingerprint(
+                None,
+                &conversations,
+                &users,
+                live,
+                &Arrange::plain(Sort::Name)
+            )
         );
         sections[1].channel_ids.push("C1".into());
         let moved = key(&sections, &users, Sort::Name);
@@ -761,6 +1212,41 @@ mod tests {
             bot.display_name = "Deployer".into();
         }
         assert_ne!(moved, key(&sections, &users, Sort::Name));
+        // What the unread-first order reads: the setting, the hold and
+        // each conversation's rank.
+        let arranged = |arrange: &Arrange<'_>| {
+            fingerprint(Some(&sections), &conversations, &users, live, arrange)
+        };
+        let plain = arranged(&Arrange::plain(Sort::Name));
+        let first = Arrange {
+            sort: Sort::Name,
+            unread_first: true,
+            hold: None,
+        };
+        assert_ne!(plain, arranged(&first));
+        let held = Hold {
+            id: "C1".into(),
+            rank: Rank::Unread,
+        };
+        assert_ne!(
+            arranged(&first),
+            arranged(&Arrange {
+                hold: Some(&held),
+                ..first
+            })
+        );
+        let mut read = conversations.clone();
+        read[4].last_read = read[4].latest.clone();
+        assert_ne!(
+            plain,
+            fingerprint(
+                Some(&sections),
+                &read,
+                &users,
+                live,
+                &Arrange::plain(Sort::Name)
+            )
+        );
     }
 
     #[test]
@@ -771,7 +1257,8 @@ mod tests {
             &conversations,
             &users,
             |c| c.name.clone(),
-            Sort::Name,
+            live,
+            &Arrange::plain(Sort::Name),
         );
         let kinds: Vec<SectionKind> = shown.iter().map(|s| s.kind).collect();
         assert_eq!(
@@ -811,7 +1298,8 @@ mod tests {
             &conversations,
             &users,
             |c| c.name.clone(),
-            Sort::Recent,
+            live,
+            &Arrange::plain(Sort::Recent),
         );
         assert_eq!(ids(&shown[2]), ["C4", "C1"]);
         let plain = layout(
@@ -819,7 +1307,8 @@ mod tests {
             &conversations,
             &users,
             |c| c.name.clone(),
-            Sort::Recent,
+            live,
+            &Arrange::plain(Sort::Recent),
         );
         assert_eq!(ids(&plain[0]), ["C4", "C2", "C3", "C1"]);
         assert_eq!(ids(&plain[1]), ["D3", "D2", "D1"]);
@@ -838,7 +1327,8 @@ mod tests {
             &conversations,
             &HashMap::new(),
             |c| c.name.clone(),
-            Sort::Name,
+            live,
+            &Arrange::plain(Sort::Name),
         );
         let titles: Vec<&str> = shown.iter().map(|s| s.title.as_str()).collect();
         assert_eq!(titles, ["Empty", "Channels"]);
