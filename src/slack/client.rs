@@ -187,9 +187,13 @@ fn refresh_wait(failures: u32) -> Duration {
 /// image loader or to tasks see a renewed token or a new app at once.
 struct Shared {
     token: Mutex<Token>,
-    /// Held for a whole refresh, including saving the new token, so
-    /// renewals happen and are stored strictly one after another.
+    /// Held while a refresh asks Slack, so renewals happen one at a time.
     refresh_lock: tokio::sync::Mutex<()>,
+    /// Held while a refresh's outcome is reported (the new token saved to
+    /// the keyring). Taken before `refresh_lock` is let go, so reports go
+    /// out in the order Slack issued the tokens, while calls that only
+    /// need the renewed token already in memory need not wait for the save.
+    report_lock: tokio::sync::Mutex<()>,
     failure: Mutex<Option<RefreshFailure>>,
     app: Mutex<Option<OauthApp>>,
     on_refresh: Mutex<Option<OnRefresh>>,
@@ -247,6 +251,7 @@ impl Client {
             shared: Arc::new(Shared {
                 token: Mutex::new(token),
                 refresh_lock: tokio::sync::Mutex::new(()),
+                report_lock: tokio::sync::Mutex::new(()),
                 failure: Mutex::new(None),
                 app: Mutex::new(None),
                 on_refresh: Mutex::new(None),
@@ -257,9 +262,9 @@ impl Client {
     }
 
     /// Renews a rotating token with `app`, reporting each outcome: the new
-    /// token, or why the refresh failed. The report is awaited before the
-    /// next refresh can start, so new tokens are stored in the order Slack
-    /// issued them.
+    /// token, or why the refresh failed. Reports go out one at a time, in
+    /// the order Slack issued the tokens; calls go on with the renewed
+    /// token while one is being saved.
     pub fn with_refresh<F, Fut>(self, app: Option<OauthApp>, on_refresh: F) -> Self
     where
         F: Fn(Result<Token, SlackError>) -> Fut + Send + Sync + 'static,
@@ -296,7 +301,7 @@ impl Client {
         if !token.needs_refresh(now()) {
             return Ok(token.access);
         }
-        let _guard = self.shared.refresh_lock.lock().await;
+        let refreshing = self.shared.refresh_lock.lock().await;
         // Another call may have refreshed while this one waited.
         let token = self.token();
         if !token.needs_refresh(now()) {
@@ -321,7 +326,10 @@ impl Client {
                 *lock(&self.shared.failure) = None;
                 log::info!("renewed a rotating Slack token");
                 if let Some(on_refresh) = on_refresh {
+                    let reporting = self.shared.report_lock.lock().await;
+                    drop(refreshing);
                     on_refresh(Ok(renewed.clone())).await;
+                    drop(reporting);
                 }
                 Ok(renewed.access)
             }
@@ -336,7 +344,10 @@ impl Client {
                     retry_at: std::time::Instant::now() + refresh_wait(failures),
                 });
                 if let Some(on_refresh) = on_refresh {
+                    let reporting = self.shared.report_lock.lock().await;
+                    drop(refreshing);
                     on_refresh(Err(error.clone())).await;
+                    drop(reporting);
                 }
                 fallback(&token, error)
             }
@@ -372,6 +383,9 @@ impl Client {
         let mut attempt = 0;
         loop {
             attempt += 1;
+            // The token comes first: a refresh can wait on Slack and on
+            // another refresh, and must not hold a slot meanwhile.
+            let token = self.access_token().await?;
             // The permit covers one attempt, not the waits between them:
             // a call sitting out a Retry-After must not hold a slot that a
             // send could use.
@@ -381,7 +395,6 @@ impl Client {
                 .acquire()
                 .await
                 .map_err(|_| SlackError::Network("client closed".into()))?;
-            let token = self.access_token().await?;
             let mut request = self.http().post(&url).bearer_auth(&token).form(params);
             if let Some(cookie) = self.cookie() {
                 request = request.header(reqwest::header::COOKIE, format!("d={cookie}"));
