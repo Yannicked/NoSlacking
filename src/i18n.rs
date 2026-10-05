@@ -243,7 +243,8 @@ mod tests {
     }
 
     fn in_catalog(message: &str) -> bool {
-        let po = include_str!("../assets/i18n/nl.po");
+        // A Windows checkout may end the lines with CRLF.
+        let po = include_str!("../assets/i18n/nl.po").replace("\r\n", "\n");
         let escaped = message
             .replace('\\', "\\\\")
             .replace('"', "\\\"")

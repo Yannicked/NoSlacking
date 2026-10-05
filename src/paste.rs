@@ -29,7 +29,8 @@ pub fn pasted_files(text: &str) -> Option<Vec<PathBuf>> {
                 if !rest.starts_with('/') {
                     return None;
                 }
-                PathBuf::from(urlencoding::decode(rest).ok()?.into_owned())
+                let decoded = urlencoding::decode(rest).ok()?;
+                PathBuf::from(windows_drive(&decoded).unwrap_or(&decoded))
             }
             None => PathBuf::from(line),
         };
@@ -39,6 +40,16 @@ pub fn pasted_files(text: &str) -> Option<Vec<PathBuf>> {
         files.push(path);
     }
     (!files.is_empty()).then_some(files)
+}
+
+/// A Windows file URI's path starts with a slash before its drive
+/// (`/C:/Users/…`), which is no path there: the path without that slash.
+/// Elsewhere the slash belongs to the path.
+fn windows_drive(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix('/')?;
+    let bytes = rest.as_bytes();
+    let drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    (cfg!(windows) && drive).then_some(rest)
 }
 
 /// What the clipboard holds to upload: the files it lists, or its image as
@@ -177,7 +188,12 @@ mod tests {
         let b = dir.0.join("notes.txt");
         std::fs::write(&a, b"x").expect("written");
         std::fs::write(&b, b"x").expect("written");
-        let uri = |p: &Path| format!("file://{}", p.display()).replace(' ', "%20");
+        // `file:///home/…`, or `file:///C:/Users/…` on Windows.
+        let uri = |p: &Path| {
+            let path = p.display().to_string().replace('\\', "/");
+            let path = path.strip_prefix('/').unwrap_or(&path).replace(' ', "%20");
+            format!("file:///{path}")
+        };
         assert_eq!(
             pasted_files(&format!("{}\r\n{}\n", uri(&a), uri(&b))),
             Some(vec![a.clone(), b.clone()])
