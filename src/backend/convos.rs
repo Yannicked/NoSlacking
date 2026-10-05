@@ -65,13 +65,13 @@ struct FilesPage {
     files: Vec<ListedFile>,
 }
 
-/// A file in `files.list`: a message's file, and who shared it when.
+/// A file in `files.list`: a message's file (with who shared it), and
+/// when.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct ListedFile {
     #[serde(flatten)]
     file: types::File,
-    user: Option<String>,
     created: Option<i64>,
 }
 
@@ -297,9 +297,10 @@ fn shared(page: FilesPage) -> Vec<convos::SharedFile> {
     page.files
         .into_iter()
         .filter_map(|listed| {
+            let file = listed.file.into_model().filter(|file| !file.deleted)?;
             Some(convos::SharedFile {
-                file: listed.file.into_model()?,
-                user: listed.user.filter(|u| !u.is_empty()),
+                user: file.user.clone(),
+                file,
                 created: listed.created,
             })
         })
@@ -590,30 +591,52 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
             },
         }],
         Command::Files { channel } => {
-            let file = |id: &str, name: &str, mimetype: &str, size: u64| crate::model::File {
-                id: id.into(),
-                name: name.into(),
-                title: name.into(),
-                mimetype: mimetype.into(),
-                size,
-                download_url: Some(format!("https://files.example/{name}")),
-                ..crate::model::File::default()
+            let shared = |id: &str, name: &str, mimetype: &str, size: u64, user: &str, created| {
+                convos::SharedFile {
+                    file: crate::model::File {
+                        id: id.into(),
+                        name: name.into(),
+                        title: name.into(),
+                        mimetype: mimetype.into(),
+                        size,
+                        download_url: Some(format!("https://files.example/{name}")),
+                        user: Some(user.into()),
+                        ..crate::model::File::default()
+                    },
+                    user: Some(user.into()),
+                    created: Some(created),
+                }
             };
             vec![Event::Convos {
                 team: team.to_owned(),
                 event: convos::Event::Files {
                     channel,
                     result: Ok(vec![
-                        convos::SharedFile {
-                            file: file("F1", "roadmap-q4.pdf", "application/pdf", 482_113),
-                            user: Some("U03".into()),
-                            created: Some(1_790_100_000),
-                        },
-                        convos::SharedFile {
-                            file: file("F2", "sidebar-spacing.png", "image/png", 91_034),
-                            user: Some("U01".into()),
-                            created: Some(1_790_000_000),
-                        },
+                        // Yours, so it can be deleted.
+                        shared(
+                            "F3",
+                            "sidebar-v2.png",
+                            "image/png",
+                            48_213,
+                            crate::demo::ME,
+                            1_790_150_000,
+                        ),
+                        shared(
+                            "F1",
+                            "roadmap-q4.pdf",
+                            "application/pdf",
+                            482_113,
+                            "U03",
+                            1_790_100_000,
+                        ),
+                        shared(
+                            "F2",
+                            "sidebar-spacing.png",
+                            "image/png",
+                            91_034,
+                            "U01",
+                            1_790_000_000,
+                        ),
                     ]),
                 },
             }]

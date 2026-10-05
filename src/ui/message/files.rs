@@ -17,6 +17,17 @@ pub(super) fn file_view(
 ) {
     let palette = row.palette;
     let team = &row.workspace.info.team_id;
+    // Deleted, or being deleted: Slack's own words in its place.
+    if file.deleted || !row.workspace.shows_file(&file.id) {
+        ui.label(
+            RichText::new(t("This file was deleted."))
+                .font(theme::regular(13.0))
+                .italics()
+                .color(palette.dim),
+        );
+        return;
+    }
+    let deletable = file.deletable_by(&row.workspace.info.user_id);
     if file.is_image()
         && let Some(thumb) = &file.thumb
     {
@@ -67,6 +78,7 @@ pub(super) fn file_view(
                         .map(|full| crate::ui::image_uri(team, full))
                         .chain([uri.clone()])
                         .collect(),
+                    deletable,
                 },
             );
         }
@@ -112,6 +124,9 @@ pub(super) fn file_view(
         if file.media() == Some(Media::Video) {
             play_badge(ui, response.rect.center(), response.hovered());
         }
+        if response.hovered() {
+            hover_file(ui, file, deletable);
+        }
         theme::describe(&response, egui::WidgetType::Button, &tip);
         if response.on_hover_text(&tip).clicked()
             && let Some(url) = play.clone()
@@ -123,7 +138,10 @@ pub(super) fn file_view(
         }
     }
     if file.media().is_some() {
-        media_card(ui, row, file, play, actions);
+        let card = media_card(ui, row, file, play, actions);
+        if ui.rect_contains_pointer(card) {
+            hover_file(ui, file, deletable);
+        }
         return;
     }
     let response = egui::Frame::new()
@@ -172,6 +190,9 @@ pub(super) fn file_view(
         egui::WidgetType::Button,
         &tf("Download {name}", &[("name", &file.name)]),
     );
+    if response.hovered() {
+        hover_file(ui, file, deletable);
+    }
     if response.clicked()
         && let Some(url) = file
             .download_url
@@ -183,6 +204,22 @@ pub(super) fn file_view(
             name: file.name.clone(),
         });
     }
+}
+
+/// Tells the message's right-click menu that `file` is under the pointer.
+fn hover_file(ui: &egui::Ui, file: &File, deletable: bool) {
+    crate::ui::context::hover(
+        ui,
+        crate::ui::context::Target::File {
+            file: file.id.clone(),
+            name: file.name.clone(),
+            download: file
+                .download_url
+                .clone()
+                .or_else(|| file.url_private.clone()),
+            deletable,
+        },
+    );
 }
 
 /// Where it is remembered that a held-back picture was asked for.
@@ -306,14 +343,14 @@ fn file_detail(file: &File) -> String {
 }
 
 /// A video or sound: a play button that opens it in the system's player,
-/// its name, and a download button.
+/// its name, and a download button. Returns where the card is.
 fn media_card(
     ui: &mut egui::Ui,
     row: &Row<'_>,
     file: &File,
     play: Option<String>,
     actions: &mut Vec<Action>,
-) {
+) -> egui::Rect {
     let palette = row.palette;
     egui::Frame::new()
         .fill(palette.surface)
@@ -381,7 +418,9 @@ fn media_card(
                     });
                 }
             });
-        });
+        })
+        .response
+        .rect
 }
 
 #[cfg(test)]

@@ -49,7 +49,7 @@ struct Cli {
 
     /// Open a view before the screenshot: thread, settings, sign-in,
     /// switcher, picker, profile, share, upload, drafts, lightbox, media,
-    /// compact, held-media or shortcuts.
+    /// compact, held-media, shortcuts or delete-file.
     #[cfg(feature = "demo")]
     #[arg(long, value_name = "VIEW")]
     demo_view: Option<String>,
@@ -560,6 +560,18 @@ impl DemoSetup {
                 ts: parent,
             }),
             Some("settings") => app.actions.push(Action::ShowSettings),
+            // #engineering's Files tab, asking whether to delete your file.
+            Some("delete-file") => {
+                app.actions
+                    .push(Action::Convos(noslacking::convos::Action::Details {
+                        channel: "C02".into(),
+                        tab: noslacking::convos::Tab::Files,
+                    }));
+                app.actions.push(Action::AskDeleteFile {
+                    file: "F3".into(),
+                    name: "sidebar-v2.png".into(),
+                });
+            }
             Some("shortcuts") => app.actions.push(Action::ShowShortcuts),
             Some("sign-in") => app.actions.push(Action::AddWorkspace),
             Some("switcher") => app.actions.push(Action::OpenSwitcher),

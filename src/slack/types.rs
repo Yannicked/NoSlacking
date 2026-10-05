@@ -197,6 +197,8 @@ pub struct File {
     pub mimetype: String,
     pub size: u64,
     pub mode: String,
+    /// Who uploaded it.
+    pub user: Option<String>,
     pub url_private: Option<String>,
     pub url_private_download: Option<String>,
     pub permalink: Option<String>,
@@ -221,9 +223,18 @@ pub struct File {
 
 impl File {
     pub fn into_model(self) -> Option<model::File> {
-        // Files past the free plan's limit, or deleted ones.
-        if self.mode == "tombstone" || self.mode == "hidden_by_limit" || self.id.is_empty() {
+        // Files past the free plan's limit show nothing.
+        if self.mode == "hidden_by_limit" || self.id.is_empty() {
             return None;
+        }
+        // A deleted one keeps its place, as in Slack: "This file was
+        // deleted".
+        if self.mode == "tombstone" {
+            return Some(model::File {
+                id: self.id,
+                deleted: true,
+                ..model::File::default()
+            });
         }
         let (thumb, size) = [
             (self.thumb_720, self.thumb_720_w, self.thumb_720_h),
@@ -272,6 +283,8 @@ impl File {
             original_size,
             poster,
             poster_size,
+            user: self.user.filter(|user| !user.is_empty()),
+            deleted: false,
         })
     }
 }
@@ -1511,7 +1524,11 @@ mod tests {
         assert_eq!(messages[1].username.as_deref(), Some("CI"));
         assert!(messages[2].files[0].is_image());
         assert_eq!(messages[2].files[0].thumb_size, Some([360.0, 200.0]));
-        assert!(messages[3].files.is_empty());
+        assert!(
+            messages[3].files[0].deleted,
+            "a deleted file keeps its place"
+        );
+        assert_eq!(messages[3].files[0].id, "F2");
     }
 
     #[test]

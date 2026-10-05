@@ -1025,6 +1025,16 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
             Command::Download { name, .. } => {
                 sink.send(Event::Notice(Notice::DemoSave { name }));
             }
+            // Slack takes it, then says so to every client.
+            Command::DeleteFile { team, file, name } => {
+                sink.send(Event::FileDeleteSettled {
+                    team: team.clone(),
+                    file: file.clone(),
+                    name,
+                    result: Ok(()),
+                });
+                sink.send(Event::FileGone { team, file });
+            }
             Command::OpenFile { name, .. } => {
                 sink.send(Event::Notice(Notice::DemoOpen { name }));
             }

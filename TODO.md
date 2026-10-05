@@ -544,8 +544,13 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       messages with interactive blocks.
 - [ ] **Add and edit bookmarks** (`bookmarks.add`, `bookmarks.edit`,
       `bookmarks.remove`); today they can only be listed.
-- [ ] **Delete your own files** (`files.delete`) from file cards and the
-      channel's Files tab.
+- [x] **Delete your own files** (`files.delete`) from file cards and the
+      channel's Files tab. *Right-click a file you uploaded (a card, a
+      picture, a video or a row of the Files tab), confirm, and it goes at
+      once; a refusal brings it back with a toast. A deleted file stands as
+      "This file was deleted.", as Slack's tombstone does, and `file_deleted`
+      keeps it gone. `files:write` was already in the manifest. Not yet
+      tried against a real workspace.*
 - [ ] **Upload custom emoji** (`emoji.add`, session sign-ins only).
 
 ### Blocked or needs a real workspace

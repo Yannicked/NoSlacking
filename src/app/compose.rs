@@ -281,6 +281,18 @@ impl App {
         }
     }
 
+    /// Deletes your file: hidden at once in the active workspace, then
+    /// asked of Slack.
+    pub(super) fn delete_file(&mut self, file: String, name: String) {
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        if let Some(workspace) = self.workspace_mut(&team) {
+            workspace.hide_file(&file);
+        }
+        self.backend.send(Command::DeleteFile { team, file, name });
+    }
+
     /// Where a file from the composer of `thread` (or the conversation)
     /// goes, as it is on screen now.
     fn upload_target(&self, thread: Option<Ts>) -> Option<UploadTarget> {

@@ -459,6 +459,11 @@ fn files(
     let Some(files) = loaded(ui, palette, conversation, Tab::Files, &data.files, actions) else {
         return;
     };
+    // A file you just deleted goes at once.
+    let files: Vec<&crate::convos::SharedFile> = files
+        .iter()
+        .filter(|shared| workspace.shows_file(&shared.file.id))
+        .collect();
     if files.is_empty() {
         ui.label(RichText::new(t("No files shared here yet.")).color(palette.dim));
         return;
@@ -469,6 +474,7 @@ fn files(
         .show_rows(ui, ROW + 4.0, files.len(), |ui, range| {
             for shared in &files[range] {
                 let file = &shared.file;
+                let deletable = file.deletable_by(&workspace.info.user_id);
                 let (rect, row) = ui.allocate_exact_size(
                     Vec2::new(ui.available_width(), ROW + 4.0),
                     Sense::click(),
@@ -524,6 +530,11 @@ fn files(
                     palette.dim,
                 );
                 theme::describe(&row, egui::WidgetType::Button, name);
+                if deletable {
+                    row.context_menu(|ui| {
+                        crate::ui::context::delete_file_item(ui, &file.id, &file.name, actions);
+                    });
+                }
                 if row
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()

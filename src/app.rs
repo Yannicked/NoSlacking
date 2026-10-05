@@ -244,6 +244,8 @@ pub struct App {
     pub preview: Option<crate::lightbox::Lightbox>,
     /// A message waiting for "Delete?" to be answered.
     pub confirm_delete: Option<(String, Ts)>,
+    /// Your file waiting for "Delete?" to be answered: its id and name.
+    pub confirm_delete_file: Option<(String, String)>,
     pub section_dialog: Option<SectionDialog>,
     /// Whether the keyboard shortcut sheet is open.
     pub shortcuts: bool,
@@ -421,6 +423,7 @@ impl App {
             picker_query: String::new(),
             preview: None,
             confirm_delete: None,
+            confirm_delete_file: None,
             section_dialog: None,
             shortcuts: false,
             share: None,
@@ -1065,6 +1068,8 @@ impl App {
             Action::PickEmoji { draft } => self.open_picker(PickerTarget::Draft(draft)),
             Action::MarkUnread { channel, ts } => self.mark_unread(&channel, &ts),
             Action::AskDelete { channel, ts } => self.confirm_delete = Some((channel, ts)),
+            Action::AskDeleteFile { file, name } => self.confirm_delete_file = Some((file, name)),
+            Action::DeleteFile { file, name } => self.delete_file(file, name),
             Action::NameSection { rename, channel } => self.name_section(rename, channel),
             Action::Preview { uri, name } => {
                 let picture = crate::lightbox::Picture {
@@ -1605,6 +1610,7 @@ impl App {
             || self.profile.is_some()
             || self.preview.is_some()
             || self.confirm_delete.is_some()
+            || self.confirm_delete_file.is_some()
             || self.section_dialog.is_some()
             || self.shortcuts
             || self.share.is_some()

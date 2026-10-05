@@ -2098,3 +2098,22 @@ msgstr "NoSlacking toont je nu als actief zolang het verbonden is"
 
 msgid "You are shown as active only while you use NoSlacking"
 msgstr "Je wordt alleen als actief getoond terwijl je NoSlacking gebruikt"
+
+# Deleting your own files.
+msgid "Delete file…"
+msgstr "Bestand verwijderen…"
+
+msgid "This file was deleted."
+msgstr "Dit bestand is verwijderd."
+
+msgid "Delete {name}?"
+msgstr "{name} verwijderen?"
+
+msgid "This removes it for everyone."
+msgstr "Het verdwijnt dan voor iedereen."
+
+msgid "Could not delete {name}: {error}"
+msgstr "Kon {name} niet verwijderen: {error}"
+
+msgid "you cannot delete that file"
+msgstr "je kunt dat bestand niet verwijderen"

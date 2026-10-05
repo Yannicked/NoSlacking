@@ -78,6 +78,13 @@ pub struct WorkspaceState {
     /// Messages so deleted, by conversation and real ts, whose echo is not
     /// to bring them back.
     suppressed: HashSet<(String, Ts)>,
+    /// Files you deleted that Slack has not answered for yet: hidden
+    /// everywhere, and shown again if Slack refuses.
+    deleting_files: HashSet<String>,
+    /// Files Slack says are deleted, by you here or anyone anywhere. A
+    /// copy of a message fetched before the deletion still carries the
+    /// file, and must not bring it back.
+    gone_files: HashSet<String>,
 }
 
 /// What became of a send Slack answered (see [`WorkspaceState::sent`]).
@@ -132,7 +139,16 @@ impl WorkspaceState {
             echoed: HashMap::new(),
             cancelled: HashSet::new(),
             suppressed: HashSet::new(),
+            deleting_files: HashSet::new(),
+            gone_files: HashSet::new(),
         }
+    }
+
+    /// Whether file `id` still shows: not deleted, here or in Slack. A
+    /// deleted file stands as "This file was deleted", as Slack's own
+    /// copy of the message will say once it comes.
+    pub fn shows_file(&self, id: &str) -> bool {
+        !self.deleting_files.contains(id) && !self.gone_files.contains(id)
     }
 
     /// Whether you marked `channel` unread and it is to stay so while it
@@ -1314,6 +1330,33 @@ impl WorkspaceState {
         before
     }
 
+    /// You deleted file `id`: it is hidden at once, wherever it shows,
+    /// until Slack answers ([`Self::file_delete_settled`]).
+    pub(super) fn hide_file(&mut self, id: &str) {
+        if !self.gone_files.contains(id) {
+            self.deleting_files.insert(id.to_owned());
+        }
+    }
+
+    /// Slack answered your deletion of file `id`. Taken, it stays hidden
+    /// for good; refused, it shows again, unless Slack itself said
+    /// meanwhile that it is gone. Returns whether it shows again.
+    pub(super) fn file_delete_settled(&mut self, id: &str, deleted: bool) -> bool {
+        let was_hidden = self.deleting_files.remove(id);
+        if deleted {
+            self.gone_files.insert(id.to_owned());
+            return false;
+        }
+        was_hidden && self.shows_file(id)
+    }
+
+    /// Slack says file `id` was deleted (`file_deleted`), here or
+    /// anywhere: it stays hidden, and nothing brings it back.
+    pub(super) fn file_gone(&mut self, id: &str) {
+        self.deleting_files.remove(id);
+        self.gone_files.insert(id.to_owned());
+    }
+
     /// Takes back a change Slack refused: the text before your edit, the
     /// message you deleted, or your reaction toggle.
     pub(super) fn undo(&mut self, channel: &str, change: Change) {
@@ -1712,6 +1755,78 @@ mod tests {
             icon: None,
             user_id: "U1".into(),
         })
+    }
+
+    /// A message of yours in C1 at `ts` sharing file F1.
+    fn with_file(ts: &str) -> Message {
+        Message {
+            files: vec![crate::model::File {
+                id: "F1".into(),
+                name: "sidebar-v2.png".into(),
+                user: Some("U1".into()),
+                ..crate::model::File::default()
+            }],
+            ..message(ts, None)
+        }
+    }
+
+    #[test]
+    fn a_deleted_file_hides_at_once_and_comes_back_if_refused() {
+        let mut w = workspace();
+        w.timelines
+            .entry("C1".into())
+            .or_default()
+            .upsert(with_file("1.0"));
+        assert!(w.shows_file("F1"));
+        w.hide_file("F1");
+        assert!(!w.shows_file("F1"), "hidden before Slack answers");
+        // A copy of the message from before the deletion (a reaction, say)
+        // must not bring it back.
+        w.message_changed("C1", with_file("1.0"));
+        assert!(!w.shows_file("F1"));
+        assert!(
+            w.file_delete_settled("F1", false),
+            "refused: it shows again"
+        );
+        assert!(w.shows_file("F1"));
+        assert_eq!(w.timelines["C1"].messages[0].files.len(), 1);
+        assert!(!w.timelines["C1"].messages[0].files[0].deleted);
+        // Taken: it stays hidden, whatever copy comes later.
+        w.hide_file("F1");
+        assert!(!w.file_delete_settled("F1", true));
+        w.message_changed("C1", with_file("1.0"));
+        assert!(!w.shows_file("F1"));
+    }
+
+    #[test]
+    fn file_deleted_and_the_tombstone_agree_with_your_deletion() {
+        let mut w = workspace();
+        w.timelines
+            .entry("C1".into())
+            .or_default()
+            .upsert(with_file("1.0"));
+        w.hide_file("F1");
+        // Slack's events come before its answer: the file is gone for
+        // good, and the message stays once, with the file in its place.
+        w.file_gone("F1");
+        let mut tombstone = with_file("1.0");
+        tombstone.files = vec![crate::model::File {
+            id: "F1".into(),
+            deleted: true,
+            ..crate::model::File::default()
+        }];
+        w.message_changed("C1", tombstone);
+        let messages = &w.timelines["C1"].messages;
+        assert_eq!(messages.len(), 1, "no duplicate");
+        assert!(messages[0].files[0].deleted);
+        // A late refusal (a retry that found nothing to delete) does not
+        // bring back what Slack itself says is gone.
+        assert!(!w.file_delete_settled("F1", false));
+        assert!(!w.shows_file("F1"));
+        // Someone else's deletion, seen only through the event.
+        w.file_gone("F9");
+        assert!(!w.shows_file("F9"));
+        assert!(!w.file_delete_settled("F9", false), "never hidden here");
     }
 
     /// A workspace with a parent in C1 and two replies loaded in its thread.

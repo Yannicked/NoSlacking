@@ -227,6 +227,17 @@ impl App {
                 changed,
             } => self.message(&team, &channel, message, changed),
             Event::Deleted { team, channel, ts } => self.remove_message(&team, &channel, &ts),
+            Event::FileDeleteSettled {
+                team,
+                file,
+                name,
+                result,
+            } => self.file_delete_settled(&team, &file, &name, result),
+            Event::FileGone { team, file } => {
+                if let Some(workspace) = self.workspace_mut(&team) {
+                    workspace.file_gone(&file);
+                }
+            }
             Event::Reaction {
                 team,
                 channel,
@@ -290,6 +301,29 @@ impl App {
             workspace.undo(channel, change);
         }
         self.toast(format!("{what}: {}", error.message()), true);
+    }
+
+    /// Slack answered the deletion of your file; a refused one shows
+    /// again, and you are told.
+    fn file_delete_settled(
+        &mut self,
+        team: &str,
+        file: &str,
+        name: &str,
+        result: Result<(), Failure>,
+    ) {
+        if let Some(workspace) = self.workspace_mut(team) {
+            workspace.file_delete_settled(file, result.is_ok());
+        }
+        if let Err(error) = result {
+            self.toast(
+                tf(
+                    "Could not delete {name}: {error}",
+                    &[("name", name), ("error", &error.message())],
+                ),
+                true,
+            );
+        }
     }
 
     fn app_loaded(&mut self, app: Option<AppCredentials>) {
@@ -387,6 +421,7 @@ impl App {
             self.editing = None;
             self.selected = None;
             self.confirm_delete = None;
+            self.confirm_delete_file = None;
             self.picker = None;
             self.share = None;
             self.views.open = None;
