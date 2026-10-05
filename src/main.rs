@@ -421,6 +421,8 @@ struct DemoSetup {
     /// Where to save every frame, and how many were asked for and saved.
     film: Option<std::path::PathBuf>,
     filmed: (u32, u32),
+    /// Whether `--demo-type` gave nothing to type.
+    typing_none: bool,
     /// How many frames were asked for when the last character was typed:
     /// filming goes on a little after it, to see the field at rest.
     typed_frames: u32,
@@ -468,6 +470,7 @@ impl DemoSetup {
             film: cli.demo_frames.clone(),
             filmed: (0, 0),
             typed_frames: 0,
+            typing_none: cli.demo_type.as_deref().is_none_or(str::is_empty),
             hover: cli
                 .demo_hover
                 .as_deref()
@@ -708,8 +711,13 @@ impl DemoSetup {
             }
             *saved += 1;
         }
-        let started = self.started.elapsed() > std::time::Duration::from_millis(2500);
-        if started && (!self.typing.is_empty() || *asked < self.typed_frames + 20) {
+        // With nothing to type, from the first frame: to catch what moves
+        // while the window loads.
+        let started = self.typed_frames == 0 && self.typing.is_empty() && self.typing_none
+            || self.started.elapsed() > std::time::Duration::from_millis(2500);
+        // A little past the typing; longer with none, for loading to end.
+        let after = if self.typing_none { 150 } else { 20 };
+        if started && (!self.typing.is_empty() || *asked < self.typed_frames + after) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             *asked += 1;
         } else if started && *saved >= *asked {
