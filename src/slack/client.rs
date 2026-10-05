@@ -414,10 +414,7 @@ impl Client {
             }
             let bytes = response.bytes().await?;
             drop(permit);
-            if !(200..300).contains(&status) && bytes.is_empty() {
-                return Err(SlackError::Http(status));
-            }
-            return decode(&bytes);
+            return answer(status, &bytes);
         }
     }
 
@@ -532,6 +529,23 @@ fn counted(
             }
         },
     )
+}
+
+/// Reads the answer to a Web API call that came back with HTTP `status`.
+/// An error status still carries Slack's own JSON at times, whose code says
+/// more than the status; anything else (an empty body, a proxy's or a load
+/// balancer's HTML page) is the status alone, not a decoding error.
+fn answer<T: DeserializeOwned>(status: u16, bytes: &[u8]) -> Result<T, SlackError> {
+    if !(200..300).contains(&status) && !is_slack_answer(bytes) {
+        return Err(SlackError::Http(status));
+    }
+    decode(bytes)
+}
+
+/// Whether `bytes` is a Web API answer: a JSON object with `ok`.
+fn is_slack_answer(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .is_ok_and(|value| value.get("ok").is_some_and(serde_json::Value::is_boolean))
 }
 
 /// Decodes a Web API answer, turning `ok: false` into [`SlackError::Api`].
@@ -702,6 +716,33 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_page_is_its_http_status() {
+        let html = b"<html><body><h1>502 Bad Gateway</h1></body></html>";
+        assert_eq!(
+            answer::<serde_json::Value>(502, html),
+            Err(SlackError::Http(502))
+        );
+        assert_eq!(
+            answer::<serde_json::Value>(503, b""),
+            Err(SlackError::Http(503))
+        );
+        assert_eq!(
+            answer::<serde_json::Value>(500, br#"{"message":"oops"}"#),
+            Err(SlackError::Http(500))
+        );
+        // Slack's own answer on an error status still gives its code.
+        assert_eq!(
+            answer::<serde_json::Value>(400, br#"{"ok":false,"error":"invalid_arguments"}"#),
+            Err(SlackError::Api("invalid_arguments".into()))
+        );
+        // A success that cannot be read stays a decoding error.
+        assert!(matches!(
+            answer::<serde_json::Value>(200, html),
+            Err(SlackError::Decode(_))
+        ));
+    }
 
     #[test]
     fn errors_decode_with_their_code() {
