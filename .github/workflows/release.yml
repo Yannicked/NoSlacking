@@ -1,7 +1,7 @@
 name: Release
 
 # Pushing a tag like v0.2.0 builds every platform and publishes a GitHub
-# release with the archives attached. The tag must match the version in
+# release with the archives, and .deb and .rpm packages, attached. The tag must match the version in
 # Cargo.toml.
 on:
   push:
@@ -37,7 +37,7 @@ jobs:
       - name: Build dependencies and packaging validators
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake desktop-file-utils appstream
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake desktop-file-utils appstream dpkg-dev
       - name: Build
         run: cargo build --locked --release
       - name: Package
@@ -55,10 +55,23 @@ jobs:
           desktop-file-validate "$root/share/applications/cloud.yannick.NoSlacking.desktop"
           appstreamcli validate --no-net --override=url-homepage-missing=info "$root/share/metainfo/cloud.yannick.NoSlacking.metainfo.xml"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
+      # The same files as the archive, as packages; what goes where is in
+      # Cargo.toml's [package.metadata.deb] and [package.metadata.generate-rpm].
+      - name: Packagers
+        run: cargo install --locked cargo-deb@3.8.0 cargo-generate-rpm@0.21.0
+      - name: Debian and RPM packages
+        run: |
+          cargo deb --locked --no-build
+          cargo generate-rpm
+          cp target/debian/*.deb target/generate-rpm/*.rpm dist/
+          dpkg-deb --info dist/*.deb
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linux
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.rpm
           if-no-files-found: error
 
   macos:

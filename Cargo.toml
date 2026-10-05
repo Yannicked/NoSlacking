@@ -8,6 +8,7 @@ license = "MIT"
 # also reads this to accept them.
 publish = false
 description = "A native Slack client"
+repository = "https://github.com/Yannicked/NoSlacking"
 keywords = ["slack", "chat", "egui", "client"]
 categories = ["gui"]
 
@@ -108,6 +109,52 @@ fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2", f
 # The .exe's icon and version info (build.rs; it does nothing for other
 # targets). Without the toml feature it pulls in no parser.
 winresource = { version = "0.1", default-features = false }
+
+# Linux packages for the release workflow (cargo-deb, cargo-generate-rpm):
+# the same files as the release's .tar.gz, in the system's own places.
+# What the binary links is read from it; the windowing and GL libraries it
+# loads itself at start-up are named here, as no scan can see them.
+[package.metadata.deb]
+maintainer = "Yannick de Jong <yannickludodejong@gmail.com>"
+section = "net"
+priority = "optional"
+extended-description = "One window for your Slack workspaces: channels, direct messages, threads, reactions, files and notifications, without Electron."
+depends = "$auto, libxkbcommon0, libegl1, libgl1"
+recommends = "libwayland-client0, libxkbcommon-x11-0"
+assets = [
+    ["target/release/noslacking", "usr/bin/", "755"],
+    ["packaging/applications/cloud.yannick.NoSlacking.desktop", "usr/share/applications/", "644"],
+    ["packaging/metainfo/cloud.yannick.NoSlacking.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["packaging/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["packaging/icons/hicolor/32x32/apps/cloud.yannick.NoSlacking.png", "usr/share/icons/hicolor/32x32/apps/", "644"],
+    ["packaging/icons/hicolor/48x48/apps/cloud.yannick.NoSlacking.png", "usr/share/icons/hicolor/48x48/apps/", "644"],
+    ["packaging/icons/hicolor/64x64/apps/cloud.yannick.NoSlacking.png", "usr/share/icons/hicolor/64x64/apps/", "644"],
+    ["packaging/icons/hicolor/128x128/apps/cloud.yannick.NoSlacking.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
+    ["packaging/icons/hicolor/256x256/apps/cloud.yannick.NoSlacking.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+    ["packaging/icons/hicolor/512x512/apps/cloud.yannick.NoSlacking.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
+    ["LICENSE", "usr/share/doc/noslacking/", "644"],
+    ["README.md", "usr/share/doc/noslacking/", "644"],
+]
+
+[package.metadata.generate-rpm]
+auto-req = "auto"
+# By library, so the same package fits Fedora and openSUSE.
+requires = { "libxkbcommon.so.0()(64bit)" = "*", "libEGL.so.1()(64bit)" = "*", "libGL.so.1()(64bit)" = "*" }
+recommends = { "libwayland-client.so.0()(64bit)" = "*", "libxkbcommon-x11.so.0()(64bit)" = "*" }
+assets = [
+    { source = "target/release/noslacking", dest = "/usr/bin/noslacking", mode = "755" },
+    { source = "packaging/applications/cloud.yannick.NoSlacking.desktop", dest = "/usr/share/applications/cloud.yannick.NoSlacking.desktop", mode = "644" },
+    { source = "packaging/metainfo/cloud.yannick.NoSlacking.metainfo.xml", dest = "/usr/share/metainfo/cloud.yannick.NoSlacking.metainfo.xml", mode = "644" },
+    { source = "packaging/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg", dest = "/usr/share/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg", mode = "644" },
+    { source = "packaging/icons/hicolor/32x32/apps/cloud.yannick.NoSlacking.png", dest = "/usr/share/icons/hicolor/32x32/apps/cloud.yannick.NoSlacking.png", mode = "644" },
+    { source = "packaging/icons/hicolor/48x48/apps/cloud.yannick.NoSlacking.png", dest = "/usr/share/icons/hicolor/48x48/apps/cloud.yannick.NoSlacking.png", mode = "644" },
+    { source = "packaging/icons/hicolor/64x64/apps/cloud.yannick.NoSlacking.png", dest = "/usr/share/icons/hicolor/64x64/apps/cloud.yannick.NoSlacking.png", mode = "644" },
+    { source = "packaging/icons/hicolor/128x128/apps/cloud.yannick.NoSlacking.png", dest = "/usr/share/icons/hicolor/128x128/apps/cloud.yannick.NoSlacking.png", mode = "644" },
+    { source = "packaging/icons/hicolor/256x256/apps/cloud.yannick.NoSlacking.png", dest = "/usr/share/icons/hicolor/256x256/apps/cloud.yannick.NoSlacking.png", mode = "644" },
+    { source = "packaging/icons/hicolor/512x512/apps/cloud.yannick.NoSlacking.png", dest = "/usr/share/icons/hicolor/512x512/apps/cloud.yannick.NoSlacking.png", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/noslacking/LICENSE", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/noslacking/README.md", mode = "644", doc = true },
+]
 
 [features]
 default = ["highlight", "bundled-emoji"]

@@ -59,6 +59,13 @@ cookies are stored only in your operating system's keyring (Secret Service on
 Linux, the Keychain on macOS, the Credential Manager on Windows), never in a
 file, and never written to the log.
 
+## Installing
+
+Each [release](https://github.com/Yannicked/NoSlacking/releases) has a
+`.deb` (Debian, Ubuntu), an `.rpm` (Fedora, openSUSE) and a `.tar.gz` for
+Linux, a `.zip` with the app for macOS, and a `.zip` with the program for
+Windows.
+
 ## Building
 
 ```
