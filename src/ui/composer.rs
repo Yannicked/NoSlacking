@@ -551,30 +551,37 @@ pub fn show(
         if bar_open && let Some(format) = formatting_bar(ui, palette) {
             apply_format(ui.ctx(), id, draft, format);
         }
-        egui::ScrollArea::vertical()
-            .id_salt(("composer-scroll", &composer.key))
-            .max_height(220.0)
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                let output = (egui::TextEdit::multiline(&mut draft.text)
-                    .id(id)
-                    .frame(egui::Frame::NONE)
-                    .hint_text(
-                        RichText::new(&composer.placeholder)
-                            .font(theme::regular(14.5))
-                            .color(palette.dim),
-                    )
-                    .desired_rows(1)
-                    .desired_width(f32::INFINITY)
-                    .font(theme::regular(14.5))
-                    .lock_focus(true))
-                .show(ui);
-                spelling::show(ui, &output, id, draft, palette);
-                let response = output.response.response;
-                if composer.focus {
-                    response.request_focus();
-                }
-            });
+        ui.scope(|ui| {
+            // No edge fade: a frame with input briefly counts the field as
+            // overflowing, and the fade painted over the text for that one
+            // frame, so on a HiDPI screen typing made the text blink. It
+            // only ever shows on drafts tall enough to scroll.
+            ui.spacing_mut().scroll.fade.strength = 0.0;
+            egui::ScrollArea::vertical()
+                .id_salt(("composer-scroll", &composer.key))
+                .max_height(220.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    let output = (egui::TextEdit::multiline(&mut draft.text)
+                        .id(id)
+                        .frame(egui::Frame::NONE)
+                        .hint_text(
+                            RichText::new(&composer.placeholder)
+                                .font(theme::regular(14.5))
+                                .color(palette.dim),
+                        )
+                        .desired_rows(1)
+                        .desired_width(f32::INFINITY)
+                        .font(theme::regular(14.5))
+                        .lock_focus(true))
+                    .show(ui);
+                    spelling::show(ui, &output, id, draft, palette);
+                    let response = output.response.response;
+                    if composer.focus {
+                        response.request_focus();
+                    }
+                });
+        });
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             if theme::icon_button(ui, palette, Icon::Paperclip, 17.0, &t("Upload a file")).clicked()
