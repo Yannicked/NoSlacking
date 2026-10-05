@@ -1,3 +1,5 @@
+<img src="packaging/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg" alt="" width="96" align="right">
+
 # NoSlacking
 
 A native [Slack](https://slack.com) client for Linux, macOS and Windows,
