@@ -334,6 +334,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         settings.closed.get(&workspace.info.team_id),
                         sidebar_filter,
                         settings.sidebar_sort,
+                        settings.unread_first,
                         actions,
                     );
                     ui.add_space(12.0);
@@ -344,6 +345,21 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.settings.sidebar_width = width;
         app.settings_changed();
     }
+}
+
+/// Where a workspace's remembered sidebar layout lives in egui's memory.
+fn memo_id(team: &str) -> egui::Id {
+    egui::Id::new(("sidebar-layout", team))
+}
+
+/// The open conversation's place as the sidebar holds it (see
+/// [`sidebar::Hold`]), so stepping through the sidebar by keyboard follows
+/// the order on screen.
+pub(super) fn held(ctx: &egui::Context, team: &str) -> Option<sidebar::Hold> {
+    ctx.data(|d| {
+        d.get_temp::<sidebar::Memo>(memo_id(team))
+            .and_then(|memo| memo.held().cloned())
+    })
 }
 
 fn matches(workspace: &WorkspaceState, conversation: &Conversation, filter: &str) -> bool {
@@ -365,20 +381,28 @@ fn list(
     closed: Option<&std::collections::BTreeMap<String, String>>,
     filter: &str,
     sort: sidebar::Sort,
+    unread_first: bool,
     actions: &mut Vec<Action>,
 ) {
     let filter = filter.trim();
     let sections = workspace.sections.as_deref();
     // Remembered per workspace: sorting every conversation each frame is
     // the sidebar's main cost, and the order rarely changes.
-    let memo_id = egui::Id::new(("sidebar-layout", workspace.info.team_id.as_str()));
     let shown = ui.data_mut(|d| {
-        d.get_temp_mut_or_default::<sidebar::Memo>(memo_id).layout(
+        let memo = d.get_temp_mut_or_default::<sidebar::Memo>(memo_id(&workspace.info.team_id));
+        let rank = |c: &Conversation| workspace.rank(c);
+        let hold = memo.hold(workspace.active.as_deref(), &workspace.conversations, rank);
+        memo.layout(
             sections,
             &workspace.conversations,
             &workspace.users,
             |c| workspace.title(c),
-            sort,
+            rank,
+            &sidebar::Arrange {
+                sort,
+                unread_first,
+                hold: hold.as_ref(),
+            },
         )
     });
     for section in &shown {

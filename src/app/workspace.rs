@@ -203,6 +203,12 @@ impl WorkspaceState {
             && (conversation.mentions > 0 || !self.desktop.is_muted(&conversation.id))
     }
 
+    /// How much a conversation asks for you, for the sidebar's
+    /// unread-first order; a muted one counts only for its mentions.
+    pub fn rank(&self, conversation: &Conversation) -> crate::sidebar::Rank {
+        crate::sidebar::rank(conversation, self.is_unread(conversation))
+    }
+
     /// Whether a message mentions you (or everyone).
     pub fn mentions_me(&self, message: &Message) -> bool {
         let me = format!("<@{}", self.info.user_id);

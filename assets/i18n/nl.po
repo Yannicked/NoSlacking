@@ -421,6 +421,12 @@ msgstr "Kanalen sorteren"
 msgid "Within each sidebar section. Direct messages are always newest first."
 msgstr "Binnen elke sectie van de zijbalk. Privéberichten staan altijd op nieuwste eerst."
 
+msgid "Unread conversations first"
+msgstr "Ongelezen gesprekken eerst"
+
+msgid "At the top of each sidebar section, mentions and direct messages before the rest."
+msgstr "Bovenaan elke sectie van de zijbalk, vermeldingen en privéberichten vóór de rest."
+
 msgid "By name"
 msgstr "Op naam"
 

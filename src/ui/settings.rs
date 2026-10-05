@@ -279,6 +279,20 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             app.settings.sidebar_sort = sort;
             app.settings_changed();
         }
+        let mut unread_first = app.settings.unread_first;
+        row(
+            ui,
+            palette,
+            &t("Unread conversations first"),
+            &t("At the top of each sidebar section, mentions and direct messages before the rest."),
+            |ui, name| {
+                ui.checkbox(&mut unread_first, "").labelled_by(name);
+            },
+        );
+        if unread_first != app.settings.unread_first {
+            app.settings.unread_first = unread_first;
+            app.settings_changed();
+        }
     });
 
     super::desktop::settings_group(app, ui, palette);

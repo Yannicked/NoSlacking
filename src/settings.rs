@@ -96,6 +96,9 @@ pub struct Settings {
     pub enter_sends: bool,
     /// How channels are ordered in their sidebar sections.
     pub sidebar_sort: crate::sidebar::Sort,
+    /// Unread conversations at the top of their sidebar sections, mentions
+    /// and direct messages first; on by default.
+    pub unread_first: bool,
     /// Notifications and the rest of the desktop integration.
     pub desktop: crate::desktop::DesktopSettings,
     /// Your skin tone for emoji that have them, as Slack counts: 2 (light)
@@ -137,6 +140,7 @@ impl Default for Settings {
             zoom: 1.0,
             enter_sends: true,
             sidebar_sort: crate::sidebar::Sort::Name,
+            unread_first: true,
             desktop: crate::desktop::DesktopSettings::default(),
             skin_tone: 0,
             recent_emoji: Vec::new(),
@@ -235,6 +239,7 @@ impl Settings {
             zoom,
             enter_sends,
             sidebar_sort,
+            unread_first,
             desktop,
             skin_tone,
             recent_emoji,
@@ -651,6 +656,21 @@ mod tests {
         let old: Settings = serde_json::from_str("{}").expect("parses");
         assert_eq!(old.density, Density::Comfortable);
         assert!(old.inline_media);
+    }
+
+    #[test]
+    fn unread_first_is_on_until_turned_off() {
+        // Older files do not have it: unread conversations come first.
+        let old: Settings = serde_json::from_str("{}").expect("parses");
+        assert!(old.unread_first);
+        let off: Settings = serde_json::from_str(r#"{"unread_first":false}"#).expect("parses");
+        assert!(!off.unread_first);
+        let encoded = off.encode().expect("encodes");
+        let again: Settings = serde_json::from_slice(&encoded).expect("parses");
+        assert!(!again.unread_first);
+        let (bad, problems) = Settings::from_json(serde_json::json!({"unread_first": "yes"}));
+        assert!(bad.unread_first, "unreadable falls back to on");
+        assert_eq!(problems.len(), 1);
     }
 
     #[test]

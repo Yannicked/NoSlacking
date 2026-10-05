@@ -17,7 +17,7 @@ use egui::{Key, Modifiers};
 
 use crate::app::{App, Page, WorkspaceState};
 use crate::model::{Action, Conversation};
-use crate::sidebar::Sort;
+use crate::sidebar::Arrange;
 
 pub fn global(app: &mut App, ctx: &egui::Context) {
     let overlay = app.overlay_open();
@@ -115,9 +115,17 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
     if up || down || unread_up || unread_down {
         let only_unread = unread_up || unread_down;
         let forward = down || unread_down;
-        let next = app
-            .active_workspace()
-            .and_then(|w| step(w, app.settings.sidebar_sort, forward, only_unread));
+        let next = app.active_workspace().and_then(|w| {
+            // The order the sidebar shows, the open conversation held in
+            // its place.
+            let held = super::sidebar::held(ctx, &w.info.team_id);
+            let arrange = Arrange {
+                sort: app.settings.sidebar_sort,
+                unread_first: app.settings.unread_first,
+                hold: held.as_ref(),
+            };
+            step(w, &arrange, forward, only_unread)
+        });
         if let Some(next) = next {
             app.actions.push(Action::OpenConversation(next));
         }
@@ -149,7 +157,7 @@ fn in_empty_composer(app: &App, ctx: &egui::Context) -> bool {
 /// wrapping around at either end.
 fn step(
     workspace: &WorkspaceState,
-    sort: Sort,
+    arrange: &Arrange<'_>,
     forward: bool,
     only_unread: bool,
 ) -> Option<String> {
@@ -158,7 +166,8 @@ fn step(
         &workspace.conversations,
         &workspace.users,
         |c| workspace.title(c),
-        sort,
+        |c| workspace.rank(c),
+        arrange,
     );
     let order: Vec<&Conversation> = shown
         .iter()
@@ -228,7 +237,12 @@ mod tests {
     }
 
     fn next(w: &WorkspaceState, forward: bool, only_unread: bool) -> Option<String> {
-        step(w, Sort::Name, forward, only_unread)
+        step(
+            w,
+            &Arrange::plain(crate::sidebar::Sort::Name),
+            forward,
+            only_unread,
+        )
     }
 
     #[test]
