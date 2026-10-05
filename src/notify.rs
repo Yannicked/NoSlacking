@@ -262,6 +262,8 @@ mod platform {
     use notify_rust::{Notification, NotificationResponse};
 
     use super::{Clicked, Note};
+    // Linux names the desktop entry and macOS the sender by it.
+    #[cfg(not(windows))]
     use crate::paths::APP_ID;
 
     pub const AVAILABLE: bool = true;
