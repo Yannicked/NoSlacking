@@ -328,10 +328,10 @@ fn register_scheme_for(exe: &std::path::Path) -> Result<(), String> {
     let applications = data.join("applications");
     std::fs::create_dir_all(&applications).map_err(|e| e.to_string())?;
     let file = applications.join(format!("{APP_ID}.desktop"));
-    let quoted = exe.display().to_string().replace('"', "\\\"");
+    let exec = crate::autostart::exec_quote(&exe.display().to_string());
     let entry = format!(
         "[Desktop Entry]\nType=Application\nName=NoSlacking\nComment=A native Slack client\n\
-         Exec=\"{quoted}\" %u\nIcon={APP_ID}\nTerminal=false\nCategories=Network;InstantMessaging;Chat;\n\
+         Exec={exec} %u\nIcon={APP_ID}\nTerminal=false\nCategories=Network;InstantMessaging;Chat;\n\
          MimeType={mime}\nStartupWMClass={APP_ID}\n",
         mime = SCHEMES
             .iter()

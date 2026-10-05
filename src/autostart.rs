@@ -17,18 +17,40 @@ pub fn set(enabled: bool) -> Result<(), String> {
     platform::set(&exe, enabled)
 }
 
-/// `path` quoted for a desktop entry's `Exec` key: in double quotes, with
-/// the characters the specification reserves escaped.
+/// `path` as one argument of a desktop entry's `Exec` key, ready to write
+/// into the file. Shared by the autostart entry and the link handler's
+/// desktop file (see [`crate::auth`]).
+///
+/// The Desktop Entry specification reads the value in two steps, so it is
+/// written in two: first as an `Exec` argument (in double quotes, with
+/// `"`, `` ` ``, `$` and `\` escaped by a backslash, and `%` doubled so it
+/// is never taken for a field code like `%u`), then as a key-file string
+/// (every backslash doubled again, and line breaks and tabs spelled out so
+/// a strange path cannot end the line and add keys of its own).
 pub fn exec_quote(path: &str) -> String {
-    let mut out = String::with_capacity(path.len() + 2);
-    out.push('"');
+    let mut quoted = String::with_capacity(path.len() + 2);
+    quoted.push('"');
     for c in path.chars() {
-        if matches!(c, '"' | '`' | '$' | '\\') {
-            out.push('\\');
+        match c {
+            '"' | '`' | '$' | '\\' => {
+                quoted.push('\\');
+                quoted.push(c);
+            }
+            '%' => quoted.push_str("%%"),
+            c => quoted.push(c),
         }
-        out.push(c);
     }
-    out.push('"');
+    quoted.push('"');
+    let mut out = String::with_capacity(quoted.len());
+    for c in quoted.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
     out
 }
 
@@ -174,11 +196,24 @@ mod tests {
     fn the_desktop_entry_quotes_the_path_and_starts_hidden() {
         let entry = desktop_entry(Path::new("/opt/No Slacking/$bin/noslacking"));
         assert!(
-            entry.contains("Exec=\"/opt/No Slacking/\\$bin/noslacking\" --hidden\n"),
+            entry.contains("Exec=\"/opt/No Slacking/\\\\$bin/noslacking\" --hidden\n"),
             "{entry}"
         );
         assert!(entry.starts_with("[Desktop Entry]\n"));
-        assert_eq!(exec_quote(r#"a"b\c"#), r#""a\"b\\c""#);
+    }
+
+    #[test]
+    fn exec_arguments_follow_the_desktop_entry_spec() {
+        // The spec's own examples: a literal backslash takes four, a
+        // literal dollar sign `\\$`.
+        assert_eq!(exec_quote(r"a\b"), r#""a\\\\b""#);
+        assert_eq!(exec_quote("$HOME"), r#""\\$HOME""#);
+        assert_eq!(exec_quote(r#"say "hi" `now`"#), r#""say \\"hi\\" \\`now\\`""#);
+        // A percent sign is never a field code.
+        assert_eq!(exec_quote("/opt/100%u/app"), r#""/opt/100%%u/app""#);
+        // A line break cannot start a new key.
+        assert_eq!(exec_quote("a\nIcon=x"), r#""a\nIcon=x""#);
+        assert_eq!(exec_quote("/usr/bin/noslacking"), r#""/usr/bin/noslacking""#);
     }
 
     #[test]
