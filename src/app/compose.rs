@@ -68,8 +68,11 @@ impl App {
                 _ => {
                     let text = to_wire(args, &draft.mentions);
                     // Kept until it has run, to give back if it fails.
-                    self.slashing.push((command.clone(), key, draft));
+                    self.next_slash += 1;
+                    let id = self.next_slash;
+                    self.slashing.insert(id, (key, draft));
                     self.backend.send(Command::Slash {
+                        id,
                         team,
                         channel,
                         command,
@@ -341,7 +344,6 @@ impl App {
             total: 0,
             finishing: false,
             pasted,
-            failed: false,
         });
         self.backend.send(Command::Upload {
             id,
@@ -365,27 +367,19 @@ impl App {
         }
     }
 
-    /// The worker could not upload a file: the upload of that name still
-    /// going ends as failed, which gives its text back when it ends.
-    pub(super) fn upload_failed(&mut self, name: &str) {
-        if let Some(upload) = self
-            .transfers
-            .iter_mut()
-            .find(|u| u.name == name && !u.failed)
-        {
-            upload.failed = true;
-        }
-    }
-
     /// A slash command finished: Slack's reply if it gave one, a word
     /// that it worked otherwise, or why not.
-    pub(super) fn slash_done(&mut self, command: &str, result: Result<Option<String>, Failure>) {
+    pub(super) fn slash_done(
+        &mut self,
+        id: u64,
+        command: &str,
+        result: Result<Option<String>, Failure>,
+    ) {
         let name = format!("/{command}");
-        if let Some(index) = self.slashing.iter().position(|(c, _, _)| c == command) {
-            let (_, key, draft) = self.slashing.remove(index);
-            if result.is_err() {
-                self.give_back_draft(key, draft);
-            }
+        if let Some((key, draft)) = self.slashing.remove(&id)
+            && result.is_err()
+        {
+            self.give_back_draft(key, draft);
         }
         match result {
             Ok(Some(reply)) => {
@@ -423,17 +417,17 @@ impl App {
         }
     }
 
-    /// An upload ended one way or another (`cancelled`, say): it leaves
+    /// An upload ended, `shared` or not (failed or cancelled): it leaves
     /// the composer, and a pasted image's temporary file goes. Its text
     /// comes back if it did not go up. False when it was already gone, so
     /// a late answer says nothing about it.
-    pub(super) fn upload_done(&mut self, id: u64, cancelled: bool) -> bool {
+    pub(super) fn upload_done(&mut self, id: u64, shared: bool) -> bool {
         let Some(index) = self.transfers.iter().position(|u| u.id == id) else {
             return false;
         };
         let upload = self.transfers.remove(index);
         if let Some((key, draft)) = self.uploading.remove(&id)
-            && (upload.failed || cancelled)
+            && !shared
         {
             self.give_back_draft(key, draft);
         }
@@ -497,7 +491,6 @@ mod tests {
             total,
             finishing: false,
             pasted: None,
-            failed: false,
         }
     }
 

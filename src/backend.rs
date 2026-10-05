@@ -143,8 +143,10 @@ pub enum Command {
         comment: String,
     },
     /// Runs a slash command (without its `/`) in `channel`; `text` is in
-    /// wire form, mentions as `<@U1>`. Answered by [`Event::Slash`].
+    /// wire form, mentions as `<@U1>`. Answered by [`Event::Slash`] under
+    /// `id`.
     Slash {
+        id: u64,
         team: String,
         channel: String,
         command: String,
@@ -386,12 +388,14 @@ impl std::fmt::Debug for Command {
                 .field("comment", comment)
                 .finish(),
             Self::Slash {
+                id,
                 team,
                 channel,
                 command,
                 text,
             } => f
                 .debug_struct("Slash")
+                .field("id", id)
                 .field("team", team)
                 .field("channel", channel)
                 .field("command", command)
@@ -712,6 +716,7 @@ pub enum Event {
     /// failed. [`Failure::NeedsSession`] says it can only run through a
     /// browser session's sign-in.
     Slash {
+        id: u64,
         command: String,
         result: Result<Option<String>, Failure>,
     },
@@ -720,9 +725,11 @@ pub enum Event {
     UploadFinishing {
         id: u64,
     },
-    /// Upload `id` ended: shared, or failed with its own error event.
+    /// Upload `id` ended: `shared`, or failed with its own error event
+    /// sent first.
     UploadDone {
         id: u64,
+        shared: bool,
     },
     /// Upload `id` was stopped before Slack was told to share it, so
     /// nothing was posted.

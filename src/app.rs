@@ -124,8 +124,6 @@ pub struct Upload {
     pub finishing: bool,
     /// A pasted image's temporary file, removed once the upload ends.
     pasted: Option<PathBuf>,
-    /// Whether the worker said it failed, which it does before it ends.
-    failed: bool,
 }
 
 impl Upload {
@@ -236,6 +234,8 @@ pub struct App {
     /// Files being uploaded, oldest first.
     pub transfers: Vec<Upload>,
     next_upload: u64,
+    /// The id of the last slash command run, counted like uploads.
+    next_slash: u64,
     pub switcher: Option<(String, usize)>,
     pub profile: Option<String>,
     pub picker: Option<PickerTarget>,
@@ -288,9 +288,9 @@ pub struct App {
     marks: HashMap<(String, String), (Ts, Instant)>,
     pending_marks: HashMap<(String, String), Ts>,
     /// Drafts sent as a slash command or as an upload's comment, with
-    /// their composer's key, kept until it is done: by command (several
-    /// can run), and by upload. A failure puts the text back.
-    slashing: Vec<(String, String, Draft)>,
+    /// their composer's key, kept until it is done: by command id, and by
+    /// upload id. A failure puts the text back.
+    slashing: HashMap<u64, (String, Draft)>,
     uploading: HashMap<u64, (String, Draft)>,
     window_focused: bool,
     /// When changed settings are next written, and the thread that writes them.
@@ -414,6 +414,7 @@ impl App {
             actions: Vec::new(),
             transfers: Vec::new(),
             next_upload: 0,
+            next_slash: 0,
             switcher: None,
             profile: None,
             picker: None,
@@ -443,7 +444,7 @@ impl App {
             copied: mpsc::channel(),
             marks: HashMap::new(),
             pending_marks: HashMap::new(),
-            slashing: Vec::new(),
+            slashing: HashMap::new(),
             uploading: HashMap::new(),
             window_focused: true,
             settings_due: crate::settings::Debounce::default(),

@@ -772,11 +772,12 @@ impl Worker {
                 comment,
             } => self.upload(id, team, channel, thread, path, comment),
             Command::Slash {
+                id,
                 team,
                 channel,
                 command,
                 text,
-            } => self.slash(team, channel, command, text),
+            } => self.slash(id, team, channel, command, text),
             Command::CancelUpload { id } => self.cancel_upload(id),
             Command::Download { team, url, name } => self.download(&team, url, name),
             Command::OpenFile { team, url, name } => self.open_file(&team, url, name),
@@ -969,7 +970,7 @@ impl Worker {
             self.not_signed_in(Doing::Upload {
                 name: file_name(&path),
             });
-            self.sink.send(Event::UploadDone { id });
+            self.sink.send(Event::UploadDone { id, shared: false });
             return;
         };
         let poll_after = !self.is_live(&team);
@@ -978,11 +979,11 @@ impl Worker {
         let task = {
             let gate = gate.clone();
             tokio::spawn(async move {
-                upload(
+                let shared = upload(
                     id, client, team, channel, thread, path, comment, poll_after, gate, &sink,
                 )
                 .await;
-                sink.send(Event::UploadDone { id });
+                sink.send(Event::UploadDone { id, shared });
             })
         };
         self.uploads.insert(id, (task.abort_handle(), gate));
@@ -1012,9 +1013,10 @@ impl Worker {
     /// Runs a slash command: through its own Web API method where it has
     /// one, so it works with any sign-in, and otherwise through
     /// `chat.command`, Slack's own runner, which only sessions may call.
-    fn slash(&self, team: String, channel: String, command: String, text: String) {
+    fn slash(&self, id: u64, team: String, channel: String, command: String, text: String) {
         let Some((client, sink)) = self.team(&team) else {
             self.sink.send(Event::Slash {
+                id,
                 command,
                 result: Err(Failure::NotSignedIn),
             });
@@ -1022,7 +1024,11 @@ impl Worker {
         };
         tokio::spawn(async move {
             let result = run_slash(&client, &channel, &command, &text).await;
-            sink.send(Event::Slash { command, result });
+            sink.send(Event::Slash {
+                id,
+                command,
+                result,
+            });
         });
     }
 
