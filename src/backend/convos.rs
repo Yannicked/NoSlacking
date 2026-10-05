@@ -4,7 +4,7 @@
 
 use serde::Deserialize;
 
-use super::worker::describe;
+use super::api::describe;
 use super::{Event, Sink};
 use crate::convos::{self, Command};
 use crate::model::Conversation;

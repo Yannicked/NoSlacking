@@ -1,6 +1,6 @@
 //! Asks Slack's search for a page of results.
 
-use super::worker::describe;
+use super::api::describe;
 use super::{Event, Sink};
 use crate::search::{Failure, PAGE_SIZE, Query, Scope, Sort};
 use crate::slack::search::{FilesAnswer, MessagesAnswer};

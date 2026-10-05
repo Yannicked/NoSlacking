@@ -7,7 +7,7 @@
 
 use serde::Deserialize;
 
-use super::worker::describe;
+use super::api::describe;
 use super::{Event, Sink};
 use crate::model::{Message, Ts};
 use crate::slack::search::MessagesAnswer;

@@ -6,7 +6,7 @@
 //! is given, and the ones nearest `oldest` when only that is given, so one
 //! call of each reads either side of a message.
 
-use super::worker::describe;
+use super::api::describe;
 use super::{Event, Sink};
 use crate::model::{Message, Ts};
 use crate::slack::{Client, SlackError, types};
