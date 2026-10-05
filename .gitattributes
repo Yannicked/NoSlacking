@@ -1,0 +1,3 @@
+# The catalogs are read as text by tests too; keep their lines LF on
+# every checkout.
+*.po text eol=lf
