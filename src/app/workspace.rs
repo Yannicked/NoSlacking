@@ -707,14 +707,25 @@ impl WorkspaceState {
         has_newer: bool,
     ) -> Arrived {
         let arrived = self.arrived_in(&messages);
+        let newest = messages.iter().map(|m| m.ts.clone()).max();
         let timeline = self.timelines.entry(channel.to_owned()).or_default();
         // Messages still being sent stay; they go after everything real.
+        // So do ones that came live past the page when it reaches the
+        // present: they were sent while it was on its way.
+        let line = if timeline.cached {
+            max_ts(newest, timeline.cached_newest.take())
+        } else {
+            newest
+        };
         let local: Vec<Message> = timeline
             .messages
             .iter()
-            .filter(|m| m.ts.is_local())
+            .filter(|m| {
+                m.ts.is_local() || (!has_newer && line.as_ref().is_some_and(|line| m.ts > *line))
+            })
             .cloned()
             .collect();
+        timeline.cached = false;
         timeline.messages = messages;
         for message in local {
             timeline.upsert(message);
@@ -2418,6 +2429,23 @@ mod tests {
         assert!(!w.timelines["C1"].has_newer);
         w.message_arrived("C1", message("11.0", None), false);
         assert_eq!(w.timelines["C1"].messages.len(), 7);
+    }
+
+    #[test]
+    fn a_jump_that_reaches_the_present_keeps_what_came_live() {
+        let mut w = workspace_in_general();
+        w.message_arrived("C1", theirs("8.0"), true);
+        w.message_arrived("C1", theirs("9.0"), true);
+        w.around_arrived(
+            "C1",
+            vec![message("7.0", None), message("8.0", None)],
+            (true, None),
+            false,
+        );
+        assert_eq!(stamps(&w.timelines["C1"].messages), ["7.0", "8.0", "9.0"]);
+        // One that does not reach it stands apart.
+        w.around_arrived("C1", vec![message("2.0", None)], (true, None), true);
+        assert_eq!(stamps(&w.timelines["C1"].messages), ["2.0"]);
     }
 
     #[test]
