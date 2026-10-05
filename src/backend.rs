@@ -12,6 +12,7 @@ pub mod desktop;
 mod fetch;
 mod files;
 pub mod people;
+mod poll;
 mod search;
 mod translate;
 pub mod views;

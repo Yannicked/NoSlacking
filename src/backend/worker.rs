@@ -7,6 +7,7 @@
 //! interface, so one slow call never holds up another.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -98,13 +99,44 @@ struct Team {
     /// The start-up work (lists, people, sections, the unread sweep),
     /// stopped on sign-out rather than left calling Slack for nothing.
     boot: tokio::task::AbortHandle,
+    /// The watch over every conversation while the socket is down (see
+    /// [`super::poll`]). A round holds the lock while it runs, so two
+    /// never overlap.
+    watch: Arc<tokio::sync::Mutex<super::poll::State>>,
+    /// The round running now, stopped when the socket comes back or the
+    /// workspace signs out.
+    watching: Option<tokio::task::AbortHandle>,
 }
 
 impl Team {
+    /// A signed-in workspace with nothing watched yet.
+    fn new(
+        client: Client,
+        user_id: String,
+        sink: Sink,
+        gate: Gate,
+        boot: tokio::task::AbortHandle,
+    ) -> Self {
+        Self {
+            client,
+            user_id,
+            sink,
+            gate,
+            boot,
+            watch: Arc::new(tokio::sync::Mutex::new(super::poll::State::starting(
+                std::time::Instant::now(),
+            ))),
+            watching: None,
+        }
+    }
+
     /// Stops everything still running for this workspace.
     fn shut(&self) {
         self.gate.close();
         self.boot.abort();
+        if let Some(round) = &self.watching {
+            round.abort();
+        }
     }
 }
 
@@ -394,13 +426,7 @@ impl Worker {
         .abort_handle();
         let replaced = self.teams.insert(
             workspace.team_id.clone(),
-            Team {
-                client: client.clone(),
-                user_id: workspace.user_id.clone(),
-                sink,
-                gate,
-                boot,
-            },
+            Team::new(client.clone(), workspace.user_id.clone(), sink, gate, boot),
         );
         tokio::spawn(super::desktop::dnd_info(
             client.clone(),
@@ -1280,13 +1306,62 @@ impl Worker {
             .poll(std::time::Instant::now(), |team| teams.get(team).cloned());
     }
 
+    /// What runs on each poll tick: the open conversation, then the watch
+    /// over every workspace's other conversations.
+    fn poll(&mut self) {
+        self.poll_open();
+        self.watch_all(std::time::Instant::now());
+    }
+
+    /// Starts a round of the watch over every conversation (see
+    /// [`super::poll`]) for each workspace whose socket is down and whose
+    /// rest is over, and stops the round of each whose socket is back:
+    /// live events tell everything from then on.
+    fn watch_all(&mut self, now: std::time::Instant) {
+        let live: HashSet<String> = self
+            .teams
+            .keys()
+            .filter(|team| self.is_live(team))
+            .cloned()
+            .collect();
+        for (id, team) in &mut self.teams {
+            let running = team.watching.as_ref().is_some_and(|r| !r.is_finished());
+            if live.contains(id) {
+                if let Some(round) = team.watching.take() {
+                    round.abort();
+                }
+                continue;
+            }
+            if running {
+                continue;
+            }
+            // Held by a round that was stopped but has not let go yet.
+            let Ok(mut state) = team.watch.clone().try_lock_owned() else {
+                continue;
+            };
+            if !state.due(now) {
+                continue;
+            }
+            let open = self
+                .focus
+                .as_ref()
+                .filter(|(team, _)| team == id)
+                .and_then(|(_, channel)| channel.clone());
+            let (client, sink, team_id) = (team.client.clone(), team.sink.clone(), id.clone());
+            let round = tokio::spawn(async move {
+                super::poll::round(client, team_id, open, &mut state, sink).await;
+            });
+            team.watching = Some(round.abort_handle());
+        }
+    }
+
     /// Without a live socket for its workspace, the open conversation is
     /// fetched again now and then, so new messages still show up.
     ///
     /// Only one poll runs at a time: under a rate limit one call can take
     /// longer than the poll interval, and stacking more on top would only
     /// deepen the limit.
-    fn poll(&mut self) {
+    fn poll_open(&mut self) {
         if self
             .polling
             .as_ref()
@@ -1447,13 +1522,7 @@ mod tests {
         let boot = tokio::spawn(async {}).abort_handle();
         worker.teams.insert(
             id.to_owned(),
-            Team {
-                client,
-                user_id: "U1".into(),
-                sink,
-                gate,
-                boot,
-            },
+            Team::new(client, "U1".into(), sink, gate, boot),
         );
     }
 

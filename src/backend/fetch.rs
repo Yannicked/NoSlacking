@@ -15,7 +15,8 @@ use crate::model::{Conversation, ConversationKind, Message, Ts, User, Workspace}
 use crate::offline::Cache;
 use crate::slack::{Client, SlackError, types};
 
-const HISTORY_PAGE: u32 = 50;
+/// Messages in a page of history.
+pub(super) const HISTORY_PAGE: u32 = 50;
 /// The most pages read from each listing. Each is far beyond what a
 /// workspace normally has; they only stop a cursor that never ends, and
 /// hitting one is logged.
@@ -701,7 +702,7 @@ pub(super) async fn history(
 
 /// A history page's messages, oldest first, and whether and how to read
 /// on.
-fn history_page(page: types::HistoryPage) -> (Vec<Message>, bool, Option<String>) {
+pub(super) fn history_page(page: types::HistoryPage) -> (Vec<Message>, bool, Option<String>) {
     let cursor = page.response_metadata.cursor();
     let mut messages: Vec<Message> = page
         .messages
