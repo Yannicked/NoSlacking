@@ -476,3 +476,67 @@ sections. Nothing below exists yet.
 - [ ] **Test the batch B features against a real workspace**: presence,
       typing, huddles, the Activity, Threads and Later views (internal
       methods), the proxy and the pop-out window.
+
+## Next, by priority (2026-10-05)
+
+From a review after batch B. Each item says why it sits where it does.
+Code health (splitting `app.rs`, `worker.rs` and `ui/message.rs`, typed
+errors, demo screenshots in CI) is being done first, so it is not listed.
+
+### P1: Don't miss messages
+
+- [ ] **Notify while polling.** Notes come only from `Event::Message`, so
+      when the socket is down, new DMs and mentions in `History` and
+      `Newer` pages are silent. Run the same `note_for` and hooks over
+      messages that a poll finds past the newest one already seen.
+      *The client must not fail quietly at the one thing it is for.*
+- [ ] **Hide Cancel during an upload's last step.** Once
+      `completeUploadExternal` is sent, the upload can't be taken back, so
+      Cancel should go away rather than promise something it can't do.
+      *Small, and a broken promise in the UI.*
+
+### P2: Everyday gaps against the official client
+
+- [ ] **Mark unread** from the message menu and the keyboard (`u`):
+      `conversations.mark` with the `ts` just before the message, and the
+      read line moves locally. *The read-marker plumbing already exists.*
+- [ ] **User-group mentions in the composer.** `<!subteam^…>` is drawn and
+      notified, but `@team` can't be typed. Fetch `usergroups.list`
+      (OAuth needs `usergroups:read`; mind the manifest, as with DND) and
+      add groups to the suggestions.
+- [ ] **Share a message** to another conversation: a picker that posts
+      the permalink with an optional comment, which Slack unfurls.
+- [ ] **Keyboard shortcut sheet** on `Ctrl+/` (⌘/) listing what
+      `ui/keys.rs` and the message focus handle. *Many shortcuts, and
+      nowhere they are listed.*
+- [ ] **Quote Slack permalinks inline.** A link to a message in a known
+      conversation shows that message from local data (or one
+      `conversations.history` call) instead of a bare link.
+
+### P3: Worth having
+
+- [ ] **Interactive Block Kit buttons.** Only link buttons work now
+      (`model.rs` `Button`). Check whether session sign-ins can use the web
+      client's block-action call; otherwise offer "Open in Slack" on
+      messages with interactive blocks.
+- [ ] **Add and edit bookmarks** (`bookmarks.add`, `bookmarks.edit`,
+      `bookmarks.remove`); today they can only be listed.
+- [ ] **Delete your own files** (`files.delete`) from file cards and the
+      channel's Files tab.
+- [ ] **Upload custom emoji** (`emoji.add`, session sign-ins only).
+
+### Blocked or needs a real workspace
+
+These are the open follow-ups above, in the order to take them:
+
+1. Test batch B against a real workspace, and keep the answers as
+   fixtures for parse tests, so a change at Slack fails a test rather than
+   the client.
+2. `conversations.info` and `fatal_error`: log the conversation's kind
+   and flags (shared, archived, external) when it happens.
+3. Test on macOS and Windows; the demo screenshots in CI cover start-up and
+   drawing only.
+4. macOS link events, Dock and taskbar badges, Wayland drops: blocked on
+   `unsafe` code in fastframe or a winit patch.
+5. DND scopes for your-own-app sign-ins: wait for a manifest version bump
+   that also brings `usergroups:read`.
