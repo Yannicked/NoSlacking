@@ -60,6 +60,22 @@ impl Suggestion {
 }
 
 /// What a slash command does, for its suggestion.
+/// Whether this frame's Enter came with Shift: a new line, never a send.
+/// Read from the key's own event, as egui's key matching ignores Shift.
+pub(crate) fn shift_enter(input: &egui::InputState) -> bool {
+    input.events.iter().any(|event| {
+        matches!(
+            event,
+            egui::Event::Key {
+                key: Key::Enter,
+                pressed: true,
+                modifiers,
+                ..
+            } if modifiers.shift
+        )
+    })
+}
+
 fn command_description(name: &str) -> std::borrow::Cow<'static, str> {
     match name {
         "me" => t("Say what you are doing, in italics"),
@@ -365,6 +381,9 @@ pub fn show(
                 draft.dismissed = word.clone();
                 found.clear();
             }
+            // Shift+Enter is a new line, whatever Enter does: egui's own
+            // match ignores Shift, so it is left for the text field.
+            let shift = shift_enter(input);
             if !found.is_empty() {
                 if input.consume_key(Modifiers::NONE, Key::ArrowDown) {
                     draft.selected = (draft.selected + 1) % found.len();
@@ -373,12 +392,12 @@ pub fn show(
                     draft.selected = (draft.selected + found.len() - 1) % found.len();
                 }
                 if input.consume_key(Modifiers::NONE, Key::Tab)
-                    || input.consume_key(Modifiers::NONE, Key::Enter)
+                    || (!shift && input.consume_key(Modifiers::NONE, Key::Enter))
                 {
                     accept = found.get(draft.selected).cloned();
                 }
             } else if composer.enter_sends {
-                if input.consume_key(Modifiers::NONE, Key::Enter) {
+                if !shift && input.consume_key(Modifiers::NONE, Key::Enter) {
                     send = true;
                 }
             } else if input.consume_key(Modifiers::COMMAND, Key::Enter) {
@@ -441,8 +460,10 @@ pub fn show(
         .fill(palette.surface)
         .stroke(Stroke::new(
             1.0,
+            // The accent says where typing goes, as a field you just
+            // opened a conversation into should.
             if focused {
-                palette.secondary
+                palette.accent
             } else {
                 palette.outline
             },
@@ -1140,5 +1161,24 @@ mod tests {
         let starts = standard.iter().take_while(|n| n.starts_with(":ta")).count();
         assert!(starts > 0);
         assert!(standard[starts..].iter().all(|n| !n.starts_with(":ta")));
+    }
+
+    #[test]
+    fn only_an_enter_with_shift_is_a_new_line() {
+        let enter = |modifiers: Modifiers| {
+            let mut input = egui::InputState::default();
+            input.events.push(egui::Event::Key {
+                key: Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            });
+            shift_enter(&input)
+        };
+        assert!(enter(Modifiers::SHIFT));
+        assert!(!enter(Modifiers::NONE));
+        assert!(!enter(Modifiers::COMMAND));
+        assert!(!shift_enter(&egui::InputState::default()));
     }
 }

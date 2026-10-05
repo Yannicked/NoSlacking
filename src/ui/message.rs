@@ -619,7 +619,10 @@ fn edit(
     };
     let (save, cancel) = ui.input_mut(|input| {
         (
-            focused && input.consume_key(save_with, egui::Key::Enter),
+            // Shift+Enter is a new line, as in the composer.
+            focused
+                && !crate::ui::composer::shift_enter(input)
+                && input.consume_key(save_with, egui::Key::Enter),
             // An open dialog takes Esc for itself.
             focused && !row.overlay && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
         )
