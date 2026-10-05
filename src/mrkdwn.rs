@@ -269,9 +269,11 @@ fn is_combining(c: char) -> bool {
     )
 }
 
-/// Whether an emoji code may touch `c`: not glued to a Latin letter or a
-/// digit, so the `:30:` in `10:30:00` stays text. Other scripts write no
-/// spaces between words, so emoji may follow them directly.
+/// Whether an emoji code may start after `c`: not glued to a Latin letter
+/// or a digit, so the `:30:` in `10:30:00` stays text. Other scripts write
+/// no spaces between words, so emoji may follow them directly. Only the
+/// start is checked: Slack draws `:large_green_square:999`, and a time
+/// already fails here, at the digit before its first colon.
 fn emoji_edge(c: Option<char>) -> bool {
     c.is_none_or(|c| !c.is_ascii_alphanumeric())
 }
@@ -392,13 +394,11 @@ fn inline(text: &str, style: Style, out: &mut Vec<Inline>) {
                     len
                 })
             }
-            b':' if emoji_edge(before) => emoji(&text[i..])
-                .filter(|&(_, len)| emoji_edge(text[i + len..].chars().next()))
-                .map(|(name, len)| {
-                    flush(out, text, plain_start, i, style);
-                    out.push(Inline::Emoji(name.to_owned()));
-                    len
-                }),
+            b':' if emoji_edge(before) => emoji(&text[i..]).map(|(name, len)| {
+                flush(out, text, plain_start, i, style);
+                out.push(Inline::Emoji(name.to_owned()));
+                len
+            }),
             _ => None,
         };
         match consumed {
@@ -1076,6 +1076,23 @@ mod tests {
         assert_eq!(
             paragraph(":tada::tada:"),
             [Inline::Emoji("tada".into()), Inline::Emoji("tada".into())]
+        );
+    }
+
+    #[test]
+    fn emoji_may_run_into_the_text_after_them() {
+        assert_eq!(
+            paragraph(":large_blue_square:1000 :large_green_square:999"),
+            [
+                Inline::Emoji("large_blue_square".into()),
+                text("1000 "),
+                Inline::Emoji("large_green_square".into()),
+                text("999"),
+            ]
+        );
+        assert_eq!(
+            paragraph("(:tada:ok)"),
+            [text("("), Inline::Emoji("tada".into()), text("ok)")]
         );
     }
 
