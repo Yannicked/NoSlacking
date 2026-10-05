@@ -474,8 +474,14 @@ fn markup(language: &Language, code: &str, runs: &mut Runs) {
             i = k;
             continue;
         }
+        // Only the next few bytes can hold an entity's `;`; looking further
+        // made a line of `&&&…` search to its end from every `&`.
         if bytes[i] == b'&'
-            && let Some(len) = code[i..].find(';').filter(|&len| (2..12).contains(&len))
+            && let Some(len) = bytes[i..]
+                .iter()
+                .take(12)
+                .position(|&b| b == b';')
+                .filter(|&len| len >= 2)
             && code[i + 1..i + len]
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '#')
@@ -506,6 +512,10 @@ fn ident_len(text: &str, extra: impl Fn(char) -> bool) -> usize {
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
+
+/// The longest `${…}` taken as one variable, in bytes; longer ones are
+/// rare and stay plain.
+const MAX_BRACED: usize = 256;
 
 /// The general lexer: comments, strings, numbers and words.
 fn lex(language: &Language, code: &str, runs: &mut Runs) {
@@ -580,7 +590,13 @@ fn lex(language: &Language, code: &str, runs: &mut Runs) {
         if language.dollar_variables && c == '$' {
             let name = &rest[1..];
             let len = if name.starts_with('{') {
-                name.find('}').map_or(0, |at| at + 1)
+                // On its line and within reach, so a line of `${${${…` is
+                // not searched to its end from every `$`.
+                name.bytes()
+                    .take(MAX_BRACED)
+                    .take_while(|&b| b != b'\n')
+                    .position(|b| b == b'}')
+                    .map_or(0, |at| at + 1)
             } else {
                 ident_len(name, |_| false).max(
                     // `$1`, `$?`, `$@`
@@ -907,6 +923,26 @@ mod tests {
         assert_eq!(marked("js", "x = \"open\ny"), owned(&[("\"open", String)]));
         assert_eq!(marked("c", "/* open"), owned(&[("/* open", Comment)]));
         assert_eq!(marked("js", "`a\nb"), owned(&[("`a\nb", String)]));
+    }
+
+    #[test]
+    fn entities_and_braced_variables_look_only_nearby() {
+        use Kind::*;
+        assert_eq!(
+            marked("html", "a &amp; b &#x27; &toolongtobeone; c"),
+            owned(&[("&amp;", Number), ("&#x27;", Number)])
+        );
+        assert_eq!(
+            marked("bash", "echo ${A:-x} ${B\n}"),
+            owned(&[("echo", Keyword), ("${A:-x}", Type)])
+        );
+        // Each `&` and `${` once searched the rest of the line, so this
+        // much of them took seconds; the `é` keeps the window honest about
+        // characters wider than a byte.
+        let ampersands = "&é".repeat(100_000);
+        assert!(marked("html", &ampersands).is_empty());
+        let dollars = "${".repeat(100_000);
+        assert!(marked("bash", &dollars).is_empty());
     }
 
     #[test]

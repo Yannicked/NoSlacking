@@ -300,7 +300,9 @@ fn flow(
     let workspace = rich.workspace;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
-        let mut previous_newline = false;
+        // A line break first is an empty first line, as after a quote and
+        // a blank line, which keeps its height too.
+        let mut previous_newline = true;
         for inline in inlines {
             let newline = matches!(inline, Inline::Newline);
             match inline {
@@ -370,7 +372,7 @@ fn flow(
                     ));
                 }
                 Inline::Group { id, label } => {
-                    let name = group_name(workspace, id, label.as_deref());
+                    let name = workspace.group_label(id, label.as_deref());
                     ui.add(egui::Label::new(
                         RichText::new(name)
                             .font(theme::medium(size))
@@ -397,16 +399,6 @@ fn flow(
             ));
         }
     });
-}
-
-/// How a user group mention reads: the handle Slack lists now, else the
-/// label the message was sent with, else the bare id.
-fn group_name(workspace: &WorkspaceState, id: &str, label: Option<&str>) -> String {
-    workspace
-        .group(id)
-        .map(|g| format!("@{}", g.handle))
-        .or_else(|| label.map(str::to_owned))
-        .unwrap_or_else(|| format!("@{id}"))
 }
 
 /// Draws `:name:` as the emoji it stands for. Its name shows on hover, and
@@ -456,7 +448,7 @@ fn shorten(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_name, shorten};
+    use super::shorten;
     use crate::app::WorkspaceState;
     use crate::model::{UserGroup, Workspace};
 
@@ -469,16 +461,16 @@ mod tests {
             icon: None,
             user_id: "U0".into(),
         });
-        assert_eq!(group_name(&w, "S1", None), "@S1");
-        assert_eq!(group_name(&w, "S1", Some("@design")), "@design");
+        assert_eq!(w.group_label("S1", None), "@S1");
+        assert_eq!(w.group_label("S1", Some("@design")), "@design");
         w.groups.push(UserGroup {
             id: "S1".into(),
             handle: "design-team".into(),
             name: "Design".into(),
             members: None,
         });
-        assert_eq!(group_name(&w, "S1", None), "@design-team");
-        assert_eq!(group_name(&w, "S1", Some("@design")), "@design-team");
+        assert_eq!(w.group_label("S1", None), "@design-team");
+        assert_eq!(w.group_label("S1", Some("@design")), "@design-team");
     }
 
     #[test]

@@ -20,10 +20,24 @@ use crate::mrkdwn::{Block, Inline, Style, is_openable};
 pub fn blocks(block: &Value) -> Vec<Block> {
     let mut out = Vec::new();
     let mut paragraph = Vec::new();
+    // Whether the last block is a list inside a quote, which the quote or
+    // quoted list right after it continues.
+    let mut quoted_list = false;
     for element in elements(block) {
+        let bordered = kind(element) == "rich_text_list"
+            && element.get("border").and_then(Value::as_u64).unwrap_or(0) > 0;
         match kind(element) {
             "rich_text_section" => {
                 inlines(element, &mut paragraph);
+            }
+            // A list with a border is quoted: Slack draws the quote's bar
+            // beside it.
+            "rich_text_list" if bordered => {
+                flush(&mut paragraph, &mut out);
+                let mut quote = Vec::new();
+                list(element, &mut quote);
+                trim(&mut quote);
+                push_quote(&mut out, quote, true);
             }
             "rich_text_list" => list(element, &mut paragraph),
             "rich_text_quote" => {
@@ -31,9 +45,7 @@ pub fn blocks(block: &Value) -> Vec<Block> {
                 let mut quote = Vec::new();
                 inlines(element, &mut quote);
                 trim(&mut quote);
-                if !quote.is_empty() {
-                    out.push(Block::Quote(quote));
-                }
+                push_quote(&mut out, quote, quoted_list);
             }
             "rich_text_preformatted" => {
                 flush(&mut paragraph, &mut out);
@@ -45,9 +57,25 @@ pub fn blocks(block: &Value) -> Vec<Block> {
             }
             _ => {}
         }
+        quoted_list = bordered;
     }
     flush(&mut paragraph, &mut out);
     out
+}
+
+/// Adds a quote, continuing the quote just before it when `join` says the
+/// two are one: a quote and the quoted list that follows it.
+fn push_quote(out: &mut Vec<Block>, quote: Vec<Inline>, join: bool) {
+    if quote.is_empty() {
+        return;
+    }
+    match out.last_mut() {
+        Some(Block::Quote(previous)) if join => {
+            previous.push(Inline::Newline);
+            previous.extend(quote);
+        }
+        _ => out.push(Block::Quote(quote)),
+    }
 }
 
 fn elements(node: &Value) -> impl Iterator<Item = &Value> {
@@ -96,11 +124,17 @@ fn list(list: &Value, paragraph: &mut Vec<Inline>) {
     }
     let ordered = str_at(list, "style") == Some("ordered");
     let indent = list.get("indent").and_then(Value::as_u64).unwrap_or(0);
-    let first = list.get("offset").and_then(Value::as_u64).unwrap_or(0) + 1;
+    // Bounded, so counting on from a wild offset cannot overflow.
+    let first = list
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(u64::from(u32::MAX))
+        + 1;
     let pad = "    ".repeat(usize::try_from(indent).unwrap_or(0).min(8));
     for (number, item) in (first..).zip(elements(list)) {
         let marker = if ordered {
-            format!("{pad}{number}. ")
+            format!("{pad}{}. ", ordinal(number, indent))
         } else {
             format!("{pad}• ")
         };
@@ -108,6 +142,58 @@ fn list(list: &Value, paragraph: &mut Vec<Inline>) {
         inlines(item, paragraph);
         paragraph.push(Inline::Newline);
     }
+}
+
+/// An ordered list item's number as Slack writes it at an indent: `1.`,
+/// then `a.` one level in, then `i.`, and round again.
+fn ordinal(number: u64, indent: u64) -> String {
+    match indent % 3 {
+        1 => letters(number),
+        2 => roman(number).unwrap_or_else(|| number.to_string()),
+        _ => number.to_string(),
+    }
+}
+
+/// `1` is `a`, `26` is `z`, `27` is `aa`: letters as a spreadsheet counts
+/// its columns, so every number has one.
+fn letters(mut number: u64) -> String {
+    let mut out = Vec::new();
+    while number > 0 {
+        number -= 1;
+        out.push(char::from(b'a' + u8::try_from(number % 26).unwrap_or(0)));
+        number /= 26;
+    }
+    out.iter().rev().collect()
+}
+
+/// Lowercase Roman numerals, which stop at 3999; past that, none.
+fn roman(mut number: u64) -> Option<String> {
+    const NUMERALS: [(u64, &str); 13] = [
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+    if !(1..4000).contains(&number) {
+        return None;
+    }
+    let mut out = String::new();
+    for (value, numeral) in NUMERALS {
+        while number >= value {
+            out.push_str(numeral);
+            number -= value;
+        }
+    }
+    Some(out)
 }
 
 /// A section's (or quote's) inline elements.
@@ -138,7 +224,14 @@ fn inlines(node: &Value, out: &mut Vec<Inline>) {
             }
             "emoji" => {
                 if let Some(name) = str_at(element, "name").filter(|name| !name.is_empty()) {
-                    out.push(Inline::Emoji(emoji_name(name, element)));
+                    // An emoji newer than the table still shows, as the
+                    // characters Slack gave alongside its name.
+                    match emoji_unicode(element) {
+                        Some(text) if crate::emoji::unicode(name, None).is_none() => {
+                            push(out, text, style);
+                        }
+                        _ => out.push(Inline::Emoji(emoji_name(name, element))),
+                    }
                 }
             }
             "user" => {
@@ -187,6 +280,17 @@ fn emoji_name(name: &str, element: &Value) -> String {
         Some(tone @ 2..=6) => format!("{name}::skin-tone-{tone}"),
         _ => name.to_owned(),
     }
+}
+
+/// The characters in an emoji element's `unicode` field, which Slack
+/// writes as code points in hex joined by dashes (`1f44d-1f3fc`), skin tone
+/// included.
+fn emoji_unicode(element: &Value) -> Option<String> {
+    let field = str_at(element, "unicode").filter(|field| !field.is_empty())?;
+    field
+        .split('-')
+        .map(|point| u32::from_str_radix(point, 16).ok().and_then(char::from_u32))
+        .collect()
 }
 
 fn style(element: &Value) -> Style {
@@ -242,7 +346,7 @@ fn plain(node: &Value) -> String {
             "emoji" => {
                 if let Some(name) = str_at(element, "name") {
                     out.push(':');
-                    out.push_str(name);
+                    out.push_str(&emoji_name(name, element));
                     out.push(':');
                 }
             }
@@ -286,6 +390,29 @@ mod tests {
                 Inline::Emoji("+1::skin-tone-3".into()),
             ])]
         );
+    }
+
+    #[test]
+    fn newer_emoji_show_their_unicode_and_code_keeps_tones() {
+        let blocks = read(&section(
+            r#"{"type":"emoji","name":"face_shaking_from_the_future","unicode":"1fae8"},
+               {"type":"emoji","name":"+1","unicode":"1f44d-1f3fc","skin_tone":3},
+               {"type":"emoji","name":"broken","unicode":"zz"}"#,
+        ));
+        assert_eq!(
+            blocks,
+            [Block::Paragraph(vec![
+                text("\u{1fae8}"),
+                Inline::Emoji("+1::skin-tone-3".into()),
+                Inline::Emoji("broken".into()),
+            ])]
+        );
+        let code = read(
+            r#"{"type":"rich_text","elements":[{"type":"rich_text_preformatted","elements":[
+                {"type":"text","text":"ok "},
+                {"type":"emoji","name":"wave","skin_tone":5}]}]}"#,
+        );
+        assert_eq!(code, [Block::Preformatted("ok :wave::skin-tone-5:".into())]);
     }
 
     #[test]
@@ -394,6 +521,60 @@ mod tests {
                 Block::Quote(vec![text("said")]),
                 Block::Paragraph(vec![text("after")]),
                 Block::Preformatted("let x = *y;\nhttps://x.y".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_ordered_lists_count_as_slack_does() {
+        let blocks = read(
+            r#"{"type":"rich_text","elements":[
+                {"type":"rich_text_list","style":"ordered","indent":0,"elements":[
+                    {"type":"rich_text_section","elements":[{"type":"text","text":"top"}]}]},
+                {"type":"rich_text_list","style":"ordered","indent":1,"offset":1,"elements":[
+                    {"type":"rich_text_section","elements":[{"type":"text","text":"b"}]}]},
+                {"type":"rich_text_list","style":"ordered","indent":2,"offset":3,"elements":[
+                    {"type":"rich_text_section","elements":[{"type":"text","text":"iv"}]}]},
+                {"type":"rich_text_list","style":"ordered","indent":3,"elements":[
+                    {"type":"rich_text_section","elements":[{"type":"text","text":"one"}]}]}
+            ]}"#,
+        );
+        assert_eq!(
+            blocks,
+            [Block::Paragraph(vec![
+                text("1. top"),
+                Inline::Newline,
+                text("    b. b"),
+                Inline::Newline,
+                text("        iv. iv"),
+                Inline::Newline,
+                text("            1. one"),
+            ])]
+        );
+        assert_eq!(letters(26), "z");
+        assert_eq!(letters(28), "ab");
+        assert_eq!(roman(1994).as_deref(), Some("mcmxciv"));
+        assert_eq!(ordinal(4000, 2), "4000");
+    }
+
+    #[test]
+    fn lists_with_a_border_are_quoted() {
+        let blocks = read(
+            r#"{"type":"rich_text","elements":[
+                {"type":"rich_text_quote","elements":[{"type":"text","text":"said"}]},
+                {"type":"rich_text_list","style":"bullet","indent":0,"border":1,"elements":[
+                    {"type":"rich_text_section","elements":[{"type":"text","text":"point"}]}]},
+                {"type":"rich_text_section","elements":[{"type":"text","text":"after"}]},
+                {"type":"rich_text_list","style":"ordered","border":1,"elements":[
+                    {"type":"rich_text_section","elements":[{"type":"text","text":"alone"}]}]}
+            ]}"#,
+        );
+        assert_eq!(
+            blocks,
+            [
+                Block::Quote(vec![text("said"), Inline::Newline, text("• point")]),
+                Block::Paragraph(vec![text("after")]),
+                Block::Quote(vec![text("1. alone")]),
             ]
         );
     }

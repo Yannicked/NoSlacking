@@ -191,6 +191,16 @@ impl WorkspaceState {
         self.groups.iter().find(|g| g.id == id)
     }
 
+    /// How a user group mention reads: the handle Slack lists now, else the
+    /// label the message was sent with, else the bare id, so a mention is
+    /// never lost from the text.
+    pub fn group_label(&self, id: &str, label: Option<&str>) -> String {
+        self.group(id)
+            .map(|g| format!("@{}", g.handle))
+            .or_else(|| label.map(str::to_owned))
+            .unwrap_or_else(|| format!("@{id}"))
+    }
+
     pub fn user(&self, id: &str) -> Option<&User> {
         self.users.get(id)
     }

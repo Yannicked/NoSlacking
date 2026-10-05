@@ -84,44 +84,81 @@ pub fn escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The bytes the parser has looked at, so a test can tell linear from
+    /// quadratic work without a clock.
+    static WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts `bytes` of looking at text toward [`WORK`]; nothing outside
+/// tests. Every scan of a line goes through here, so a new one that reads
+/// the rest of the line on each marker shows up as quadratic.
+fn charge(bytes: usize) {
+    #[cfg(test)]
+    WORK.with(|work| work.set(work.get() + bytes));
+    #[cfg(not(test))]
+    let _ = bytes;
+}
+
+/// `haystack.find(needle)`, charging what it reads.
+fn find(haystack: &str, needle: &str) -> Option<usize> {
+    let found = haystack.find(needle);
+    charge(found.map_or(haystack.len(), |at| at + needle.len()));
+    found
+}
+
 /// Parses a message's text into blocks.
 pub fn parse(text: &str) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut rest = text;
+    // Whether the last block is a quote that runs up to `rest`, so a quoted
+    // line there continues it rather than starting another.
+    let mut open = false;
     while !rest.is_empty() {
-        match rest.find("```") {
+        match find(rest, "```") {
             Some(start) => {
                 let (before, after) = rest.split_at(start);
                 let after = &after[3..];
-                match after.find("```") {
+                match find(after, "```") {
                     Some(end) => {
                         let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+                        charge(before.len() - line_start);
                         rest = match quote_marker(&before[line_start..]) {
                             Some(lead) => {
-                                lines(&before[..line_start], &mut blocks);
-                                quoted_fence(lead, &after[..end], &after[end + 3..], &mut blocks)
+                                open = lines(&before[..line_start], &mut blocks, open);
+                                let (rest, still) = quoted_fence(
+                                    lead,
+                                    &after[..end],
+                                    &after[end + 3..],
+                                    &mut blocks,
+                                    open,
+                                );
+                                open = still;
+                                rest
                             }
                             None => {
-                                lines(before, &mut blocks);
+                                lines(before, &mut blocks, open);
                                 let code = after[..end].trim_matches('\n');
                                 blocks.push(Block::Preformatted(unescape(code)));
+                                open = false;
                                 after[end + 3..].trim_start_matches('\n')
                             }
                         };
                     }
                     None => {
-                        lines(rest, &mut blocks);
+                        lines(rest, &mut blocks, open);
                         rest = "";
                     }
                 }
             }
             None => {
-                lines(rest, &mut blocks);
+                lines(rest, &mut blocks, open);
                 rest = "";
             }
         }
     }
-    join_quotes(blocks)
+    blocks
 }
 
 /// A line's text after its quote marker, if it is quoted.
@@ -134,8 +171,16 @@ fn quote_marker(line: &str) -> Option<&str> {
 /// A fence opened on a quoted line (`> ```code```  `): the code stays in
 /// the quote, a line of code at a time, instead of the quote being lost.
 /// `lead` is the quoted text before the fence, `code` what the fence holds
-/// and `after` the text after it. Returns what is left to parse.
-fn quoted_fence<'a>(lead: &str, code: &str, after: &'a str, blocks: &mut Vec<Block>) -> &'a str {
+/// and `after` the text after it; `join` says the quote before the fence
+/// runs up to it. Returns what is left to parse, and whether a quote still
+/// runs up to there.
+fn quoted_fence<'a>(
+    lead: &str,
+    code: &str,
+    after: &'a str,
+    blocks: &mut Vec<Block>,
+    join: bool,
+) -> (&'a str, bool) {
     let mut quote = Vec::new();
     inline(lead, Style::default(), &mut quote);
     // Each line of a quoted block carries its own marker after the first.
@@ -165,67 +210,86 @@ fn quoted_fence<'a>(lead: &str, code: &str, after: &'a str, blocks: &mut Vec<Blo
         quote.push(Inline::Newline);
         inline(tail.trim_start(), Style::default(), &mut quote);
     }
-    if !quote.is_empty() {
-        blocks.push(Block::Quote(quote));
+    if quote.is_empty() {
+        return (rest, join);
     }
-    rest
+    push_quote(blocks, quote, join);
+    (rest, true)
 }
 
-/// Joins quotes that follow each other, which only a quoted fence leaves
-/// apart: the lines before it, the fence and the lines after are one quote.
-fn join_quotes(blocks: Vec<Block>) -> Vec<Block> {
-    let mut joined: Vec<Block> = Vec::with_capacity(blocks.len());
-    for block in blocks {
-        match (joined.last_mut(), block) {
-            (Some(Block::Quote(previous)), Block::Quote(next)) => {
-                previous.push(Inline::Newline);
-                previous.extend(next);
-            }
-            (_, block) => joined.push(block),
+/// Ends a quote. With `join`, it continues the quote before it, which only
+/// a quoted fence splits: the lines before it, the fence and the lines
+/// after are one quote. Quotes a blank line apart stay apart.
+fn push_quote(blocks: &mut Vec<Block>, quote: Vec<Inline>, join: bool) {
+    match blocks.last_mut() {
+        Some(Block::Quote(previous)) if join => {
+            previous.push(Inline::Newline);
+            previous.extend(quote);
         }
+        _ => blocks.push(Block::Quote(quote)),
     }
-    joined
 }
 
-/// Groups lines into paragraphs and quotes.
-fn lines(text: &str, blocks: &mut Vec<Block>) {
+/// Groups lines into paragraphs and quotes. `join` says a quote runs up to
+/// the start of `text`; returns whether one runs to its end.
+fn lines(text: &str, blocks: &mut Vec<Block>, join: bool) -> bool {
     if text.is_empty() {
-        return;
+        return join;
     }
     let text = text.strip_suffix('\n').unwrap_or(text);
+    charge(text.len());
     let mut paragraph: Vec<Inline> = Vec::new();
+    // Whether the paragraph has a line yet, which may be an empty one.
+    let mut started = false;
     let mut quote: Vec<Inline> = Vec::new();
+    // Whether the quote being built continues the one before `text`.
+    let mut quote_joins = join;
+    // Whether no text came since the last quoted line, so a blank line
+    // here sets the text after a quote apart from it.
+    let mut after_quote = join;
     for line in text.split('\n') {
-        let quoted = quote_marker(line);
-        match quoted {
+        match quote_marker(line) {
             Some(inner) => {
+                trim_newline(&mut paragraph);
                 if !paragraph.is_empty() {
-                    trim_newline(&mut paragraph);
                     blocks.push(Block::Paragraph(std::mem::take(&mut paragraph)));
                 }
+                started = false;
                 if !quote.is_empty() {
                     quote.push(Inline::Newline);
                 }
                 inline(inner, Style::default(), &mut quote);
+                after_quote = true;
             }
             None => {
                 if !quote.is_empty() {
-                    blocks.push(Block::Quote(std::mem::take(&mut quote)));
+                    push_quote(blocks, std::mem::take(&mut quote), quote_joins);
                 }
-                if !paragraph.is_empty() {
+                quote_joins = false;
+                if !started && line.is_empty() {
+                    // A blank line before any text is kept only after a
+                    // quote, as the paragraph's first, empty line.
+                    started = after_quote;
+                    continue;
+                }
+                after_quote = false;
+                if started {
                     paragraph.push(Inline::Newline);
                 }
                 inline(line, Style::default(), &mut paragraph);
+                started = true;
             }
         }
     }
-    if !quote.is_empty() {
-        blocks.push(Block::Quote(quote));
+    let open = !quote.is_empty();
+    if open {
+        push_quote(blocks, quote, quote_joins);
     }
+    trim_newline(&mut paragraph);
     if !paragraph.is_empty() {
-        trim_newline(&mut paragraph);
         blocks.push(Block::Paragraph(paragraph));
     }
+    open
 }
 
 fn trim_newline(inlines: &mut Vec<Inline>) {
@@ -305,6 +369,7 @@ impl Marks {
             runs: HashMap::new(),
             closers: [Vec::new(), Vec::new(), Vec::new()],
         };
+        charge(text.len());
         let mut previous: Option<char> = None;
         // The ticks seen in a row so far.
         let mut run = 0;
@@ -334,7 +399,102 @@ impl Marks {
             }
             previous = Some(c);
         }
+        marks.drop_shielded_closers(text);
         marks
+    }
+
+    /// Forgets the closers inside a `<…>` form or a code span, which the
+    /// parser takes whole: the `_` in `_see <https://x.y/a_(b)>_` must not
+    /// end the italics inside the link. Walks the line once, taking the
+    /// forms and spans as the parser does.
+    fn drop_shielded_closers(&mut self, text: &str) {
+        let shields = self.shields(text);
+        if shields.is_empty() {
+            return;
+        }
+        // Both lists are sorted, so one walk along each will do.
+        for closers in &mut self.closers {
+            let mut shield = shields.iter().peekable();
+            closers.retain(|&at| {
+                while shield.next_if(|&&(_, end)| end < at).is_some() {}
+                shield.peek().is_none_or(|&&(start, _)| at < start)
+            });
+        }
+    }
+
+    /// Where the line's `<…>` forms and code spans are, first and last
+    /// byte, in order.
+    fn shields(&self, text: &str) -> Vec<(usize, usize)> {
+        let mut shields: Vec<(usize, usize)> = Vec::new();
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            charge(1);
+            match bytes[i] {
+                b'<' => {
+                    let form = next_at(&self.closes, i + 1)
+                        .filter(|&end| next_at(&self.opens, i + 1).is_none_or(|open| open > end))
+                        // Whether the parser takes it as a form, asked of
+                        // the very code that decides it.
+                        .filter(|&end| {
+                            special(&text[i + 1..end], Style::default(), &mut Vec::new())
+                        });
+                    match form {
+                        Some(end) => {
+                            shields.push((i, end));
+                            i = end + 1;
+                        }
+                        None => i += 1,
+                    }
+                }
+                b'`' => match code(text, i, self) {
+                    Code::Span { len, .. } => {
+                        shields.push((i, i + len - 1));
+                        i += len;
+                    }
+                    Code::Text { len } => i += len,
+                    Code::None => i += 1,
+                },
+                _ => i += 1,
+            }
+        }
+        shields
+    }
+}
+
+/// Where `text` has fenced blocks, code spans and `<…>` forms, first and
+/// last byte, in order: the places where a `:name:` is not an emoji to
+/// touch, found as [`parse`] finds them.
+pub fn shielded(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    let mut rest = text;
+    loop {
+        // The lines up to the next closed fence, then the fence.
+        let fence = find(rest, "```").and_then(|start| {
+            find(&rest[start + 3..], "```").map(|end| (start, start + 3 + end + 3))
+        });
+        let lines_end = fence.map_or(rest.len(), |(start, _)| start);
+        let mut line_start = offset;
+        for line in rest[..lines_end].split('\n') {
+            // The marker is no part of what the line holds.
+            let inner = quote_marker(line).unwrap_or(line);
+            let skip = line_start + line.len() - inner.len();
+            let marks = Marks::new(inner);
+            out.extend(
+                marks
+                    .shields(inner)
+                    .into_iter()
+                    .map(|(start, end)| (start + skip, end + skip)),
+            );
+            line_start += line.len() + 1;
+        }
+        let Some((start, end)) = fence else {
+            return out;
+        };
+        out.push((offset + start, offset + end - 1));
+        offset += end;
+        rest = &rest[end..];
     }
 }
 
@@ -360,6 +520,7 @@ fn inline(text: &str, style: Style, out: &mut Vec<Inline>) {
     let mut i = 0;
     let bytes = text.as_bytes();
     while i < bytes.len() {
+        charge(1);
         let c = bytes[i];
         let before = text[..i].chars().next_back();
         let consumed = match c {
@@ -421,6 +582,7 @@ fn flush(out: &mut Vec<Inline>, text: &str, start: usize, end: usize, style: Sty
 /// What is between the brackets of a `<...>` form, which holds no `<` or
 /// line break. Returns whether it was one; if not, it stays text.
 fn special(inner: &str, style: Style, out: &mut Vec<Inline>) -> bool {
+    charge(inner.len());
     if inner.is_empty() {
         return false;
     }
@@ -503,6 +665,7 @@ fn code<'a>(text: &'a str, at: usize, marks: &Marks) -> Code<'a> {
         .iter()
         .take_while(|&&b| b == b'`')
         .count();
+    charge(run);
     if run == 1 {
         // One tick closes at the next tick, whatever follows it.
         return match next_at(&marks.ticks, at + 1) {
@@ -563,20 +726,27 @@ fn styled<'a>(
 /// `:name:` at the start of `text`: the name and the bytes consumed.
 fn emoji(text: &str) -> Option<(&str, usize)> {
     let after = &text[1..];
-    let mut end = after.find(':')?;
-    // A skin tone is part of the name: `:+1::skin-tone-2:`.
+    let end = find(after, ":")?;
+    // A skin tone is part of the name: `:+1::skin-tone-2:`. A broken one
+    // (`:ok::skin-tone- is fine`) leaves the emoji before it as it was.
     if after[end..].starts_with("::skin-tone-")
-        && let Some(close) = after[end + 2..].find(':')
+        && let Some(close) = find(&after[end + 2..], ":")
+        && is_emoji_name(&after[..end + 2 + close])
     {
-        end = end + 2 + close;
+        let end = end + 2 + close;
+        return Some((&after[..end], end + 2));
     }
     let name = &after[..end];
-    let valid = !name.is_empty()
+    is_emoji_name(name).then_some((name, end + 2))
+}
+
+/// Whether `name` can be the inside of a `:name:` code.
+fn is_emoji_name(name: &str) -> bool {
+    !name.is_empty()
         && name.len() <= 100
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '\'' | ':'));
-    valid.then_some((name, end + 2))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '\'' | ':'))
 }
 
 /// Parsed texts kept between frames, so an immediate-mode view need not
@@ -652,6 +822,9 @@ pub fn plain(text: &str, name_of: impl Fn(&Inline) -> Option<String>) -> String 
                 for inline in &inlines {
                     match inline {
                         Inline::Text(text, _) | Inline::Code(text) => out.push_str(text),
+                        // One space for a run of breaks, or a blank line
+                        // after a quote, which already has its space.
+                        Inline::Newline if out.ends_with(' ') => {}
                         Inline::Newline => out.push(' '),
                         Inline::Link { url, label, .. } => {
                             out.push_str(label.as_deref().unwrap_or(url));
@@ -660,10 +833,14 @@ pub fn plain(text: &str, name_of: impl Fn(&Inline) -> Option<String>) -> String 
                             out.push('@');
                             out.push_str(name);
                         }
-                        Inline::Emoji(name) => match crate::emoji::unicode(name, None) {
-                            Some(unicode) => out.push_str(&unicode),
-                            None => out.push_str(&format!(":{name}:")),
-                        },
+                        Inline::Emoji(name) => {
+                            // The tone is not part of the name the tables know.
+                            let (base, tone) = crate::emoji::split_tone(name);
+                            match crate::emoji::unicode(base, tone) {
+                                Some(unicode) => out.push_str(&unicode),
+                                None => out.push_str(&format!(":{name}:")),
+                            }
+                        }
                         other => out.push_str(&name_of(other).unwrap_or_default()),
                     }
                 }
@@ -858,6 +1035,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn plain_text_keeps_skin_tones() {
+        assert_eq!(
+            plain(":+1::skin-tone-2: :wave::skin-tone-6:", |_| None),
+            "👍🏻 👋🏿"
+        );
+        assert_eq!(
+            plain(":nope::skin-tone-2:", |_| None),
+            ":nope::skin-tone-2:"
+        );
+    }
+
     /// Long lines of markup that never closes. Each used to make every
     /// marker scan the rest of the line: 40 KB of `*a ` took about 600 ms
     /// in a release build.
@@ -883,15 +1072,18 @@ mod tests {
 
     #[test]
     fn long_unclosed_markup_parses_in_linear_time() {
-        // A generous budget for an unoptimized build on a busy machine;
-        // the quadratic parser took many seconds here.
-        let budget = std::time::Duration::from_secs(1);
+        // Counted work instead of a clock: the quadratic parser looked at
+        // each byte about once per marker before it, thousands of times.
         for (name, text) in pathological() {
-            let start = std::time::Instant::now();
+            WORK.with(|work| work.set(0));
             let blocks = parse(&text);
-            let took = start.elapsed();
+            let work = WORK.with(std::cell::Cell::get);
             assert!(!blocks.is_empty(), "{name}");
-            assert!(took < budget, "{name}: {took:?} for {} bytes", text.len());
+            assert!(
+                work <= 16 * text.len(),
+                "{name}: looked at {work} bytes for {}",
+                text.len()
+            );
         }
     }
 
@@ -1009,6 +1201,39 @@ mod tests {
     }
 
     #[test]
+    fn styles_do_not_close_inside_links_or_code() {
+        let italic = Style {
+            italic: true,
+            ..Style::default()
+        };
+        assert_eq!(
+            paragraph("_see <https://en.wikipedia.org/wiki/Mercury_(planet)>_"),
+            [
+                Inline::Text("see ".into(), italic),
+                Inline::Link {
+                    url: "https://en.wikipedia.org/wiki/Mercury_(planet)".into(),
+                    label: None,
+                    style: italic
+                },
+            ]
+        );
+        assert_eq!(
+            paragraph("*run `make all*` first*"),
+            [
+                bold("run "),
+                Inline::Code("make all*".into()),
+                bold(" first")
+            ]
+        );
+        assert_eq!(
+            paragraph("*a ``b* `c``* d"),
+            [bold("a "), Inline::Code("b* `c".into()), text(" d")]
+        );
+        // Brackets that are no form do not shield what is in them.
+        assert_eq!(paragraph("*a < b* > c"), [bold("a < b"), text(" > c")]);
+    }
+
+    #[test]
     fn double_backticks_hold_single_ones() {
         assert_eq!(
             paragraph("run ``a ` b`` now"),
@@ -1017,6 +1242,39 @@ mod tests {
         assert_eq!(paragraph("`` `x` ``"), [Inline::Code("`x`".into())]);
         assert_eq!(paragraph("``unclosed"), [text("``unclosed")]);
         assert_eq!(paragraph("``a`b"), [text("``a`b")]);
+    }
+
+    #[test]
+    fn quotes_a_blank_line_apart_stay_apart() {
+        assert_eq!(
+            parse("&gt; a\n\n&gt; b"),
+            [Block::Quote(vec![text("a")]), Block::Quote(vec![text("b")])]
+        );
+        // The blank line after a quote is kept, as the paragraph's first.
+        assert_eq!(
+            parse("&gt; a\n\nb"),
+            [
+                Block::Quote(vec![text("a")]),
+                Block::Paragraph(vec![Inline::Newline, text("b")])
+            ]
+        );
+        assert_eq!(
+            parse("&gt; a\nb"),
+            [
+                Block::Quote(vec![text("a")]),
+                Block::Paragraph(vec![text("b")])
+            ]
+        );
+        // So is one after a quoted fence.
+        assert_eq!(
+            parse("&gt; ```x```\n\n&gt; b"),
+            [
+                Block::Quote(vec![Inline::Code("x".into())]),
+                Block::Quote(vec![text("b")])
+            ]
+        );
+        assert_eq!(parse("\n\nb"), [Block::Paragraph(vec![text("b")])]);
+        assert_eq!(plain("&gt; a\n\nb", |_| None), "a b");
     }
 
     #[test]
@@ -1076,6 +1334,18 @@ mod tests {
         assert_eq!(
             paragraph(":tada::tada:"),
             [Inline::Emoji("tada".into()), Inline::Emoji("tada".into())]
+        );
+    }
+
+    #[test]
+    fn a_broken_skin_tone_keeps_its_emoji() {
+        assert_eq!(
+            paragraph(":ok::skin-tone- is fine :tada:"),
+            [
+                Inline::Emoji("ok".into()),
+                text(":skin-tone- is fine "),
+                Inline::Emoji("tada".into()),
+            ]
         );
     }
 
@@ -1185,6 +1455,7 @@ mod tests {
             let blocks = parse(&input);
             let _ = only_emoji(&blocks);
             let _ = plain(&input, |_| Some("@someone".into()));
+            let _ = crate::emoji::tone_shortcodes(&input, 3);
             for block in &blocks {
                 if let Block::Paragraph(inlines) | Block::Quote(inlines) = block {
                     assert!(

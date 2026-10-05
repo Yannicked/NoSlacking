@@ -167,7 +167,8 @@ fn parse_time(text: &str) -> Option<Time> {
     let text = text.trim();
     let (hours, minutes) = match text.split_once(':') {
         Some(parts) => parts,
-        None if text.len() == 4 => text.split_at(2),
+        // Checked, because four bytes may be two characters like `1€`.
+        None if text.len() == 4 => text.split_at_checked(2)?,
         None => return None,
     };
     let digits = |s: &str| !s.is_empty() && s.len() <= 2 && s.bytes().all(|b| b.is_ascii_digit());
@@ -236,6 +237,13 @@ mod tests {
             moment("2026-12-31", "09:00", &zone, seconds),
             Err(Problem::TooFar)
         );
+    }
+
+    #[test]
+    fn times_with_other_characters_are_refused_not_a_crash() {
+        for text in ["1€", "1２", "€€", "１２３４", "12€"] {
+            assert_eq!(parse_time(text), None, "{text}");
+        }
     }
 
     #[test]

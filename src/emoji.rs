@@ -61,7 +61,7 @@ impl EmojiSet {
 }
 
 /// `+1::skin-tone-3` is `+1` at the third tone (Slack counts 2 to 6).
-fn split_tone(name: &str) -> (&str, Option<u8>) {
+pub fn split_tone(name: &str) -> (&str, Option<u8>) {
     match name.split_once("::skin-tone-") {
         Some((base, tone)) => (base, tone.parse().ok()),
         None => (name, None),
@@ -175,19 +175,26 @@ pub fn with_tone(emoji: &'static emojis::Emoji, tone: u8) -> &'static str {
 }
 
 /// Gives every `:shortcode:` in wire text that has tones your skin tone,
-/// except in code, where `:+1:` is just text.
+/// except in code, where `:+1:` is just text, and in `<…>` forms, where it
+/// is part of a link or a label.
 pub fn tone_shortcodes(wire: &str, tone: u8) -> String {
     if valid_tone(tone).is_none() || !wire.contains(':') {
         return wire.to_owned();
     }
     let mut out = String::with_capacity(wire.len());
-    let mut in_code = false;
+    let mut shields = crate::mrkdwn::shielded(wire).into_iter().peekable();
     let mut rest = wire;
     while let Some(c) = rest.chars().next() {
-        if c == '`' {
-            in_code = !in_code;
+        let at = wire.len() - rest.len();
+        while shields.next_if(|&(_, end)| end < at).is_some() {}
+        if let Some((_, end)) = shields.next_if(|&(start, _)| start <= at) {
+            // Shields are whole characters, so this cuts at a boundary.
+            let len = end + 1 - at;
+            out.push_str(&rest[..len]);
+            rest = &rest[len..];
+            continue;
         }
-        if c == ':' && !in_code {
+        if c == ':' {
             let after = &rest[1..];
             let name_len = after
                 .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '\'')))
@@ -325,6 +332,24 @@ mod tests {
             ":+1::skin-tone-4: ok :tada: `:+1:` :wave::skin-tone-2: a:+1:"
         );
         assert_eq!(tone_shortcodes(":+1:", 1), ":+1:");
+    }
+
+    #[test]
+    fn your_tone_stays_out_of_code_and_links() {
+        assert_eq!(
+            tone_shortcodes("``a ` :+1: b`` :+1:", 2),
+            "``a ` :+1: b`` :+1::skin-tone-2:"
+        );
+        assert_eq!(
+            tone_shortcodes("<https://x.y/:wave:/|:+1:> :wave:", 3),
+            "<https://x.y/:wave:/|:+1:> :wave::skin-tone-3:"
+        );
+        assert_eq!(
+            tone_shortcodes("```\n:+1:\n``` &gt; `:+1:` :+1:", 4),
+            "```\n:+1:\n``` &gt; `:+1:` :+1::skin-tone-4:"
+        );
+        // A lone tick opens nothing, so what follows still gets the tone.
+        assert_eq!(tone_shortcodes("it`s :+1:", 5), "it`s :+1::skin-tone-5:");
     }
 
     #[test]
