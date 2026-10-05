@@ -563,20 +563,27 @@ fn styled<'a>(
 /// `:name:` at the start of `text`: the name and the bytes consumed.
 fn emoji(text: &str) -> Option<(&str, usize)> {
     let after = &text[1..];
-    let mut end = after.find(':')?;
-    // A skin tone is part of the name: `:+1::skin-tone-2:`.
+    let end = after.find(':')?;
+    // A skin tone is part of the name: `:+1::skin-tone-2:`. A broken one
+    // (`:ok::skin-tone- is fine`) leaves the emoji before it as it was.
     if after[end..].starts_with("::skin-tone-")
         && let Some(close) = after[end + 2..].find(':')
+        && is_emoji_name(&after[..end + 2 + close])
     {
-        end = end + 2 + close;
+        let end = end + 2 + close;
+        return Some((&after[..end], end + 2));
     }
     let name = &after[..end];
-    let valid = !name.is_empty()
+    is_emoji_name(name).then_some((name, end + 2))
+}
+
+/// Whether `name` can be the inside of a `:name:` code.
+fn is_emoji_name(name: &str) -> bool {
+    !name.is_empty()
         && name.len() <= 100
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '\'' | ':'));
-    valid.then_some((name, end + 2))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '\'' | ':'))
 }
 
 /// Parsed texts kept between frames, so an immediate-mode view need not
@@ -1092,6 +1099,18 @@ mod tests {
         assert_eq!(
             paragraph(":tada::tada:"),
             [Inline::Emoji("tada".into()), Inline::Emoji("tada".into())]
+        );
+    }
+
+    #[test]
+    fn a_broken_skin_tone_keeps_its_emoji() {
+        assert_eq!(
+            paragraph(":ok::skin-tone- is fine :tada:"),
+            [
+                Inline::Emoji("ok".into()),
+                text(":skin-tone- is fine "),
+                Inline::Emoji("tada".into()),
+            ]
         );
     }
 
