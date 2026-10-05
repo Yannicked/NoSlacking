@@ -116,11 +116,21 @@ pub fn picture(
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, sense);
     if ui.is_rect_visible(rect) {
-        let image = egui::Image::new(uri).corner_radius(radius);
-        let loaded = image
-            .load_for_size(ui.ctx(), size)
-            .ok()
-            .and_then(|poll| poll.size());
+        let image = egui::Image::new(uri)
+            .corner_radius(radius)
+            .show_loading_spinner(false);
+        let poll = image.load_for_size(ui.ctx(), size);
+        if let Ok(egui::load::TexturePoll::Pending { .. }) = poll {
+            // A faint box with a small spinner: egui's own fills the whole
+            // box, which is loud for a large picture.
+            ui.painter()
+                .rect_filled(rect, radius, ui.visuals().faint_bg_color);
+            let side = rect.width().min(rect.height()).min(24.0);
+            egui::Spinner::new()
+                .size(side)
+                .paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(side)));
+        }
+        let loaded = poll.ok().and_then(|poll| poll.size());
         image.paint_at(ui, contain(rect, loaded));
     }
     response
