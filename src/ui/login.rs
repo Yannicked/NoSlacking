@@ -119,6 +119,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 fn header(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
         ui.horizontal(|ui| {
+            // The app's own icon, from the same SVG the packages install.
+            ui.add(
+                egui::Image::new(egui::include_image!(
+                    "../../packaging/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg"
+                ))
+                .fit_to_exact_size(egui::Vec2::splat(40.0)),
+            );
+            ui.add_space(4.0);
             ui.label(RichText::new("NoSlacking").font(theme::bold(30.0)).color(palette.text));
             if !app.workspaces.is_empty() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
