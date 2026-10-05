@@ -246,6 +246,22 @@ impl Notifier {
     }
 }
 
+/// `text` safe as freedesktop notification markup, where `&`, `<` and
+/// `>` would otherwise start an entity or a tag.
+#[cfg(any(test, not(any(target_os = "macos", windows))))]
+fn escape_markup(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(any(
     target_os = "linux",
     target_os = "freebsd",
@@ -305,17 +321,42 @@ mod platform {
         }
     }
 
+    /// Whether the notification server reads the body as markup. Asked
+    /// once, on the notification thread; a server that cannot be asked is
+    /// taken to read markup, as most do, since escaping text it shows
+    /// literally is far less harm than markup it would follow.
+    #[cfg(not(any(target_os = "macos", windows)))]
+    fn reads_markup() -> bool {
+        static MARKUP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *MARKUP.get_or_init(|| {
+            notify_rust::get_capabilities()
+                .map_or(true, |caps| caps.iter().any(|cap| cap == "body-markup"))
+        })
+    }
+
     pub fn show(
         note: &Note,
         clicked: &mpsc::Sender<Clicked>,
         wake: &Arc<dyn Fn() + Send + Sync>,
         waiting: &Arc<AtomicUsize>,
     ) {
+        // Freedesktop servers that announce `body-markup` read the body as
+        // markup, so plain text has to be escaped: `a < b && c` would break,
+        // and a message could pass off a disguised link. The summary is
+        // always plain text.
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let body = if reads_markup() {
+            super::escape_markup(&note.body)
+        } else {
+            note.body.clone()
+        };
+        #[cfg(any(target_os = "macos", windows))]
+        let body = note.body.clone();
         let mut notification = Notification::new();
         notification
             .appname("NoSlacking")
             .summary(&note.title)
-            .body(&note.body);
+            .body(&body);
         #[cfg(not(any(target_os = "macos", windows)))]
         {
             use notify_rust::Hint;
@@ -439,6 +480,23 @@ mod tests {
 
     fn why(kind: ConversationKind, m: &Message, level: Level) -> Option<Reason> {
         reason(kind, m, &m.text, "U1", level, &["deploy".to_owned()])
+    }
+
+    #[test]
+    fn notification_text_is_never_read_as_markup() {
+        assert_eq!(
+            escape_markup("a < b && c > d"),
+            "a &lt; b &amp;&amp; c &gt; d"
+        );
+        assert_eq!(
+            escape_markup("<a href=\"https://evil\">bank</a>"),
+            "&lt;a href=\"https://evil\"&gt;bank&lt;/a&gt;"
+        );
+        assert_eq!(
+            escape_markup("&amp; stays as typed"),
+            "&amp;amp; stays as typed"
+        );
+        assert_eq!(escape_markup("plain words 👍"), "plain words 👍");
     }
 
     #[test]
