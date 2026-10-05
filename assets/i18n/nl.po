@@ -2057,3 +2057,16 @@ msgstr "Gedeeld in {conversation}"
 
 msgid "Shared"
 msgstr "Gedeeld"
+
+# Keeping you active in Slack.
+msgid "Always show as active"
+msgstr "Altijd als actief tonen"
+
+msgid "While NoSlacking is connected, even when you are not using it. Browser sign-ins only."
+msgstr "Zolang NoSlacking verbonden is, ook als je het niet gebruikt. Alleen bij aanmelden via de browser."
+
+msgid "NoSlacking now keeps you shown as active while it is connected"
+msgstr "NoSlacking toont je nu als actief zolang het verbonden is"
+
+msgid "You are shown as active only while you use NoSlacking"
+msgstr "Je wordt alleen als actief getoond terwijl je NoSlacking gebruikt"

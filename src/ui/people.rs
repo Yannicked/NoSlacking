@@ -86,6 +86,7 @@ pub fn me_button(
     ui: &mut egui::Ui,
     palette: &Palette,
     workspace: &crate::app::WorkspaceState,
+    stay_active: bool,
     actions: &mut Vec<Action>,
 ) {
     let me = &workspace.info.user_id;
@@ -149,6 +150,17 @@ pub fn me_button(
         };
         if ui.button(toggle).clicked() {
             actions.push(Action::People(people::Action::SetAway(!away)));
+            ui.close();
+        }
+        let mut always = stay_active;
+        if ui
+            .checkbox(&mut always, t("Always show as active"))
+            .on_hover_text(t(
+                "While NoSlacking is connected, even when you are not using it. Browser sign-ins only.",
+            ))
+            .changed()
+        {
+            actions.push(Action::People(people::Action::StayActive(always)));
             ui.close();
         }
         ui.separator();

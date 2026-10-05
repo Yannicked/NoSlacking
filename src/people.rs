@@ -202,6 +202,9 @@ pub enum Action {
     },
     /// Shows you as away, or as active again, in the open workspace.
     SetAway(bool),
+    /// Keeps you shown as active for as long as NoSlacking is connected,
+    /// or only while you use it.
+    StayActive(bool),
 }
 
 /// What the interface asks the worker to do for one workspace.
@@ -222,6 +225,47 @@ pub enum Command {
     },
     /// `users.setPresence`: away, or back to automatic.
     SetAway(bool),
+    /// You are using NoSlacking. Slack has no call that marks you active;
+    /// its own apps send a "tickle" over the real-time socket instead, and
+    /// so does this, so your automatic presence stays active. Only a
+    /// browser session's RTM socket can; otherwise nothing happens.
+    Active,
+}
+
+/// How often, at most, Slack hears that you are active: Slack's desktop
+/// app tickles about this often, and it marks you away only after minutes
+/// without one.
+pub const TICKLE_EVERY: Duration = Duration::from_secs(20);
+
+/// Whether this frame's input is you using the app: a key, a click, a
+/// scroll or the pointer moving. Repaints, timers and the like are not.
+pub fn is_activity(events: &[egui::Event]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            egui::Event::Key { pressed: true, .. }
+                | egui::Event::Text(_)
+                | egui::Event::Paste(_)
+                | egui::Event::PointerButton { pressed: true, .. }
+                | egui::Event::PointerMoved(_)
+                | egui::Event::MouseWheel { .. }
+        )
+    })
+}
+
+/// Whether to tell Slack you are active at `now`: never twice within
+/// [`TICKLE_EVERY`]; with `always`, whenever that has passed; otherwise
+/// only after you used the app since the last time.
+pub fn tickle_due(
+    now: Instant,
+    input: Option<Instant>,
+    tickled: Option<Instant>,
+    always: bool,
+) -> bool {
+    if tickled.is_some_and(|at| now.duration_since(at) < TICKLE_EVERY) {
+        return false;
+    }
+    always || input.is_some_and(|input| tickled.is_none_or(|at| input > at))
 }
 
 /// What the worker answers.
@@ -388,6 +432,10 @@ pub struct State {
     /// When you were last said to be typing, by workspace, conversation
     /// and thread.
     typed: HashMap<(String, String, Option<Ts>), Instant>,
+    /// When you last used the app, for [`tickle_due`].
+    input: Option<Instant>,
+    /// When Slack was last told you are active.
+    tickled: Option<Instant>,
     /// The "Set a status" dialog, while open.
     pub status: Option<StatusDialog>,
     /// Your status before the last change, by workspace, to put back if
@@ -396,6 +444,11 @@ pub struct State {
 }
 
 impl State {
+    /// Notes that you used the app at `now`.
+    pub fn saw_input(&mut self, now: Instant) {
+        self.input = Some(now);
+    }
+
     /// Whether a "typing" notice for this place may go out at `now`, and
     /// if so notes that it did. Slack only needs one every few seconds.
     fn may_say_typing(&mut self, place: (String, String, Option<Ts>), now: Instant) -> bool {
@@ -440,6 +493,7 @@ pub fn wanted(workspace: &WorkspaceState, others: &[&str]) -> Vec<String> {
 /// Tells the worker who is on screen in each workspace, when that changed.
 /// Only the workspace you look at is watched; the others stop.
 pub fn frame(app: &mut App, now: Instant) {
+    keep_active(app, now);
     if app
         .people
         .checked
@@ -482,12 +536,46 @@ pub fn frame(app: &mut App, now: Instant) {
     }
 }
 
+/// Tells Slack you are active in every workspace when [`tickle_due`] says
+/// so. With "Stay active" on, the app wakes itself for the next one, as
+/// nothing else may wake it while its window is hidden.
+fn keep_active(app: &mut App, now: Instant) {
+    let always = app.settings.desktop.stay_active;
+    if tickle_due(now, app.people.input, app.people.tickled, always) {
+        app.people.tickled = Some(now);
+        for workspace in app.workspaces.iter().filter(|w| w.signed_out.is_none()) {
+            app.backend.send(backend::Command::People {
+                team: workspace.info.team_id.clone(),
+                command: Command::Active,
+            });
+        }
+    }
+    if always {
+        let since = app
+            .people
+            .tickled
+            .map_or(TICKLE_EVERY, |at| now.duration_since(at));
+        app.waker.wake_after(TICKLE_EVERY.saturating_sub(since));
+    }
+}
+
 /// Applies a view's request.
 pub fn apply(app: &mut App, action: Action) {
     let Some(team) = app.active_team() else {
         return;
     };
     match action {
+        Action::StayActive(on) => {
+            // Every workspace's presence, not the open one's: it is a setting.
+            app.settings.desktop.stay_active = on;
+            app.settings_changed();
+            let said = if on {
+                t("NoSlacking now keeps you shown as active while it is connected")
+            } else {
+                t("You are shown as active only while you use NoSlacking")
+            };
+            app.toast(said.into_owned(), false);
+        }
         Action::EditStatus => {
             let me = app.active_workspace().and_then(|w| w.user(&w.info.user_id));
             let emoji =
@@ -642,6 +730,42 @@ fn presence_of(away: bool) -> Presence {
 mod tests {
     use super::*;
     use crate::model::{Conversation, Ts, User, Workspace};
+
+    #[test]
+    fn slack_hears_you_are_active_after_you_use_the_app() {
+        let start = Instant::now();
+        let at = |s: u64| start + Duration::from_secs(s);
+        // Never used: nothing, unless always active.
+        assert!(!tickle_due(at(0), None, None, false));
+        assert!(tickle_due(at(0), None, None, true));
+        // Used: once, then not again within the interval.
+        assert!(tickle_due(at(1), Some(at(1)), None, false));
+        assert!(!tickle_due(at(10), Some(at(9)), Some(at(1)), false));
+        // After it, only if used again since the last tickle.
+        assert!(tickle_due(at(30), Some(at(25)), Some(at(1)), false));
+        assert!(!tickle_due(at(30), Some(at(0)), Some(at(1)), false));
+        // Always active: whenever the interval has passed.
+        assert!(!tickle_due(at(10), None, Some(at(1)), true));
+        assert!(tickle_due(at(21), None, Some(at(1)), true));
+    }
+
+    #[test]
+    fn using_the_app_is_input_not_repaints() {
+        assert!(!is_activity(&[]));
+        assert!(!is_activity(&[egui::Event::WindowFocused(true)]));
+        assert!(is_activity(&[egui::Event::PointerMoved(egui::pos2(
+            1.0, 1.0
+        ))]));
+        assert!(is_activity(&[egui::Event::Text("a".into())]));
+        let released = egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        assert!(!is_activity(&[released]));
+    }
 
     fn dm(id: &str, user: &str, latest: &str) -> Conversation {
         Conversation {
