@@ -528,22 +528,44 @@ pub fn candidates(workspace: &WorkspaceState) -> Vec<Candidate> {
         .collect()
 }
 
+/// Changes whenever what [`candidates`] gives for `workspace` may have:
+/// a conversation's name, unread state, newest message or archiving, or
+/// the people DMs are titled by. Far cheaper than the candidates
+/// themselves, so a picker can keep its matches until it changes.
+pub fn candidates_fingerprint(workspace: &WorkspaceState) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (workspace.users.len(), workspace.users_version()).hash(&mut hasher);
+    for c in &workspace.conversations {
+        (
+            &c.id,
+            &c.name,
+            &c.user,
+            c.archived,
+            c.has_unread(),
+            &c.latest,
+        )
+            .hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 /// The conversations whose title holds `query`, best first: titles that
 /// start with it, then unread ones, then the busiest lately.
 pub fn conversations_matching(candidates: Vec<Candidate>, query: &str) -> Vec<Candidate> {
     let needle = query.trim().trim_start_matches(['#', '@']).to_lowercase();
-    let mut found: Vec<Candidate> = candidates
+    // Each title lowered once, not again in every comparison of the sort.
+    let mut found: Vec<(bool, Candidate)> = candidates
         .into_iter()
-        .filter(|c| needle.is_empty() || c.title.to_lowercase().contains(&needle))
+        .filter_map(|c| {
+            let title = c.title.to_lowercase();
+            title
+                .contains(&needle)
+                .then(|| (!title.starts_with(&needle), c))
+        })
         .collect();
-    found.sort_by_key(|c| {
-        (
-            !c.title.to_lowercase().starts_with(&needle),
-            !c.unread,
-            std::cmp::Reverse(c.latest),
-        )
-    });
-    found
+    found.sort_by_key(|(later, c)| (*later, !c.unread, std::cmp::Reverse(c.latest)));
+    found.into_iter().map(|(_, c)| c).collect()
 }
 
 /// Why a channel name cannot be used.
@@ -1334,5 +1356,42 @@ mod tests {
             ["C3", "C1", "C4", "C2"],
             "unread and busiest first without a query"
         );
+    }
+
+    #[test]
+    fn the_fingerprint_follows_what_pickers_list() {
+        let mut workspace = WorkspaceState::new(Workspace {
+            team_id: "T1".into(),
+            name: "Acme".into(),
+            domain: "acme".into(),
+            icon: None,
+            user_id: "U0".into(),
+        });
+        workspace.conversations.push(Conversation {
+            id: "C1".into(),
+            name: "general".into(),
+            kind: ConversationKind::Channel,
+            user: None,
+            topic: String::new(),
+            purpose: String::new(),
+            members: None,
+            archived: false,
+            last_read: Some(Ts::new("1.0")),
+            latest: Some(Ts::new("1.0")),
+            unread: 0,
+            mentions: 0,
+            external: false,
+        });
+        let first = candidates_fingerprint(&workspace);
+        assert_eq!(candidates_fingerprint(&workspace), first);
+        // A topic is not listed: no reason to search again.
+        workspace.conversations[0].topic = "news".into();
+        assert_eq!(candidates_fingerprint(&workspace), first);
+        // A new message makes it unread and moves it up.
+        workspace.conversations[0].latest = Some(Ts::new("2.0"));
+        let unread = candidates_fingerprint(&workspace);
+        assert_ne!(unread, first);
+        workspace.conversations[0].archived = true;
+        assert_ne!(candidates_fingerprint(&workspace), unread);
     }
 }

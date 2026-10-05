@@ -10,7 +10,7 @@ use crate::app::{App, WorkspaceState};
 use crate::failure::Failure;
 use crate::i18n::{t, tf, tn};
 use crate::model::{Action, ConversationKind};
-use crate::search::{Heading, Hit, Scope, Sort};
+use crate::search::{Heading, Hit, Query, Scope, Sort};
 use crate::theme::{self, Icon, Palette};
 
 /// The results list's tallest.
@@ -136,11 +136,14 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         heading(ui, &palette, workspace, &group.heading, &search.hits);
                         for &index in &group.hits {
                             let selected = position == search.selected;
+                            let hit = &search.hits[index];
+                            let text = prepared(ui.ctx(), workspace, search.query.as_ref(), hit);
                             let row = hit_row(
                                 ui,
                                 &palette,
                                 workspace,
-                                &search.hits[index],
+                                hit,
+                                &text,
                                 selected,
                                 search.sort,
                             );
@@ -288,12 +291,66 @@ fn conversation_label(workspace: &WorkspaceState, id: Option<&str>, name: &str) 
     }
 }
 
+/// A result's text made ready to draw.
+#[derive(Debug)]
+struct Prepared {
+    /// The text in pieces, the matching ones flagged.
+    segments: Vec<(String, bool)>,
+    /// The text as a screen reader reads it, without the match markers.
+    spoken: String,
+}
+
+/// The prepared texts of one search's results, kept in egui's memory.
+#[derive(Clone, Default)]
+struct Texts {
+    /// The query, and the people's count and version, they were made for:
+    /// people are named in the text.
+    stamp: Option<(Query, usize, u64)>,
+    texts: std::collections::HashMap<String, std::sync::Arc<Prepared>>,
+}
+
+/// `hit`'s text, worked out once per result rather than on every frame:
+/// turning mrkdwn into plain words for each result, each frame, slowed a
+/// long list of results.
+fn prepared(
+    ctx: &egui::Context,
+    workspace: &WorkspaceState,
+    query: Option<&Query>,
+    hit: &Hit,
+) -> std::sync::Arc<Prepared> {
+    let stamp = query.map(|q| (q.clone(), workspace.users.len(), workspace.users_version()));
+    ctx.data_mut(|d| {
+        let memo = d.get_temp_mut_or_default::<Texts>(egui::Id::new("search-texts"));
+        if memo.stamp != stamp {
+            memo.stamp = stamp;
+            memo.texts.clear();
+        }
+        memo.texts
+            .entry(hit.key.clone())
+            .or_insert_with(|| {
+                let text = match &hit.file {
+                    Some(file) => {
+                        let size = super::file_size(file.size);
+                        format!("{} · {size}", hit.text)
+                    }
+                    None => plain(workspace, &hit.text),
+                };
+                std::sync::Arc::new(Prepared {
+                    segments: crate::search::segments(&text),
+                    spoken: crate::search::unmarked(&hit.text),
+                })
+            })
+            .clone()
+    })
+}
+
 /// One result: who and when, and the text with its matches lit up.
 fn hit_row(
     ui: &mut egui::Ui,
     palette: &Palette,
     workspace: &WorkspaceState,
     hit: &Hit,
+    text: &Prepared,
     selected: bool,
     sort: Sort,
 ) -> egui::Response {
@@ -386,14 +443,7 @@ fn hit_row(
                             );
                         }
                     });
-                    let text = match &hit.file {
-                        Some(file) => {
-                            let size = super::file_size(file.size);
-                            format!("{} · {size}", hit.text)
-                        }
-                        None => plain(workspace, &hit.text),
-                    };
-                    let mut job = highlighted(&text, palette, ui.available_width());
+                    let mut job = highlighted(&text.segments, palette, ui.available_width());
                     job.wrap.max_rows = 3;
                     ui.label(job);
                 });
@@ -422,7 +472,7 @@ fn hit_row(
     theme::describe(
         &response,
         egui::WidgetType::Button,
-        &format!("{author}: {}", crate::search::unmarked(&hit.text)),
+        &format!("{author}: {}", text.spoken),
     );
     response
 }
@@ -444,12 +494,12 @@ fn plain(workspace: &WorkspaceState, text: &str) -> String {
     })
 }
 
-/// Text laid out with its matching words lit up.
-fn highlighted(text: &str, palette: &Palette, width: f32) -> LayoutJob {
+/// Text in `segments` laid out with its matching words lit up.
+fn highlighted(segments: &[(String, bool)], palette: &Palette, width: f32) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = width;
-    for (piece, matched) in crate::search::segments(text) {
-        let format = if matched {
+    for (piece, matched) in segments {
+        let format = if *matched {
             TextFormat {
                 font_id: theme::semibold(13.5),
                 color: palette.text,
@@ -463,7 +513,7 @@ fn highlighted(text: &str, palette: &Palette, width: f32) -> LayoutJob {
                 ..TextFormat::default()
             }
         };
-        job.append(&piece, 0.0, format);
+        job.append(piece, 0.0, format);
     }
     job
 }

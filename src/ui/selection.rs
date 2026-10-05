@@ -303,7 +303,7 @@ fn empty_composer(app: &App, ctx: &egui::Context) -> Option<bool> {
 /// Takes a key press with exactly `modifiers`. egui's own `consume_key`
 /// also matches with Shift or Alt held, which would steal Alt+↑ (next
 /// conversation) and Shift+↑.
-fn take(input: &mut egui::InputState, key: Key, modifiers: Modifiers) -> bool {
+pub(super) fn take(input: &mut egui::InputState, key: Key, modifiers: Modifiers) -> bool {
     let mut found = false;
     input.events.retain(|event| {
         let hit = matches!(

@@ -416,8 +416,8 @@ pub fn show(
                     thread: composer.thread.clone(),
                 });
             }
-            // Files copied in a file manager paste as their paths: upload
-            // them instead of typing the paths into the message.
+            // Files copied in a file manager paste as `file://` addresses:
+            // upload them instead of typing the addresses into the message.
             input.events.retain(|event| {
                 let egui::Event::Paste(text) = event else {
                     return true;
@@ -444,15 +444,18 @@ pub fn show(
             // Shift+Enter is a new line, whatever Enter does: egui's own
             // match ignores Shift, so it is left for the text field.
             let shift = shift_enter(input);
+            // The list's keys take no modifiers: egui's own match would
+            // also take Alt+↑ (next conversation) and Alt+Enter.
+            let take = super::selection::take;
             if !found.is_empty() {
-                if input.consume_key(Modifiers::NONE, Key::ArrowDown) {
+                if take(input, Key::ArrowDown, Modifiers::NONE) {
                     draft.selected = (draft.selected + 1) % found.len();
                 }
-                if input.consume_key(Modifiers::NONE, Key::ArrowUp) {
+                if take(input, Key::ArrowUp, Modifiers::NONE) {
                     draft.selected = (draft.selected + found.len() - 1) % found.len();
                 }
-                if input.consume_key(Modifiers::NONE, Key::Tab)
-                    || (!shift && input.consume_key(Modifiers::NONE, Key::Enter))
+                if take(input, Key::Tab, Modifiers::NONE)
+                    || (!shift && take(input, Key::Enter, Modifiers::NONE))
                 {
                     accept = found.get(draft.selected).cloned();
                 }
@@ -465,7 +468,7 @@ pub fn show(
             }
             if draft.text.is_empty()
                 && composer.thread.is_none()
-                && input.consume_key(Modifiers::NONE, Key::ArrowUp)
+                && take(input, Key::ArrowUp, Modifiers::NONE)
             {
                 actions.push(Action::EditLast);
             }
@@ -530,6 +533,9 @@ pub fn show(
                 .set_char_range(Some(CCursorRange::one(CCursor::new(at))));
             state.store(ui.ctx(), id);
         }
+        // A click on the list took the focus: give it back, so typing
+        // goes on after the inserted name.
+        ui.memory_mut(|m| m.request_focus(id));
     }
 
     uploads(ui, composer, actions);
@@ -613,6 +619,14 @@ pub fn show(
                     draft.text.push(' ');
                 }
                 draft.text.push('@');
+                // The cursor goes after the @, where the name is typed
+                // and where the suggestions look for it.
+                let end = draft.text.chars().count();
+                let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+                state
+                    .cursor
+                    .set_char_range(Some(CCursorRange::one(CCursor::new(end))));
+                state.store(ui.ctx(), id);
                 ui.memory_mut(|m| m.request_focus(id));
             }
             let tip = if bar_open {

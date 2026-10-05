@@ -5,35 +5,32 @@
 //! (through arboard, which egui-winit already uses for text) and writes it
 //! out as a PNG the upload can stream like any other file.
 //!
-//! Files copied in a file manager arrive as text (`file:///…` or plain
-//! paths), which [`pasted_files`] recognises so they upload instead of
-//! landing in the message. On Wayland, where dropping files on the window
+//! Files copied in a file manager arrive as text (`file:///…` addresses),
+//! which [`pasted_files`] recognises so they upload instead of landing in
+//! the message. On Wayland, where dropping files on the window
 //! does not reach the app, this is how a file gets in without the picker.
 
 use std::path::{Path, PathBuf};
 
 /// The files pasted text names, when it names nothing but files that
-/// exist: one per line, as `file://` addresses (a file manager's copy) or
-/// absolute paths. GNOME's form starts with a `copy` or `cut` line, and
-/// `text/uri-list` allows `#` comments. Anything else is ordinary text.
+/// exist: one per line, as `file://` addresses (a file manager's copy).
+/// GNOME's form starts with a `copy` or `cut` line, and `text/uri-list`
+/// allows `#` comments. Anything else is ordinary text, plain paths too:
+/// pasting `~/.ssh/id_rsa`'s path to talk about it must not stage the key.
 pub fn pasted_files(text: &str) -> Option<Vec<PathBuf>> {
     let mut files = Vec::new();
     for (i, line) in text.lines().map(str::trim).enumerate() {
         if line.is_empty() || line.starts_with('#') || (i == 0 && matches!(line, "copy" | "cut")) {
             continue;
         }
-        let path = match line.strip_prefix("file://") {
-            // `file:///home/…` or `file://localhost/home/…`, percent-encoded.
-            Some(rest) => {
-                let rest = rest.strip_prefix("localhost").unwrap_or(rest);
-                if !rest.starts_with('/') {
-                    return None;
-                }
-                let decoded = urlencoding::decode(rest).ok()?;
-                PathBuf::from(windows_drive(&decoded).unwrap_or(&decoded))
-            }
-            None => PathBuf::from(line),
-        };
+        // `file:///home/…` or `file://localhost/home/…`, percent-encoded.
+        let rest = line.strip_prefix("file://")?;
+        let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+        if !rest.starts_with('/') {
+            return None;
+        }
+        let decoded = urlencoding::decode(rest).ok()?;
+        let path = PathBuf::from(windows_drive(&decoded).unwrap_or(&decoded));
         if !path.is_absolute() || !path.is_file() {
             return None;
         }
@@ -202,15 +199,14 @@ mod tests {
             pasted_files(&format!("copy\n{}", uri(&a))),
             Some(vec![a.clone()])
         );
-        assert_eq!(
-            pasted_files(&b.display().to_string()),
-            Some(vec![b.clone()])
-        );
-        // Ordinary text, a missing file, a folder or a relative path stays text.
+        // Ordinary text, a plain path (even to a file that exists), a
+        // missing file, a folder or a relative path stays text.
+        assert_eq!(pasted_files(&b.display().to_string()), None);
+        assert_eq!(pasted_files(&format!("{}\n{}", uri(&a), b.display())), None);
         assert_eq!(pasted_files("hello world"), None);
         assert_eq!(pasted_files(&format!("{} and more", b.display())), None);
         assert_eq!(pasted_files("file:///no/such/file.png"), None);
-        assert_eq!(pasted_files(&dir.0.display().to_string()), None);
+        assert_eq!(pasted_files(&uri(&dir.0)), None);
         assert_eq!(pasted_files("notes.txt"), None);
         assert_eq!(pasted_files(""), None);
     }

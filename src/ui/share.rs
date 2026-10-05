@@ -29,13 +29,15 @@ pub fn dialog(app: &mut App, ctx: &egui::Context) {
     };
     let author = workspace.author(message);
     let preview = crate::share::preview(&super::message::plain_text(workspace, message), 3);
-    let candidates = crate::convos::candidates(workspace)
-        .into_iter()
-        // Nothing can be posted to an archived channel.
-        .filter(|c| !c.archived)
-        .collect();
-    let mut matches = crate::convos::conversations_matching(candidates, &share.query);
-    matches.truncate(SHOWN);
+    // Nothing can be posted to an archived channel.
+    let matches = super::overlays::matching(
+        ctx,
+        "share",
+        workspace,
+        &share.query,
+        |c| !c.archived,
+        SHOWN,
+    );
     let comment_id = egui::Id::new("share-comment");
     let in_comment = ctx.memory(|m| m.has_focus(comment_id));
     let (down, up, enter, escape) = ctx.input_mut(|input| {
