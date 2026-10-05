@@ -293,4 +293,25 @@ mod tests {
             .replace('\n', "\\n");
         po.contains(&format!("msgid \"{escaped}\"\n"))
     }
+
+    /// The check `build.rs` runs on every catalog. Included rather than
+    /// declared with `#[path]`, which inside `tests` would look under a
+    /// `src/i18n/tests/` folder that does not exist.
+    mod po {
+        include!("../build/po.rs");
+    }
+
+    #[test]
+    fn a_comment_glued_to_an_entry_is_caught() {
+        let glued = "msgid \"a\"\nmsgstr \"b\"\n# About c.\nmsgid \"c\"\nmsgstr \"d\"\n";
+        assert_eq!(po::glued_comments(glued), [3]);
+        // A blank line, or a comment under a comment, is the right shape.
+        let fine = "# Header\n#, fuzzy\nmsgid \"a\"\nmsgstr \"b\"\n\n# About c.\nmsgid \"c\"\n";
+        assert!(po::glued_comments(fine).is_empty());
+        // Trailing spaces still count as a blank line, and CRLF as a break.
+        assert!(po::glued_comments("msgstr \"b\"\r\n  \r\n# c\r\n").is_empty());
+        assert_eq!(po::glued_comments("msgstr \"b\"\r\n# c\r\n"), [2]);
+        let real = include_str!("../assets/i18n/nl.po");
+        assert_eq!(po::glued_comments(real), Vec::<usize>::new());
+    }
 }
