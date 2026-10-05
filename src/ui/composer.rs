@@ -530,6 +530,9 @@ pub fn show(
                 .set_char_range(Some(CCursorRange::one(CCursor::new(at))));
             state.store(ui.ctx(), id);
         }
+        // A click on the list took the focus: give it back, so typing
+        // goes on after the inserted name.
+        ui.memory_mut(|m| m.request_focus(id));
     }
 
     uploads(ui, composer, actions);
