@@ -96,6 +96,11 @@ impl App {
                     workspace.emoji = EmojiSet::new(emoji);
                 }
             }
+            Event::UserGroups { team, groups } => {
+                if let Some(workspace) = self.workspace_mut(&team) {
+                    workspace.groups = groups;
+                }
+            }
             // Messages and read state.
             Event::History {
                 team,

@@ -1063,6 +1063,47 @@ pub struct EmojiList {
     pub emoji: std::collections::HashMap<String, String>,
 }
 
+/// `usergroups.list`'s answer.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct UserGroupList {
+    pub usergroups: Vec<UserGroup>,
+}
+
+/// One user group, as `usergroups.list` describes it.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct UserGroup {
+    pub id: String,
+    pub handle: String,
+    pub name: String,
+    /// A number, though some answers send it as a string.
+    pub user_count: Value,
+    /// Non-zero once the group is disabled.
+    pub date_delete: i64,
+}
+
+impl UserGroupList {
+    /// The groups you can mention. Disabled ones and any without a handle
+    /// are left out, as typing them would reach no one.
+    pub fn into_model(self) -> Vec<model::UserGroup> {
+        self.usergroups
+            .into_iter()
+            .filter(|g| !g.id.is_empty() && !g.handle.is_empty() && g.date_delete == 0)
+            .map(|g| model::UserGroup {
+                members: g
+                    .user_count
+                    .as_u64()
+                    .or_else(|| g.user_count.as_str().and_then(|s| s.parse().ok()))
+                    .and_then(|n| usize::try_from(n).ok()),
+                id: g.id,
+                handle: g.handle,
+                name: g.name,
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Posted {
@@ -1144,6 +1185,42 @@ pub struct Authorization {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_groups_keep_the_ones_you_can_mention() {
+        // Shaped like Slack's documented answer, trimmed.
+        let list: UserGroupList = serde_json::from_str(
+            r#"{"ok":true,"usergroups":[
+                {"id":"S0614TZR7","team_id":"T060RNRCH","is_usergroup":true,
+                 "name":"Team Admins","description":"A group of all Administrators",
+                 "handle":"admins","is_external":false,"date_create":1446598059,
+                 "date_update":1446670362,"date_delete":0,"auto_type":"admin",
+                 "created_by":"USLACKBOT","updated_by":"U060RNRCZ","deleted_by":null,
+                 "prefs":{"channels":[],"groups":[]},"user_count":2},
+                {"id":"S06158AV7","name":"Team Owners","handle":"owners","user_count":"1"},
+                {"id":"S0615G0KT","name":"Old","handle":"old","date_delete":1446746793},
+                {"id":"S0615G0KU","name":"No handle","handle":""}
+            ]}"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            list.into_model(),
+            [
+                model::UserGroup {
+                    id: "S0614TZR7".into(),
+                    handle: "admins".into(),
+                    name: "Team Admins".into(),
+                    members: Some(2),
+                },
+                model::UserGroup {
+                    id: "S06158AV7".into(),
+                    handle: "owners".into(),
+                    name: "Team Owners".into(),
+                    members: Some(1),
+                },
+            ]
+        );
+    }
 
     #[test]
     fn unsent_section_channels_are_counted() {

@@ -13,7 +13,7 @@ use crate::failure::Failure;
 use crate::i18n::t;
 use crate::model::{
     Bot, Conversation, ConversationKind, Delivery, KitBlock, Message, SidebarSection, Timeline, Ts,
-    User, Workspace,
+    User, UserGroup, Workspace,
 };
 use crate::settings::Settings;
 
@@ -27,6 +27,9 @@ pub struct WorkspaceState {
     /// Your Slack sidebar sections, when Slack shares them (sessions).
     pub sections: Option<Vec<SidebarSection>>,
     pub emoji: EmojiSet,
+    /// User groups you can mention. Empty when the sign-in may
+    /// not list them, which leaves group mentions out of the suggestions.
+    pub groups: Vec<UserGroup>,
     pub timelines: HashMap<String, Timeline>,
     pub threads: HashMap<(String, Ts), Timeline>,
     pub active: Option<String>,
@@ -68,6 +71,7 @@ impl WorkspaceState {
             bots: HashMap::new(),
             sections: None,
             emoji: EmojiSet::default(),
+            groups: Vec::new(),
             timelines: HashMap::new(),
             threads: HashMap::new(),
             active: None,
@@ -141,6 +145,11 @@ impl WorkspaceState {
     pub fn find_message(&self, channel: &str, ts: &Ts) -> Option<&Message> {
         self.timelines_for(channel)
             .find_map(|t| t.messages.iter().find(|m| m.ts == *ts))
+    }
+
+    /// The user group with this id, if Slack listed it.
+    pub fn group(&self, id: &str) -> Option<&UserGroup> {
+        self.groups.iter().find(|g| g.id == id)
     }
 
     pub fn user(&self, id: &str) -> Option<&User> {
@@ -249,6 +258,7 @@ impl WorkspaceState {
     pub fn editable(&self, wire: &str) -> (String, Vec<(String, String)>) {
         to_editable(wire, |sigil, id| match sigil {
             '@' => self.users.get(id).map(|u| u.label().to_owned()),
+            '^' => self.group(id).map(|g| g.handle.clone()),
             _ => self.conversation(id).map(|c| self.title(c)),
         })
     }

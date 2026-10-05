@@ -221,6 +221,20 @@ impl User {
     }
 }
 
+/// A user group (`@design`), which a message can mention to reach all of
+/// its members at once.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UserGroup {
+    /// Slack's id (`S123`), which mentions carry.
+    pub id: String,
+    /// What you type after `@` to mention it (`design`).
+    pub handle: String,
+    /// Its full name (`Design team`).
+    pub name: String,
+    /// How many people are in it, when Slack says.
+    pub members: Option<usize>,
+}
+
 /// What a sidebar section holds, as Slack types them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SectionKind {

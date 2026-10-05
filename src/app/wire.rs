@@ -90,9 +90,10 @@ impl Piece {
 /// A sent message's text as you would type it, and the mentions that turn
 /// it back into the same markup through [`to_wire`].
 ///
-/// People and channels show as `@name` and `#name`. A link shows its label
-/// when that is unique in the text, and its address otherwise. `name_of`
-/// names a person (`'@'`) or a channel (`'#'`) by id.
+/// People, channels and user groups show as `@name`, `#name` and `@handle`.
+/// A link shows its label when that is unique in the text, and its address
+/// otherwise. `name_of` names a person (`'@'`), a channel (`'#'`) or a user
+/// group (`'^'`, its handle) by id.
 pub fn to_editable(
     wire: &str,
     name_of: impl Fn(char, &str) -> Option<String>,
@@ -132,12 +133,22 @@ pub fn to_editable(
             Piece::markup(format!("@{}", name('@', id)), raw)
         } else if let Some(id) = target.strip_prefix('#') {
             Piece::markup(format!("#{}", name('#', id)), raw)
+        } else if let Some(id) = target.strip_prefix("!subteam^") {
+            // The handle Slack lists now, else the label it was sent with.
+            let handle = name_of('^', id)
+                .or_else(|| {
+                    label
+                        .as_deref()
+                        .map(|l| l.trim_start_matches('@').to_owned())
+                })
+                .unwrap_or_else(|| id.to_owned());
+            Piece::markup(format!("@{handle}"), raw)
         } else if let Some(command) = target.strip_prefix('!') {
             let word = command.split('^').next().unwrap_or(command);
             match BROADCASTS.iter().find(|(typed, _)| typed[1..] == *word) {
                 // Typing these brings them back.
                 Some((typed, _)) => Piece::text(typed),
-                // User groups and dates: their label stands for them.
+                // Dates and the like: their label stands for them.
                 None => Piece::markup(label.clone().unwrap_or_else(|| format!("@{word}")), raw),
             }
         } else {
@@ -225,8 +236,29 @@ mod tests {
         match (sigil, id) {
             ('@', "U1") => Some("Ann Lee".into()),
             ('#', "C1") => Some("general".into()),
+            ('^', "S2") => Some("ops".into()),
             _ => None,
         }
+    }
+
+    #[test]
+    fn group_mentions_round_trip_next_to_people() {
+        // As the composer records a picked group and a picked person.
+        let mentions = vec![
+            ("@ops".to_owned(), "<!subteam^S2|@ops>".to_owned()),
+            ("@Ann Lee".to_owned(), "<@U1>".to_owned()),
+        ];
+        let wire = to_wire("@ops and @Ann Lee, not @opsy", &mentions);
+        assert_eq!(wire, "<!subteam^S2|@ops> and <@U1>, not @opsy");
+        let (text, again) = to_editable(&wire, names);
+        assert_eq!(text, "@ops and @Ann Lee, not @opsy");
+        assert_eq!(to_wire(&text, &again), wire);
+        // A group sent without a label takes its handle from the list, and
+        // an unknown one keeps its id; both go back out unchanged.
+        let bare = "<!subteam^S2> <!subteam^S9>";
+        let (text, again) = to_editable(bare, names);
+        assert_eq!(text, "@ops @S9");
+        assert_eq!(to_wire(&text, &again), bare);
     }
 
     #[test]
