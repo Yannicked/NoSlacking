@@ -416,8 +416,8 @@ pub fn show(
                     thread: composer.thread.clone(),
                 });
             }
-            // Files copied in a file manager paste as their paths: upload
-            // them instead of typing the paths into the message.
+            // Files copied in a file manager paste as `file://` addresses:
+            // upload them instead of typing the addresses into the message.
             input.events.retain(|event| {
                 let egui::Event::Paste(text) = event else {
                     return true;
