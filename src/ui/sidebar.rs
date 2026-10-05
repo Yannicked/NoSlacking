@@ -412,7 +412,9 @@ fn list(
         )
     });
     let ctx = ui.ctx().clone();
-    let drawn = drawn(workspace, &shown, closed, filter, |key| folding(&ctx, key));
+    let drawn = drawn(workspace, &shown, closed, filter, |key| {
+        folding(&ctx, &workspace.info.team_id, key)
+    });
     for section in &drawn {
         section_view(ui, palette, workspace, section, actions);
     }
@@ -505,26 +507,28 @@ pub(super) fn drawn<'s, 'a>(
     drawn
 }
 
-/// A section's remembered (open, showing more) state.
-pub(super) fn folding(ctx: &egui::Context, key: &str) -> (bool, bool) {
+/// A section's remembered (open, showing more) state in workspace `team`.
+pub(super) fn folding(ctx: &egui::Context, team: &str, key: &str) -> (bool, bool) {
     // Folded state survives restarts, per section.
     let open = ctx
-        .data_mut(|d| d.get_persisted::<bool>(open_id(key)))
+        .data_mut(|d| d.get_persisted::<bool>(open_id(team, key)))
         .unwrap_or(true);
     let more = ctx
-        .data(|d| d.get_temp::<bool>(more_id(key)))
+        .data(|d| d.get_temp::<bool>(more_id(team, key)))
         .unwrap_or(false);
     (open, more)
 }
 
-/// Where whether a section is unfolded is remembered.
-fn open_id(key: &str) -> egui::Id {
-    egui::Id::new(("section-open", key))
+/// Where whether a section is unfolded is remembered. With the workspace,
+/// as the sections without Slack's ids share their keys across them.
+fn open_id(team: &str, key: &str) -> egui::Id {
+    egui::Id::new(("section-open", team, key))
 }
 
-/// Where whether a section shows all its rows is remembered.
-fn more_id(key: &str) -> egui::Id {
-    egui::Id::new(("section-more", key))
+/// Where whether a section shows all its rows is remembered, per
+/// workspace like [`open_id`].
+fn more_id(team: &str, key: &str) -> egui::Id {
+    egui::Id::new(("section-more", team, key))
 }
 
 fn section_view(
@@ -579,7 +583,7 @@ fn section_view(
     );
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.clicked() {
-        ui.data_mut(|d| d.insert_persisted(open_id(key), !open));
+        ui.data_mut(|d| d.insert_persisted(open_id(&workspace.info.team_id, key), !open));
     }
     if let (Some(id), Some(sections)) = (&section.id, workspace.sections.as_deref()) {
         section_menu(&response, id, section.kind, sections, actions);
@@ -604,7 +608,7 @@ fn section_view(
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked()
         {
-            ui.data_mut(|d| d.insert_temp(more_id(key), true));
+            ui.data_mut(|d| d.insert_temp(more_id(&workspace.info.team_id, key), true));
         }
     }
 }

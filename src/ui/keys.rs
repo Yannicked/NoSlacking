@@ -138,7 +138,7 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
                 &arrange,
                 app.settings.closed.get(&w.info.team_id),
                 &app.sidebar_filter,
-                |key| super::sidebar::folding(ctx, key),
+                |key| super::sidebar::folding(ctx, &w.info.team_id, key),
             );
             step(&order, w.active.as_deref(), forward, only_unread)
         });
