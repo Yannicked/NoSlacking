@@ -40,7 +40,10 @@ const SCHEMES: [&str; 2] = [SCHEME, SLACK_SCHEME];
 pub const SCHEME_REDIRECT: &str = "noslacking://oauth/callback";
 
 /// Everything NoSlacking reads and does, as you. Keep in step with
-/// `slack-app-manifest.json`.
+/// `slack-app-manifest.json`. `dnd:*`, `usergroups:read` and
+/// `bookmarks:write` are left out on purpose: asking for a scope the app
+/// lacks fails the sign-in, which would break apps made from an older
+/// manifest. Those features work when the app has them anyway.
 pub const USER_SCOPES: &[&str] = &[
     "channels:history",
     "channels:read",

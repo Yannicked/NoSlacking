@@ -459,7 +459,9 @@ sections. Nothing below exists yet.
 - [ ] **DND for your-own-app sign-ins** needs the `dnd:read` and
       `dnd:write` scopes. Adding them breaks apps made from the old
       manifest, so DND is local only for those sign-ins for now. The same
-      goes for `usergroups:read`: without it, `@group` isn't suggested.
+      goes for `usergroups:read`: without it, `@group` isn't suggested;
+      and for `bookmarks:write`: without it, changing a bookmark is
+      undone with a toast naming the permission.
 - [ ] **No Dock or taskbar badge on macOS and Windows**: it would need
       `unsafe` platform calls. The unread count is in the window title.
 - [ ] **Test on macOS and Windows**: the platform code is only compiled on
@@ -542,8 +544,11 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       (`model.rs` `Button`). Check whether session sign-ins can use the web
       client's block-action call; otherwise offer "Open in Slack" on
       messages with interactive blocks.
-- [ ] **Add and edit bookmarks** (`bookmarks.add`, `bookmarks.edit`,
-      `bookmarks.remove`); today they can only be listed.
+- [x] **Add and edit bookmarks** (`bookmarks.add`, `bookmarks.edit`,
+      `bookmarks.remove`); today they can only be listed. *Sessions can;
+      your-own-app sign-ins only if the app has `bookmarks:write`, which
+      the manifest does not ask for yet (see the DND follow-up). Others'
+      changes arrive as `bookmark_added`/`_changed`/`_removed` events.*
 - [ ] **Delete your own files** (`files.delete`) from file cards and the
       channel's Files tab.
 - [ ] **Upload custom emoji** (`emoji.add`, session sign-ins only).
@@ -562,7 +567,7 @@ These are the open follow-ups above, in the order to take them:
 4. macOS link events, Dock and taskbar badges, Wayland drops: blocked on
    `unsafe` code in fastframe or a winit patch.
 5. DND scopes for your-own-app sign-ins: wait for a manifest version bump
-   that also brings `usergroups:read`.
+   that also brings `usergroups:read` and `bookmarks:write`.
 
 ### Found while typing the errors
 

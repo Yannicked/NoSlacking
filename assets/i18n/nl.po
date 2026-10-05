@@ -2098,3 +2098,63 @@ msgstr "NoSlacking toont je nu als actief zolang het verbonden is"
 
 msgid "You are shown as active only while you use NoSlacking"
 msgstr "Je wordt alleen als actief getoond terwijl je NoSlacking gebruikt"
+
+msgid "Add a bookmark"
+msgstr "Bladwijzer toevoegen"
+
+msgid "Edit bookmark"
+msgstr "Bladwijzer bewerken"
+
+msgid "Remove bookmark"
+msgstr "Bladwijzer verwijderen"
+
+msgid "More for {name}"
+msgstr "Meer voor {name}"
+
+msgid "Link"
+msgstr "Link"
+
+msgid "Name"
+msgstr "Naam"
+
+msgid "Add"
+msgstr "Toevoegen"
+
+msgid "Emoji (optional)"
+msgstr "Emoji (optioneel)"
+
+msgid "e.g. rocket"
+msgstr "bijv. rocket"
+
+msgid "The link, if left empty"
+msgstr "De link, als je dit leeg laat"
+
+msgid "It will link to {link}."
+msgstr "Het wordt een link naar {link}."
+
+msgid "Enter a link."
+msgstr "Vul een link in."
+
+msgid "Only web links (http:// or https://) can be bookmarked."
+msgstr "Alleen weblinks (http:// of https://) kunnen een bladwijzer worden."
+
+msgid "Enter an emoji name, such as rocket or :rocket:."
+msgstr "Vul de naam van een emoji in, zoals rocket of :rocket:."
+
+msgid "Remove “{name}”?"
+msgstr "“{name}” verwijderen?"
+
+msgid "It is removed for everyone in the channel."
+msgstr "Hij verdwijnt voor iedereen in het kanaal."
+
+msgid "Could not add the bookmark: {error}"
+msgstr "De bladwijzer kon niet worden toegevoegd: {error}"
+
+msgid "Could not save the bookmark: {error}"
+msgstr "De bladwijzer kon niet worden opgeslagen: {error}"
+
+msgid "Could not remove the bookmark: {error}"
+msgstr "De bladwijzer kon niet worden verwijderd: {error}"
+
+msgid "Changing bookmarks needs the bookmarks:write permission, which your Slack app does not have."
+msgstr "Voor het wijzigen van bladwijzers is de toestemming bookmarks:write nodig, die je Slack-app niet heeft."
