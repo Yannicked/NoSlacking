@@ -63,6 +63,11 @@ pub struct WorkspaceState {
     /// poll can count one before its live copy comes (or Slack delivers it
     /// again), and it must count once.
     counted_mentions: VecDeque<(String, Ts)>,
+    /// The optimistic copies of messages Slack has not answered for yet, by
+    /// their local id. An echo of the same text
+    /// can take a copy's place before its own answer comes; the answer
+    /// still settles it from here.
+    sending: HashMap<Ts, Message>,
 }
 
 /// How many announced messages [`WorkspaceState::seen`] remembers. A copy
@@ -99,6 +104,7 @@ impl WorkspaceState {
             held_unread: HashSet::new(),
             counted_replies: VecDeque::new(),
             counted_mentions: VecDeque::new(),
+            sending: HashMap::new(),
         }
     }
 
@@ -980,12 +986,16 @@ impl WorkspaceState {
     }
 
     /// Slack answered a send: the optimistic copy `local` gives way to the
-    /// real message, or is marked as failed.
+    /// real message, or is marked as failed. A copy an echo took away
+    /// already is shown again from what was sent: the real message if it is
+    /// not there, or a failed row to retry.
     pub(super) fn sent(&mut self, channel: &str, local: &Ts, result: &Result<Message, Failure>) {
+        let mut found = false;
         for timeline in self.timelines_for_mut(channel) {
             let Some(position) = timeline.messages.iter().position(|m| &m.ts == local) else {
                 continue;
             };
+            found = true;
             match result {
                 Ok(message) => {
                     timeline.messages.remove(position);
@@ -996,6 +1006,21 @@ impl WorkspaceState {
                 }
                 Err(error) => {
                     timeline.messages[position].delivery = Delivery::Failed(error.clone());
+                }
+            }
+        }
+        match result {
+            Ok(message) => {
+                self.sending.remove(local);
+                if !found && self.find_message(channel, &message.ts).is_none() {
+                    self.place(channel, message.clone());
+                }
+            }
+            Err(error) => {
+                let copy = self.sending.get(local).cloned();
+                if !found && let Some(mut copy) = copy {
+                    copy.delivery = Delivery::Failed(error.clone());
+                    self.add_local(channel, copy);
                 }
             }
         }
@@ -1095,8 +1120,25 @@ impl WorkspaceState {
         Some(marker)
     }
 
+    /// Puts a real message into the loaded lists it belongs in: its
+    /// thread's and the conversation's own.
+    fn place(&mut self, channel: &str, message: Message) {
+        if message.is_reply()
+            && let Some(parent) = message.thread_ts.clone()
+            && let Some(thread) = self.threads.get_mut(&(channel.to_owned(), parent))
+        {
+            thread.upsert(message.clone());
+        }
+        if message.in_channel()
+            && let Some(timeline) = self.timelines.get_mut(channel)
+        {
+            timeline.upsert(message);
+        }
+    }
+
     /// Shows a message you are sending before Slack has it.
     pub(super) fn add_local(&mut self, channel: &str, message: Message) {
+        self.sending.insert(message.ts.clone(), message.clone());
         let timeline = match &message.thread_ts {
             Some(parent) => self
                 .threads
@@ -1391,9 +1433,11 @@ fn add_replies(parent: &mut Message, live: &[&Message], extra: u32) {
     }
 }
 
-/// A sent message's own echo replaces its optimistic copy.
+/// A sent message's own echo replaces its optimistic copy. Matched by
+/// text, so an echo of a message already here (its answer came first) is
+/// not one: it would take the place of another copy of the same text.
 fn remove_echoed_local(timeline: &mut Timeline, message: &Message, from_me: bool) {
-    if !from_me {
+    if !from_me || timeline.messages.iter().any(|m| m.ts == message.ts) {
         return;
     }
     if let Some(position) = timeline
@@ -1738,6 +1782,46 @@ mod tests {
         theirs.user = Some("U2".into());
         w.message_arrived("C1", theirs, true);
         assert!(w.timelines["C1"].messages.iter().any(|m| m.ts.is_local()));
+    }
+
+    #[test]
+    fn an_echo_of_a_message_answered_already_takes_no_other_copy() {
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "ok", None);
+        sending(&mut w, "local-2", "ok", None);
+        w.sent("C1", &Ts::new("local-1"), &Ok(mine("5.0", "ok")));
+        w.message_arrived("C1", mine("5.0", "ok"), true);
+        assert_eq!(
+            texts(&w.timelines["C1"]),
+            [("5.0", "ok"), ("local-2", "ok")]
+        );
+    }
+
+    #[test]
+    fn a_copy_an_echo_took_still_settles() {
+        // The second "ok" goes through first; its echo takes the first's
+        // copy, which then fails.
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "ok", None);
+        sending(&mut w, "local-2", "ok", None);
+        w.message_arrived("C1", mine("5.0", "ok"), true);
+        w.sent("C1", &Ts::new("local-2"), &Ok(mine("5.0", "ok")));
+        w.sent("C1", &Ts::new("local-1"), &Err(Failure::RateLimited));
+        let timeline = &w.timelines["C1"];
+        assert_eq!(texts(timeline), [("5.0", "ok"), ("local-1", "ok")]);
+        assert_eq!(
+            timeline.messages[1].delivery,
+            Delivery::Failed(Failure::RateLimited)
+        );
+        assert!(w.retry_local("C1", &Ts::new("local-1")).is_some());
+        // The other way: it goes through, and shows from Slack's answer.
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "ok", None);
+        sending(&mut w, "local-2", "ok", None);
+        w.message_arrived("C1", mine("6.0", "ok"), true);
+        w.sent("C1", &Ts::new("local-2"), &Ok(mine("6.0", "ok")));
+        w.sent("C1", &Ts::new("local-1"), &Ok(mine("5.0", "ok")));
+        assert_eq!(texts(&w.timelines["C1"]), [("5.0", "ok"), ("6.0", "ok")]);
     }
 
     #[test]
