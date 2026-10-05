@@ -372,7 +372,58 @@ impl Marks {
             }
             previous = Some(c);
         }
+        marks.drop_shielded_closers(text);
         marks
+    }
+
+    /// Forgets the closers inside a `<…>` form or a code span, which the
+    /// parser takes whole: the `_` in `_see <https://x.y/a_(b)>_` must not
+    /// end the italics inside the link. Walks the line once, taking the
+    /// forms and spans as the parser does.
+    fn drop_shielded_closers(&mut self, text: &str) {
+        let mut shields: Vec<(usize, usize)> = Vec::new();
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'<' => {
+                    let form = next_at(&self.closes, i + 1)
+                        .filter(|&end| next_at(&self.opens, i + 1).is_none_or(|open| open > end))
+                        // Whether the parser takes it as a form, asked of
+                        // the very code that decides it.
+                        .filter(|&end| {
+                            special(&text[i + 1..end], Style::default(), &mut Vec::new())
+                        });
+                    match form {
+                        Some(end) => {
+                            shields.push((i, end));
+                            i = end + 1;
+                        }
+                        None => i += 1,
+                    }
+                }
+                b'`' => match code(text, i, self) {
+                    Code::Span { len, .. } => {
+                        shields.push((i, i + len - 1));
+                        i += len;
+                    }
+                    Code::Text { len } => i += len,
+                    Code::None => i += 1,
+                },
+                _ => i += 1,
+            }
+        }
+        if shields.is_empty() {
+            return;
+        }
+        // Both lists are sorted, so one walk along each will do.
+        for closers in &mut self.closers {
+            let mut shield = shields.iter().peekable();
+            closers.retain(|&at| {
+                while shield.next_if(|&&(_, end)| end < at).is_some() {}
+                shield.peek().is_none_or(|&&(start, _)| at < start)
+            });
+        }
     }
 }
 
@@ -1070,6 +1121,39 @@ mod tests {
         // An accent written as a combining mark is part of its letter.
         assert_eq!(paragraph("cafe\u{301}*x*"), [text("cafe\u{301}*x*")]);
         assert_eq!(paragraph("naïve_word_here"), [text("naïve_word_here")]);
+    }
+
+    #[test]
+    fn styles_do_not_close_inside_links_or_code() {
+        let italic = Style {
+            italic: true,
+            ..Style::default()
+        };
+        assert_eq!(
+            paragraph("_see <https://en.wikipedia.org/wiki/Mercury_(planet)>_"),
+            [
+                Inline::Text("see ".into(), italic),
+                Inline::Link {
+                    url: "https://en.wikipedia.org/wiki/Mercury_(planet)".into(),
+                    label: None,
+                    style: italic
+                },
+            ]
+        );
+        assert_eq!(
+            paragraph("*run `make all*` first*"),
+            [
+                bold("run "),
+                Inline::Code("make all*".into()),
+                bold(" first")
+            ]
+        );
+        assert_eq!(
+            paragraph("*a ``b* `c``* d"),
+            [bold("a "), Inline::Code("b* `c".into()), text(" d")]
+        );
+        // Brackets that are no form do not shield what is in them.
+        assert_eq!(paragraph("*a < b* > c"), [bold("a < b"), text(" > c")]);
     }
 
     #[test]
