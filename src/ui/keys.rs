@@ -34,7 +34,8 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
         .any(|key| app.drafts.get(key).is_some_and(|d| d.suggesting));
     // Alt+↑/↓ also move through text (by paragraph on macOS): a field with
     // text in it keeps them. An empty composer has nothing to move through.
-    let arrows = !ctx.text_edit_focused() || in_empty_composer(app, ctx);
+    // Behind an open overlay they would change the conversation unseen.
+    let arrows = !overlay && (!ctx.text_edit_focused() || in_empty_composer(app, ctx));
     let (switch, settings, unread_up, unread_down, up, down, escape, zoom_in, zoom_out, zoom_reset) =
         ctx.input_mut(|input| {
             (
@@ -56,7 +57,7 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
     if switch && !app.workspaces.is_empty() {
         if app.switcher.is_some() {
             app.switcher = None;
-        } else {
+        } else if !overlay {
             app.actions.push(Action::OpenSwitcher);
         }
     }
