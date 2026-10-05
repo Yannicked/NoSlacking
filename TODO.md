@@ -527,7 +527,7 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       add groups to the suggestions. *Sessions get them; your-own-app
       sign-ins only if the app happens to have `usergroups:read`, as the
       manifest does not ask for it yet (see the DND follow-up).*
-- [ ] **Share a message** to another conversation: a picker that posts
+- [x] **Share a message** to another conversation: a picker that posts
       the permalink with an optional comment, which Slack unfurls.
 - [x] **Keyboard shortcut sheet** on `Ctrl+/` (⌘/) listing what
       `ui/keys.rs` and the message focus handle. *Many shortcuts, and

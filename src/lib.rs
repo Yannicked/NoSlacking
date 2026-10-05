@@ -37,6 +37,7 @@ pub mod people;
 pub mod redact;
 pub mod search;
 pub mod settings;
+pub mod share;
 pub mod sidebar;
 pub mod single_instance;
 pub mod slack;

@@ -497,6 +497,55 @@ pub fn channels_matching(channels: &[Listed], query: &str) -> Vec<usize> {
     found.into_iter().map(|(.., index)| index).collect()
 }
 
+/// A conversation you have, as the quick switcher and the "Share
+/// message" picker list it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    pub id: String,
+    /// The channel's name, or the person (or people) for a DM.
+    pub title: String,
+    pub kind: ConversationKind,
+    pub unread: bool,
+    pub archived: bool,
+    /// When its newest message came, in seconds; 0 when not known.
+    pub latest: i64,
+}
+
+/// Every conversation of `workspace`, as [`conversations_matching`]
+/// takes them.
+pub fn candidates(workspace: &WorkspaceState) -> Vec<Candidate> {
+    workspace
+        .conversations
+        .iter()
+        .map(|c| Candidate {
+            id: c.id.clone(),
+            title: workspace.title(c),
+            kind: c.kind,
+            unread: c.has_unread(),
+            archived: c.archived,
+            latest: c.latest.as_ref().and_then(Ts::seconds).unwrap_or(0),
+        })
+        .collect()
+}
+
+/// The conversations whose title holds `query`, best first: titles that
+/// start with it, then unread ones, then the busiest lately.
+pub fn conversations_matching(candidates: Vec<Candidate>, query: &str) -> Vec<Candidate> {
+    let needle = query.trim().trim_start_matches(['#', '@']).to_lowercase();
+    let mut found: Vec<Candidate> = candidates
+        .into_iter()
+        .filter(|c| needle.is_empty() || c.title.to_lowercase().contains(&needle))
+        .collect();
+    found.sort_by_key(|c| {
+        (
+            !c.title.to_lowercase().starts_with(&needle),
+            !c.unread,
+            std::cmp::Reverse(c.latest),
+        )
+    });
+    found
+}
+
 /// Why a channel name cannot be used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NameProblem {
@@ -1256,5 +1305,34 @@ mod tests {
         assert_eq!(found, ["design-system", "design", "team-design", "random"]);
         assert_eq!(channels_matching(&channels, "").len(), 5);
         assert_eq!(channels_matching(&channels, "")[0], 2, "busiest first");
+    }
+
+    #[test]
+    fn conversations_starting_with_the_query_come_first() {
+        let candidate = |id: &str, title: &str, unread: bool, latest: i64| Candidate {
+            id: id.into(),
+            title: title.into(),
+            kind: ConversationKind::Channel,
+            unread,
+            archived: false,
+            latest,
+        };
+        let all = vec![
+            candidate("C1", "team-design", true, 50),
+            candidate("C2", "design", false, 10),
+            candidate("C3", "random", true, 90),
+            candidate("C4", "design-system", true, 5),
+        ];
+        let ids = |found: Vec<Candidate>| found.into_iter().map(|c| c.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(conversations_matching(all.clone(), " #Design")),
+            ["C4", "C2", "C1"],
+            "starting with it, then unread first"
+        );
+        assert_eq!(
+            ids(conversations_matching(all, "")),
+            ["C3", "C1", "C4", "C2"],
+            "unread and busiest first without a query"
+        );
     }
 }

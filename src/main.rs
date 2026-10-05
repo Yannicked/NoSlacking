@@ -48,8 +48,8 @@ struct Cli {
     demo_hover: Option<String>,
 
     /// Open a view before the screenshot: thread, settings, sign-in,
-    /// switcher, picker, profile, upload, drafts, lightbox, media, compact,
-    /// held-media or shortcuts.
+    /// switcher, picker, profile, share, upload, drafts, lightbox, media,
+    /// compact, held-media or shortcuts.
     #[cfg(feature = "demo")]
     #[arg(long, value_name = "VIEW")]
     demo_view: Option<String>,
@@ -433,6 +433,11 @@ struct DemoSetup {
     /// The message whose picture to open in the image viewer once its
     /// history has arrived.
     image: Option<noslacking::model::Ts>,
+    /// The message to open the "Share message" dialog on once its history
+    /// has arrived: the dialog closes on a message it cannot find.
+    share: Option<noslacking::model::Ts>,
+    /// Whether the share dialog's comment was typed in yet.
+    commented: bool,
 }
 
 #[cfg(feature = "demo")]
@@ -475,6 +480,8 @@ impl DemoSetup {
             asked: false,
             edit: None,
             image: None,
+            share: None,
+            commented: false,
         }
     }
 
@@ -509,6 +516,25 @@ impl DemoSetup {
             });
             self.image = None;
         }
+        if let Some(ts) = &self.share
+            && app
+                .active_workspace()
+                .is_some_and(|w| w.find_message("C02", ts).is_some())
+        {
+            app.actions.push(Action::Share {
+                channel: "C02".into(),
+                ts: ts.clone(),
+                thread: Some(ts.clone()),
+            });
+            self.share = None;
+        }
+        // The share dialog, once open, with a comment typed in it.
+        if !self.commented
+            && let Some(share) = app.share.as_mut()
+        {
+            share.comment = "Worth a read before Thursday's review".into();
+            self.commented = true;
+        }
         if self.frames != 6 {
             return;
         }
@@ -527,6 +553,8 @@ impl DemoSetup {
                 ts: parent,
             }),
             Some("profile") => app.actions.push(Action::OpenProfile("U01".into())),
+            // The "Share message" dialog, on the thread's first message.
+            Some("share") => self.share = Some(parent),
             // Your own status, being set.
             Some("status") => app
                 .actions

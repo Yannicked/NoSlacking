@@ -800,13 +800,7 @@ impl Worker {
                 broadcast,
                 local,
             } = outgoing;
-            let mut params = vec![("channel", channel.clone()), ("text", text)];
-            if let Some(thread) = &thread {
-                params.push(("thread_ts", thread.0.clone()));
-                if broadcast {
-                    params.push(("reply_broadcast", "true".into()));
-                }
-            }
+            let params = post_params(&channel, text, thread.as_ref(), broadcast);
             let result = client
                 .act::<types::Posted>("chat.postMessage", &params)
                 .await
@@ -1415,6 +1409,32 @@ impl Worker {
     }
 }
 
+/// What `chat.postMessage` is given for a message.
+///
+/// Without `unfurl_links`, whether Slack unfurls a text-based link in a
+/// post through the API depends on the token (an app's posts are not
+/// unfurled unless asked). A shared message is only a link to the message
+/// it quotes, so a text with a link to a Slack message asks outright.
+fn post_params(
+    channel: &str,
+    text: String,
+    thread: Option<&Ts>,
+    broadcast: bool,
+) -> Vec<(&'static str, String)> {
+    let unfurl = crate::links::has_message_link(&text);
+    let mut params = vec![("channel", channel.to_owned()), ("text", text)];
+    if unfurl {
+        params.push(("unfurl_links", "true".into()));
+    }
+    if let Some(thread) = thread {
+        params.push(("thread_ts", thread.0.clone()));
+        if broadcast {
+            params.push(("reply_broadcast", "true".into()));
+        }
+    }
+    params
+}
+
 /// The Web API call that makes a [`Change`], and the error codes that
 /// mean it is already made.
 fn request(
@@ -1736,6 +1756,30 @@ mod tests {
         assert!(
             matches!(&events[..], [Event::DeepLink(link)] if link.team.as_deref() == Some("TA")),
             "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_shared_message_asks_slack_to_unfurl_its_link() {
+        let shared = "Look\n<https://acme.slack.com/archives/C1/p1700000000000100>";
+        assert_eq!(
+            post_params("C2", shared.into(), None, false),
+            [
+                ("channel", "C2".to_owned()),
+                ("text", shared.to_owned()),
+                ("unfurl_links", "true".to_owned()),
+            ]
+        );
+        let plain = post_params("C2", "hi".into(), Some(&Ts::new("1.000100")), true);
+        assert_eq!(
+            plain,
+            [
+                ("channel", "C2".to_owned()),
+                ("text", "hi".to_owned()),
+                ("thread_ts", "1.000100".to_owned()),
+                ("reply_broadcast", "true".to_owned()),
+            ],
+            "other messages are sent as before"
         );
     }
 

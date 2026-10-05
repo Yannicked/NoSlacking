@@ -16,6 +16,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     super::lightbox::show(app, ctx);
     confirm_delete(app, ctx);
     section_dialog(app, ctx);
+    super::share::dialog(app, ctx);
     super::people::status_dialog(app, ctx);
     super::shortcuts::show(app, ctx);
     toasts(app, ctx);
@@ -119,28 +120,8 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
     let Some(workspace) = app.active_workspace() else {
         return;
     };
-    let needle = query.trim().to_lowercase();
-    let mut matches: Vec<(String, String, ConversationKind, bool, i64)> = workspace
-        .conversations
-        .iter()
-        .map(|c| {
-            (
-                c.id.clone(),
-                workspace.title(c),
-                c.kind,
-                c.has_unread(),
-                c.latest.as_ref().and_then(|l| l.seconds()).unwrap_or(0),
-            )
-        })
-        .filter(|(_, title, ..)| needle.is_empty() || title.to_lowercase().contains(&needle))
-        .collect();
-    matches.sort_by_key(|(_, title, _, unread, latest)| {
-        (
-            !title.to_lowercase().starts_with(&needle),
-            !unread,
-            std::cmp::Reverse(*latest),
-        )
-    });
+    let mut matches =
+        crate::convos::conversations_matching(crate::convos::candidates(workspace), &query);
     matches.truncate(12);
     let (down, up, enter, escape) = ctx.input_mut(|input| {
         (
@@ -177,52 +158,9 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
                 field.request_focus();
             }
             ui.add_space(8.0);
-            for (index, (id, title, kind, unread, _)) in matches.iter().enumerate() {
-                let (rect, response) =
-                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::click());
-                if index == selected || response.hovered() {
-                    ui.painter().rect_filled(
-                        rect,
-                        CornerRadius::same(theme::RADIUS_SMALL),
-                        if index == selected {
-                            palette.accent.gamma_multiply(0.25)
-                        } else {
-                            palette.surface_hover
-                        },
-                    );
-                }
-                let icon = match kind {
-                    ConversationKind::Channel => Icon::Hash,
-                    ConversationKind::Private => Icon::Lock,
-                    ConversationKind::Direct => Icon::User,
-                    ConversationKind::Group => Icon::Users,
-                };
-                icon.image(palette.secondary, 15.0).paint_at(
-                    ui,
-                    egui::Rect::from_center_size(
-                        egui::pos2(rect.left() + 18.0, rect.center().y),
-                        Vec2::splat(15.0),
-                    ),
-                );
-                ui.painter().text(
-                    egui::pos2(rect.left() + 36.0, rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    title,
-                    if *unread {
-                        theme::bold(14.5)
-                    } else {
-                        theme::regular(14.5)
-                    },
-                    palette.text,
-                );
-                theme::describe_selected(
-                    &response,
-                    egui::WidgetType::SelectableLabel,
-                    index == selected,
-                    title,
-                );
-                if response.clicked() {
-                    open = Some(id.clone());
+            for (index, found) in matches.iter().enumerate() {
+                if conversation_row(ui, &palette, found, index == selected).clicked() {
+                    open = Some(found.id.clone());
                 }
             }
             if matches.is_empty() {
@@ -232,8 +170,8 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
     if response.should_close() {
         close = true;
     }
-    if enter && let Some((id, ..)) = matches.get(selected) {
-        open = Some(id.clone());
+    if enter && let Some(found) = matches.get(selected) {
+        open = Some(found.id.clone());
     }
     if let Some(id) = open {
         app.actions.push(Action::OpenConversation(id));
@@ -242,6 +180,60 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
     if !close {
         app.switcher = Some((query, selected));
     }
+}
+
+/// One conversation in a list to pick from: its kind's icon and its
+/// title, bold when unread, lit when `selected`.
+pub(super) fn conversation_row(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    found: &crate::convos::Candidate,
+    selected: bool,
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::click());
+    if selected || response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::same(theme::RADIUS_SMALL),
+            if selected {
+                palette.accent.gamma_multiply(0.25)
+            } else {
+                palette.surface_hover
+            },
+        );
+    }
+    let icon = match found.kind {
+        ConversationKind::Channel => Icon::Hash,
+        ConversationKind::Private => Icon::Lock,
+        ConversationKind::Direct => Icon::User,
+        ConversationKind::Group => Icon::Users,
+    };
+    icon.image(palette.secondary, 15.0).paint_at(
+        ui,
+        egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 18.0, rect.center().y),
+            Vec2::splat(15.0),
+        ),
+    );
+    ui.painter().text(
+        egui::pos2(rect.left() + 36.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        &found.title,
+        if found.unread {
+            theme::bold(14.5)
+        } else {
+            theme::regular(14.5)
+        },
+        palette.text,
+    );
+    theme::describe_selected(
+        &response,
+        egui::WidgetType::SelectableLabel,
+        selected,
+        &found.title,
+    );
+    response
 }
 
 /// Emoji grouped as the picker shows them.

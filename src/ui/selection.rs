@@ -5,7 +5,8 @@
 //! - ↑ / ↓: the message before or after; ↓ past the last, or Esc, goes back
 //!   to the composer.
 //! - R react, T reply in thread, E edit, Delete (or Backspace) delete,
-//!   C copy the text, U mark unread from here. Editing and deleting are
+//!   C copy the text, S share it to another conversation, U mark unread
+//!   from here. Editing and deleting are
 //!   for your own messages, and delete still asks first. Marking unread is
 //!   for the conversation, not a thread (see the message menu).
 //!
@@ -50,20 +51,22 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
     let row = super::message::row_id(&selected.channel, &selected.ts, selected.in_thread);
     // Arrows belong to whatever else has focus, a toolbar button say.
     let arrows = focused.is_none_or(|id| id == row);
-    let (up, down, escape, react, thread, edit, delete, copy, unread) = ctx.input_mut(|input| {
-        (
-            arrows && take(input, Key::ArrowUp, Modifiers::NONE),
-            arrows && take(input, Key::ArrowDown, Modifiers::NONE),
-            take(input, Key::Escape, Modifiers::NONE),
-            take(input, Key::R, Modifiers::NONE),
-            take(input, Key::T, Modifiers::NONE),
-            take(input, Key::E, Modifiers::NONE),
-            take(input, Key::Delete, Modifiers::NONE)
-                || take(input, Key::Backspace, Modifiers::NONE),
-            take(input, Key::C, Modifiers::NONE),
-            take(input, Key::U, Modifiers::NONE),
-        )
-    });
+    let (up, down, escape, react, thread, edit, delete, copy, unread, share) =
+        ctx.input_mut(|input| {
+            (
+                arrows && take(input, Key::ArrowUp, Modifiers::NONE),
+                arrows && take(input, Key::ArrowDown, Modifiers::NONE),
+                take(input, Key::Escape, Modifiers::NONE),
+                take(input, Key::R, Modifiers::NONE),
+                take(input, Key::T, Modifiers::NONE),
+                take(input, Key::E, Modifiers::NONE),
+                take(input, Key::Delete, Modifiers::NONE)
+                    || take(input, Key::Backspace, Modifiers::NONE),
+                take(input, Key::C, Modifiers::NONE),
+                take(input, Key::U, Modifiers::NONE),
+                take(input, Key::S, Modifiers::NONE),
+            )
+        });
     if up || down {
         // The arrow moved the selection: egui must not also move focus to
         // the widget above or below.
@@ -136,6 +139,13 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
     }
     if copy {
         actions.push(Action::Copy(super::message::plain_text(workspace, message)));
+    }
+    if share && !ts.is_local() {
+        actions.push(Action::Share {
+            channel: channel.clone(),
+            ts: ts.clone(),
+            thread: message.thread_ts.clone(),
+        });
     }
     if escape {
         next = None;

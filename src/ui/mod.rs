@@ -20,6 +20,7 @@ mod rows;
 mod search;
 mod selection;
 mod settings;
+mod share;
 mod shortcuts;
 mod sidebar;
 mod thread;

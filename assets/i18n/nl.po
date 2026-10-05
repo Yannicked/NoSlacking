@@ -2036,3 +2036,24 @@ msgstr "Tonen"
 
 msgid "Also {keys}"
 msgstr "Ook {keys}"
+
+msgid "Share message…"
+msgstr "Bericht delen…"
+
+msgid "Share message"
+msgstr "Bericht delen"
+
+msgid "Search for a channel or person…"
+msgstr "Zoek een kanaal of persoon…"
+
+msgid "Add a message, if you like"
+msgstr "Voeg eventueel een bericht toe"
+
+msgid "Share"
+msgstr "Delen"
+
+msgid "Shared to {conversation}"
+msgstr "Gedeeld in {conversation}"
+
+msgid "Shared"
+msgstr "Gedeeld"
