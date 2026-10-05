@@ -256,6 +256,52 @@ fn from_json(json: &str) -> Message {
         .unwrap_or_else(|| message(NOW, "U05", "unreadable demo message"))
 }
 
+/// A link to the release plan in #engineering with Slack's own unfurl of
+/// it, an attachment with `is_msg_unfurl`, as Slack stores it.
+fn message_unfurl() -> Message {
+    let link = format!("https://acme-inc.slack.com/archives/C02/p{THREAD}000100");
+    from_json(
+        &serde_json::json!({
+            "type": "message",
+            "ts": format!("{}.000100", NOW - 120),
+            "user": ME,
+            "text": format!("And the plan itself, for reference:\n<{link}>"),
+            "attachments": [{
+                "id": 1,
+                "ts": format!("{THREAD}.000100"),
+                "channel_id": "C02",
+                "channel_name": "engineering",
+                "is_msg_unfurl": true,
+                "author_id": "U03",
+                "author_name": "Carla Rossi",
+                "author_subname": "Carla Rossi",
+                "author_link": "https://acme-inc.slack.com/team/U03",
+                "text": "*Release plan for Friday* :calendar:\n• freeze `main` at noon\n• smoke test on Linux, macOS and Windows\n• ship :rocket:",
+                "fallback": "[September 30th, 2026 1:00 PM] Carla Rossi: Release plan for Friday",
+                "from_url": link,
+                "original_url": link,
+                "color": "D0D0D0",
+                "footer": "Posted in #engineering",
+                "mrkdwn_in": ["text"],
+            }],
+        })
+        .to_string(),
+    )
+}
+
+/// A message by itself, as [`Command::FetchQuote`] answers: from any
+/// conversation's history or the thread, none when it is not there.
+fn quoted(channel: &str, ts: &Ts) -> Option<Message> {
+    all_history(channel)
+        .into_iter()
+        .chain(if channel == "C02" {
+            thread()
+        } else {
+            Vec::new()
+        })
+        .find(|m| m.ts == *ts)
+}
+
 /// A GlitchTip alert, in the shape GlitchTip's "Slack-compatible webhook"
 /// posts it (apps/alerts/webhooks.py) and Slack stores it.
 fn glitchtip_alert() -> Message {
@@ -515,12 +561,23 @@ fn history(channel: &str) -> Vec<Message> {
                 "Sure, sending notes in a bit :slightly_smiling_face:",
             ),
             // A permalink to an old message in #general, which opens here.
+            // Posted without an unfurl, so the quote under it is fetched.
             message(
                 NOW - 150,
                 "U01",
                 &format!(
                     "Same question came up before: <https://acme-inc.slack.com/archives/C01/p{}000100>",
                     NOW - 90 * (LONG - 20) as u64
+                ),
+            ),
+            message_unfurl(),
+            // A link to a message deleted since.
+            message(
+                NOW - 100,
+                "U01",
+                &format!(
+                    "There was a third one, but it's gone: <https://acme-inc.slack.com/archives/C02/p{}000100>",
+                    NOW - 2200
                 ),
             ),
         ],
@@ -1042,6 +1099,23 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                 for event in views::answer(&team, command) {
                     sink.send(event);
                 }
+            }
+            // A moment late, as from the network, so the quote grows its
+            // row after the list is laid out.
+            Command::FetchQuote {
+                team, channel, ts, ..
+            } => {
+                let sink = sink.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(LATENCY).await;
+                    let result = Ok(quoted(&channel, &ts));
+                    sink.send(Event::Quoted {
+                        team,
+                        channel,
+                        ts,
+                        result,
+                    });
+                });
             }
             _ => {}
         }
