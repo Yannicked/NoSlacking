@@ -12,8 +12,8 @@ use crate::emoji::EmojiSet;
 use crate::failure::Failure;
 use crate::i18n::t;
 use crate::model::{
-    Bot, Conversation, ConversationKind, Delivery, Message, SidebarSection, Timeline, Ts, User,
-    Workspace,
+    Bot, Conversation, ConversationKind, Delivery, KitBlock, Message, SidebarSection, Timeline, Ts,
+    User, Workspace,
 };
 use crate::settings::Settings;
 
@@ -712,6 +712,11 @@ impl WorkspaceState {
             if let Some(message) = timeline.find_mut(ts) {
                 before.get_or_insert_with(|| message.clone());
                 message.text = wire.to_owned();
+                // Slack's layout is of the old text; until its copy of the
+                // edit comes, the new text is drawn from its mrkdwn.
+                message
+                    .blocks
+                    .retain(|block| !matches!(block, KitBlock::RichText(_)));
                 message.edited = true;
             }
         }
@@ -731,6 +736,7 @@ impl WorkspaceState {
                         && message.text == text
                     {
                         message.text.clone_from(&before.text);
+                        message.blocks.clone_from(&before.blocks);
                         message.edited = before.edited;
                     }
                 }
@@ -1326,6 +1332,37 @@ mod tests {
         assert_eq!(
             w.find_message("C1", &ts).map(|m| m.text.as_str()),
             Some("second")
+        );
+    }
+
+    #[test]
+    fn an_edit_draws_its_new_text_until_slack_lays_it_out() {
+        let mut w = workspace_with_thread();
+        let ts = Ts::new("1.0");
+        let laid_out: std::sync::Arc<[crate::mrkdwn::Block]> =
+            crate::mrkdwn::parse("old layout").into();
+        for timeline in w.timelines_for_mut("C1") {
+            if let Some(message) = timeline.find_mut(&ts) {
+                message.blocks = vec![KitBlock::RichText(laid_out.clone())];
+            }
+        }
+        let before = w.edit_locally("C1", &ts, "new").map(Box::new);
+        assert!(
+            w.find_message("C1", &ts)
+                .is_some_and(|m| m.rich_text().is_none()),
+            "the old layout would show the old words"
+        );
+        w.undo(
+            "C1",
+            Change::Edit {
+                ts: ts.clone(),
+                text: "new".into(),
+                before,
+            },
+        );
+        assert_eq!(
+            w.find_message("C1", &ts).and_then(Message::rich_text),
+            Some(&laid_out)
         );
     }
 

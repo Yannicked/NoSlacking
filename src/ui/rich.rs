@@ -187,23 +187,48 @@ pub fn show(
     edited: bool,
     actions: &mut Vec<Action>,
 ) {
+    show_parsed(ui, rich, &parsed(text), edited, actions);
+}
+
+/// Draws a message's words: from Slack's own layout of them when it sent
+/// one, else from its mrkdwn.
+pub fn message(
+    ui: &mut egui::Ui,
+    rich: &Rich<'_>,
+    message: &crate::model::Message,
+    edited: bool,
+    actions: &mut Vec<Action>,
+) {
+    match message.rich_text() {
+        Some(blocks) => show_parsed(ui, rich, blocks, edited, actions),
+        None => show(ui, rich, &message.text, edited, actions),
+    }
+}
+
+/// Draws blocks parsed already; `edited` adds Slack's quiet "(edited)".
+pub fn show_parsed(
+    ui: &mut egui::Ui,
+    rich: &Rich<'_>,
+    blocks: &[Block],
+    edited: bool,
+    actions: &mut Vec<Action>,
+) {
     // Message text can be selected and copied, across runs, links and
     // mentions alike; the rest of the interface keeps labels inert.
     ui.scope(|ui| {
         ui.style_mut().interaction.selectable_labels = true;
-        show_blocks(ui, rich, text, edited, actions);
+        show_blocks(ui, rich, blocks, edited, actions);
     });
 }
 
 fn show_blocks(
     ui: &mut egui::Ui,
     rich: &Rich<'_>,
-    text: &str,
+    blocks: &[Block],
     edited: bool,
     actions: &mut Vec<Action>,
 ) {
-    let blocks = parsed(text);
-    let size = if mrkdwn::only_emoji(&blocks) {
+    let size = if mrkdwn::only_emoji(blocks) {
         30.0
     } else {
         rich.size

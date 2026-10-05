@@ -395,8 +395,10 @@ pub enum KitBlock {
         title: Option<String>,
     },
     Actions(Vec<Button>),
-    /// What people type; the message's `text` already says the same.
-    RichText(String),
+    /// What people type, as Slack laid it out: the message's `text` says
+    /// the same in mrkdwn, but these say for certain what is an emoji, a
+    /// mention or a style.
+    RichText(std::sync::Arc<[crate::mrkdwn::Block]>),
 }
 
 impl KitBlock {
@@ -455,6 +457,15 @@ impl Message {
     /// Whether the Block Kit layout replaces `text` on screen.
     pub fn uses_blocks(&self) -> bool {
         self.blocks.iter().any(KitBlock::is_layout)
+    }
+
+    /// Slack's own layout of `text`, when the message carries one: drawn
+    /// instead of parsing `text`, which can only guess at it.
+    pub fn rich_text(&self) -> Option<&std::sync::Arc<[crate::mrkdwn::Block]>> {
+        self.blocks.iter().find_map(|block| match block {
+            KitBlock::RichText(blocks) => Some(blocks),
+            _ => None,
+        })
     }
 
     /// Whether this is a reply inside a thread (not the parent).

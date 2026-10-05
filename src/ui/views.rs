@@ -545,7 +545,7 @@ fn card_contents(
                 }
             });
             let rich = Rich::new(palette, workspace).size(14.0);
-            rich::show(ui, &rich, &message.text, message.edited, actions);
+            rich::message(ui, &rich, message, message.edited, actions);
         });
     });
 }

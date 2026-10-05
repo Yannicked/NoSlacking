@@ -351,7 +351,7 @@ fn system(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec
             let rich = Rich::new(row.palette, row.workspace)
                 .size(13.0)
                 .color(row.palette.secondary);
-            rich::show(ui, &rich, &message.text, false, actions);
+            rich::message(ui, &rich, message, false, actions);
         });
 }
 
@@ -508,7 +508,7 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
         blocks_view(ui, row, &message.blocks, actions);
     } else if !message.text.is_empty() {
         let rich = Rich::new(palette, row.workspace);
-        rich::show(ui, &rich, &message.text, message.edited, actions);
+        rich::message(ui, &rich, message, message.edited, actions);
     }
     for file in &message.files {
         file_view(ui, row, message, file, actions);
