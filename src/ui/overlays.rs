@@ -120,9 +120,7 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
     let Some(workspace) = app.active_workspace() else {
         return;
     };
-    let mut matches =
-        crate::convos::conversations_matching(crate::convos::candidates(workspace), &query);
-    matches.truncate(12);
+    let matches = matching(ctx, "switcher", workspace, &query, |_| true, 12);
     let (down, up, enter, escape) = ctx.input_mut(|input| {
         (
             input.consume_key(Modifiers::NONE, Key::ArrowDown),
@@ -180,6 +178,57 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
     if !close {
         app.switcher = Some((query, selected));
     }
+}
+
+/// A conversation picker's last search, kept in egui's memory.
+#[derive(Clone, Default)]
+struct Matched {
+    /// The query and [`crate::convos::candidates_fingerprint`] it was for.
+    key: Option<(String, u64)>,
+    found: Vec<crate::convos::Candidate>,
+}
+
+/// The first `limit` conversations that `keep` lets through and whose
+/// title holds `query`, best first, for the picker named `picker`. Kept
+/// until the query or the conversations change: building, matching and
+/// sorting every conversation on every frame is too slow in a big
+/// workspace.
+pub(super) fn matching(
+    ctx: &egui::Context,
+    picker: &str,
+    workspace: &crate::app::WorkspaceState,
+    query: &str,
+    keep: fn(&crate::convos::Candidate) -> bool,
+    limit: usize,
+) -> Vec<crate::convos::Candidate> {
+    let id = egui::Id::new(("conversation-matches", picker));
+    let key = (
+        query.to_owned(),
+        crate::convos::candidates_fingerprint(workspace),
+    );
+    if let Some(found) = ctx.data(|d| {
+        d.get_temp::<Matched>(id)
+            .filter(|m| m.key.as_ref() == Some(&key))
+            .map(|m| m.found)
+    }) {
+        return found;
+    }
+    let candidates = crate::convos::candidates(workspace)
+        .into_iter()
+        .filter(keep)
+        .collect();
+    let mut found = crate::convos::conversations_matching(candidates, query);
+    found.truncate(limit);
+    ctx.data_mut(|d| {
+        d.insert_temp(
+            id,
+            Matched {
+                key: Some(key),
+                found: found.clone(),
+            },
+        );
+    });
+    found
 }
 
 /// One conversation in a list to pick from: its kind's icon and its
