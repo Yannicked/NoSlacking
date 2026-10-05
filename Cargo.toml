@@ -36,8 +36,9 @@ eframe = { version = "0.36", default-features = false, features = ["accesskit", 
 egui = "0.36"
 egui_extras = { version = "0.36", features = ["image", "svg", "gif", "webp"] }
 # Slack serves avatars as JPEG and PNG, custom emoji as PNG and GIF, and
-# attachments in whatever was uploaded.
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+# attachments in whatever was uploaded. Link previews show the site's
+# favicon, which is often an ICO.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "ico"] }
 # The shared foundation of ZapFast and Spotifast (crmne/fastframe). Every
 # crate comes from the same tag; move them together.
 fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }

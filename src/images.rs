@@ -618,6 +618,15 @@ mod tests {
     }
 
     #[test]
+    fn favicons_in_ico_decode() {
+        // A real ICO with several sizes inside: the app's own Windows icon.
+        let ico = include_bytes!("../packaging/windows/noslacking.ico");
+        assert_eq!(check_decoded_size(ico), Ok(()));
+        let decoded = image::load_from_memory(ico).expect("an ICO decodes");
+        assert!(decoded.width() >= 16 && decoded.width() == decoded.height());
+    }
+
+    #[test]
     fn failed_fetches_are_retried_later_and_refusals_never() {
         let fetch = Failure::Fetch("HTTP 503".into());
         assert_eq!(retry_delay(&fetch, 1), Some(Duration::from_secs(5)));

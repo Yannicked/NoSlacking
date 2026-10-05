@@ -44,13 +44,27 @@ pub(super) fn attachment_media(
 
 /// A small picture before a name in a card's header: a site's or an
 /// author's icon.
+///
+/// Drawn only once it has loaded: a site's favicon can be in a format no
+/// decoder here reads, or broken, and the card says who it is without it,
+/// where an error mark would only be noise.
 fn card_icon(ui: &mut egui::Ui, team: &str, url: &str, round: bool) {
     let radius = if round { 8 } else { 3 };
-    ui.add(
-        egui::Image::new(crate::ui::image_uri(team, url))
-            .fit_to_exact_size(Vec2::splat(16.0))
-            .corner_radius(CornerRadius::same(radius)),
-    );
+    let size = Vec2::splat(16.0);
+    let image = egui::Image::new(crate::ui::image_uri(team, url))
+        .fit_to_exact_size(size)
+        .corner_radius(CornerRadius::same(radius));
+    match image.load_for_size(ui.ctx(), size) {
+        Ok(egui::load::TexturePoll::Ready { .. }) => {
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            image.paint_at(ui, rect);
+        }
+        // Held open while it loads, so the name beside it doesn't jump.
+        Ok(egui::load::TexturePoll::Pending { .. }) => {
+            ui.allocate_exact_size(size, egui::Sense::hover());
+        }
+        Err(_) => {}
+    }
 }
 
 /// A link card or a bot's legacy attachment: the site and author, the
