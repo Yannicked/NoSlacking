@@ -26,7 +26,7 @@ pub use fastframe_shell::Waker;
 use crate::credentials::{AppCredentials, Credentials};
 use crate::failure::{Failure, Problem};
 use crate::images::ImageLoader;
-use crate::model::{Bot, Conversation, Message, SidebarSection, Ts, User, Workspace};
+use crate::model::{Bot, Conversation, Message, SidebarSection, Ts, User, UserGroup, Workspace};
 use crate::paths::AppDirs;
 use crate::settings::{Redirect, WorkspaceMeta};
 use crate::sidebar::SidebarCall;
@@ -559,6 +559,12 @@ pub enum Event {
     Emoji {
         team: String,
         emoji: HashMap<String, String>,
+    },
+    /// The workspace's user groups, for mentioning them. Never sent when
+    /// the sign-in may not list them.
+    UserGroups {
+        team: String,
+        groups: Vec<UserGroup>,
     },
     History {
         team: String,

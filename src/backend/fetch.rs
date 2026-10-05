@@ -110,6 +110,7 @@ pub(super) async fn boot(client: Client, workspace: Workspace, cache: Cache, sin
         }),
         Err(error) => log::info!("emoji.list: {error}"),
     }
+    user_groups(&client, &team, &sink).await;
     // Side by side, but inside this task, so stopping the boot on sign-out
     // stops them too.
     let sweep = async {
@@ -122,6 +123,29 @@ pub(super) async fn boot(client: Client, workspace: Workspace, cache: Cache, sin
         sections(client.clone(), team.clone(), sink.clone()),
         sweep,
     );
+}
+
+/// The workspace's user groups, so `@design` can be typed and drawn.
+///
+/// A sign-in through your own Slack app needs the `usergroups:read`
+/// permission, which the bundled manifest does not ask for (as with DND,
+/// adding it would break apps made from the older manifest). Without it
+/// the call is refused, and groups simply stay out of the suggestions.
+async fn user_groups(client: &Client, team: &str, sink: &Sink) {
+    let params = [("include_disabled", "false".to_owned())];
+    match client
+        .call::<types::UserGroupList>("usergroups.list", &params)
+        .await
+    {
+        Ok(list) => sink.send(Event::UserGroups {
+            team: team.to_owned(),
+            groups: list.into_model(),
+        }),
+        Err(SlackError::Api(code)) if code == "missing_scope" => {
+            log::info!("usergroups.list: no usergroups:read permission, so no group mentions");
+        }
+        Err(error) => log::info!("usergroups.list: {error}"),
+    }
 }
 
 /// Every conversation you are in.

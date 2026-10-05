@@ -370,7 +370,7 @@ fn flow(
                     ));
                 }
                 Inline::Group { id, label } => {
-                    let name = label.clone().unwrap_or_else(|| format!("@{id}"));
+                    let name = group_name(workspace, id, label.as_deref());
                     ui.add(egui::Label::new(
                         RichText::new(name)
                             .font(theme::medium(size))
@@ -397,6 +397,16 @@ fn flow(
             ));
         }
     });
+}
+
+/// How a user group mention reads: the handle Slack lists now, else the
+/// label the message was sent with, else the bare id.
+fn group_name(workspace: &WorkspaceState, id: &str, label: Option<&str>) -> String {
+    workspace
+        .group(id)
+        .map(|g| format!("@{}", g.handle))
+        .or_else(|| label.map(str::to_owned))
+        .unwrap_or_else(|| format!("@{id}"))
 }
 
 /// Draws `:name:` as the emoji it stands for. Its name shows on hover, and
@@ -446,7 +456,30 @@ fn shorten(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::shorten;
+    use super::{group_name, shorten};
+    use crate::app::WorkspaceState;
+    use crate::model::{UserGroup, Workspace};
+
+    #[test]
+    fn group_mentions_show_their_handle() {
+        let mut w = WorkspaceState::new(Workspace {
+            team_id: "T1".into(),
+            name: "Acme".into(),
+            domain: "acme".into(),
+            icon: None,
+            user_id: "U0".into(),
+        });
+        assert_eq!(group_name(&w, "S1", None), "@S1");
+        assert_eq!(group_name(&w, "S1", Some("@design")), "@design");
+        w.groups.push(UserGroup {
+            id: "S1".into(),
+            handle: "design-team".into(),
+            name: "Design".into(),
+            members: None,
+        });
+        assert_eq!(group_name(&w, "S1", None), "@design-team");
+        assert_eq!(group_name(&w, "S1", Some("@design")), "@design-team");
+    }
 
     #[test]
     fn links_lose_their_scheme_and_length() {

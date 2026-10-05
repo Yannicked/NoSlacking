@@ -458,7 +458,8 @@ sections. Nothing below exists yet.
 - [x] **The new-message icon touches the sidebar edge.**
 - [ ] **DND for your-own-app sign-ins** needs the `dnd:read` and
       `dnd:write` scopes. Adding them breaks apps made from the old
-      manifest, so DND is local only for those sign-ins for now.
+      manifest, so DND is local only for those sign-ins for now. The same
+      goes for `usergroups:read`: without it, `@group` isn't suggested.
 - [ ] **No Dock or taskbar badge on macOS and Windows**: it would need
       `unsafe` platform calls. The unread count is in the window title.
 - [ ] **Cancelling an upload during its last step** may still post it.
@@ -502,10 +503,12 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
 - [ ] **Mark unread** from the message menu and the keyboard (`u`):
       `conversations.mark` with the `ts` just before the message, and the
       read line moves locally. *The read-marker plumbing already exists.*
-- [ ] **User-group mentions in the composer.** `<!subteam^…>` is drawn and
+- [x] **User-group mentions in the composer.** `<!subteam^…>` is drawn and
       notified, but `@team` can't be typed. Fetch `usergroups.list`
       (OAuth needs `usergroups:read`; mind the manifest, as with DND) and
-      add groups to the suggestions.
+      add groups to the suggestions. *Sessions get them; your-own-app
+      sign-ins only if the app happens to have `usergroups:read`, as the
+      manifest does not ask for it yet (see the DND follow-up).*
 - [ ] **Share a message** to another conversation: a picker that posts
       the permalink with an optional comment, which Slack unfurls.
 - [ ] **Keyboard shortcut sheet** on `Ctrl+/` (⌘/) listing what

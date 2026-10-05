@@ -11,7 +11,7 @@ use crate::backend::{Command, Event, Sink, Socket};
 use crate::credentials::AppCredentials;
 use crate::model::{
     Attachment, Bot, Conversation, ConversationKind, Delivery, File, Message, Reaction,
-    SectionKind, SidebarSection, Ts, User, Workspace,
+    SectionKind, SidebarSection, Ts, User, UserGroup, Workspace,
 };
 
 pub const TEAM: &str = "TDEMO";
@@ -414,7 +414,11 @@ fn history(channel: &str) -> Vec<Message> {
                     original_size: Some([480.0, 270.0]),
                     ..File::default()
                 }],
-                ..message(NOW - 2400, "U01", "New sidebar spacing, what do you think?")
+                ..message(
+                    NOW - 2400,
+                    "U01",
+                    "New sidebar spacing, what do you think <!subteam^S01>?",
+                )
             },
             Message {
                 files: vec![File {
@@ -788,6 +792,20 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                 ("partyparrot".to_owned(), PARROT.to_owned()),
                 ("parrot".to_owned(), "alias:partyparrot".to_owned()),
             ]),
+        });
+        // Groups to mention: type `@des` or `@eng` in the composer.
+        let group = |id: &str, handle: &str, name: &str, members| UserGroup {
+            id: id.into(),
+            handle: handle.into(),
+            name: name.into(),
+            members: Some(members),
+        };
+        sink.send(Event::UserGroups {
+            team: id.into(),
+            groups: vec![
+                group("S01", "design", "Design team", 3),
+                group("S02", "engineering", "Engineering", 5),
+            ],
         });
         sink.send(Event::Conversations {
             team: id.into(),

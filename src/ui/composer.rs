@@ -39,6 +39,13 @@ enum Suggestion {
         name: String,
     },
     Special(&'static str),
+    /// A user group, by the handle you type to mention it.
+    Group {
+        id: String,
+        handle: String,
+        name: String,
+        members: Option<usize>,
+    },
     Channel {
         id: String,
         name: String,
@@ -53,6 +60,7 @@ impl Suggestion {
             Self::User { label, .. } => format!("@{label} "),
             Self::Emoji { name } => format!(":{name}: "),
             Self::Special(name) => format!("@{name} "),
+            Self::Group { handle, .. } => format!("@{handle} "),
             Self::Channel { name, .. } => format!("#{name} "),
             Self::Command(known) => format!("/{} ", known.name),
         }
@@ -97,6 +105,22 @@ fn broadcast_description(name: &str) -> std::borrow::Cow<'static, str> {
         "here" => t("Notify everyone online in this conversation"),
         "channel" => t("Notify every member of this conversation"),
         _ => t("Notify everyone in the workspace"),
+    }
+}
+
+/// A user group's name and, when known, how many are in it.
+fn group_detail(name: &str, members: Option<usize>) -> String {
+    let count = members.map(|n| {
+        crate::i18n::tn(
+            "{count} member",
+            "{count} members",
+            u32::try_from(n).unwrap_or(u32::MAX),
+        )
+    });
+    match count {
+        Some(count) if name.is_empty() => count,
+        Some(count) => format!("{name} · {count}"),
+        None => name.to_owned(),
     }
 }
 
@@ -169,14 +193,17 @@ impl People {
     }
 }
 
+/// How many custom emoji, conversations and user groups a workspace has:
+/// when one changes, remembered suggestions may be out of date.
+type Counts = (usize, usize, usize);
+
 /// The suggestions for the last word typed, kept per composer: the field
 /// asks again on every frame while the word stays the same.
 #[derive(Clone, Debug, Default)]
 struct Memo {
     people: People,
-    /// The word, the custom emoji and conversation counts, and what was
-    /// found.
-    last: Option<(String, (usize, usize), Vec<Suggestion>)>,
+    /// The word, the counts, and what was found.
+    last: Option<(String, Counts, Vec<Suggestion>)>,
 }
 
 impl Memo {
@@ -188,6 +215,7 @@ impl Memo {
         let custom = (
             workspace.emoji.custom_names().count(),
             workspace.conversations.len(),
+            workspace.groups.len(),
         );
         if let Some((last, count, found)) = &self.last
             && last == word
@@ -258,12 +286,22 @@ fn suggest(people: &People, workspace: &WorkspaceState, word: &str) -> Vec<Sugge
                 .cmp(&key(b))
                 .then_with(|| a.label_lower.cmp(&b.label_lower))
         });
-        out.extend(users.into_iter().take(8).map(|p| Suggestion::User {
+        users.truncate(8);
+        // People whose name starts with what you typed come before groups,
+        // as you most often mean a person; groups come before the rest.
+        let first = users
+            .iter()
+            .take_while(|p| !p.is_bot && p.label_lower.starts_with(&query))
+            .count();
+        let person = |p: &Person| Suggestion::User {
             id: p.id.clone(),
             label: p.label.clone(),
             detail: p.detail.clone(),
             avatar: p.avatar.clone(),
-        }));
+        };
+        out.extend(users[..first].iter().map(|p| person(p)));
+        out.extend(groups(&workspace.groups, &query));
+        out.extend(users[first..].iter().map(|p| person(p)));
         return out;
     }
     if let Some(query) = word.strip_prefix(':')
@@ -290,6 +328,28 @@ fn suggest(people: &People, workspace: &WorkspaceState, word: &str) -> Vec<Sugge
             .collect();
     }
     Vec::new()
+}
+
+/// The user groups whose handle or name contains `query` (lower-cased),
+/// those whose handle starts with it first. A workspace has few groups, so
+/// they are matched afresh rather than kept lower-cased.
+fn groups(groups: &[crate::model::UserGroup], query: &str) -> Vec<Suggestion> {
+    let mut found: Vec<(String, &crate::model::UserGroup)> = groups
+        .iter()
+        .map(|g| (g.handle.to_lowercase(), g))
+        .filter(|(handle, g)| handle.contains(query) || g.name.to_lowercase().contains(query))
+        .collect();
+    found.sort_by(|(a, _), (b, _)| (!a.starts_with(query), a).cmp(&(!b.starts_with(query), b)));
+    found
+        .into_iter()
+        .take(4)
+        .map(|(_, g)| Suggestion::Group {
+            id: g.id.clone(),
+            handle: g.handle.clone(),
+            name: g.name.clone(),
+            members: g.members,
+        })
+        .collect()
 }
 
 /// The text field of the composer for the draft `key`.
@@ -436,6 +496,13 @@ pub fn show(
                 draft
                     .mentions
                     .push((format!("@{label}"), format!("<@{id}>")));
+            }
+            // The label form draws as the handle even where the group is
+            // unknown, and is what Slack itself sends.
+            Suggestion::Group { id, handle, .. } => {
+                draft
+                    .mentions
+                    .push((format!("@{handle}"), format!("<!subteam^{id}|@{handle}>")));
             }
             Suggestion::Channel { id, name, .. } => {
                 draft
@@ -951,6 +1018,28 @@ fn suggestion_list(
                                 .color(palette.dim),
                         );
                     }
+                    Suggestion::Group {
+                        handle,
+                        name,
+                        members,
+                        ..
+                    } => {
+                        let (rect, _) =
+                            child.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                        Icon::Users
+                            .image(palette.secondary, 15.0)
+                            .paint_at(&child, rect.shrink(2.5));
+                        child.label(
+                            RichText::new(format!("@{handle}"))
+                                .font(theme::semibold(13.5))
+                                .color(palette.text),
+                        );
+                        child.label(
+                            RichText::new(group_detail(name, *members))
+                                .font(theme::regular(12.5))
+                                .color(palette.dim),
+                        );
+                    }
                     Suggestion::Channel { name, private, .. } => {
                         let icon = if *private { Icon::Lock } else { Icon::Hash };
                         let (rect, _) =
@@ -1051,6 +1140,7 @@ mod tests {
                 Suggestion::User { label, .. } => label.clone(),
                 Suggestion::Emoji { name } => format!(":{name}:"),
                 Suggestion::Special(name) => format!("@{name}"),
+                Suggestion::Group { handle, .. } => format!("@{handle}"),
                 Suggestion::Channel { name, .. } => format!("#{name}"),
                 Suggestion::Command(known) => format!("/{}", known.name),
             })
@@ -1070,6 +1160,45 @@ mod tests {
         // A bare @ lists people, not broadcasts.
         assert_eq!(suggestions(&w, "@").len(), 3);
         assert!(suggestions(&w, "plain").is_empty());
+    }
+
+    #[test]
+    fn groups_suggest_by_handle_and_name_after_people() {
+        let mut w = workspace();
+        let group = |id: &str, handle: &str, name: &str| crate::model::UserGroup {
+            id: id.into(),
+            handle: handle.into(),
+            name: name.into(),
+            members: Some(3),
+        };
+        w.groups = vec![
+            group("S1", "design", "Design team"),
+            group("S2", "ops", "Operations"),
+            group("S3", "android", "Mobile"),
+        ];
+        // People starting with the query, then groups (handle prefix
+        // first), then the people and bots that only contain it.
+        assert_eq!(
+            labels(&suggestions(&w, "@an")),
+            ["Ann", "@android", "Joanna Ek", "anbot"]
+        );
+        // The name counts too, but what goes in is the handle.
+        let found = suggestions(&w, "@operat");
+        assert_eq!(labels(&found), ["@ops"]);
+        assert_eq!(
+            found.first().map(Suggestion::insert).as_deref(),
+            Some("@ops ")
+        );
+        assert_eq!(
+            group_detail("Operations", Some(3)),
+            "Operations · 3 members"
+        );
+        assert_eq!(group_detail("Operations", None), "Operations");
+        // A new list of groups is seen by remembered suggestions.
+        let mut memo = Memo::default();
+        assert_eq!(labels(&memo.suggestions(&w, "@des")), ["@design"]);
+        w.groups.push(group("S4", "desk", "Help desk"));
+        assert_eq!(labels(&memo.suggestions(&w, "@des")), ["@design", "@desk"]);
     }
 
     #[test]
