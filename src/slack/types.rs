@@ -499,9 +499,17 @@ pub fn kit_blocks(blocks: &[Value]) -> Vec<model::KitBlock> {
                 (!buttons.is_empty()).then_some(KitBlock::Actions(buttons))
             }
             "rich_text" => {
-                let mut text = String::new();
-                rich_text(block, &mut text);
-                (!text.trim().is_empty()).then_some(KitBlock::RichText(text))
+                let blocks = super::rich::blocks(block);
+                if blocks.is_empty() {
+                    None
+                } else if let Some(KitBlock::RichText(before)) = out.last_mut() {
+                    // A message has one rich text block in practice; should
+                    // it have more, they read on as one, as its `text` does.
+                    *before = before.iter().cloned().chain(blocks).collect();
+                    None
+                } else {
+                    Some(KitBlock::RichText(blocks.into()))
+                }
             }
             _ => None,
         };
@@ -1346,6 +1354,33 @@ mod tests {
         assert!(
             !kit_blocks(&typed).iter().any(KitBlock::is_layout),
             "people's own messages keep their text"
+        );
+    }
+
+    #[test]
+    fn rich_text_is_kept_as_slack_laid_it_out() {
+        let message: Message = serde_json::from_str(
+            r#"{"type":"message","ts":"1.0","user":"U1","text":":large_blue_square:1000",
+                "blocks":[
+                    {"type":"rich_text","elements":[{"type":"rich_text_section","elements":[
+                        {"type":"emoji","name":"large_blue_square"},{"type":"text","text":"1000"}]}]},
+                    {"type":"rich_text","elements":[{"type":"rich_text_section","elements":[
+                        {"type":"text","text":"more"}]}]}]}"#,
+        )
+        .expect("parses");
+        let message = message.into_model().expect("a message");
+        assert!(!message.uses_blocks(), "rich text alone is no app layout");
+        use crate::mrkdwn::{Block, Inline, Style};
+        assert_eq!(
+            message.rich_text().map(|blocks| blocks.to_vec()),
+            Some(vec![
+                Block::Paragraph(vec![
+                    Inline::Emoji("large_blue_square".into()),
+                    Inline::Text("1000".into(), Style::default()),
+                ]),
+                Block::Paragraph(vec![Inline::Text("more".into(), Style::default())]),
+            ]),
+            "two blocks read on as one"
         );
     }
 

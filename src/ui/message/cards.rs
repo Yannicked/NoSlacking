@@ -357,9 +357,9 @@ pub(super) fn blocks_view(
                     let rich = Rich::new(palette, row.workspace).size(16.5);
                     rich::show(ui, &rich, &format!("*{}*", text.trim()), false, actions);
                 }
-                KitBlock::RichText(text) => {
+                KitBlock::RichText(blocks) => {
                     let rich = Rich::new(palette, row.workspace);
-                    rich::show(ui, &rich, text, false, actions);
+                    rich::show_parsed(ui, &rich, blocks, false, actions);
                 }
                 KitBlock::Section {
                     text,
