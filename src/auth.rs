@@ -230,20 +230,62 @@ const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>NoSlacking</t
 <style>body{font:16px system-ui;display:grid;place-items:center;height:90vh;color:#333}</style>\
 <p>You can close this tab and go back to NoSlacking.</p>";
 
+/// The loopback redirect's listeners, bound before the browser opens so
+/// Slack's answer always has somewhere to go.
+#[derive(Debug)]
+pub struct Loopback {
+    port: u16,
+    v4: Option<tokio::net::TcpListener>,
+    v6: Option<tokio::net::TcpListener>,
+}
+
+/// Listens on `port` of 127.0.0.1 and of ::1. Must run inside the tokio
+/// runtime, which takes the listeners over.
+pub fn bind_loopback(port: u16) -> std::io::Result<Loopback> {
+    let bind = |address: std::net::SocketAddr| {
+        let listener = std::net::TcpListener::bind(address)?;
+        listener.set_nonblocking(true)?;
+        tokio::net::TcpListener::from_std(listener)
+    };
+    let (v4, v6) = either_family(
+        bind((std::net::Ipv4Addr::LOCALHOST, port).into()),
+        bind((std::net::Ipv6Addr::LOCALHOST, port).into()),
+    )?;
+    Ok(Loopback { port, v4, v6 })
+}
+
+/// Whether a failed bind means someone else holds the port, rather than
+/// the address family being missing (no IPv6 on this machine).
+fn port_taken(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+    )
+}
+
+/// The listeners to use, from the binds of both families. Browsers resolve
+/// `localhost` to 127.0.0.1 or ::1 as they like, so a family the machine
+/// lacks may be left out, but one whose port someone else holds may not:
+/// the browser could take Slack's answer, code and all, to that program.
+fn either_family<L>(
+    v4: std::io::Result<L>,
+    v6: std::io::Result<L>,
+) -> std::io::Result<(Option<L>, Option<L>)> {
+    match (v4, v6) {
+        (Ok(v4), Ok(v6)) => Ok((Some(v4), Some(v6))),
+        (Ok(_), Err(error)) | (Err(error), Ok(_)) if port_taken(&error) => Err(error),
+        (Ok(v4), Err(_)) => Ok((Some(v4), None)),
+        (Err(_), Ok(v6)) => Ok((None, Some(v6))),
+        (Err(v4), Err(v6)) => Err(if port_taken(&v6) { v6 } else { v4 }),
+    }
+}
+
 /// Waits for Slack to send the browser to the loopback redirect carrying
 /// `state`, answers it, and returns the URL it asked for. Any other request
 /// (a stray page, an old redirect) is answered and ignored, so it cannot
 /// end the attempt.
-pub async fn loopback(port: u16, state: &str) -> std::io::Result<String> {
-    // Browsers resolve `localhost` to 127.0.0.1 or ::1 as they like, so
-    // listen on both. One of them failing (no IPv6 on this machine, or the
-    // port taken on one family) is fine while the other works.
-    let v4 = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await;
-    let v6 = tokio::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port)).await;
-    let (v4, v6) = match (v4, v6) {
-        (Err(error), Err(_)) => return Err(error),
-        (v4, v6) => (v4.ok(), v6.ok()),
-    };
+pub async fn loopback(listeners: Loopback, state: &str) -> std::io::Result<String> {
+    let Loopback { port, v4, v6 } = listeners;
     loop {
         let (mut stream, _) = accept_either(v4.as_ref(), v6.as_ref()).await?;
         let mut buffer = vec![0u8; 8192];
@@ -543,6 +585,49 @@ mod tests {
         assert_eq!(
             parse_callback("x://cb?error=invalid_scope&state=s1", "s1"),
             Err(Failure::Refused("invalid_scope".into()))
+        );
+    }
+
+    #[test]
+    fn a_port_someone_else_holds_stops_the_sign_in() {
+        use std::io::{Error, ErrorKind};
+        let failed = |kind| -> std::io::Result<u8> { Err(Error::from(kind)) };
+        assert!(matches!(
+            either_family(Ok(4), Ok(6)),
+            Ok((Some(4), Some(6)))
+        ));
+        // No IPv6 (or no IPv4) on this machine: the other family will do.
+        assert!(matches!(
+            either_family(Ok(4), failed(ErrorKind::AddrNotAvailable)),
+            Ok((Some(4), None))
+        ));
+        assert!(matches!(
+            either_family(failed(ErrorKind::Unsupported), Ok(6)),
+            Ok((None, Some(6)))
+        ));
+        // Another program on either family could catch the browser.
+        for kind in [ErrorKind::AddrInUse, ErrorKind::PermissionDenied] {
+            assert_eq!(
+                either_family(Ok(4), failed(kind))
+                    .map(|_| ())
+                    .map_err(|e| e.kind()),
+                Err(kind)
+            );
+            assert_eq!(
+                either_family(failed(kind), Ok(6))
+                    .map(|_| ())
+                    .map_err(|e| e.kind()),
+                Err(kind)
+            );
+        }
+        assert_eq!(
+            either_family(
+                failed(ErrorKind::AddrNotAvailable),
+                failed(ErrorKind::AddrInUse)
+            )
+            .map(|_| ())
+            .map_err(|e| e.kind()),
+            Err(ErrorKind::AddrInUse)
         );
     }
 

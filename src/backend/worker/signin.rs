@@ -187,8 +187,9 @@ impl Worker {
                 .send(Event::SignIn(SignIn::Failed(Failure::NoClientId)));
             return;
         };
-        if let Some(listener) = self.listener.take() {
-            listener.abort();
+        let previous = self.listener.take();
+        if let Some(previous) = &previous {
+            previous.abort();
         }
         let flow = Flow::start(&app, redirect, port);
         match redirect {
@@ -200,25 +201,39 @@ impl Worker {
                         Failure::Other(error),
                     )));
                 }
+                open_browser(&flow.url);
             }
             Redirect::Loopback => {
                 let internal = self.internal.clone();
                 let state = flow.state.clone();
+                let url = flow.url.clone();
                 self.listener = Some(tokio::spawn(async move {
-                    match auth::loopback(port, &state).await {
+                    // The last attempt's listener lets go of the port once
+                    // its task is gone; only then can this one take it.
+                    if let Some(previous) = previous {
+                        let _ = previous.await;
+                    }
+                    // Listen first: with nowhere to land, the browser would
+                    // be sent off for nothing, or to whoever holds the port.
+                    let listened = match auth::bind_loopback(port) {
+                        Ok(listeners) => {
+                            open_browser(&url);
+                            auth::loopback(listeners, &state).await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    match listened {
                         Ok(url) => {
                             let _ = internal.send(Internal::Callback(url));
                         }
                         Err(error) => {
+                            log::warn!("the sign-in listener on port {port} failed: {error}");
                             let _ =
                                 internal.send(Internal::SignInListenerFailed(error.to_string()));
                         }
                     }
                 }));
             }
-        }
-        if let Err(error) = open::that_detached(&flow.url) {
-            log::warn!("could not open the browser: {error}");
         }
         self.sink
             .send(Event::SignIn(SignIn::Waiting(flow.url.clone())));
@@ -323,6 +338,14 @@ impl Worker {
             self.restart_socket();
         }
         self.report_socket();
+    }
+}
+
+/// Opens the sign-in page; the waiting screen shows its address to open by
+/// hand when no browser comes up.
+fn open_browser(url: &str) {
+    if let Err(error) = open::that_detached(url) {
+        log::warn!("could not open the browser: {error}");
     }
 }
 
