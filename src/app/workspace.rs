@@ -518,13 +518,25 @@ impl WorkspaceState {
             users: self.unknown_users(messages.iter().filter_map(|m| m.user.as_deref())),
             bots: self.unknown_bots(messages.iter()),
         };
+        // The thread's own copy of its parent carries Slack's count, which
+        // corrects whatever was counted here; failing that, the replies
+        // that came are the count.
         let replies = messages.iter().filter(|m| m.ts != ts).count() as u32;
+        let fresh = messages.iter().find(|m| m.ts == ts && m.replies_known);
         if let Some(parent) = self
             .timelines
             .get_mut(channel)
             .and_then(|t| t.find_mut(&ts))
         {
-            parent.reply_count = parent.reply_count.max(replies);
+            match fresh {
+                Some(fresh) => {
+                    parent.reply_count = fresh.reply_count;
+                    parent.replies_known = true;
+                    parent.reply_users.clone_from(&fresh.reply_users);
+                    parent.latest_reply.clone_from(&fresh.latest_reply);
+                }
+                None => parent.reply_count = replies,
+            }
         }
         let timeline = self.threads.entry((channel.to_owned(), ts)).or_default();
         timeline.loading = false;
@@ -563,26 +575,9 @@ impl WorkspaceState {
         // A muted direct message counts only what mentions you.
         let counts_all = !self.desktop.is_muted(channel);
         if message.is_reply() {
+            self.count_reply(channel, &message);
             let parent_ts = message.thread_ts.clone().unwrap_or_default();
             let key = (channel.to_owned(), parent_ts);
-            let already = self
-                .threads
-                .get(&key)
-                .is_some_and(|t| t.messages.iter().any(|m| m.ts == message.ts));
-            if !already
-                && let Some(parent) = self
-                    .timelines
-                    .get_mut(channel)
-                    .and_then(|t| t.find_mut(&key.1))
-            {
-                parent.reply_count += 1;
-                parent.latest_reply = Some(message.ts.clone());
-                if let Some(user) = &message.user
-                    && !parent.reply_users.contains(user)
-                {
-                    parent.reply_users.push(user.clone());
-                }
-            }
             if let Some(thread) = self.threads.get_mut(&key) {
                 remove_echoed_local(thread, &message, from_me);
                 thread.upsert(message.clone());
@@ -616,6 +611,39 @@ impl WorkspaceState {
             arrived.users.clear();
         }
         (arrived, fetch_conversation)
+    }
+
+    /// Counts a new reply on every loaded copy of its parent, once. A reply
+    /// no newer than the parent's latest is counted already: by an earlier
+    /// copy of this reply, or by Slack, whose own update of the parent can
+    /// come before the reply does.
+    fn count_reply(&mut self, channel: &str, reply: &Message) {
+        let Some(parent) = reply.thread_ts.clone() else {
+            return;
+        };
+        let thread = self.threads.get_mut(&(channel.to_owned(), parent.clone()));
+        let copies = self
+            .timelines
+            .get_mut(channel)
+            .and_then(|t| t.find_mut(&parent))
+            .into_iter()
+            .chain(thread.and_then(|t| t.find_mut(&parent)));
+        for copy in copies {
+            if copy
+                .latest_reply
+                .as_ref()
+                .is_some_and(|latest| reply.ts <= *latest)
+            {
+                continue;
+            }
+            copy.reply_count += 1;
+            copy.latest_reply = Some(reply.ts.clone());
+            if let Some(user) = &reply.user
+                && !copy.reply_users.contains(user)
+            {
+                copy.reply_users.push(user.clone());
+            }
+        }
     }
 
     /// A new copy of a message already sent: an edit, or a thread
@@ -658,6 +686,13 @@ impl WorkspaceState {
                     timeline.messages[position].delivery = Delivery::Failed(error.clone());
                 }
             }
+        }
+        // Your reply counts on whichever comes first, this answer or its
+        // echo; the other finds it counted.
+        if let Ok(message) = result
+            && message.is_reply()
+        {
+            self.count_reply(channel, message);
         }
         if let Ok(message) = result
             && message.in_channel()
@@ -1086,6 +1121,83 @@ mod tests {
         thread.upsert(message("2.0", Some("1.0")));
         thread.upsert(message("3.0", Some("1.0")));
         w
+    }
+
+    fn counts(w: &WorkspaceState) -> (u32, u32) {
+        let parent = Ts::new("1.0");
+        let thread = &w.threads[&("C1".to_owned(), parent.clone())];
+        (
+            w.timelines["C1"].messages[0].reply_count,
+            thread
+                .messages
+                .iter()
+                .find(|m| m.ts == parent)
+                .map_or(0, |m| m.reply_count),
+        )
+    }
+
+    #[test]
+    fn slacks_parent_update_before_the_reply_counts_it_once() {
+        let mut w = workspace_with_thread();
+        // Slack's copy of the parent, already counting reply 4.0.
+        let mut parent = message("1.0", Some("1.0"));
+        parent.reply_count = 3;
+        parent.replies_known = true;
+        parent.latest_reply = Some(Ts::new("4.0"));
+        w.message_changed("C1", parent);
+        w.message_arrived("C1", message("4.0", Some("1.0")), true);
+        assert_eq!(counts(&w), (3, 3));
+    }
+
+    #[test]
+    fn a_reply_delivered_twice_counts_once_with_its_thread_closed() {
+        let mut w = workspace_with_thread();
+        w.threads.clear();
+        w.message_arrived("C1", message("4.0", Some("1.0")), false);
+        w.message_arrived("C1", message("4.0", Some("1.0")), false);
+        assert_eq!(w.timelines["C1"].messages[0].reply_count, 3);
+    }
+
+    #[test]
+    fn your_reply_counts_once_whichever_comes_first() {
+        for answer_first in [true, false] {
+            let mut w = workspace_with_thread();
+            sending(&mut w, "local-1", "mine", Some("1.0"));
+            let real = Message {
+                text: "mine".into(),
+                ..message("4.0", Some("1.0"))
+            };
+            if answer_first {
+                w.sent("C1", &Ts::new("local-1"), &Ok(real.clone()));
+                w.message_arrived("C1", real, true);
+            } else {
+                w.message_arrived("C1", real.clone(), true);
+                w.sent("C1", &Ts::new("local-1"), &Ok(real));
+            }
+            assert_eq!(counts(&w), (3, 3), "answer first: {answer_first}");
+        }
+    }
+
+    #[test]
+    fn opening_a_thread_takes_slacks_count() {
+        let mut w = workspace_with_thread();
+        if let Some(parent) = w
+            .timelines
+            .get_mut("C1")
+            .and_then(|t| t.find_mut(&Ts::new("1.0")))
+        {
+            parent.reply_count = 9;
+        }
+        let mut parent = message("1.0", Some("1.0"));
+        parent.reply_count = 2;
+        parent.replies_known = true;
+        let thread = vec![
+            parent,
+            message("2.0", Some("1.0")),
+            message("3.0", Some("1.0")),
+        ];
+        w.thread_arrived("C1", Ts::new("1.0"), thread);
+        assert_eq!(counts(&w), (2, 2), "a count that ran high comes down");
     }
 
     #[test]
