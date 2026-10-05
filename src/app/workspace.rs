@@ -55,6 +55,10 @@ pub struct WorkspaceState {
     /// again at once), until you open them anew, mark them read, write
     /// in them or read further on another device.
     held_unread: HashSet<String>,
+    /// The replies already counted on their parents here, oldest first: a
+    /// reply comes back as Slack's answer and as its echo, and must count
+    /// once whichever order they come in.
+    counted_replies: VecDeque<(String, Ts)>,
 }
 
 /// How many announced messages [`WorkspaceState::seen`] remembers. A copy
@@ -85,6 +89,7 @@ impl WorkspaceState {
             people: crate::people::TeamPeople::default(),
             seen: VecDeque::new(),
             held_unread: HashSet::new(),
+            counted_replies: VecDeque::new(),
         }
     }
 
@@ -811,13 +816,25 @@ impl WorkspaceState {
     }
 
     /// Counts a new reply on every loaded copy of its parent, once. A reply
-    /// no newer than the parent's latest is counted already: by an earlier
-    /// copy of this reply, or by Slack, whose own update of the parent can
-    /// come before the reply does.
+    /// counted here before is not counted again. Nor is one no newer than
+    /// a parent's latest reply when Slack set that, as Slack's own update
+    /// of the parent can come before the reply does and counts it already;
+    /// a latest reply counted here says nothing of the older ones, as your
+    /// own reply can be answered by Slack after someone else's later one.
     fn count_reply(&mut self, channel: &str, reply: &Message) {
         let Some(parent) = reply.thread_ts.clone() else {
             return;
         };
+        if self.reply_counted(channel, &reply.ts) {
+            return;
+        }
+        let slacks_line = |copy: &Message, counted: &VecDeque<(String, Ts)>| {
+            copy.latest_reply
+                .as_ref()
+                .filter(|latest| !counted.iter().any(|(c, t)| c == channel && t == *latest))
+                .is_some_and(|latest| reply.ts <= *latest)
+        };
+        let counted = &self.counted_replies;
         let thread = self.threads.get_mut(&(channel.to_owned(), parent.clone()));
         let copies = self
             .timelines
@@ -826,21 +843,29 @@ impl WorkspaceState {
             .into_iter()
             .chain(thread.and_then(|t| t.find_mut(&parent)));
         for copy in copies {
-            if copy
-                .latest_reply
-                .as_ref()
-                .is_some_and(|latest| reply.ts <= *latest)
-            {
+            if slacks_line(copy, counted) {
                 continue;
             }
             copy.reply_count += 1;
-            copy.latest_reply = Some(reply.ts.clone());
+            copy.latest_reply = max_ts(copy.latest_reply.take(), Some(reply.ts.clone()));
             if let Some(user) = &reply.user
                 && !copy.reply_users.contains(user)
             {
                 copy.reply_users.push(user.clone());
             }
         }
+        if self.counted_replies.len() >= SEEN_LIMIT {
+            self.counted_replies.pop_front();
+        }
+        self.counted_replies
+            .push_back((channel.to_owned(), reply.ts.clone()));
+    }
+
+    /// Whether reply `ts` was counted on its parent here already.
+    fn reply_counted(&self, channel: &str, ts: &Ts) -> bool {
+        self.counted_replies
+            .iter()
+            .any(|(c, t)| c == channel && t == ts)
     }
 
     /// A new copy of a message already sent: an edit, or a thread
@@ -1458,6 +1483,29 @@ mod tests {
             }
             assert_eq!(counts(&w), (3, 3), "answer first: {answer_first}");
         }
+    }
+
+    #[test]
+    fn your_reply_answered_after_a_later_one_still_counts() {
+        let mut w = workspace_with_thread();
+        sending(&mut w, "local-1", "mine", Some("1.0"));
+        let later = Message {
+            user: Some("U2".into()),
+            ..message("5.0", Some("1.0"))
+        };
+        w.message_arrived("C1", later, true);
+        assert_eq!(counts(&w), (3, 3));
+        let real = Message {
+            text: "mine".into(),
+            ..message("4.0", Some("1.0"))
+        };
+        w.sent("C1", &Ts::new("local-1"), &Ok(real.clone()));
+        w.message_arrived("C1", real, true);
+        assert_eq!(counts(&w), (4, 4));
+        assert_eq!(
+            w.timelines["C1"].messages[0].latest_reply,
+            Some(Ts::new("5.0"))
+        );
     }
 
     #[test]
