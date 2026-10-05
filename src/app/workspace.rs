@@ -457,11 +457,16 @@ impl WorkspaceState {
     /// was last seen, to be announced as if they had come live.
     ///
     /// Only a poll (`polled`) of the newest page (not `older`) can bring
-    /// such messages. Even then, a first load, the offline cache's copy,
-    /// or a stretch of history opened around an older message gives no
-    /// line to measure "new" from, and so none. Otherwise new means newer
-    /// than the newest message already loaded, not yours, and not already
-    /// announced. Call it before the page is merged.
+    /// such messages. For a conversation whose messages are loaded, new
+    /// means newer than the newest one loaded. A conversation never opened
+    /// (see [`Self::unopened`]) has no messages to measure from, so new
+    /// means newer than its newest message known before this page: a
+    /// conversation with none known yet announces nothing, as its first
+    /// data is not news. A first load in progress, the offline cache's
+    /// copy, or a stretch of history opened around an older message gives
+    /// no line at all, and so nothing. Either way, your own messages and
+    /// ones announced already are left out. Call it before the page is
+    /// merged, since merging moves the line.
     pub(super) fn polled_new(
         &self,
         channel: &str,
@@ -472,22 +477,112 @@ impl WorkspaceState {
         if !polled || older {
             return Vec::new();
         }
-        let Some(timeline) = self.timelines.get(channel) else {
-            return Vec::new();
+        let line = if self.unopened(channel) {
+            // Live messages can sit in a list never opened: past news too.
+            let known = self.conversation(channel).and_then(|c| c.latest.as_ref());
+            let live = self.timelines.get(channel).and_then(Timeline::newest);
+            match known.max(live) {
+                Some(line) => Some(line),
+                None => return Vec::new(),
+            }
+        } else {
+            let Some(timeline) = self.timelines.get(channel) else {
+                return Vec::new();
+            };
+            if !timeline.loaded
+                || timeline.cached
+                || timeline.has_newer
+                || timeline.around.is_some()
+            {
+                return Vec::new();
+            }
+            // Anything loaded, live ones included, is past news.
+            timeline.newest()
         };
-        if !timeline.loaded || timeline.cached || timeline.has_newer || timeline.around.is_some() {
-            return Vec::new();
-        }
-        // Anything loaded, live ones included, is past news.
-        let newest = timeline.newest();
         let me = self.info.user_id.as_str();
         messages
             .iter()
-            .filter(|m| !m.ts.is_local() && newest.is_none_or(|n| m.ts > *n))
+            .filter(|m| !m.ts.is_local() && line.is_none_or(|n| m.ts > *n))
             .filter(|m| m.user.as_deref() != Some(me))
             .filter(|m| !self.was_seen(channel, &m.ts))
             .cloned()
             .collect()
+    }
+
+    /// Whether a conversation was never opened here: nothing loaded,
+    /// nothing loading, no offline copy shown. A poll of such a
+    /// conversation only tells what is new in it; its messages wait until
+    /// it is opened and loaded properly, offline copy and all.
+    pub(super) fn unopened(&self, channel: &str) -> bool {
+        self.timelines
+            .get(channel)
+            .is_none_or(|t| !t.loaded && !t.loading && t.around.is_none())
+    }
+
+    /// A polled page of a conversation never opened (see
+    /// [`Self::unopened`]): its newest message becomes the conversation's
+    /// latest, so the sidebar shows it unread, and the page is not kept.
+    pub(super) fn polled_unopened(&mut self, channel: &str, messages: &[Message]) {
+        let newest = messages
+            .iter()
+            .map(|m| &m.ts)
+            .filter(|ts| !ts.is_local())
+            .max()
+            .cloned();
+        if let Some(conversation) = self.conversation_mut(channel) {
+            conversation.latest = max_ts(conversation.latest.take(), newest);
+        }
+    }
+
+    /// Counts an unread mention for a message a poll announced, as the
+    /// live path does: one that mentions you, or any in a direct message
+    /// that is not muted, unless you are looking at it.
+    pub(super) fn count_polled(&mut self, channel: &str, message: &Message, viewing: bool) {
+        let counts = !viewing
+            && (self.mentions_me(message)
+                || (self.conversation(channel).is_some_and(|c| c.kind.is_dm())
+                    && !self.desktop.is_muted(channel)));
+        if counts && let Some(conversation) = self.conversation_mut(channel) {
+            conversation.mentions += 1;
+        }
+    }
+
+    /// What a poll learnt about a conversation (see
+    /// [`crate::backend::Event::Activity`]). Markers only move forward;
+    /// Slack's mention count is taken when it is higher than what was
+    /// counted here, and cleared when the marker is past everything.
+    /// Answers whether the conversation is unknown here and should be
+    /// fetched, once: only when it has something unread and the full list
+    /// is in, as Slack counts conversations the list leaves out (closed
+    /// ones), and a poll at start-up can beat the list.
+    pub(super) fn activity(
+        &mut self,
+        channel: &str,
+        latest: Option<Ts>,
+        last_read: Option<Ts>,
+        mentions: Option<u32>,
+    ) -> bool {
+        let Some(conversation) = self.conversation_mut(channel) else {
+            let unread = latest
+                .as_ref()
+                .is_some_and(|latest| last_read.as_ref().is_none_or(|read| read < latest));
+            return self.loaded
+                && unread
+                && self.requested_conversations.insert(channel.to_owned());
+        };
+        conversation.latest = max_ts(conversation.latest.take(), latest);
+        if let Some(mentions) = mentions {
+            conversation.mentions = conversation.mentions.max(mentions);
+        }
+        match last_read {
+            Some(ts) => read_up_to(conversation, ts),
+            None if read_through(conversation) => {
+                conversation.unread = 0;
+                conversation.mentions = 0;
+            }
+            None => {}
+        }
+        false
     }
 
     /// Whether a message was announced already.
@@ -2033,6 +2128,139 @@ mod tests {
         // Nor does the newest page while a stretch of older history is open.
         w.around_arrived("C1", vec![theirs("1.0")], (false, None), true);
         assert!(w.polled_new("C1", &[theirs("9.0")], false, true).is_empty());
+    }
+
+    /// A workspace that knows C1 up to `latest` (read up to 1.0), but
+    /// never opened it.
+    fn unopened(latest: &str) -> WorkspaceState {
+        let mut w = workspace();
+        w.conversation_arrived(conversation("1.0", latest, 0, 0));
+        w
+    }
+
+    #[test]
+    fn an_unopened_conversation_announces_only_what_is_past_its_latest() {
+        let mut w = unopened("2.0");
+        assert!(w.unopened("C1"));
+        let page = [theirs("1.0"), theirs("2.0"), theirs("3.0"), theirs("4.0")];
+        assert_eq!(
+            stamps(&w.polled_new("C1", &page, false, true)),
+            ["3.0", "4.0"]
+        );
+        // Not a poll, or an older page: no news.
+        assert!(w.polled_new("C1", &page, false, false).is_empty());
+        assert!(w.polled_new("C1", &page, true, true).is_empty());
+        // The page moves the latest on, and is not kept as a timeline.
+        w.polled_unopened("C1", &page);
+        assert_eq!(
+            w.conversation("C1").and_then(|c| c.latest.clone()),
+            Some(Ts::new("4.0"))
+        );
+        assert!(w.unopened("C1"));
+        assert!(!w.timelines.contains_key("C1"));
+        assert!(w.conversation("C1").is_some_and(Conversation::has_unread));
+        // So the same page again is no news.
+        assert!(w.polled_new("C1", &page, false, true).is_empty());
+    }
+
+    #[test]
+    fn an_unopened_conversation_announces_nothing_twice() {
+        let mut w = unopened("2.0");
+        let page = [theirs("2.0"), theirs("3.0")];
+        let found = w.polled_new("C1", &page, false, true);
+        assert_eq!(stamps(&found), ["3.0"]);
+        assert!(w.first_sight("C1", &found[0].ts));
+        // Asked again before the latest moved (a page that came twice).
+        assert!(w.polled_new("C1", &page, false, true).is_empty());
+        // Seen live first: the poll that follows stays quiet.
+        let mut w = unopened("2.0");
+        assert!(w.first_sight("C1", &Ts::new("3.0")));
+        w.message_arrived("C1", theirs("3.0"), false);
+        assert!(w.unopened("C1"));
+        assert!(w.polled_new("C1", &page, false, true).is_empty());
+    }
+
+    #[test]
+    fn an_unopened_conversation_with_nothing_known_announces_nothing() {
+        // Known, but with no newest message yet: its first data is not news.
+        let mut w = workspace();
+        let mut c = conversation("1.0", "1.0", 0, 0);
+        c.latest = None;
+        w.conversation_arrived(c);
+        assert!(w.polled_new("C1", &[theirs("3.0")], false, true).is_empty());
+        // Not known at all.
+        let w = workspace();
+        assert!(w.polled_new("C9", &[theirs("3.0")], false, true).is_empty());
+    }
+
+    #[test]
+    fn an_unopened_conversation_leaves_out_your_own_messages() {
+        let w = unopened("2.0");
+        let page = [theirs("2.0"), message("3.0", None), theirs("4.0")];
+        assert_eq!(stamps(&w.polled_new("C1", &page, false, true)), ["4.0"]);
+    }
+
+    #[test]
+    fn a_first_load_under_way_is_not_unopened() {
+        let mut w = unopened("2.0");
+        w.timelines.entry("C1".into()).or_default().loading = true;
+        assert!(!w.unopened("C1"));
+        assert!(w.polled_new("C1", &[theirs("3.0")], false, true).is_empty());
+    }
+
+    #[test]
+    fn polled_activity_moves_markers_only_forward() {
+        let mut w = unopened("5.0");
+        // Newer: taken, with Slack's mention count.
+        assert!(!w.activity("C1", Some(Ts::new("7.0")), Some(Ts::new("2.0")), Some(2)));
+        let c = w.conversation("C1").cloned().expect("known");
+        assert_eq!(c.latest, Some(Ts::new("7.0")));
+        assert_eq!(c.last_read, Some(Ts::new("2.0")));
+        assert_eq!(c.mentions, 2);
+        // Older, and a lower count: nothing goes back.
+        w.activity("C1", Some(Ts::new("6.0")), Some(Ts::new("1.0")), Some(0));
+        let c = w.conversation("C1").cloned().expect("known");
+        assert_eq!(c.latest, Some(Ts::new("7.0")));
+        assert_eq!(c.last_read, Some(Ts::new("2.0")));
+        assert_eq!(c.mentions, 2);
+        // Read up to the newest elsewhere: all clear.
+        w.activity("C1", Some(Ts::new("7.0")), Some(Ts::new("7.0")), Some(0));
+        let c = w.conversation("C1").cloned().expect("known");
+        assert!(!c.has_unread());
+        assert_eq!(c.mentions, 0);
+    }
+
+    #[test]
+    fn polled_activity_fetches_an_unknown_conversation_once_when_unread() {
+        let mut w = workspace();
+        let new = || (Some(Ts::new("3.0")), Some(Ts::new("1.0")));
+        // Before the list is in, nothing is fetched.
+        let (latest, read) = new();
+        assert!(!w.activity("D9", latest, read, None));
+        w.conversations_arrived(Vec::new(), true);
+        // Nothing unread: left alone.
+        assert!(!w.activity("D9", Some(Ts::new("3.0")), Some(Ts::new("3.0")), None));
+        let (latest, read) = new();
+        assert!(w.activity("D9", latest, read, None));
+        let (latest, read) = new();
+        assert!(!w.activity("D9", latest, read, None));
+    }
+
+    #[test]
+    fn polled_messages_count_mentions_as_live_ones_do() {
+        let mut w = workspace();
+        let mut dm = conversation("1.0", "1.0", 0, 0);
+        dm.id = "D1".into();
+        dm.kind = ConversationKind::Direct;
+        w.conversation_arrived(dm);
+        w.conversation_arrived(conversation("1.0", "1.0", 0, 0));
+        w.count_polled("D1", &theirs("2.0"), false);
+        // Looking at it: no unread mention.
+        w.count_polled("D1", &theirs("3.0"), true);
+        // A channel message that does not mention you.
+        w.count_polled("C1", &theirs("2.0"), false);
+        assert_eq!(w.conversation("D1").map(|c| c.mentions), Some(1));
+        assert_eq!(w.conversation("C1").map(|c| c.mentions), Some(0));
     }
 
     #[test]

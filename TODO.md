@@ -490,8 +490,23 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       messages that a poll finds past the newest one already seen.
       *The client must not fail quietly at the one thing it is for.*
       Done for polls of the open conversation, at most three notes per
-      poll. Polling reads no threads and no other conversations, so their
-      replies and messages still need the socket.
+      poll. Every other conversation is watched too while the socket is
+      down (`backend/poll.rs`): browser sessions ask `client.counts` every
+      30 s and fetch the newest page of direct messages and of channels
+      whose mention count rose (at most 8 a round), so their unread state
+      and notes follow; OAuth sign-ins check 20 direct and group messages
+      a minute with `conversations.history` `limit=1`, the busiest ones
+      every round and the rest in turn. A conversation never opened
+      announces only what is newer than its latest known message.
+      Still left:
+      - Threads: no poll reads replies, so they wait for the socket.
+      - OAuth sign-ins see nothing of channels (unread state or
+        mentions) until the socket is back: they have no `client.counts`,
+        and a call per channel would cost too much.
+      - A conversation the app has never seen (a first DM from someone)
+        shows up, but its first messages do not notify while polling.
+      - Messages from the first seconds of an outage at start-up
+        (before the first round takes its record) do not notify.
 - [x] **Hide Cancel during an upload's last step.** Once
       `completeUploadExternal` is sent, the upload can't be taken back, so
       Cancel should go away rather than promise something it can't do.
