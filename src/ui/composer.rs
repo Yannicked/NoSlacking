@@ -616,6 +616,14 @@ pub fn show(
                     draft.text.push(' ');
                 }
                 draft.text.push('@');
+                // The cursor goes after the @, where the name is typed
+                // and where the suggestions look for it.
+                let end = draft.text.chars().count();
+                let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+                state
+                    .cursor
+                    .set_char_range(Some(CCursorRange::one(CCursor::new(end))));
+                state.store(ui.ctx(), id);
                 ui.memory_mut(|m| m.request_focus(id));
             }
             let tip = if bar_open {
