@@ -9,6 +9,18 @@ use serde_json::Value;
 
 use crate::model::{self, ConversationKind, Delivery, Ts};
 
+/// A field's value, with an explicit `null` read as its default. Slack
+/// sends `null` where it would usually leave a field out, and
+/// `#[serde(default)]` only covers a missing field: without this, one
+/// `null` would fail a whole page.
+fn null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ResponseMetadata {
@@ -564,31 +576,40 @@ impl Icons {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Message {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", deserialize_with = "null_default")]
     pub kind: String,
     pub subtype: Option<String>,
+    #[serde(deserialize_with = "null_default")]
     pub ts: String,
     pub user: Option<String>,
     pub bot_id: Option<String>,
     pub username: Option<String>,
+    #[serde(deserialize_with = "null_default")]
     pub text: String,
     pub thread_ts: Option<String>,
     /// Absent on a message that says nothing about its thread, as some
     /// edits and trimmed answers do; an explicit 0 means no replies.
     pub reply_count: Option<u32>,
+    #[serde(deserialize_with = "null_default")]
     pub reply_users: Vec<String>,
     pub latest_reply: Option<String>,
+    #[serde(deserialize_with = "null_default")]
     pub reactions: Vec<Reaction>,
+    #[serde(deserialize_with = "null_default")]
     pub files: Vec<File>,
+    #[serde(deserialize_with = "null_default")]
     pub attachments: Vec<Attachment>,
+    #[serde(deserialize_with = "null_default")]
     pub blocks: Vec<Value>,
     pub edited: Option<Edited>,
     pub bot_profile: Option<BotProfile>,
     pub icons: Option<Icons>,
     /// Set by Slack on a thread reply also sent to the channel.
     pub root: Option<Value>,
+    #[serde(deserialize_with = "null_default")]
     pub hidden: bool,
     /// The conversations it is pinned in.
+    #[serde(deserialize_with = "null_default")]
     pub pinned_to: Vec<String>,
     /// The huddle a `huddle_thread` message stands for: who is in it, and
     /// whether it has ended.
@@ -781,10 +802,15 @@ fn rich_text(node: &Value, out: &mut String) {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Profile {
+    #[serde(deserialize_with = "null_default")]
     pub display_name: String,
+    #[serde(deserialize_with = "null_default")]
     pub real_name: String,
+    #[serde(deserialize_with = "null_default")]
     pub title: String,
+    #[serde(deserialize_with = "null_default")]
     pub status_text: String,
+    #[serde(deserialize_with = "null_default")]
     pub status_emoji: String,
     pub image_72: Option<String>,
     pub image_192: Option<String>,
@@ -971,8 +997,11 @@ pub fn order_sections(sections: Vec<ChannelSection>) -> Vec<model::SidebarSectio
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ClientCounts {
+    #[serde(deserialize_with = "null_default")]
     pub channels: Vec<CountEntry>,
+    #[serde(deserialize_with = "null_default")]
     pub mpims: Vec<CountEntry>,
+    #[serde(deserialize_with = "null_default")]
     pub ims: Vec<CountEntry>,
 }
 
@@ -980,10 +1009,15 @@ pub struct ClientCounts {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct CountEntry {
+    #[serde(deserialize_with = "null_default")]
     pub id: String,
+    #[serde(deserialize_with = "null_default")]
     pub last_read: String,
+    #[serde(deserialize_with = "null_default")]
     pub latest: String,
+    #[serde(deserialize_with = "null_default")]
     pub mention_count: u32,
+    #[serde(deserialize_with = "null_default")]
     pub has_unreads: bool,
 }
 
@@ -1229,6 +1263,36 @@ pub struct Authorization {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nulls_do_not_lose_a_page() {
+        let page: Vec<Message> = serde_json::from_str(
+            r#"[
+                {"type":"message","ts":"1.0","user":"U1","text":null,"reactions":null,
+                 "files":null,"attachments":null,"blocks":null,"reply_users":null,
+                 "pinned_to":null,"hidden":null},
+                {"type":null,"ts":"2.0","user":"U2","text":"hi"}
+            ]"#,
+        )
+        .expect("parses");
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].text, "");
+        assert!(page[0].reactions.is_empty() && !page[0].hidden);
+        assert_eq!(page[1].text, "hi");
+        let profile: Profile = serde_json::from_str(
+            r#"{"display_name":null,"real_name":"Ada","title":null,"status_text":null,"status_emoji":null}"#,
+        )
+        .expect("parses");
+        assert_eq!(profile.real_name, "Ada");
+        assert_eq!(profile.display_name, "");
+        let counts: ClientCounts = serde_json::from_str(
+            r#"{"channels":[{"id":"C1","last_read":null,"latest":null,"mention_count":null,"has_unreads":null}],"mpims":null}"#,
+        )
+        .expect("parses");
+        let by_id = counts.by_id();
+        assert_eq!(by_id["C1"].mention_count, 0);
+        assert!(!by_id["C1"].has_unreads);
+    }
 
     #[test]
     fn tokens_and_socket_tickets_never_print() {
