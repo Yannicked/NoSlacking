@@ -560,6 +560,9 @@ impl Message {
     }
 }
 
+/// How many messages [`Timeline::held`] keeps: about a page.
+const HELD_LIMIT: usize = 100;
+
 /// Messages of one conversation or thread, oldest first.
 #[derive(Clone, Debug, Default)]
 pub struct Timeline {
@@ -581,6 +584,14 @@ pub struct Timeline {
     /// Whether the list is the offline cache's copy of the newest page,
     /// which the first page from Slack replaces.
     pub cached: bool,
+    /// The newest message of the offline cache's copy, while it shows:
+    /// anything newer came live, and stays when Slack's page replaces it.
+    pub cached_newest: Option<Ts>,
+    /// New messages that came live while the list does not reach the
+    /// present (see [`Self::has_newer`]), oldest first. They join it once
+    /// it does, in case the page that gets there was asked for before
+    /// they were sent.
+    pub held: Vec<Message>,
 }
 
 impl Timeline {
@@ -634,6 +645,30 @@ impl Timeline {
 
     pub fn remove(&mut self, ts: &Ts) {
         self.messages.retain(|m| &m.ts != ts);
+        self.held.retain(|m| &m.ts != ts);
+    }
+
+    /// Keeps a new message for when the list reaches the present (see
+    /// [`Self::held`]), a page's worth at most: a list that far behind
+    /// reads the rest from Slack.
+    pub fn hold(&mut self, message: Message) {
+        match self.held.iter_mut().find(|m| m.ts == message.ts) {
+            Some(existing) => *existing = message,
+            None => self.held.push(message),
+        }
+        self.held.sort_by(|a, b| a.ts.cmp(&b.ts));
+        let over = self.held.len().saturating_sub(HELD_LIMIT);
+        self.held.drain(..over);
+    }
+
+    /// Puts the messages held while the list did not reach the present into
+    /// it, without replacing the copies it has.
+    pub fn release_held(&mut self) {
+        for message in std::mem::take(&mut self.held) {
+            if self.find_mut(&message.ts).is_none() {
+                self.upsert(message);
+            }
+        }
     }
 
     pub fn newest(&self) -> Option<&Ts> {

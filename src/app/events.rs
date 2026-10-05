@@ -5,7 +5,7 @@
 //! event changes in one workspace lives in [`super::workspace`]; this
 //! side adds what needs the backend: fetching, toasts and scrolling.
 
-use super::workspace::Arrived;
+use super::workspace::{Arrived, SendOutcome};
 use super::{App, Page, WorkspaceState};
 use crate::backend::{Change, Command, Event, SignIn, Socket};
 use crate::credentials::AppCredentials;
@@ -32,7 +32,12 @@ impl App {
             Event::WorkspaceReady(info) => self.workspace_ready(info),
             Event::SignedOut { team, reason } => self.signed_out(&team, reason),
             Event::Socket(socket) => self.socket_changed(socket),
-            Event::Error(problem) => self.toast(problem.message(), problem.is_error()),
+            Event::Error(problem) => {
+                if let crate::failure::Doing::Upload { name } = &problem.doing {
+                    self.upload_failed(name);
+                }
+                self.toast(problem.message(), problem.is_error());
+            }
             Event::UploadProgress { id, sent, total } => {
                 if let Some(upload) = self.transfers.iter_mut().find(|u| u.id == id) {
                     upload.sent = sent;
@@ -45,12 +50,12 @@ impl App {
                 }
             }
             Event::UploadDone { id } => {
-                self.upload_done(id);
+                self.upload_done(id, false);
             }
             // Said only once the worker has really stopped it, so the
             // toast never claims a cancel for a file that was posted.
             Event::UploadCancelled { id } => {
-                if self.upload_done(id) {
+                if self.upload_done(id, true) {
                     self.toast(t("Upload cancelled").into_owned(), false);
                 }
             }
@@ -343,16 +348,50 @@ impl App {
                 }
             }
             None => {
-                // What you were writing there goes with the sign-in.
-                let prefix = format!("{team}/");
-                self.drafts.retain(|key, _| !key.starts_with(&prefix));
+                let was_active = self.active_team().as_deref() == Some(team);
+                self.forget_team(team);
                 self.workspaces.retain(|w| w.info.team_id != team);
                 self.settings.remove_workspace(team);
                 self.save_settings();
                 if self.workspaces.is_empty() {
                     self.page = Page::SignIn;
+                } else if was_active && let Some(next) = self.active_team() {
+                    self.select_workspace(next);
                 }
             }
+        }
+    }
+
+    /// Drops what the interface holds for a workspace signed out of: what
+    /// you were writing there goes with the sign-in, and what is open of it
+    /// closes, so nothing (a reply in its thread, say) goes to another.
+    fn forget_team(&mut self, team: &str) {
+        let prefix = format!("{team}/");
+        let ours = |key: &str| key.starts_with(&prefix);
+        self.drafts.retain(|key, _| !ours(key));
+        self.jumps.retain(|j| !ours(&j.list));
+        self.scroll_to_bottom.retain(|key| !ours(key));
+        if self.read_line.as_ref().is_some_and(|(key, _)| ours(key)) {
+            self.read_line = None;
+        }
+        if self.prepended.as_ref().is_some_and(|(key, _)| ours(key)) {
+            self.prepended = None;
+        }
+        self.marks.retain(|(t, _), _| t != team);
+        self.pending_marks.retain(|(t, _), _| t != team);
+        self.popouts.retain(|p| p.team != team);
+        self.views.teams.remove(team);
+        self.convos.data.retain(|(t, _), _| t != team);
+        if self.active_team().as_deref() == Some(team) {
+            // What is open names the workspace on screen.
+            self.thread = None;
+            self.editing = None;
+            self.selected = None;
+            self.confirm_delete = None;
+            self.picker = None;
+            self.share = None;
+            self.views.open = None;
+            self.convos.details = None;
         }
     }
 
@@ -454,6 +493,13 @@ impl App {
     }
 
     fn message(&mut self, team: &str, channel: &str, message: Message, changed: bool) {
+        // The echo of a message you deleted while it was sending.
+        if self
+            .workspace_mut(team)
+            .is_some_and(|w| w.is_suppressed(channel, &message.ts))
+        {
+            return;
+        }
         let viewing = self.is_viewing(team, channel);
         // A message a poll announced already stays quiet when its live copy
         // comes too.
@@ -509,7 +555,18 @@ impl App {
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
-        workspace.sent(channel, local, &result);
+        if let SendOutcome::Cancelled { delete } = workspace.sent(channel, local, &result) {
+            // Deleted while it was sending: take it back now it is posted.
+            if let Some(ts) = delete {
+                self.backend.send(Command::Delete {
+                    team: team.to_owned(),
+                    channel: channel.to_owned(),
+                    ts,
+                    removed: None,
+                });
+            }
+            return;
+        }
         if let Err(error) = result {
             self.toast(
                 tf("Message not sent: {error}", &[("error", &error.message())]),

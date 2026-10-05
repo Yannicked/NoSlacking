@@ -55,11 +55,45 @@ pub struct WorkspaceState {
     /// again at once), until you open them anew, mark them read, write
     /// in them or read further on another device.
     held_unread: HashSet<String>,
+    /// The replies already counted on their parents here, oldest first: a
+    /// reply comes back as Slack's answer and as its echo, and must count
+    /// once whichever order they come in.
+    counted_replies: VecDeque<(String, Ts)>,
+    /// The messages already counted as unread mentions, oldest first: a
+    /// poll can count one before its live copy comes (or Slack delivers it
+    /// again), and it must count once.
+    counted_mentions: VecDeque<(String, Ts)>,
+    /// The optimistic copies of messages Slack has not answered for yet, by
+    /// their local id. An echo of the same text
+    /// can take a copy's place before its own answer comes; the answer
+    /// still settles it from here.
+    sending: HashMap<Ts, Message>,
+    /// Messages you deleted while they were still sending, by local id:
+    /// the send cannot be called back, so the message is deleted once
+    /// Slack answers.
+    cancelled: HashSet<Ts>,
+    /// Messages so deleted, by conversation and real ts, whose echo is not
+    /// to bring them back.
+    suppressed: HashSet<(String, Ts)>,
+}
+
+/// What became of a send Slack answered (see [`WorkspaceState::sent`]).
+#[derive(Debug, PartialEq)]
+pub(super) enum SendOutcome {
+    /// It shows as sent, or as failed.
+    Settled,
+    /// You deleted it while it was sending; `delete` is the message to
+    /// delete in Slack, if it was posted.
+    Cancelled { delete: Option<Ts> },
 }
 
 /// How many announced messages [`WorkspaceState::seen`] remembers. A copy
 /// arriving twice comes close together, so a few hundred is plenty.
 const SEEN_LIMIT: usize = 512;
+
+/// How many live messages a conversation never opened keeps: about a
+/// page of history.
+const UNOPENED_LIMIT: usize = 50;
 
 impl WorkspaceState {
     /// A workspace with nothing loaded yet.
@@ -85,6 +119,11 @@ impl WorkspaceState {
             people: crate::people::TeamPeople::default(),
             seen: VecDeque::new(),
             held_unread: HashSet::new(),
+            counted_replies: VecDeque::new(),
+            counted_mentions: VecDeque::new(),
+            sending: HashMap::new(),
+            cancelled: HashSet::new(),
+            suppressed: HashSet::new(),
         }
     }
 
@@ -244,13 +283,10 @@ impl WorkspaceState {
         crate::sidebar::rank(conversation, self.is_unread(conversation))
     }
 
-    /// Whether a message mentions you (or everyone).
+    /// Whether a message mentions you (or everyone). Read as the activity
+    /// view reads it, so a longer id that starts with yours is not you.
     pub fn mentions_me(&self, message: &Message) -> bool {
-        let me = format!("<@{}", self.info.user_id);
-        message.text.contains(&me)
-            || message.text.contains("<!here")
-            || message.text.contains("<!channel")
-            || message.text.contains("<!everyone")
+        crate::views::mention_reason(&message.text, &self.info.user_id).is_some()
     }
 
     /// A message's text ready to edit, with people and channels named as
@@ -339,12 +375,14 @@ impl WorkspaceState {
             }
             merged.push(conversation);
         }
-        if !complete {
+        for existing in &self.conversations {
             // A cached list: keep anything already known that it lacks.
-            for existing in &self.conversations {
-                if !merged.iter().any(|c| c.id == existing.id) {
-                    merged.push(existing.clone());
-                }
+            // The full list leaves out what Slack counts as closed (DMs,
+            // say), so one fetched by itself for a message stays too: it
+            // is never fetched again.
+            let keep = !complete || self.requested_conversations.contains(&existing.id);
+            if keep && !merged.iter().any(|c| c.id == existing.id) {
+                merged.push(existing.clone());
             }
         }
         self.conversations = merged;
@@ -428,9 +466,14 @@ impl WorkspaceState {
         if !older && timeline.cached {
             // Slack's own newest page replaces the cached copy whole: the
             // copy may hold messages deleted since, or end before a gap.
+            // What is newer than both the page and the copy came live
+            // while the page was on its way, and stays.
+            let line = max_ts(newest.clone(), timeline.cached_newest.take());
             timeline.cached = false;
             timeline.loaded = false;
-            timeline.messages.retain(|m| m.ts.is_local());
+            timeline
+                .messages
+                .retain(|m| m.ts.is_local() || line.as_ref().is_none_or(|line| m.ts > *line));
         }
         let first = !timeline.loaded;
         // The newest page does not join a stretch of older history opened
@@ -542,9 +585,30 @@ impl WorkspaceState {
             && (self.mentions_me(message)
                 || (self.conversation(channel).is_some_and(|c| c.kind.is_dm())
                     && !self.desktop.is_muted(channel)));
-        if counts && let Some(conversation) = self.conversation_mut(channel) {
-            conversation.mentions += 1;
+        if counts {
+            self.count_mention(channel, &message.ts);
         }
+    }
+
+    /// Adds an unread mention to `channel` for message `ts`, unless it was
+    /// counted already.
+    fn count_mention(&mut self, channel: &str, ts: &Ts) {
+        if self
+            .counted_mentions
+            .iter()
+            .any(|(c, t)| c == channel && t == ts)
+        {
+            return;
+        }
+        let Some(conversation) = self.conversation_mut(channel) else {
+            return;
+        };
+        conversation.mentions += 1;
+        if self.counted_mentions.len() >= SEEN_LIMIT {
+            self.counted_mentions.pop_front();
+        }
+        self.counted_mentions
+            .push_back((channel.to_owned(), ts.clone()));
     }
 
     /// What a poll learnt about a conversation (see
@@ -621,9 +685,11 @@ impl WorkspaceState {
         {
             return None;
         }
+        let newest = messages.iter().map(|m| m.ts.clone()).max();
         let (arrived, _) = self.history_arrived(channel, messages, has_more, cursor, false);
         if let Some(timeline) = self.timelines.get_mut(channel) {
             timeline.cached = true;
+            timeline.cached_newest = newest;
             // Older pages wait for Slack's newest one, whose cursor counts.
             timeline.loading = true;
         }
@@ -641,20 +707,34 @@ impl WorkspaceState {
         has_newer: bool,
     ) -> Arrived {
         let arrived = self.arrived_in(&messages);
+        let newest = messages.iter().map(|m| m.ts.clone()).max();
         let timeline = self.timelines.entry(channel.to_owned()).or_default();
         // Messages still being sent stay; they go after everything real.
+        // So do ones that came live past the page when it reaches the
+        // present: they were sent while it was on its way.
+        let line = if timeline.cached {
+            max_ts(newest, timeline.cached_newest.take())
+        } else {
+            newest
+        };
         let local: Vec<Message> = timeline
             .messages
             .iter()
-            .filter(|m| m.ts.is_local())
+            .filter(|m| {
+                m.ts.is_local() || (!has_newer && line.as_ref().is_some_and(|line| m.ts > *line))
+            })
             .cloned()
             .collect();
+        timeline.cached = false;
         timeline.messages = messages;
         for message in local {
             timeline.upsert(message);
         }
         (timeline.has_more, timeline.cursor) = older;
         timeline.has_newer = has_newer;
+        if !has_newer {
+            timeline.release_held();
+        }
         timeline.loaded = true;
         timeline.loading = false;
         timeline.around = None;
@@ -674,6 +754,11 @@ impl WorkspaceState {
         let timeline = self.timelines.entry(channel.to_owned()).or_default();
         timeline.merge(messages);
         timeline.has_newer = has_newer;
+        if !has_newer {
+            // Messages that came live on the way here; the page asked for
+            // may not have had them yet.
+            timeline.release_held();
+        }
         timeline.loading = false;
         if let (Some(newest), Some(conversation)) = (newest, self.conversation_mut(channel))
             && conversation.latest.as_ref().is_none_or(|l| *l < newest)
@@ -703,7 +788,9 @@ impl WorkspaceState {
         }
     }
 
-    /// A whole thread, parent first.
+    /// A whole thread, parent first. Replies loaded here that are newer
+    /// than all of it came live while it was on its way, and stay, as do
+    /// replies still being sent.
     pub(super) fn thread_arrived(
         &mut self,
         channel: &str,
@@ -714,11 +801,34 @@ impl WorkspaceState {
             users: self.unknown_users(messages.iter().filter_map(|m| m.user.as_deref())),
             bots: self.unknown_bots(messages.iter()),
         };
+        let key = (channel.to_owned(), ts.clone());
+        let newest = messages.iter().map(|m| m.ts.clone()).max();
+        let kept: Vec<Message> = self
+            .threads
+            .get(&key)
+            .into_iter()
+            .flat_map(|t| t.messages.iter())
+            .filter(|m| m.ts.is_local() || newest.as_ref().is_some_and(|n| m.ts > *n))
+            .cloned()
+            .collect();
+        let live: Vec<&Message> = kept
+            .iter()
+            .filter(|m| !m.ts.is_local() && m.is_reply())
+            .collect();
+        let extra = u32::try_from(live.len()).unwrap_or(u32::MAX);
         // The thread's own copy of its parent carries Slack's count, which
         // corrects whatever was counted here; failing that, the replies
-        // that came are the count.
+        // that came are the count. Either way, live replies past the page
+        // add to it.
         let replies = messages.iter().filter(|m| m.ts != ts).count() as u32;
-        let fresh = messages.iter().find(|m| m.ts == ts && m.replies_known);
+        let mut messages = messages;
+        let fresh = messages
+            .iter_mut()
+            .find(|m| m.ts == ts && m.replies_known)
+            .map(|fresh| {
+                add_replies(fresh, &live, extra);
+                fresh.clone()
+            });
         if let Some(parent) = self
             .timelines
             .get_mut(channel)
@@ -731,21 +841,14 @@ impl WorkspaceState {
                     parent.reply_users.clone_from(&fresh.reply_users);
                     parent.latest_reply.clone_from(&fresh.latest_reply);
                 }
-                None => parent.reply_count = replies,
+                None => parent.reply_count = replies.saturating_add(extra),
             }
         }
-        let timeline = self.threads.entry((channel.to_owned(), ts)).or_default();
+        let timeline = self.threads.entry(key).or_default();
         timeline.loading = false;
         timeline.loaded = true;
-        // Keep replies still being sent.
-        let local: Vec<Message> = timeline
-            .messages
-            .iter()
-            .filter(|m| m.ts.is_local())
-            .cloned()
-            .collect();
         timeline.messages = messages;
-        for message in local {
+        for message in kept {
             timeline.upsert(message);
         }
         arrived
@@ -761,6 +864,9 @@ impl WorkspaceState {
         message: Message,
         viewing: bool,
     ) -> (Arrived, bool) {
+        if self.is_suppressed(channel, &message.ts) {
+            return (Arrived::default(), false);
+        }
         let mut arrived = Arrived {
             users: self.unknown_users(message.user.as_deref().into_iter()),
             bots: self.unknown_bots(std::iter::once(&message)),
@@ -786,24 +892,32 @@ impl WorkspaceState {
             let ts = message.ts.clone();
             // A list of older history shows new messages once it is read up
             // to them, not after a gap.
-            if !(new && timeline.has_newer) {
+            if new && timeline.has_newer {
+                timeline.hold(message);
+            } else {
                 timeline.upsert(message);
             }
             if new && from_me {
                 // Writing in a conversation reads it, marked unread or not.
                 self.held_unread.remove(channel);
             }
+            let mut mention = false;
             if new && let Some(conversation) = self.conversation_mut(channel) {
                 if conversation.latest.as_ref().is_none_or(|l| *l < ts) {
                     conversation.latest = Some(ts.clone());
                 }
                 if from_me {
-                    conversation.last_read = Some(ts);
+                    conversation.last_read = Some(ts.clone());
                     conversation.mentions = 0;
-                } else if !viewing && (mentions_me || (conversation.kind.is_dm() && counts_all)) {
-                    conversation.mentions += 1;
+                } else {
+                    mention =
+                        !viewing && (mentions_me || (conversation.kind.is_dm() && counts_all));
                 }
             }
+            if mention {
+                self.count_mention(channel, &ts);
+            }
+            self.trim_unopened(channel);
         }
         let fetch_conversation = !known && self.requested_conversations.insert(channel.to_owned());
         if !known {
@@ -813,14 +927,40 @@ impl WorkspaceState {
         (arrived, fetch_conversation)
     }
 
+    /// Keeps only the newest messages that came live in a conversation
+    /// never opened (see [`Self::unopened`]): nobody reads them there, and
+    /// opening it loads its history anyway. Its counts live on the
+    /// conversation, and stay.
+    fn trim_unopened(&mut self, channel: &str) {
+        if !self.unopened(channel) {
+            return;
+        }
+        if let Some(timeline) = self.timelines.get_mut(channel) {
+            let over = timeline.messages.len().saturating_sub(UNOPENED_LIMIT);
+            timeline.messages.drain(..over);
+        }
+    }
+
     /// Counts a new reply on every loaded copy of its parent, once. A reply
-    /// no newer than the parent's latest is counted already: by an earlier
-    /// copy of this reply, or by Slack, whose own update of the parent can
-    /// come before the reply does.
+    /// counted here before is not counted again. Nor is one no newer than
+    /// a parent's latest reply when Slack set that, as Slack's own update
+    /// of the parent can come before the reply does and counts it already;
+    /// a latest reply counted here says nothing of the older ones, as your
+    /// own reply can be answered by Slack after someone else's later one.
     fn count_reply(&mut self, channel: &str, reply: &Message) {
         let Some(parent) = reply.thread_ts.clone() else {
             return;
         };
+        if self.reply_counted(channel, &reply.ts) {
+            return;
+        }
+        let slacks_line = |copy: &Message, counted: &VecDeque<(String, Ts)>| {
+            copy.latest_reply
+                .as_ref()
+                .filter(|latest| !counted.iter().any(|(c, t)| c == channel && t == *latest))
+                .is_some_and(|latest| reply.ts <= *latest)
+        };
+        let counted = &self.counted_replies;
         let thread = self.threads.get_mut(&(channel.to_owned(), parent.clone()));
         let copies = self
             .timelines
@@ -829,21 +969,29 @@ impl WorkspaceState {
             .into_iter()
             .chain(thread.and_then(|t| t.find_mut(&parent)));
         for copy in copies {
-            if copy
-                .latest_reply
-                .as_ref()
-                .is_some_and(|latest| reply.ts <= *latest)
-            {
+            if slacks_line(copy, counted) {
                 continue;
             }
             copy.reply_count += 1;
-            copy.latest_reply = Some(reply.ts.clone());
+            copy.latest_reply = max_ts(copy.latest_reply.take(), Some(reply.ts.clone()));
             if let Some(user) = &reply.user
                 && !copy.reply_users.contains(user)
             {
                 copy.reply_users.push(user.clone());
             }
         }
+        if self.counted_replies.len() >= SEEN_LIMIT {
+            self.counted_replies.pop_front();
+        }
+        self.counted_replies
+            .push_back((channel.to_owned(), reply.ts.clone()));
+    }
+
+    /// Whether reply `ts` was counted on its parent here already.
+    fn reply_counted(&self, channel: &str, ts: &Ts) -> bool {
+        self.counted_replies
+            .iter()
+            .any(|(c, t)| c == channel && t == ts)
     }
 
     /// A new copy of a message already sent: an edit, or a thread
@@ -857,6 +1005,9 @@ impl WorkspaceState {
                 timeline.upsert(message.clone());
                 loaded = true;
             }
+            if let Some(held) = timeline.held.iter_mut().find(|m| m.ts == message.ts) {
+                held.clone_from(&message);
+            }
         }
         if !loaded {
             return Arrived::default();
@@ -868,12 +1019,32 @@ impl WorkspaceState {
     }
 
     /// Slack answered a send: the optimistic copy `local` gives way to the
-    /// real message, or is marked as failed.
-    pub(super) fn sent(&mut self, channel: &str, local: &Ts, result: &Result<Message, Failure>) {
+    /// real message, or is marked as failed. A copy an echo took away
+    /// already is shown again from what was sent: the real message if it is
+    /// not there, or a failed row to retry.
+    /// One you deleted while it was sending is deleted now instead.
+    pub(super) fn sent(
+        &mut self,
+        channel: &str,
+        local: &Ts,
+        result: &Result<Message, Failure>,
+    ) -> SendOutcome {
+        if self.cancelled.remove(local) {
+            self.sending.remove(local);
+            let delete = result.as_ref().ok().map(|message| message.ts.clone());
+            if let Some(ts) = &delete {
+                // Its echo may be here already.
+                self.suppressed.insert((channel.to_owned(), ts.clone()));
+                self.remove_message(channel, ts);
+            }
+            return SendOutcome::Cancelled { delete };
+        }
+        let mut found = false;
         for timeline in self.timelines_for_mut(channel) {
             let Some(position) = timeline.messages.iter().position(|m| &m.ts == local) else {
                 continue;
             };
+            found = true;
             match result {
                 Ok(message) => {
                     timeline.messages.remove(position);
@@ -884,6 +1055,21 @@ impl WorkspaceState {
                 }
                 Err(error) => {
                     timeline.messages[position].delivery = Delivery::Failed(error.clone());
+                }
+            }
+        }
+        match result {
+            Ok(message) => {
+                self.sending.remove(local);
+                if !found && self.find_message(channel, &message.ts).is_none() {
+                    self.place(channel, message.clone());
+                }
+            }
+            Err(error) => {
+                let copy = self.sending.get(local).cloned();
+                if !found && let Some(mut copy) = copy {
+                    copy.delivery = Delivery::Failed(error.clone());
+                    self.add_local(channel, copy);
                 }
             }
         }
@@ -907,6 +1093,26 @@ impl WorkspaceState {
             conversation.last_read =
                 max_ts(conversation.last_read.take(), Some(message.ts.clone()));
         }
+        SendOutcome::Settled
+    }
+
+    /// You deleted a message of yours not sent yet. One still sending is
+    /// remembered, to delete once Slack answers (see [`Self::sent`]); a
+    /// failed one only goes. Call it before taking the copy away.
+    pub(super) fn cancel_local(&mut self, channel: &str, local: &Ts) {
+        let sending = self
+            .find_message(channel, local)
+            .is_some_and(|m| m.delivery == Delivery::Sending);
+        if sending {
+            self.cancelled.insert(local.clone());
+        }
+        self.sending.remove(local);
+    }
+
+    /// Whether a message is one you deleted while it was sending, whose
+    /// echo is not to show.
+    pub(super) fn is_suppressed(&self, channel: &str, ts: &Ts) -> bool {
+        self.suppressed.contains(&(channel.to_owned(), ts.clone()))
     }
 
     /// Someone reacted, or took a reaction back.
@@ -983,8 +1189,25 @@ impl WorkspaceState {
         Some(marker)
     }
 
+    /// Puts a real message into the loaded lists it belongs in: its
+    /// thread's and the conversation's own.
+    fn place(&mut self, channel: &str, message: Message) {
+        if message.is_reply()
+            && let Some(parent) = message.thread_ts.clone()
+            && let Some(thread) = self.threads.get_mut(&(channel.to_owned(), parent))
+        {
+            thread.upsert(message.clone());
+        }
+        if message.in_channel()
+            && let Some(timeline) = self.timelines.get_mut(channel)
+        {
+            timeline.upsert(message);
+        }
+    }
+
     /// Shows a message you are sending before Slack has it.
     pub(super) fn add_local(&mut self, channel: &str, message: Message) {
+        self.sending.insert(message.ts.clone(), message.clone());
         let timeline = match &message.thread_ts {
             Some(parent) => self
                 .threads
@@ -1265,9 +1488,25 @@ pub(super) fn local_message(
     }
 }
 
-/// A sent message's own echo replaces its optimistic copy.
+/// Counts `live` replies, `extra` of them, on a copy of their parent
+/// that Slack's count does not cover yet.
+fn add_replies(parent: &mut Message, live: &[&Message], extra: u32) {
+    parent.reply_count = parent.reply_count.saturating_add(extra);
+    for reply in live {
+        parent.latest_reply = max_ts(parent.latest_reply.take(), Some(reply.ts.clone()));
+        if let Some(user) = &reply.user
+            && !parent.reply_users.contains(user)
+        {
+            parent.reply_users.push(user.clone());
+        }
+    }
+}
+
+/// A sent message's own echo replaces its optimistic copy. Matched by
+/// text, so an echo of a message already here (its answer came first) is
+/// not one: it would take the place of another copy of the same text.
 fn remove_echoed_local(timeline: &mut Timeline, message: &Message, from_me: bool) {
-    if !from_me {
+    if !from_me || timeline.messages.iter().any(|m| m.ts == message.ts) {
         return;
     }
     if let Some(position) = timeline
@@ -1464,6 +1703,29 @@ mod tests {
     }
 
     #[test]
+    fn your_reply_answered_after_a_later_one_still_counts() {
+        let mut w = workspace_with_thread();
+        sending(&mut w, "local-1", "mine", Some("1.0"));
+        let later = Message {
+            user: Some("U2".into()),
+            ..message("5.0", Some("1.0"))
+        };
+        w.message_arrived("C1", later, true);
+        assert_eq!(counts(&w), (3, 3));
+        let real = Message {
+            text: "mine".into(),
+            ..message("4.0", Some("1.0"))
+        };
+        w.sent("C1", &Ts::new("local-1"), &Ok(real.clone()));
+        w.message_arrived("C1", real, true);
+        assert_eq!(counts(&w), (4, 4));
+        assert_eq!(
+            w.timelines["C1"].messages[0].latest_reply,
+            Some(Ts::new("5.0"))
+        );
+    }
+
+    #[test]
     fn opening_a_thread_takes_slacks_count() {
         let mut w = workspace_with_thread();
         if let Some(parent) = w
@@ -1592,6 +1854,85 @@ mod tests {
     }
 
     #[test]
+    fn an_echo_of_a_message_answered_already_takes_no_other_copy() {
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "ok", None);
+        sending(&mut w, "local-2", "ok", None);
+        w.sent("C1", &Ts::new("local-1"), &Ok(mine("5.0", "ok")));
+        w.message_arrived("C1", mine("5.0", "ok"), true);
+        assert_eq!(
+            texts(&w.timelines["C1"]),
+            [("5.0", "ok"), ("local-2", "ok")]
+        );
+    }
+
+    #[test]
+    fn a_copy_an_echo_took_still_settles() {
+        // The second "ok" goes through first; its echo takes the first's
+        // copy, which then fails.
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "ok", None);
+        sending(&mut w, "local-2", "ok", None);
+        w.message_arrived("C1", mine("5.0", "ok"), true);
+        w.sent("C1", &Ts::new("local-2"), &Ok(mine("5.0", "ok")));
+        w.sent("C1", &Ts::new("local-1"), &Err(Failure::RateLimited));
+        let timeline = &w.timelines["C1"];
+        assert_eq!(texts(timeline), [("5.0", "ok"), ("local-1", "ok")]);
+        assert_eq!(
+            timeline.messages[1].delivery,
+            Delivery::Failed(Failure::RateLimited)
+        );
+        assert!(w.retry_local("C1", &Ts::new("local-1")).is_some());
+        // The other way: it goes through, and shows from Slack's answer.
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "ok", None);
+        sending(&mut w, "local-2", "ok", None);
+        w.message_arrived("C1", mine("6.0", "ok"), true);
+        w.sent("C1", &Ts::new("local-2"), &Ok(mine("6.0", "ok")));
+        w.sent("C1", &Ts::new("local-1"), &Ok(mine("5.0", "ok")));
+        assert_eq!(texts(&w.timelines["C1"]), [("5.0", "ok"), ("6.0", "ok")]);
+    }
+
+    #[test]
+    fn a_message_deleted_while_sending_is_deleted_once_sent() {
+        for echo_first in [true, false] {
+            let mut w = workspace_in_general();
+            sending(&mut w, "local-1", "oops", None);
+            w.cancel_local("C1", &Ts::new("local-1"));
+            w.remove_message("C1", &Ts::new("local-1"));
+            if echo_first {
+                w.message_arrived("C1", mine("5.0", "oops"), true);
+            }
+            let outcome = w.sent("C1", &Ts::new("local-1"), &Ok(mine("5.0", "oops")));
+            assert_eq!(
+                outcome,
+                SendOutcome::Cancelled {
+                    delete: Some(Ts::new("5.0"))
+                }
+            );
+            w.message_arrived("C1", mine("5.0", "oops"), true);
+            assert!(
+                w.timelines["C1"].messages.is_empty(),
+                "echo first: {echo_first}"
+            );
+        }
+        // One that fails instead is simply gone.
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "oops", None);
+        w.cancel_local("C1", &Ts::new("local-1"));
+        w.remove_message("C1", &Ts::new("local-1"));
+        let outcome = w.sent("C1", &Ts::new("local-1"), &Err(Failure::RateLimited));
+        assert_eq!(outcome, SendOutcome::Cancelled { delete: None });
+        assert!(w.timelines["C1"].messages.is_empty());
+        // A failed one deleted is not sending: nothing to call back.
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "oops", None);
+        w.sent("C1", &Ts::new("local-1"), &Err(Failure::RateLimited));
+        w.cancel_local("C1", &Ts::new("local-1"));
+        assert!(w.cancelled.is_empty());
+    }
+
+    #[test]
     fn a_failed_send_can_be_retried() {
         let mut w = workspace_in_general();
         sending(&mut w, "local-1", "hi", None);
@@ -1638,6 +1979,20 @@ mod tests {
     }
 
     #[test]
+    fn a_longer_id_that_starts_with_yours_is_not_a_mention() {
+        let w = workspace_in_general();
+        let said = |text: &str| Message {
+            text: text.into(),
+            ..theirs("5.0")
+        };
+        assert!(!w.mentions_me(&said("hey <@U12>")));
+        assert!(!w.mentions_me(&said("hey <@U12|bob>")));
+        assert!(w.mentions_me(&said("hey <@U1>")));
+        assert!(w.mentions_me(&said("hey <@U1|me>")));
+        assert!(w.mentions_me(&said("<!here> look")));
+    }
+
+    #[test]
     fn messages_in_unknown_conversations_fetch_it_once() {
         let mut w = workspace_in_general();
         let (arrived, fetch) = w.message_arrived("C9", message("5.0", None), false);
@@ -1646,6 +2001,29 @@ mod tests {
         assert!(arrived.users.is_empty());
         let (_, fetch) = w.message_arrived("C9", message("6.0", None), false);
         assert!(!fetch);
+    }
+
+    #[test]
+    fn a_conversation_fetched_by_itself_outlives_the_full_list() {
+        let mut w = workspace_in_general();
+        let (_, fetch) = w.message_arrived("D9", theirs("5.0"), false);
+        assert!(fetch);
+        let mut dm = conversation("1.0", "5.0", 0, 0);
+        dm.id = "D9".into();
+        dm.kind = ConversationKind::Direct;
+        w.conversation_arrived(dm);
+        w.active = Some("D9".into());
+        // The full list, which leaves the closed DM out.
+        w.conversations_arrived(vec![conversation("1.0", "1.0", 0, 0)], true);
+        assert!(w.conversation("D9").is_some());
+        assert_eq!(w.active.as_deref(), Some("D9"));
+        // Anything else the list lacks goes.
+        let mut gone = conversation("1.0", "1.0", 0, 0);
+        gone.id = "C7".into();
+        w.conversation_arrived(gone);
+        w.conversations_arrived(vec![conversation("1.0", "1.0", 0, 0)], true);
+        assert!(w.conversation("C7").is_none());
+        assert!(w.conversation("D9").is_some());
     }
 
     #[test]
@@ -2046,10 +2424,93 @@ mod tests {
         // An older page still does, and so do newer pages, up to the end.
         w.history_arrived("C1", vec![message("1.0", None)], false, None, true);
         w.newer_arrived("C1", vec![message("4.0", None)], false);
-        assert_eq!(order(&w), ["1.0", "2.0", "3.0", "4.0", "local-1"]);
+        // 10.0 came live on the way, and joins once the list gets there.
+        assert_eq!(order(&w), ["1.0", "2.0", "3.0", "4.0", "10.0", "local-1"]);
         assert!(!w.timelines["C1"].has_newer);
         w.message_arrived("C1", message("11.0", None), false);
-        assert_eq!(w.timelines["C1"].messages.len(), 6);
+        assert_eq!(w.timelines["C1"].messages.len(), 7);
+    }
+
+    #[test]
+    fn a_jump_that_reaches_the_present_keeps_what_came_live() {
+        let mut w = workspace_in_general();
+        w.message_arrived("C1", theirs("8.0"), true);
+        w.message_arrived("C1", theirs("9.0"), true);
+        w.around_arrived(
+            "C1",
+            vec![message("7.0", None), message("8.0", None)],
+            (true, None),
+            false,
+        );
+        assert_eq!(stamps(&w.timelines["C1"].messages), ["7.0", "8.0", "9.0"]);
+        // One that does not reach it stands apart.
+        w.around_arrived("C1", vec![message("2.0", None)], (true, None), true);
+        assert_eq!(stamps(&w.timelines["C1"].messages), ["2.0"]);
+    }
+
+    #[test]
+    fn a_message_held_while_behind_follows_its_edits_and_deletes() {
+        let mut w = workspace();
+        w.conversations.push(conversation("1.0", "9.0", 0, 0));
+        w.around_arrived("C1", vec![message("2.0", None)], (false, None), true);
+        w.message_arrived("C1", message("10.0", None), false);
+        w.message_arrived("C1", message("11.0", None), false);
+        w.message_changed("C1", mine("10.0", "edited"));
+        w.remove_message("C1", &Ts::new("11.0"));
+        w.newer_arrived("C1", vec![message("3.0", None)], false);
+        assert_eq!(
+            texts(&w.timelines["C1"]),
+            [("2.0", "text 2.0"), ("3.0", "text 3.0"), ("10.0", "edited")]
+        );
+    }
+
+    #[test]
+    fn slacks_page_keeps_what_came_live_over_the_cached_copy() {
+        let mut w = workspace();
+        w.conversations.push(conversation("1.0", "9.0", 0, 0));
+        w.cached_history_arrived(
+            "C1",
+            vec![message("5.0", None), message("6.0", None)],
+            false,
+            None,
+        );
+        // 7.0 comes live while Slack's page is on its way; 6.0 was deleted.
+        w.message_arrived("C1", theirs("7.0"), false);
+        w.history_arrived("C1", vec![message("5.0", None)], false, None, false);
+        let timeline = &w.timelines["C1"];
+        assert_eq!(stamps(&timeline.messages), ["5.0", "7.0"]);
+        assert!(!timeline.cached && timeline.cached_newest.is_none());
+    }
+
+    #[test]
+    fn a_reply_that_came_live_outlives_the_thread_page() {
+        let mut w = workspace_with_thread();
+        // Slack's page was asked for before 4.0 was sent.
+        w.message_arrived("C1", theirs_in_thread("4.0"), true);
+        let mut parent = message("1.0", Some("1.0"));
+        parent.reply_count = 2;
+        parent.replies_known = true;
+        parent.latest_reply = Some(Ts::new("3.0"));
+        let page = vec![
+            parent,
+            message("2.0", Some("1.0")),
+            message("3.0", Some("1.0")),
+        ];
+        w.thread_arrived("C1", Ts::new("1.0"), page);
+        let thread = &w.threads[&("C1".to_owned(), Ts::new("1.0"))];
+        assert_eq!(stamps(&thread.messages), ["1.0", "2.0", "3.0", "4.0"]);
+        assert_eq!(counts(&w), (3, 3));
+        let parent = &w.timelines["C1"].messages[0];
+        assert_eq!(parent.latest_reply, Some(Ts::new("4.0")));
+        assert!(parent.reply_users.iter().any(|u| u == "U2"));
+    }
+
+    /// A reply in C1's thread 1.0 from someone else.
+    fn theirs_in_thread(ts: &str) -> Message {
+        Message {
+            user: Some("U2".into()),
+            ..message(ts, Some("1.0"))
+        }
     }
 
     /// A message in C1 from someone else.
@@ -2261,6 +2722,46 @@ mod tests {
         w.count_polled("C1", &theirs("2.0"), false);
         assert_eq!(w.conversation("D1").map(|c| c.mentions), Some(1));
         assert_eq!(w.conversation("C1").map(|c| c.mentions), Some(0));
+    }
+
+    #[test]
+    fn a_polled_mention_counts_once_when_its_live_copy_follows() {
+        let mut w = unopened("2.0");
+        let ping = Message {
+            text: "hey <@U1>".into(),
+            ..theirs("3.0")
+        };
+        w.count_polled("C1", &ping, false);
+        w.polled_unopened("C1", std::slice::from_ref(&ping));
+        // Its live copy, then Socket Mode delivering it again.
+        w.message_arrived("C1", ping.clone(), false);
+        w.message_arrived("C1", ping, false);
+        assert_eq!(w.conversation("C1").map(|c| c.mentions), Some(1));
+    }
+
+    #[test]
+    fn an_unopened_conversation_keeps_only_its_newest_live_messages() {
+        let mut w = unopened("2.0");
+        for i in 0..(UNOPENED_LIMIT + 10) {
+            let ping = Message {
+                text: "hey <@U1>".into(),
+                ..theirs(&format!("{}.0", i + 3))
+            };
+            w.message_arrived("C1", ping, false);
+        }
+        let timeline = &w.timelines["C1"];
+        assert_eq!(timeline.messages.len(), UNOPENED_LIMIT);
+        let newest = format!("{}.0", UNOPENED_LIMIT + 12);
+        assert_eq!(timeline.newest().map(Ts::as_str), Some(newest.as_str()));
+        let c = w.conversation("C1").expect("C1");
+        assert_eq!(c.mentions as usize, UNOPENED_LIMIT + 10);
+        assert_eq!(c.latest, Some(Ts::new(newest)));
+        // An open one keeps everything.
+        let mut w = workspace_in_general();
+        for i in 0..(UNOPENED_LIMIT + 10) {
+            w.message_arrived("C1", theirs(&format!("{}.0", i + 3)), true);
+        }
+        assert_eq!(w.timelines["C1"].messages.len(), UNOPENED_LIMIT + 10);
     }
 
     #[test]
