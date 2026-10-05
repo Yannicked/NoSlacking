@@ -102,6 +102,43 @@ pub fn popout(app: &mut App, ui: &mut egui::Ui) {
     conversation::show(app, ui);
 }
 
+/// The picture at `uri` in a box of exactly `size`, before it has loaded
+/// as after, so whatever is below it stays put when it arrives. The box is
+/// worked out from the size Slack gave (or a fixed one when it gave none);
+/// the picture is drawn in it as [`contain`] says, in case it turns out
+/// another shape.
+pub fn picture(
+    ui: &mut egui::Ui,
+    uri: String,
+    size: Vec2,
+    radius: CornerRadius,
+    sense: Sense,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    if ui.is_rect_visible(rect) {
+        let image = egui::Image::new(uri).corner_radius(radius);
+        let loaded = image
+            .load_for_size(ui.ctx(), size)
+            .ok()
+            .and_then(|poll| poll.size());
+        image.paint_at(ui, contain(rect, loaded));
+    }
+    response
+}
+
+/// Where a picture `loaded` big (unknown while it loads) is drawn in the
+/// box `rect`: shrunk to fit it, never grown past its own size, and
+/// centred. A picture the shape the box was made for fills it exactly.
+pub fn contain(rect: Rect, loaded: Option<Vec2>) -> Rect {
+    let Some(loaded) = loaded.filter(|s| s.x > 0.0 && s.y > 0.0) else {
+        return rect;
+    };
+    let scale = (rect.width() / loaded.x)
+        .min(rect.height() / loaded.y)
+        .min(1.0);
+    Rect::from_center_size(rect.center(), loaded * scale)
+}
+
 /// A rounded square picture, or coloured initials until there is one.
 pub fn avatar(
     ui: &mut egui::Ui,
@@ -325,6 +362,32 @@ pub fn image_uri(team: &str, url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn boxed(size: Vec2) -> Rect {
+        Rect::from_min_size(egui::pos2(10.0, 20.0), size)
+    }
+
+    #[test]
+    fn a_picture_the_shape_slack_gave_fills_its_box() {
+        let rect = boxed(Vec2::new(400.0, 225.0));
+        assert_eq!(contain(rect, None), rect, "held open while it loads");
+        assert_eq!(contain(rect, Some(Vec2::new(1280.0, 720.0))), rect);
+        assert_eq!(contain(rect, Some(Vec2::new(400.0, 225.0))), rect);
+        assert_eq!(contain(rect, Some(Vec2::ZERO)), rect, "a broken size");
+    }
+
+    #[test]
+    fn a_picture_of_another_shape_stays_inside_its_box() {
+        let rect = boxed(Vec2::new(400.0, 225.0));
+        // Taller than the box: as tall, narrower, centred.
+        let tall = contain(rect, Some(Vec2::new(300.0, 450.0)));
+        assert_eq!(tall.size(), Vec2::new(150.0, 225.0));
+        assert_eq!(tall.center(), rect.center());
+        // Smaller than the box: its own size, never blown up.
+        let small = contain(rect, Some(Vec2::new(64.0, 64.0)));
+        assert_eq!(small.size(), Vec2::splat(64.0));
+        assert!(rect.contains_rect(small));
+    }
 
     #[test]
     fn dates_follow_the_language() {

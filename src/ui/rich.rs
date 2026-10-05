@@ -415,10 +415,18 @@ pub fn emoji(ui: &mut egui::Ui, rich: &Rich<'_>, name: &str, size: f32) {
         }
         Resolved::Image(url) => {
             let side = size * 1.3;
-            ui.add(egui::Image::new(url).fit_to_exact_size(Vec2::splat(side)))
-                .on_hover_ui(|ui| {
-                    ui.label(format!(":{name}:"));
-                });
+            // A square, loaded or not: a wide emoji drawn narrower would
+            // move the rest of its line, and could rewrap it.
+            super::picture(
+                ui,
+                url.to_owned(),
+                Vec2::splat(side),
+                egui::CornerRadius::ZERO,
+                egui::Sense::hover(),
+            )
+            .on_hover_ui(|ui| {
+                ui.label(format!(":{name}:"));
+            });
         }
         Resolved::Unknown => {
             ui.add(egui::Label::new(
