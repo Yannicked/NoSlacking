@@ -166,6 +166,59 @@ mod tests {
         None
     }
 
+    /// The messages `code` asks `t`, `tf` and `tn` for: the first string
+    /// literal of each call. rustfmt moves a long literal to the next line,
+    /// so any whitespace may sit between the name, the `(` and the `"`.
+    /// A path in front (`crate::i18n::t`) ends in `:`, which is no part of
+    /// a name, so those calls count too; `format` or `at` do not.
+    fn messages_in(code: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for name in ["t", "tf", "tn"] {
+            for (at, _) in code.match_indices(name) {
+                let before = code[..at].chars().next_back();
+                if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                    continue;
+                }
+                let Some(args) = code[at + name.len()..].trim_start().strip_prefix('(') else {
+                    continue;
+                };
+                // Only a literal: `t(source: &str)` is the definition.
+                let args = args.trim_start();
+                if args.starts_with('"')
+                    && let Some((value, _)) = literal(args)
+                {
+                    out.push(value);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_scan_finds_calls_however_they_are_wrapped() {
+        let code = r#"
+            ui.label(t("One line"));
+            let text = tf(
+                "Wrapped {name}",
+                &[("name", name)],
+            );
+            crate::i18n::t(
+                "By path",
+            );
+            i18n::tn("{count} reply", "{count} replies", n);
+            format!("not {this}");
+            at("nor this");
+            t(variable);
+            pub fn t(source: &str) -> Cow<str> { gettext("not a message") }
+        "#;
+        let mut found = messages_in(code);
+        found.sort();
+        assert_eq!(
+            found,
+            ["By path", "One line", "Wrapped {name}", "{count} reply"]
+        );
+    }
+
     /// Every message the interface asks `t`, `tf` and `tn` for, outside
     /// tests.
     fn interface_messages() -> Vec<String> {
@@ -181,18 +234,7 @@ mod tests {
                 }
                 let text = std::fs::read_to_string(&path).expect("read file");
                 let code = text.split("#[cfg(test)]").next().unwrap_or_default();
-                for call in ["t(\"", "tf(\"", "tn(\""] {
-                    for (at, _) in code.match_indices(call) {
-                        let before = code[..at].chars().next_back();
-                        if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
-                            continue;
-                        }
-                        let start = at + call.len() - 1;
-                        if let Some((value, _)) = literal(&code[start..]) {
-                            out.push(value);
-                        }
-                    }
-                }
+                out.extend(messages_in(code));
             }
         }
         let mut out = Vec::new();
@@ -250,5 +292,26 @@ mod tests {
             .replace('"', "\\\"")
             .replace('\n', "\\n");
         po.contains(&format!("msgid \"{escaped}\"\n"))
+    }
+
+    /// The check `build.rs` runs on every catalog. Included rather than
+    /// declared with `#[path]`, which inside `tests` would look under a
+    /// `src/i18n/tests/` folder that does not exist.
+    mod po {
+        include!("../build/po.rs");
+    }
+
+    #[test]
+    fn a_comment_glued_to_an_entry_is_caught() {
+        let glued = "msgid \"a\"\nmsgstr \"b\"\n# About c.\nmsgid \"c\"\nmsgstr \"d\"\n";
+        assert_eq!(po::glued_comments(glued), [3]);
+        // A blank line, or a comment under a comment, is the right shape.
+        let fine = "# Header\n#, fuzzy\nmsgid \"a\"\nmsgstr \"b\"\n\n# About c.\nmsgid \"c\"\n";
+        assert!(po::glued_comments(fine).is_empty());
+        // Trailing spaces still count as a blank line, and CRLF as a break.
+        assert!(po::glued_comments("msgstr \"b\"\r\n  \r\n# c\r\n").is_empty());
+        assert_eq!(po::glued_comments("msgstr \"b\"\r\n# c\r\n"), [2]);
+        let real = include_str!("../assets/i18n/nl.po");
+        assert_eq!(po::glued_comments(real), Vec::<usize>::new());
     }
 }

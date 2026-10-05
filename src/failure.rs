@@ -18,7 +18,7 @@ pub enum Failure {
     /// No token is saved for the workspace.
     NoSavedSignIn,
     /// The keyring could not be read, with its reason if it gave one.
-    KeyringUnread(Option<String>),
+    KeyringUnread(Option<Keyring>),
     /// The workspace is not signed in here, so nothing was asked.
     NotSignedIn,
     /// The sign-in lacks a permission (scope) the call needs.
@@ -132,7 +132,7 @@ impl Failure {
             Self::KeyringUnread(Some(error)) => {
                 return fill(
                     &t("the keyring could not be read: {error}"),
-                    &[("error", error)],
+                    &[("error", &error.worded(t))],
                 );
             }
             Self::NotSignedIn => t("that workspace is not signed in"),
@@ -210,6 +210,37 @@ impl Failure {
             Self::Other(text) => return text.clone(),
         };
         text.into_owned()
+    }
+}
+
+/// Why the system keyring did not do what was asked. The worker hands this
+/// over instead of the keyring's own words, so the interface can say it in
+/// the reader's language.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keyring {
+    /// The keyring is there but locked, and was not unlocked.
+    Locked,
+    /// The system has no keyring (no Secret Service running, say).
+    Unavailable,
+    /// A stored secret could not be decoded.
+    Damaged,
+}
+
+impl Keyring {
+    /// The trouble as a clause, such as "the keyring is locked", in the
+    /// interface's language.
+    pub fn message(self) -> String {
+        self.worded(&crate::i18n::t)
+    }
+
+    /// The words, through the translator `t` (see [`Failure::worded`]).
+    fn worded(self, t: &dyn Fn(&'static str) -> Cow<'static, str>) -> String {
+        match self {
+            Self::Locked => t("the keyring is locked"),
+            Self::Unavailable => t("no keyring is available"),
+            Self::Damaged => t("a stored secret is damaged"),
+        }
+        .into_owned()
     }
 }
 
@@ -359,7 +390,9 @@ mod tests {
             Failure::SignedOut,
             Failure::NoSavedSignIn,
             Failure::KeyringUnread(None),
-            Failure::KeyringUnread(Some("locked".into())),
+            Failure::KeyringUnread(Some(Keyring::Locked)),
+            Failure::KeyringUnread(Some(Keyring::Unavailable)),
+            Failure::KeyringUnread(Some(Keyring::Damaged)),
             Failure::NotSignedIn,
             Failure::MissingPermission,
             Failure::ConversationGone,

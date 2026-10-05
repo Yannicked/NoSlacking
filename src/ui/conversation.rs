@@ -196,7 +196,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                                     .font(theme::semibold(12.0))
                                     .color(palette.warning),
                             )
-                            .on_hover_text(reason.as_str());
+                            .on_hover_text(reason.sentence());
                         }
                     }
                     if let Some(members) = conversation.members

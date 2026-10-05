@@ -24,7 +24,7 @@ impl Worker {
         let saved = app.clone();
         tokio::spawn(async move {
             if let Err(error) = credentials.save_app(&saved).await {
-                sink.send(Event::KeyringError(error.to_string()));
+                sink.send(Event::KeyringError(error.into()));
             }
         });
         // Clients pick up the new client secret for refreshes. They keep
@@ -148,10 +148,7 @@ impl Worker {
                             {
                                 log::warn!("could not open the browser: {error}");
                             }
-                            sink.send(Event::Notice(
-                                "A workspace needs one more step in the browser; paste the new link it offers."
-                                    .into(),
-                            ));
+                            sink.send(Event::Notice(crate::notice::Notice::BrowserStep));
                         }
                         TeamResult::Failed { reason } => {
                             problems.push(failure(&crate::slack::SlackError::Api(reason)));

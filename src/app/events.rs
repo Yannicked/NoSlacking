@@ -25,7 +25,7 @@ impl App {
             // The account: the app, the keyring, sign-in and the socket.
             Event::AppLoaded(app) => self.app_loaded(app),
             Event::KeyringError(error) => {
-                self.toast(tf("Keyring: {error}", &[("error", &error)]), true);
+                self.toast(tf("Keyring: {error}", &[("error", &error.message())]), true);
                 self.keyring_error = Some(error);
             }
             Event::SignIn(state) => self.sign_in_changed(state),
@@ -55,7 +55,7 @@ impl App {
                 }
             }
             Event::Slash { command, result } => self.slash_done(&command, result),
-            Event::Notice(text) => self.toast(text, false),
+            Event::Notice(notice) => self.toast(notice.message(), false),
             Event::Dnd { team, dnd } => self.dnd_arrived(&team, dnd),
             Event::SlackPrefs { team, prefs } => self.prefs_arrived(&team, prefs),
             Event::DeepLink(link) => {
@@ -361,7 +361,7 @@ impl App {
             self.toast(
                 tf(
                     "Slack refused the app-level token ({reason})",
-                    &[("reason", reason)],
+                    &[("reason", &reason.message())],
                 ),
                 true,
             );

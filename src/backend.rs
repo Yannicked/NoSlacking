@@ -515,15 +515,18 @@ pub enum Socket {
     Off,
     Connecting,
     Connected,
-    Disconnected(String),
-    Rejected(String),
+    /// The live connection dropped, for this reason; reconnecting.
+    Disconnected(Failure),
+    /// Slack refused the app-level token; reconnecting will not help.
+    Rejected(Failure),
 }
 
 #[derive(Debug)]
 pub enum Event {
     /// The keyring answered: the stored app, if any.
     AppLoaded(Option<AppCredentials>),
-    KeyringError(String),
+    /// The keyring failed to read or save a secret.
+    KeyringError(crate::failure::Keyring),
     SignIn(SignIn),
     /// A workspace is signed in (and these are its current details).
     WorkspaceReady(Workspace),
@@ -687,7 +690,8 @@ pub enum Event {
     DeepLink(crate::links::Link),
     /// Something failed that has no event of its own: shown as a toast.
     Error(Problem),
-    Notice(String),
+    /// Something worth a calm toast.
+    Notice(crate::notice::Notice),
     /// Your Do Not Disturb state in a workspace.
     Dnd {
         team: String,

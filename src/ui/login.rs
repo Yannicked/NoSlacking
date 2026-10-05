@@ -387,7 +387,7 @@ fn keyring_note(app: &App, ui: &mut egui::Ui, palette: &Palette) {
         ui.label(
             RichText::new(tf(
                 "The system keyring is unavailable: {error}. NoSlacking keeps tokens only there; unlock it or install a Secret Service provider such as GNOME Keyring or KWallet.",
-                &[("error", error)],
+                &[("error", &error.message())],
             ))
             .font(theme::regular(13.0))
             .color(palette.warning),
