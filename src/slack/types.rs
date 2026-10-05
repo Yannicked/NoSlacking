@@ -1119,13 +1119,25 @@ pub struct UploadUrl {
     pub file_id: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+/// `apps.connections.open`: the socket to open.
+#[derive(Default, Deserialize)]
 #[serde(default)]
 pub struct ConnectionsOpen {
+    /// The `wss://` URL, whose ticket lets anyone open the socket.
     pub url: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+/// Leaves out the URL, which carries the socket's ticket.
+impl std::fmt::Debug for ConnectionsOpen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionsOpen")
+            .field("url", &crate::redact::REDACTED)
+            .finish()
+    }
+}
+
+/// The signed-in person in an `oauth.v2.access` answer, with their token.
+#[derive(Default, Deserialize)]
 #[serde(default)]
 pub struct AuthedUser {
     pub id: String,
@@ -1133,6 +1145,24 @@ pub struct AuthedUser {
     pub access_token: Option<String>,
     pub refresh_token: Option<String>,
     pub expires_in: Option<i64>,
+}
+
+/// Shows whether there are tokens, never the tokens.
+impl std::fmt::Debug for AuthedUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthedUser")
+            .field("id", &self.id)
+            .field("scope", &self.scope)
+            .field("access_token", &redacted(&self.access_token))
+            .field("refresh_token", &redacted(&self.refresh_token))
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
+/// A secret as Debug shows it: whether there is one, not what it is.
+fn redacted(secret: &Option<String>) -> Option<&'static str> {
+    secret.as_ref().map(|_| crate::redact::REDACTED)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1143,7 +1173,7 @@ pub struct OauthTeam {
 }
 
 /// `oauth.v2.access`, for both the code exchange and a refresh.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(default)]
 pub struct OauthAccess {
     pub authed_user: AuthedUser,
@@ -1153,6 +1183,20 @@ pub struct OauthAccess {
     pub refresh_token: Option<String>,
     pub expires_in: Option<i64>,
     pub token_type: Option<String>,
+}
+
+/// Shows whether there are tokens, never the tokens.
+impl std::fmt::Debug for OauthAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OauthAccess")
+            .field("authed_user", &self.authed_user)
+            .field("team", &self.team)
+            .field("access_token", &redacted(&self.access_token))
+            .field("refresh_token", &redacted(&self.refresh_token))
+            .field("expires_in", &self.expires_in)
+            .field("token_type", &self.token_type)
+            .finish()
+    }
 }
 
 /// A Socket Mode frame.
@@ -1185,6 +1229,27 @@ pub struct Authorization {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tokens_and_socket_tickets_never_print() {
+        let access: OauthAccess = serde_json::from_str(
+            r#"{"ok":true,"access_token":"xoxe.xoxp-top","refresh_token":"xoxe-1-top",
+                "authed_user":{"id":"U1","access_token":"xoxp-inner","refresh_token":"xoxe-1-inner"},
+                "team":{"id":"T1","name":"Acme"}}"#,
+        )
+        .expect("parses");
+        let shown = format!("{access:?}");
+        assert!(!shown.contains("xox"), "{shown}");
+        assert!(
+            shown.contains("<redacted>") && shown.contains("U1"),
+            "{shown}"
+        );
+        let open: ConnectionsOpen =
+            serde_json::from_str(r#"{"ok":true,"url":"wss://wss.slack.com/link/?ticket=secret"}"#)
+                .expect("parses");
+        let shown = format!("{open:?}");
+        assert!(!shown.contains("ticket"), "{shown}");
+    }
 
     #[test]
     fn user_groups_keep_the_ones_you_can_mention() {
