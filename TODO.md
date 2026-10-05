@@ -532,6 +532,12 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
 - [x] **Keyboard shortcut sheet** on `Ctrl+/` (⌘/) listing what
       `ui/keys.rs` and the message focus handle. *Many shortcuts, and
       nowhere they are listed.*
+- [x] **Hide inactive conversations** in the sidebar, as the official
+      client tidies it: after a week, a month (default) or three months
+      without a new message, behind each section's "N more" row, which
+      expands it until "Show less". Unread, mentioned, starred, open and
+      drafted ones, apps and those whose newest message is unknown always
+      show; the switcher, search and browse still find them all.
 - [ ] **Quote Slack permalinks inline.** A link to a message in a known
       conversation shows that message from local data (or one
       `conversations.history` call) instead of a bare link.

@@ -8,7 +8,7 @@ use crate::model::{Action, Conversation, ConversationKind, SectionKind, SidebarS
 use crate::sidebar::{self, SidebarEdit};
 use crate::theme::{self, Icon, Palette};
 
-/// Direct messages listed before "Show more".
+/// Direct messages listed before the "N more" row.
 const DM_LIMIT: usize = 25;
 
 pub fn rail(app: &mut App, ui: &mut egui::Ui) {
@@ -196,6 +196,7 @@ const HEADER_GAP: f32 = 2.0;
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let width = app.settings.sidebar_width;
+    let now = app.now_seconds();
     let inset = theme::titlebar_inset(ui.ctx());
     let App {
         workspaces,
@@ -339,8 +340,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         workspace,
                         settings.closed.get(&workspace.info.team_id),
                         sidebar_filter,
-                        settings.sidebar_sort,
-                        settings.unread_first,
+                        settings,
+                        now,
                         actions,
                     );
                     ui.add_space(12.0);
@@ -386,12 +387,15 @@ fn list(
     workspace: &WorkspaceState,
     closed: Option<&std::collections::BTreeMap<String, String>>,
     filter: &str,
-    sort: sidebar::Sort,
-    unread_first: bool,
+    settings: &crate::settings::Settings,
+    now: i64,
     actions: &mut Vec<Action>,
 ) {
     let filter = filter.trim();
     let sections = workspace.sections.as_deref();
+    let drafts = ui.data(|d| {
+        d.get_temp::<std::sync::Arc<std::collections::HashSet<String>>>(super::drafts_id())
+    });
     // Remembered per workspace: sorting every conversation each frame is
     // the sidebar's main cost, and the order rarely changes.
     let shown = ui.data_mut(|d| {
@@ -405,9 +409,14 @@ fn list(
             |c| workspace.title(c),
             rank,
             &sidebar::Arrange {
-                sort,
-                unread_first,
+                sort: settings.sidebar_sort,
+                unread_first: settings.unread_first,
                 hold: hold.as_ref(),
+                tidy: Some(sidebar::Tidy {
+                    after: settings.hide_inactive,
+                    now,
+                    drafts: drafts.as_deref(),
+                }),
             },
         )
     });
@@ -437,14 +446,23 @@ pub(super) struct Drawn<'s, 'a> {
     pub expanded: bool,
     /// The rows on screen, in order.
     pub rows: Vec<&'a Conversation>,
-    /// The rows "Show more" holds back.
+    /// The rows held back behind the "N more" row: quiet ones, and direct
+    /// messages past the first [`DM_LIMIT`].
     pub more: usize,
+    /// Whether the section was expanded past what it would hold back, so
+    /// it ends with "Show less".
+    pub less: bool,
 }
 
 /// Which rows of `shown` the sidebar draws, section by section, given
-/// each section's remembered (open, showing more) state by its key. The
+/// each section's remembered (open, showing all) state by its key. The
 /// list and Alt+↑/↓ both use it, so the keys step through exactly the rows
 /// on screen.
+///
+/// An open section holds back its quiet conversations (see
+/// [`sidebar::is_inactive`]) and the direct messages past [`DM_LIMIT`]
+/// behind one "N more" row, until it is expanded to show everything.
+/// Searching shows every match, quiet or not.
 pub(super) fn drawn<'s, 'a>(
     workspace: &WorkspaceState,
     shown: &'s [sidebar::Shown<'a>],
@@ -456,14 +474,21 @@ pub(super) fn drawn<'s, 'a>(
     let active = |c: &Conversation| workspace.active.as_deref() == Some(c.id.as_str());
     let mut drawn = Vec::new();
     for section in shown {
-        let rows: Vec<&Conversation> = section
+        let rows: Vec<(&Conversation, bool)> = section
             .conversations
             .iter()
             .copied()
-            .filter(|c| matches(workspace, c, filter))
+            .zip(
+                section
+                    .inactive
+                    .iter()
+                    .copied()
+                    .chain(std::iter::repeat(false)),
+            )
+            .filter(|(c, _)| matches(workspace, c, filter))
             // Closed ones stay out until something new arrives, unless open.
-            .filter(|c| active(c) || !sidebar::is_closed(closed, c))
-            .filter(|c| {
+            .filter(|(c, _)| active(c) || !sidebar::is_closed(closed, c))
+            .filter(|(c, _)| {
                 // Skip deactivated people's DMs unless they have something new.
                 c.user
                     .as_deref()
@@ -479,22 +504,39 @@ pub(super) fn drawn<'s, 'a>(
             .id
             .clone()
             .unwrap_or_else(|| format!("{:?}", section.kind));
-        let (open, more) = folding(&key);
+        let (open, all) = folding(&key);
         let expanded = open || !filter.is_empty();
         let total = rows.len();
-        let rows: Vec<&Conversation> = if expanded {
+        let every = |rows: Vec<(&'a Conversation, bool)>| -> Vec<&'a Conversation> {
+            rows.into_iter().map(|(c, _)| c).collect()
+        };
+        let (rows, more, less) = if !expanded {
+            // A folded section still shows what is unread or open.
+            let rows = every(rows)
+                .into_iter()
+                .filter(|c| workspace.is_unread(c) || active(c))
+                .collect();
+            (rows, 0, false)
+        } else if !filter.is_empty() {
+            (every(rows), 0, false)
+        } else {
             let limit = match section.kind {
-                SectionKind::DirectMessages if !more && filter.is_empty() => DM_LIMIT,
+                SectionKind::DirectMessages => DM_LIMIT,
                 _ => usize::MAX,
             };
-            rows.into_iter().take(limit).collect()
-        } else {
-            // A folded section still shows what is unread or open.
-            rows.into_iter()
-                .filter(|c| workspace.is_unread(c) || active(c))
-                .collect()
+            let tidy: Vec<&Conversation> = rows
+                .iter()
+                .filter(|(_, quiet)| !quiet)
+                .map(|(c, _)| *c)
+                .take(limit)
+                .collect();
+            let held_back = total - tidy.len();
+            if held_back > 0 && all {
+                (every(rows), 0, true)
+            } else {
+                (tidy, held_back, false)
+            }
         };
-        let more = if expanded { total - rows.len() } else { 0 };
         drawn.push(Drawn {
             section,
             key,
@@ -502,21 +544,22 @@ pub(super) fn drawn<'s, 'a>(
             expanded,
             rows,
             more,
+            less,
         });
     }
     drawn
 }
 
-/// A section's remembered (open, showing more) state in workspace `team`.
+/// A section's remembered (open, showing all) state in workspace `team`.
 pub(super) fn folding(ctx: &egui::Context, team: &str, key: &str) -> (bool, bool) {
-    // Folded state survives restarts, per section.
+    // Both survive restarts, per section.
     let open = ctx
         .data_mut(|d| d.get_persisted::<bool>(open_id(team, key)))
         .unwrap_or(true);
-    let more = ctx
-        .data(|d| d.get_temp::<bool>(more_id(team, key)))
+    let all = ctx
+        .data_mut(|d| d.get_persisted::<bool>(more_id(team, key)))
         .unwrap_or(false);
-    (open, more)
+    (open, all)
 }
 
 /// Where whether a section is unfolded is remembered. With the workspace,
@@ -525,8 +568,8 @@ fn open_id(team: &str, key: &str) -> egui::Id {
     egui::Id::new(("section-open", team, key))
 }
 
-/// Where whether a section shows all its rows is remembered, per
-/// workspace like [`open_id`].
+/// Where whether a section shows all its rows, quiet ones included, is
+/// remembered, per workspace like [`open_id`].
 fn more_id(team: &str, key: &str) -> egui::Id {
     egui::Id::new(("section-more", team, key))
 }
@@ -545,8 +588,9 @@ fn section_view(
         expanded,
         rows,
         more,
+        less,
     } = drawn;
-    let (open, expanded, more) = (*open, *expanded, *more);
+    let (open, expanded, more, less) = (*open, *expanded, *more, *less);
     ui.add_space(8.0);
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
@@ -591,10 +635,19 @@ fn section_view(
     for conversation in rows {
         row(ui, palette, workspace, conversation, section, actions);
     }
-    if more > 0 {
+    // One last row: "N more" expands the section, "Show less" tidies it
+    // again, and the choice is remembered like the folding.
+    let last = if more > 0 {
+        let count = u32::try_from(more).unwrap_or(u32::MAX);
+        Some((tn("{count} more", "{count} more", count), true))
+    } else if less {
+        Some((t("Show less").into_owned(), false))
+    } else {
+        None
+    };
+    if let Some((label, all)) = last {
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
-        let label = tf("Show more ({count})", &[("count", &more.to_string())]);
         theme::focus_ring(ui, &response, palette, theme::RADIUS_SMALL);
         theme::describe(&response, egui::WidgetType::Button, &label);
         ui.painter().text(
@@ -608,7 +661,7 @@ fn section_view(
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked()
         {
-            ui.data_mut(|d| d.insert_temp(more_id(&workspace.info.team_id, key), true));
+            ui.data_mut(|d| d.insert_persisted(more_id(&workspace.info.team_id, key), all));
         }
     }
 }
