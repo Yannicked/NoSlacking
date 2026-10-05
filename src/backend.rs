@@ -567,6 +567,10 @@ pub enum Event {
         has_more: bool,
         cursor: Option<String>,
         older: bool,
+        /// Whether this is a poll of the newest page while the socket is
+        /// down, whose new messages are announced as live ones would be.
+        /// A first load or a reload is not: its messages are not news.
+        polled: bool,
     },
     /// The newest page of a conversation as the offline cache kept it, to
     /// show until [`Event::History`] brings Slack's own.

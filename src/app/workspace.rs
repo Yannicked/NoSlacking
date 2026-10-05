@@ -4,7 +4,7 @@
 //! Kept apart from `app.rs` and free of side effects, so it can be tested
 //! without a backend.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::to_editable;
 use crate::backend::Change;
@@ -43,7 +43,15 @@ pub struct WorkspaceState {
     pub desktop: crate::desktop::TeamState,
     /// Who is around, and the like (see [`crate::people`]).
     pub people: crate::people::TeamPeople,
+    /// The newest messages already treated as new (notified, hooks run),
+    /// oldest first. A message can reach us both live and by a poll, in
+    /// either order, and must be announced only once.
+    seen: VecDeque<(String, Ts)>,
 }
+
+/// How many announced messages [`WorkspaceState::seen`] remembers. A copy
+/// arriving twice comes close together, so a few hundred is plenty.
+const SEEN_LIMIT: usize = 512;
 
 impl WorkspaceState {
     /// A workspace with nothing loaded yet.
@@ -66,6 +74,7 @@ impl WorkspaceState {
             users_version: 0,
             desktop: crate::desktop::TeamState::default(),
             people: crate::people::TeamPeople::default(),
+            seen: VecDeque::new(),
         }
     }
 
@@ -406,6 +415,62 @@ impl WorkspaceState {
             conversation.latest = Some(newest);
         }
         (arrived, first)
+    }
+
+    /// The messages of a history page that are new since the conversation
+    /// was last seen, to be announced as if they had come live.
+    ///
+    /// Only a poll (`polled`) of the newest page (not `older`) can bring
+    /// such messages. Even then, a first load, the offline cache's copy,
+    /// or a stretch of history opened around an older message gives no
+    /// line to measure "new" from, and so none. Otherwise new means newer
+    /// than the newest message already loaded, not yours, and not already
+    /// announced. Call it before the page is merged.
+    pub(super) fn polled_new(
+        &self,
+        channel: &str,
+        messages: &[Message],
+        older: bool,
+        polled: bool,
+    ) -> Vec<Message> {
+        if !polled || older {
+            return Vec::new();
+        }
+        let Some(timeline) = self.timelines.get(channel) else {
+            return Vec::new();
+        };
+        if !timeline.loaded || timeline.cached || timeline.has_newer || timeline.around.is_some() {
+            return Vec::new();
+        }
+        // Anything loaded, live ones included, is past news.
+        let newest = timeline.newest();
+        let me = self.info.user_id.as_str();
+        messages
+            .iter()
+            .filter(|m| !m.ts.is_local() && newest.is_none_or(|n| m.ts > *n))
+            .filter(|m| m.user.as_deref() != Some(me))
+            .filter(|m| !self.was_seen(channel, &m.ts))
+            .cloned()
+            .collect()
+    }
+
+    /// Whether a message was announced already.
+    fn was_seen(&self, channel: &str, ts: &Ts) -> bool {
+        self.seen.iter().any(|(c, t)| c == channel && t == ts)
+    }
+
+    /// Records a message as announced. Answers whether this is the first
+    /// time, so a copy coming again (live after a poll, or the other way
+    /// round) stays quiet.
+    pub(super) fn first_sight(&mut self, channel: &str, ts: &Ts) -> bool {
+        if self.was_seen(channel, ts) {
+            return false;
+        }
+        if self.seen.len() >= SEEN_LIMIT {
+            self.seen.pop_front();
+        }
+        self.seen.push_back((channel.to_owned(), ts.clone()));
+        true
     }
 
     /// The offline cache's copy of the newest page, shown only while nothing
@@ -1679,6 +1744,84 @@ mod tests {
         assert!(!w.timelines["C1"].has_newer);
         w.message_arrived("C1", message("11.0", None), false);
         assert_eq!(w.timelines["C1"].messages.len(), 6);
+    }
+
+    /// A message in C1 from someone else.
+    fn theirs(ts: &str) -> Message {
+        Message {
+            user: Some("U2".into()),
+            ..message(ts, None)
+        }
+    }
+
+    fn stamps(messages: &[Message]) -> Vec<&str> {
+        messages.iter().map(|m| m.ts.as_str()).collect()
+    }
+
+    #[test]
+    fn a_first_load_announces_nothing() {
+        let w = workspace();
+        let page = [theirs("1.0"), theirs("2.0")];
+        assert!(w.polled_new("C1", &page, false, true).is_empty());
+        // Nor does the offline cache's copy count as a line to measure from.
+        let mut w = workspace();
+        w.cached_history_arrived("C1", vec![theirs("1.0")], false, None);
+        assert!(w.polled_new("C1", &page, false, true).is_empty());
+    }
+
+    #[test]
+    fn a_poll_announces_what_is_past_the_newest_message() {
+        let mut w = workspace();
+        w.history_arrived("C1", vec![theirs("1.0"), theirs("2.0")], false, None, false);
+        let page = [theirs("1.0"), theirs("2.0"), theirs("3.0"), theirs("4.0")];
+        assert_eq!(
+            stamps(&w.polled_new("C1", &page, false, true)),
+            ["3.0", "4.0"]
+        );
+        // The same page as a reload, not a poll, is not news.
+        assert!(w.polled_new("C1", &page, false, false).is_empty());
+        // Once merged, the next poll finds nothing more.
+        w.history_arrived("C1", page.to_vec(), false, None, false);
+        assert!(w.polled_new("C1", &page, false, true).is_empty());
+    }
+
+    #[test]
+    fn a_message_seen_live_is_not_announced_again() {
+        let mut w = workspace();
+        w.history_arrived("C1", vec![theirs("1.0")], false, None, false);
+        // Live first: it is loaded, and so past news for the poll.
+        assert!(w.first_sight("C1", &Ts::new("2.0")));
+        w.message_arrived("C1", theirs("2.0"), false);
+        let page = [theirs("1.0"), theirs("2.0")];
+        assert!(w.polled_new("C1", &page, false, true).is_empty());
+        // Announced live but not loaded: still quiet.
+        assert!(w.first_sight("C1", &Ts::new("3.0")));
+        assert!(w.polled_new("C1", &[theirs("3.0")], false, true).is_empty());
+        // Polled first: the live copy that follows is not a first sight.
+        let found = w.polled_new("C1", &[theirs("4.0")], false, true);
+        assert_eq!(stamps(&found), ["4.0"]);
+        assert!(w.first_sight("C1", &found[0].ts));
+        assert!(!w.first_sight("C1", &Ts::new("4.0")));
+    }
+
+    #[test]
+    fn your_own_messages_are_not_announced() {
+        let mut w = workspace();
+        w.history_arrived("C1", vec![theirs("1.0")], false, None, false);
+        let page = [theirs("1.0"), message("2.0", None)];
+        assert!(w.polled_new("C1", &page, false, true).is_empty());
+    }
+
+    #[test]
+    fn an_older_page_announces_nothing() {
+        let mut w = workspace();
+        w.history_arrived("C1", vec![theirs("5.0")], true, Some("c".into()), false);
+        let page = [theirs("1.0"), theirs("2.0")];
+        assert!(w.polled_new("C1", &page, true, true).is_empty());
+        assert!(w.polled_new("C1", &page, true, false).is_empty());
+        // Nor does the newest page while a stretch of older history is open.
+        w.around_arrived("C1", vec![theirs("1.0")], (false, None), true);
+        assert!(w.polled_new("C1", &[theirs("9.0")], false, true).is_empty());
     }
 
     #[test]

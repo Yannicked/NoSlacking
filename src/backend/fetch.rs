@@ -611,12 +611,16 @@ async fn fetch_conversation(
 /// For the newest page, the copy in the offline cache goes out first, so
 /// the conversation shows at once (and without a network); Slack's answer
 /// then replaces it and is kept for next time.
+///
+/// `polled` marks a poll for new messages while the socket is down (see
+/// [`Event::History`]).
 pub(super) async fn history(
     client: Client,
     team: String,
     channel: String,
     cursor: Option<String>,
     cache: Cache,
+    polled: bool,
     sink: Sink,
 ) {
     let newest = cursor.is_none() && cache.is_enabled();
@@ -678,6 +682,7 @@ pub(super) async fn history(
                 has_more,
                 cursor,
                 older,
+                polled,
             });
             if newest {
                 let _ = tokio::task::spawn_blocking(move || {

@@ -79,7 +79,16 @@ pub(super) async fn upload(
             // Without a live socket the new file would only show
             // at the next poll.
             if poll_after {
-                history(client, team, channel, None, Cache::disabled(), sink.clone()).await;
+                history(
+                    client,
+                    team,
+                    channel,
+                    None,
+                    Cache::disabled(),
+                    true,
+                    sink.clone(),
+                )
+                .await;
             }
         }
         Err(error) => failed(failure(&error)),
