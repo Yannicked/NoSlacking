@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 pub use fastframe_shell::Waker;
 
 use crate::credentials::{AppCredentials, Credentials};
+use crate::failure::{Failure, Problem};
 use crate::images::ImageLoader;
 use crate::model::{Bot, Conversation, Message, SidebarSection, Ts, User, Workspace};
 use crate::paths::AppDirs;
@@ -501,7 +502,7 @@ pub enum SignIn {
     /// The browser is open on this URL.
     Waiting(String),
     Exchanging,
-    Failed(String),
+    Failed(Failure),
     Done(String),
 }
 
@@ -526,7 +527,7 @@ pub enum Event {
     /// A workspace has no working token any more.
     SignedOut {
         team: String,
-        reason: Option<String>,
+        reason: Option<Failure>,
     },
     Conversations {
         team: String,
@@ -579,7 +580,7 @@ pub enum Event {
     HistoryFailed {
         team: String,
         channel: String,
-        error: String,
+        error: Failure,
     },
     /// The messages around `ts`, oldest first, which replace what the
     /// conversation's list held: the stretch asked for by
@@ -598,7 +599,7 @@ pub enum Event {
     Search {
         team: String,
         request: u64,
-        result: Result<crate::search::Page, crate::search::Failure>,
+        result: Result<crate::search::Page, Failure>,
     },
     /// The page after the newest message loaded, oldest first.
     Newer {
@@ -640,7 +641,7 @@ pub enum Event {
         team: String,
         channel: String,
         local: Ts,
-        result: Result<Message, String>,
+        result: Result<Message, Failure>,
     },
     /// Slack answered an edit, delete or reaction. On an error the
     /// interface undoes the change it already showed.
@@ -648,7 +649,7 @@ pub enum Event {
         team: String,
         channel: String,
         change: Change,
-        result: Result<(), String>,
+        result: Result<(), Failure>,
     },
     /// Someone else read up to `ts` (you, on another device).
     Read {
@@ -660,7 +661,8 @@ pub enum Event {
     /// A `slack://` link the desktop handed over, for a signed-in
     /// workspace: open what it names.
     DeepLink(crate::links::Link),
-    Error(String),
+    /// Something failed that has no event of its own: shown as a toast.
+    Error(Problem),
     Notice(String),
     /// Your Do Not Disturb state in a workspace.
     Dnd {
@@ -679,11 +681,11 @@ pub enum Event {
         total: u64,
     },
     /// A slash command ran (`Ok`, with Slack's reply if it gave one) or
-    /// failed. [`SLASH_NEEDS_SESSION`] says it can only run through a
+    /// failed. [`Failure::NeedsSession`] says it can only run through a
     /// browser session's sign-in.
     Slash {
         command: String,
-        result: Result<Option<String>, String>,
+        result: Result<Option<String>, Failure>,
     },
     /// Upload `id` ended: shared, failed (with its own error event) or
     /// cancelled.
@@ -708,10 +710,6 @@ pub enum Event {
         event: crate::views::Event,
     },
 }
-
-/// The error of a slash command that only `chat.command` can run, which
-/// takes only a browser session's token.
-pub const SLASH_NEEDS_SESSION: &str = "needs_session";
 
 /// The interface's end of the bridge.
 pub struct Backend {

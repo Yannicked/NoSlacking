@@ -286,7 +286,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     super::hooks::settings_group(app, ui, palette);
 
     group(ui, palette, &t("Workspaces"), |ui| {
-        let workspaces: Vec<(String, String, Option<String>)> = app
+        let workspaces: Vec<(String, String, Option<crate::failure::Failure>)> = app
             .workspaces
             .iter()
             .map(|w| {
@@ -298,7 +298,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             })
             .collect();
         for (team, name, signed_out) in workspaces {
-            let detail = signed_out.unwrap_or_default();
+            let detail = signed_out.map(|f| f.message()).unwrap_or_default();
             row(ui, palette, &name, &detail, |ui, _| {
                 if theme::secondary_button(ui, palette, &t("Sign out")).clicked() {
                     app.actions.push(Action::SignOut(team.clone()));

@@ -8,7 +8,8 @@ use std::path::PathBuf;
 
 use super::workspace::local_message;
 use super::{App, Upload, UploadTarget, to_wire};
-use crate::backend::{self, Command};
+use crate::backend::Command;
+use crate::failure::Failure;
 use crate::i18n::{t, tf};
 use crate::model::Ts;
 use crate::mrkdwn;
@@ -285,7 +286,7 @@ impl App {
 
     /// A slash command finished: Slack's reply if it gave one, a word
     /// that it worked otherwise, or why not.
-    pub(super) fn slash_done(&mut self, command: &str, result: Result<Option<String>, String>) {
+    pub(super) fn slash_done(&mut self, command: &str, result: Result<Option<String>, Failure>) {
         let name = format!("/{command}");
         match result {
             Ok(Some(reply)) => {
@@ -306,7 +307,7 @@ impl App {
                 };
                 self.toast(done.into_owned(), false);
             }
-            Err(error) if error == backend::SLASH_NEEDS_SESSION => self.toast(
+            Err(Failure::NeedsSession) => self.toast(
                 tf(
                     "{command} only works when you sign in with your browser",
                     &[("command", &name)],
@@ -316,7 +317,7 @@ impl App {
             Err(error) => self.toast(
                 tf(
                     "{command} failed: {error}",
-                    &[("command", &name), ("error", &error)],
+                    &[("command", &name), ("error", &error.message())],
                 ),
                 true,
             ),

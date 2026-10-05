@@ -14,6 +14,7 @@ use serde_json::Value;
 use super::{Event, Sink};
 use crate::desktop::SlackPrefs;
 use crate::dnd::Dnd;
+use crate::failure::{Doing, Problem};
 use crate::notify::Level;
 use crate::slack::Client;
 
@@ -87,9 +88,9 @@ pub async fn snooze(client: Client, team: String, minutes: Option<u32>, sink: Si
         }
         Err(error) => {
             log::info!("could not change the snooze in Slack: {error}");
-            sink.send(Event::Notice(format!(
-                "Slack did not take the snooze ({}); it holds on this computer only.",
-                super::api::describe(&error)
+            sink.send(Event::Error(Problem::new(
+                Doing::Snooze,
+                super::api::failure(&error),
             )));
         }
     }
@@ -228,9 +229,9 @@ pub async fn mute(
         }
     };
     if let Err(error) = result {
-        sink.send(Event::Error(format!(
-            "Could not change the mute in Slack: {}",
-            super::api::describe(&error)
+        sink.send(Event::Error(Problem::new(
+            Doing::ChangeMute,
+            super::api::failure(&error),
         )));
     }
     prefs(client, team, sink).await;

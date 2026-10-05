@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::app::{App, WorkspaceState};
 use crate::backend;
+use crate::failure::Failure;
 use crate::i18n::{t, tf};
 use crate::model::{ConversationKind, Ts};
 
@@ -235,11 +236,11 @@ pub enum Event {
         user: String,
     },
     /// Slack answered [`Command::SetStatus`].
-    StatusSet { result: Result<(), String> },
+    StatusSet { result: Result<(), Failure> },
     /// Slack answered [`Command::SetAway`].
     AwaySet {
         away: bool,
-        result: Result<(), String>,
+        result: Result<(), Failure>,
     },
     /// You set yourself away or active, maybe in another client.
     ManualPresence { away: bool },
@@ -601,7 +602,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                 toast = Some((
                     tf(
                         "Could not change your presence: {error}",
-                        &[("error", &error)],
+                        &[("error", &error.message())],
                     ),
                     true,
                 ));
@@ -614,7 +615,10 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                     user.status_text = text;
                 }
                 toast = Some((
-                    tf("Could not set your status: {error}", &[("error", &error)]),
+                    tf(
+                        "Could not set your status: {error}",
+                        &[("error", &error.message())],
+                    ),
                     true,
                 ));
             }

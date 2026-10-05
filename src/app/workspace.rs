@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use super::to_editable;
 use crate::backend::Change;
 use crate::emoji::EmojiSet;
+use crate::failure::Failure;
 use crate::i18n::t;
 use crate::model::{
     Bot, Conversation, ConversationKind, Delivery, Message, SidebarSection, Timeline, Ts, User,
@@ -30,7 +31,7 @@ pub struct WorkspaceState {
     pub threads: HashMap<(String, Ts), Timeline>,
     pub active: Option<String>,
     /// Why this workspace needs signing in again, if it does.
-    pub signed_out: Option<String>,
+    pub signed_out: Option<Failure>,
     pub loaded: bool,
     pub(super) requested_users: HashSet<String>,
     pub(super) requested_bots: HashSet<String>,
@@ -640,7 +641,7 @@ impl WorkspaceState {
 
     /// Slack answered a send: the optimistic copy `local` gives way to the
     /// real message, or is marked as failed.
-    pub(super) fn sent(&mut self, channel: &str, local: &Ts, result: &Result<Message, String>) {
+    pub(super) fn sent(&mut self, channel: &str, local: &Ts, result: &Result<Message, Failure>) {
         for timeline in self.timelines_for_mut(channel) {
             let Some(position) = timeline.messages.iter().position(|m| &m.ts == local) else {
                 continue;
@@ -1191,9 +1192,9 @@ mod tests {
     fn a_failed_send_can_be_retried() {
         let mut w = workspace_in_general();
         sending(&mut w, "local-1", "hi", None);
-        w.sent("C1", &Ts::new("local-1"), &Err("ratelimited".into()));
+        w.sent("C1", &Ts::new("local-1"), &Err(Failure::RateLimited));
         let failed = &w.timelines["C1"].messages[0];
-        assert_eq!(failed.delivery, Delivery::Failed("ratelimited".into()));
+        assert_eq!(failed.delivery, Delivery::Failed(Failure::RateLimited));
         assert_eq!(
             w.retry_local("C1", &Ts::new("local-1")),
             Some(("hi".to_owned(), None, false))

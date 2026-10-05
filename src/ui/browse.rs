@@ -437,7 +437,10 @@ fn browse(app: &mut App, ctx: &egui::Context) {
                     &[("count", &browse.channels.len().to_string())],
                 )
             } else if let Some(error) = &browse.error {
-                tf("Could not list the channels: {error}", &[("error", error)])
+                tf(
+                    "Could not list the channels: {error}",
+                    &[("error", &error.message())],
+                )
             } else {
                 crate::i18n::tn(
                     "{count} channel you can join",

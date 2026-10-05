@@ -545,7 +545,7 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
                 .image(palette.danger, 14.0)
                 .paint_at(ui, icon);
             ui.label(
-                RichText::new(tf("Not sent: {error}.", &[("error", error)]))
+                RichText::new(tf("Not sent: {error}.", &[("error", &error.message())]))
                     .font(theme::regular(12.5))
                     .color(palette.danger),
             );

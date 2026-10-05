@@ -233,7 +233,7 @@ fn about(
                     ui.label(RichText::new(line).color(palette.text));
                 }
                 Loaded::Failed(error) => {
-                    ui.label(RichText::new(error).color(palette.dim));
+                    ui.label(RichText::new(error.sentence()).color(palette.dim));
                 }
                 Loaded::Idle | Loaded::Loading => {
                     ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
@@ -333,7 +333,7 @@ fn loaded<'a, T>(
     match loaded {
         Loaded::Ready(list) => Some(list),
         Loaded::Failed(error) => {
-            ui.label(RichText::new(error).color(palette.dim));
+            ui.label(RichText::new(error.sentence()).color(palette.dim));
             if ui.link(t("Try again")).clicked() {
                 actions.push(Action::Convos(Convos::Details {
                     channel: conversation.id.clone(),

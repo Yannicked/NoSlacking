@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::app::{App, WorkspaceState};
 use crate::backend;
+// Why a request failed; `Failure` here names which request it was.
+use crate::failure::Failure as Why;
 use crate::i18n::tf;
 use crate::model::{ConversationKind, File, Message, Ts, User};
 
@@ -145,23 +147,23 @@ pub enum Event {
     Browsed { channels: Vec<Listed>, done: bool },
     About {
         channel: String,
-        result: Result<About, String>,
+        result: Result<About, Why>,
     },
     Members {
         channel: String,
-        result: Result<Vec<String>, String>,
+        result: Result<Vec<String>, Why>,
     },
     Files {
         channel: String,
-        result: Result<Vec<SharedFile>, String>,
+        result: Result<Vec<SharedFile>, Why>,
     },
     Pins {
         channel: String,
-        result: Result<Vec<Pin>, String>,
+        result: Result<Vec<Pin>, Why>,
     },
     Bookmarks {
         channel: String,
-        result: Result<Vec<Bookmark>, String>,
+        result: Result<Vec<Bookmark>, Why>,
     },
     /// A message was pinned or unpinned, maybe by someone else.
     Pinned {
@@ -171,7 +173,7 @@ pub enum Event {
         by: Option<String>,
     },
     /// Slack refused, or could not be reached.
-    Failed { what: Failure, error: String },
+    Failed { what: Failure, error: Why },
 }
 
 /// Which request failed, so the interface can say so in its own words.
@@ -243,7 +245,7 @@ pub enum Loaded<T> {
     Idle,
     Loading,
     Ready(T),
-    Failed(String),
+    Failed(Why),
 }
 
 impl<T> Loaded<T> {
@@ -253,8 +255,8 @@ impl<T> Loaded<T> {
     }
 }
 
-impl<T> From<Result<T, String>> for Loaded<T> {
-    fn from(result: Result<T, String>) -> Self {
+impl<T> From<Result<T, Why>> for Loaded<T> {
+    fn from(result: Result<T, Why>) -> Self {
         match result {
             Ok(value) => Self::Ready(value),
             Err(error) => Self::Failed(error),
@@ -373,7 +375,7 @@ pub struct Browse {
     /// Whether the whole list is in.
     pub done: bool,
     /// Why the list stopped, if it did.
-    pub error: Option<String>,
+    pub error: Option<Why>,
     /// Channels being joined, waiting for Slack.
     pub joining: HashSet<String>,
     /// The last query's matches, by index into `channels`, with the query
@@ -889,7 +891,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                     }
                     tf(
                         "Could not open the conversation: {error}",
-                        &[("error", &error)],
+                        &[("error", &error.message())],
                     )
                 }
                 Failure::Browse => {
@@ -897,22 +899,31 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                         browse.error = Some(error.clone());
                         browse.done = true;
                     }
-                    tf("Could not list the channels: {error}", &[("error", &error)])
+                    tf(
+                        "Could not list the channels: {error}",
+                        &[("error", &error.message())],
+                    )
                 }
                 Failure::Join => {
                     if let Some(browse) = &mut app.convos.browse {
                         browse.joining.clear();
                     }
-                    tf("Could not join the channel: {error}", &[("error", &error)])
+                    tf(
+                        "Could not join the channel: {error}",
+                        &[("error", &error.message())],
+                    )
                 }
-                Failure::Leave => tf("Could not leave the channel: {error}", &[("error", &error)]),
+                Failure::Leave => tf(
+                    "Could not leave the channel: {error}",
+                    &[("error", &error.message())],
+                ),
                 Failure::Create => {
                     if let Some(dialog) = &mut app.convos.new_channel {
                         dialog.busy = false;
                     }
                     tf(
                         "Could not create the channel: {error}",
-                        &[("error", &error)],
+                        &[("error", &error.message())],
                     )
                 }
                 Failure::Load { channel } => {
@@ -938,9 +949,15 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                 Failure::Pin { channel, ts, pin } => {
                     pinned(app, team, &channel, &ts, !pin, None);
                     if pin {
-                        tf("Could not pin the message: {error}", &[("error", &error)])
+                        tf(
+                            "Could not pin the message: {error}",
+                            &[("error", &error.message())],
+                        )
                     } else {
-                        tf("Could not unpin the message: {error}", &[("error", &error)])
+                        tf(
+                            "Could not unpin the message: {error}",
+                            &[("error", &error.message())],
+                        )
                     }
                 }
                 Failure::Describe { channel, field } => {
@@ -950,12 +967,13 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                         channel,
                     });
                     match field {
-                        Field::Topic => {
-                            tf("Could not set the topic: {error}", &[("error", &error)])
-                        }
+                        Field::Topic => tf(
+                            "Could not set the topic: {error}",
+                            &[("error", &error.message())],
+                        ),
                         Field::Purpose => tf(
                             "Could not set the description: {error}",
-                            &[("error", &error)],
+                            &[("error", &error.message())],
                         ),
                     }
                 }

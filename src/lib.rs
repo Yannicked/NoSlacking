@@ -17,6 +17,7 @@ pub mod desktop;
 pub mod dnd;
 pub mod drafts;
 pub mod emoji;
+pub mod failure;
 #[cfg(feature = "highlight")]
 pub mod highlight;
 pub mod hooks;

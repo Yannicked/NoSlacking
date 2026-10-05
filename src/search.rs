@@ -7,6 +7,7 @@
 //! characters, [`MATCH_START`] and [`MATCH_END`]; [`segments`] splits text
 //! at them for drawing.
 
+use crate::failure::Failure;
 use crate::model::Ts;
 
 /// Where Slack starts and ends a matching word, with `highlight=true`.
@@ -74,14 +75,6 @@ pub struct Page {
     pub page: u32,
     pub pages: u32,
     pub total: u32,
-}
-
-/// Why a search failed.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Failure {
-    /// The sign-in was made without the `search:read` permission.
-    NoPermission,
-    Other(String),
 }
 
 /// A query as it was sent, so a later page asks for the same thing.
@@ -367,8 +360,8 @@ mod tests {
         let (_, third) = search.start("T1").expect("a query");
         search.arrived(second, Ok(page(vec![hit("x", "C9", "9.0")], 2, 2)));
         assert!(search.hits.is_empty() && search.loading);
-        search.arrived(third, Err(Failure::NoPermission));
-        assert_eq!(search.failure, Some(Failure::NoPermission));
+        search.arrived(third, Err(Failure::MissingPermission));
+        assert_eq!(search.failure, Some(Failure::MissingPermission));
         assert!(search.more().is_none());
         search.text = " ".into();
         assert!(search.start("T1").is_none());

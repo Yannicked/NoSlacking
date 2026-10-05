@@ -10,6 +10,7 @@ use super::{App, Page, WorkspaceState};
 use crate::backend::{Change, Command, Event, SignIn, Socket};
 use crate::credentials::AppCredentials;
 use crate::emoji::EmojiSet;
+use crate::failure::Failure;
 use crate::i18n::{t, tf};
 use crate::model::{Conversation, Message, Ts, Workspace};
 use crate::settings::WorkspaceMeta;
@@ -27,7 +28,7 @@ impl App {
             Event::WorkspaceReady(info) => self.workspace_ready(info),
             Event::SignedOut { team, reason } => self.signed_out(&team, reason),
             Event::Socket(socket) => self.socket_changed(socket),
-            Event::Error(error) => self.toast(error, true),
+            Event::Error(problem) => self.toast(problem.message(), problem.is_error()),
             Event::UploadProgress { id, sent, total } => {
                 if let Some(upload) = self.transfers.iter_mut().find(|u| u.id == id) {
                     upload.sent = sent;
@@ -111,7 +112,10 @@ impl App {
                     workspace.history_failed(&channel);
                 }
                 self.toast(
-                    tf("Could not load messages: {error}", &[("error", &error)]),
+                    tf(
+                        "Could not load messages: {error}",
+                        &[("error", &error.message())],
+                    ),
                     true,
                 );
             }
@@ -213,7 +217,7 @@ impl App {
 
     /// Slack answered an edit, delete or reaction; a refused one is
     /// undone on screen, and you are told.
-    fn settled(&mut self, team: &str, channel: &str, change: Change, result: Result<(), String>) {
+    fn settled(&mut self, team: &str, channel: &str, change: Change, result: Result<(), Failure>) {
         let Err(error) = result else { return };
         let what = match &change {
             Change::Edit { .. } => t("Could not edit the message"),
@@ -223,7 +227,7 @@ impl App {
         if let Some(workspace) = self.workspace_mut(team) {
             workspace.undo(channel, change);
         }
-        self.toast(format!("{what}: {error}"), true);
+        self.toast(format!("{what}: {}", error.message()), true);
     }
 
     fn app_loaded(&mut self, app: Option<AppCredentials>) {
@@ -273,7 +277,7 @@ impl App {
     }
 
     /// A workspace needs signing in again (`reason`), or was signed out.
-    fn signed_out(&mut self, team: &str, reason: Option<String>) {
+    fn signed_out(&mut self, team: &str, reason: Option<Failure>) {
         match reason {
             Some(reason) => {
                 if let Some(workspace) = self.workspace_mut(team) {
@@ -407,13 +411,16 @@ impl App {
         }
     }
 
-    fn sent(&mut self, team: &str, channel: &str, local: &Ts, result: Result<Message, String>) {
+    fn sent(&mut self, team: &str, channel: &str, local: &Ts, result: Result<Message, Failure>) {
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
         workspace.sent(channel, local, &result);
         if let Err(error) = result {
-            self.toast(tf("Message not sent: {error}", &[("error", &error)]), true);
+            self.toast(
+                tf("Message not sent: {error}", &[("error", &error.message())]),
+                true,
+            );
         }
     }
 

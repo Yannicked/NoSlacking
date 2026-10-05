@@ -89,7 +89,7 @@ pub fn rail(app: &mut App, ui: &mut egui::Ui) {
                         );
                     }
                     let tip = match &workspace.signed_out {
-                        Some(reason) => format!("{} ({reason})", workspace.info.name),
+                        Some(reason) => format!("{} ({})", workspace.info.name, reason.message()),
                         None => workspace.info.name.clone(),
                     };
                     theme::focus_ring(ui, &response, &palette, 12);
@@ -290,9 +290,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(
-                            RichText::new(tf("Signed out: {reason}", &[("reason", reason)]))
-                                .font(theme::regular(12.5))
-                                .color(palette.text),
+                            RichText::new(tf(
+                                "Signed out: {reason}",
+                                &[("reason", &reason.message())],
+                            ))
+                            .font(theme::regular(12.5))
+                            .color(palette.text),
                         );
                         if ui.link(t("Sign in again")).clicked() {
                             actions.push(Action::AddWorkspace);

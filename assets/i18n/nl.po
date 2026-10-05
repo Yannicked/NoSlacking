@@ -1696,3 +1696,179 @@ msgstr "Openen in nieuw venster"
 
 msgid "Close conversation"
 msgstr "Gesprek sluiten"
+
+# Why something failed (src/failure.rs): clauses after "Could not …:",
+# except the sign-in's own, which are sentences.
+msgid "the sign-in is no longer valid; sign in again"
+msgstr "de aanmelding is niet meer geldig; meld je opnieuw aan"
+
+msgid "no sign-in is saved for this workspace"
+msgstr "er is geen aanmelding bewaard voor deze werkruimte"
+
+msgid "the keyring could not be read"
+msgstr "de sleutelbos kon niet worden gelezen"
+
+msgid "the keyring could not be read: {error}"
+msgstr "de sleutelbos kon niet worden gelezen: {error}"
+
+msgid "that workspace is not signed in"
+msgstr "die werkruimte is niet aangemeld"
+
+msgid "the Slack app lacks a permission; reinstall it from the manifest"
+msgstr "de Slack-app mist een toestemming; installeer hem opnieuw vanuit het manifest"
+
+msgid "the conversation no longer exists"
+msgstr "het gesprek bestaat niet meer"
+
+msgid "you are not in that channel"
+msgstr "je zit niet in dat kanaal"
+
+msgid "the channel is archived"
+msgstr "het kanaal is gearchiveerd"
+
+msgid "the message is too long"
+msgstr "het bericht is te lang"
+
+msgid "that message can no longer be edited"
+msgstr "dat bericht kan niet meer worden bewerkt"
+
+msgid "you cannot delete that message"
+msgstr "je kunt dat bericht niet verwijderen"
+
+msgid "the sign-in link expired; try again"
+msgstr "de aanmeldlink is verlopen; probeer het opnieuw"
+
+msgid "the redirect URL does not match the Slack app; check its OAuth settings"
+msgstr "de redirect-URL komt niet overeen met de Slack-app; controleer de OAuth-instellingen"
+
+msgid "the client ID or secret is wrong"
+msgstr "de client-ID of het geheim klopt niet"
+
+msgid "a channel by that name exists already"
+msgstr "er bestaat al een kanaal met die naam"
+
+msgid "Slack does not take that name"
+msgstr "Slack accepteert die naam niet"
+
+msgid "the name is too long"
+msgstr "de naam is te lang"
+
+msgid "nobody can leave the general channel"
+msgstr "niemand kan het algemene kanaal verlaten"
+
+msgid "the workspace does not allow you to do that"
+msgstr "de werkruimte staat je dat niet toe"
+
+msgid "that cannot be done in this kind of conversation"
+msgstr "dat kan niet in dit soort gesprek"
+
+msgid "Slack is rate limiting requests; try again shortly"
+msgstr "Slack remt het aantal verzoeken af; probeer het zo opnieuw"
+
+msgid "the network failed: {detail}"
+msgstr "het netwerk liet het afweten: {detail}"
+
+msgid "HTTP {status}"
+msgstr "HTTP {status}"
+
+msgid "Slack answered unexpectedly: {detail}"
+msgstr "Slack gaf een onverwacht antwoord: {detail}"
+
+msgid "Slack did not return the message"
+msgstr "Slack stuurde het bericht niet terug"
+
+msgid "it is larger than Slack's 1 GB limit"
+msgstr "het is groter dan de limiet van 1 GB van Slack"
+
+msgid "it is not a file"
+msgstr "het is geen bestand"
+
+msgid "there is no downloads folder"
+msgstr "er is geen map voor downloads"
+
+msgid "it cannot be opened here; download it instead"
+msgstr "het kan hier niet worden geopend; download het in plaats daarvan"
+
+msgid "Enter your workspace's Slack address, such as acme.slack.com."
+msgstr "Vul het Slack-adres van je werkruimte in, zoals acme.slack.com."
+
+msgid "Could not open the browser. Open app.slack.com/ssb/signin yourself."
+msgstr "Kan de browser niet openen. Open zelf app.slack.com/ssb/signin."
+
+msgid "That is not a Slack sign-in link. Copy the slack:// link the browser offers to open."
+msgstr "Dat is geen aanmeldlink van Slack. Kopieer de slack://-link die de browser wil openen."
+
+msgid "Enter the Slack app's client ID first."
+msgstr "Vul eerst de client-ID van de Slack-app in."
+
+msgid "That does not look like a Slack token (it should start with xoxp-)."
+msgstr "Dat lijkt geen Slack-token (het hoort te beginnen met xoxp-)."
+
+msgid "That is a bot token. NoSlacking needs the User OAuth Token (xoxp-)."
+msgstr "Dat is een bottoken. NoSlacking heeft het User OAuth Token (xoxp-) nodig."
+
+msgid "Slack signed in but set no session cookie."
+msgstr "Slack heeft aangemeld maar geen sessiecookie gezet."
+
+msgid "Slack signed in to no workspace with that link."
+msgstr "Slack heeft met die link bij geen enkele werkruimte aangemeld."
+
+msgid "Could not listen for Slack's redirect: {error}. Is the port in use?"
+msgstr "Kan niet luisteren naar de redirect van Slack: {error}. Is de poort al in gebruik?"
+
+msgid "This sign-in link does not belong to the current attempt."
+msgstr "Deze aanmeldlink hoort niet bij de huidige poging."
+
+msgid "Sign-in was cancelled."
+msgstr "Aanmelden is geannuleerd."
+
+msgid "Slack refused the sign-in: {code}"
+msgstr "Slack weigerde de aanmelding: {code}"
+
+msgid "Slack sent no authorization code."
+msgstr "Slack stuurde geen autorisatiecode."
+
+msgid "it only works when you sign in with your browser"
+msgstr "dat werkt alleen als je je aanmeldt met je browser"
+
+msgid "name someone to invite with @"
+msgstr "noem met @ wie je wilt uitnodigen"
+
+msgid "Could not reach {workspace}: {error}"
+msgstr "Kan {workspace} niet bereiken: {error}"
+
+msgid "Could not list conversations: {error}"
+msgstr "Kan de gesprekken niet ophalen: {error}"
+
+msgid "Could not change the sidebar: {error}"
+msgstr "Kan de zijbalk niet wijzigen: {error}"
+
+msgid "Could not load the thread: {error}"
+msgstr "Kan de thread niet laden: {error}"
+
+msgid "Could not change the mute in Slack: {error}"
+msgstr "Kan het dempen in Slack niet wijzigen: {error}"
+
+msgid "Slack did not take the snooze ({error}); it holds on this computer only."
+msgstr "Slack heeft Niet storen niet overgenomen ({error}); het geldt alleen op deze computer."
+
+msgid "Could not upload {name}: {error}"
+msgstr "Kan {name} niet uploaden: {error}"
+
+msgid "Could not download {name}: {error}"
+msgstr "Kan {name} niet downloaden: {error}"
+
+msgid "Could not save {name}: {error}"
+msgstr "Kan {name} niet opslaan: {error}"
+
+msgid "Could not open {name}: {error}"
+msgstr "Kan {name} niet openen: {error}"
+
+msgid "{method} failed: {error}"
+msgstr "{method} mislukt: {error}"
+
+msgid "Could not use the proxy: {error}"
+msgstr "Kan de proxy niet gebruiken: {error}"
+
+msgid "Could not register noslacking:// links ({error}). Try the loopback redirect in Settings."
+msgstr "Kan noslacking://-links niet registreren ({error}). Probeer de loopback-redirect in Instellingen."
