@@ -297,6 +297,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     let palette = app.palette;
     let scroll_key = format!("{team}/{channel}");
     let to_bottom = app.scroll_to_bottom.remove(&scroll_key);
+    let mut app_scroll_again = false;
     let overlay = app.overlay_open();
     // An anchor for another list is stale by now: drop it either way.
     let prepended = app
@@ -465,14 +466,26 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         );
         ui.add_space(12.0);
         if to_bottom {
-            // Jump, don't glide, so this very frame already shows the end;
-            // the pin below keeps it there as the content settles.
+            // Jump, don't glide; the pin below keeps it there as the content
+            // settles. The scroll area moves only once this pass is drawn,
+            // so the pass is drawn again: shown as it is, a conversation just
+            // opened would first sit where the last one was scrolled to.
             ui.scroll_to_cursor_animation(
                 Some(Align::BOTTOM),
                 egui::style::ScrollAnimation::none(),
             );
+            // On the first pass the rows are placed by guesses, so the end
+            // it scrolls to is a guess too: the next pass scrolls again, to
+            // the end as measured.
+            if ui.ctx().current_pass_index() == 0 {
+                app_scroll_again = true;
+                ui.ctx().request_discard("scrolled to the newest message");
+            }
         }
     });
+    if app_scroll_again {
+        app.scroll_to_bottom.insert(scroll_key.clone());
+    }
     let content = output.content_size.y;
     let offset = output.state.offset.y;
     let bottom = (content - output.inner_rect.height()).max(0.0);
