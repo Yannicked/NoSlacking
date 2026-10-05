@@ -82,6 +82,18 @@ struct Cli {
     #[arg(long, value_name = "LINES")]
     demo_wheel: Option<f32>,
 
+    /// Type TEXT into the focused field from 2.5 s in, a character every
+    /// other frame, as a person typing would.
+    #[cfg(feature = "demo")]
+    #[arg(long, value_name = "TEXT")]
+    demo_type: Option<String>,
+
+    /// Save every frame from 2.5 s in to DIR (frame-000.png, …) until the
+    /// typing is done, then quit: for catching a frame that draws wrong.
+    #[cfg(feature = "demo")]
+    #[arg(long, value_name = "DIR")]
+    demo_frames: Option<std::path::PathBuf>,
+
     /// Wait this long before the demo screenshot (default 1500 ms), for
     /// catching animations at different moments.
     #[cfg(feature = "demo")]
@@ -303,6 +315,13 @@ impl eframe::App for Window {
             }
         }
         if self.demo.started.elapsed() > std::time::Duration::from_millis(2500)
+            && self.demo.frames.is_multiple_of(2)
+            && let Some(c) = self.demo.typing.pop_front()
+        {
+            input.events.push(egui::Event::Text(c.to_string()));
+            self.demo.typed_frames = self.demo.filmed.0;
+        }
+        if self.demo.started.elapsed() > std::time::Duration::from_millis(2500)
             && !self.demo.keys.is_empty()
         {
             let (key, modifiers) = self.demo.keys.remove(0);
@@ -397,6 +416,14 @@ struct DemoSetup {
     right_click: Option<egui::Pos2>,
     /// Where to click, once.
     click: Option<egui::Pos2>,
+    /// Characters still to type, one every other frame.
+    typing: std::collections::VecDeque<char>,
+    /// Where to save every frame, and how many were asked for and saved.
+    film: Option<std::path::PathBuf>,
+    filmed: (u32, u32),
+    /// How many frames were asked for when the last character was typed:
+    /// filming goes on a little after it, to see the field at rest.
+    typed_frames: u32,
     /// Keys still to press, one per frame.
     keys: Vec<(egui::Key, egui::Modifiers)>,
     started: std::time::Instant,
@@ -427,6 +454,15 @@ impl DemoSetup {
                 .filter_map(demo_key)
                 .collect(),
             started: std::time::Instant::now(),
+            typing: cli
+                .demo_type
+                .as_deref()
+                .unwrap_or_default()
+                .chars()
+                .collect(),
+            film: cli.demo_frames.clone(),
+            filmed: (0, 0),
+            typed_frames: 0,
             hover: cli
                 .demo_hover
                 .as_deref()
@@ -610,7 +646,52 @@ impl DemoSetup {
         }
     }
 
+    /// With `--demo-frames`: asks for a screenshot of every frame from
+    /// 2.5 s in and saves each one as it comes, quitting once the typing is
+    /// done and every frame asked for is saved.
+    fn film(&mut self, ctx: &egui::Context, app: &mut App) {
+        let Some(dir) = self.film.clone() else {
+            return;
+        };
+        ctx.request_repaint();
+        let (asked, saved) = &mut self.filmed;
+        for image in ctx.input(|input| {
+            input
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        }) {
+            let [width, height] = [image.size[0] as u32, image.size[1] as u32];
+            let pixels = image
+                .pixels
+                .iter()
+                .flat_map(|pixel| pixel.to_srgba_unmultiplied())
+                .collect();
+            let path = dir.join(format!("frame-{saved:03}.png"));
+            if let Some(buffer) = image::RgbaImage::from_raw(width, height, pixels)
+                && let Err(error) = buffer.save(&path)
+            {
+                log::error!("could not write {}: {error}", path.display());
+            }
+            *saved += 1;
+        }
+        let started = self.started.elapsed() > std::time::Duration::from_millis(2500);
+        if started && (!self.typing.is_empty() || *asked < self.typed_frames + 20) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            *asked += 1;
+        } else if started && *saved >= *asked {
+            log::info!("saved {saved} frames to {}", dir.display());
+            app.request_quit();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
     fn after_frame(&mut self, ctx: &egui::Context, app: &mut App) {
+        self.film(ctx, app);
         let Some(path) = self.shot.clone() else {
             return;
         };
