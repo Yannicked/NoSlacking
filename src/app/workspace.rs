@@ -68,6 +68,23 @@ pub struct WorkspaceState {
     /// can take a copy's place before its own answer comes; the answer
     /// still settles it from here.
     sending: HashMap<Ts, Message>,
+    /// Messages you deleted while they were still sending, by local id:
+    /// the send cannot be called back, so the message is deleted once
+    /// Slack answers.
+    cancelled: HashSet<Ts>,
+    /// Messages so deleted, by conversation and real ts, whose echo is not
+    /// to bring them back.
+    suppressed: HashSet<(String, Ts)>,
+}
+
+/// What became of a send Slack answered (see [`WorkspaceState::sent`]).
+#[derive(Debug, PartialEq)]
+pub(super) enum SendOutcome {
+    /// It shows as sent, or as failed.
+    Settled,
+    /// You deleted it while it was sending; `delete` is the message to
+    /// delete in Slack, if it was posted.
+    Cancelled { delete: Option<Ts> },
 }
 
 /// How many announced messages [`WorkspaceState::seen`] remembers. A copy
@@ -105,6 +122,8 @@ impl WorkspaceState {
             counted_replies: VecDeque::new(),
             counted_mentions: VecDeque::new(),
             sending: HashMap::new(),
+            cancelled: HashSet::new(),
+            suppressed: HashSet::new(),
         }
     }
 
@@ -834,6 +853,9 @@ impl WorkspaceState {
         message: Message,
         viewing: bool,
     ) -> (Arrived, bool) {
+        if self.is_suppressed(channel, &message.ts) {
+            return (Arrived::default(), false);
+        }
         let mut arrived = Arrived {
             users: self.unknown_users(message.user.as_deref().into_iter()),
             bots: self.unknown_bots(std::iter::once(&message)),
@@ -989,7 +1011,23 @@ impl WorkspaceState {
     /// real message, or is marked as failed. A copy an echo took away
     /// already is shown again from what was sent: the real message if it is
     /// not there, or a failed row to retry.
-    pub(super) fn sent(&mut self, channel: &str, local: &Ts, result: &Result<Message, Failure>) {
+    /// One you deleted while it was sending is deleted now instead.
+    pub(super) fn sent(
+        &mut self,
+        channel: &str,
+        local: &Ts,
+        result: &Result<Message, Failure>,
+    ) -> SendOutcome {
+        if self.cancelled.remove(local) {
+            self.sending.remove(local);
+            let delete = result.as_ref().ok().map(|message| message.ts.clone());
+            if let Some(ts) = &delete {
+                // Its echo may be here already.
+                self.suppressed.insert((channel.to_owned(), ts.clone()));
+                self.remove_message(channel, ts);
+            }
+            return SendOutcome::Cancelled { delete };
+        }
         let mut found = false;
         for timeline in self.timelines_for_mut(channel) {
             let Some(position) = timeline.messages.iter().position(|m| &m.ts == local) else {
@@ -1044,6 +1082,26 @@ impl WorkspaceState {
             conversation.last_read =
                 max_ts(conversation.last_read.take(), Some(message.ts.clone()));
         }
+        SendOutcome::Settled
+    }
+
+    /// You deleted a message of yours not sent yet. One still sending is
+    /// remembered, to delete once Slack answers (see [`Self::sent`]); a
+    /// failed one only goes. Call it before taking the copy away.
+    pub(super) fn cancel_local(&mut self, channel: &str, local: &Ts) {
+        let sending = self
+            .find_message(channel, local)
+            .is_some_and(|m| m.delivery == Delivery::Sending);
+        if sending {
+            self.cancelled.insert(local.clone());
+        }
+        self.sending.remove(local);
+    }
+
+    /// Whether a message is one you deleted while it was sending, whose
+    /// echo is not to show.
+    pub(super) fn is_suppressed(&self, channel: &str, ts: &Ts) -> bool {
+        self.suppressed.contains(&(channel.to_owned(), ts.clone()))
     }
 
     /// Someone reacted, or took a reaction back.
@@ -1822,6 +1880,45 @@ mod tests {
         w.sent("C1", &Ts::new("local-2"), &Ok(mine("6.0", "ok")));
         w.sent("C1", &Ts::new("local-1"), &Ok(mine("5.0", "ok")));
         assert_eq!(texts(&w.timelines["C1"]), [("5.0", "ok"), ("6.0", "ok")]);
+    }
+
+    #[test]
+    fn a_message_deleted_while_sending_is_deleted_once_sent() {
+        for echo_first in [true, false] {
+            let mut w = workspace_in_general();
+            sending(&mut w, "local-1", "oops", None);
+            w.cancel_local("C1", &Ts::new("local-1"));
+            w.remove_message("C1", &Ts::new("local-1"));
+            if echo_first {
+                w.message_arrived("C1", mine("5.0", "oops"), true);
+            }
+            let outcome = w.sent("C1", &Ts::new("local-1"), &Ok(mine("5.0", "oops")));
+            assert_eq!(
+                outcome,
+                SendOutcome::Cancelled {
+                    delete: Some(Ts::new("5.0"))
+                }
+            );
+            w.message_arrived("C1", mine("5.0", "oops"), true);
+            assert!(
+                w.timelines["C1"].messages.is_empty(),
+                "echo first: {echo_first}"
+            );
+        }
+        // One that fails instead is simply gone.
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "oops", None);
+        w.cancel_local("C1", &Ts::new("local-1"));
+        w.remove_message("C1", &Ts::new("local-1"));
+        let outcome = w.sent("C1", &Ts::new("local-1"), &Err(Failure::RateLimited));
+        assert_eq!(outcome, SendOutcome::Cancelled { delete: None });
+        assert!(w.timelines["C1"].messages.is_empty());
+        // A failed one deleted is not sending: nothing to call back.
+        let mut w = workspace_in_general();
+        sending(&mut w, "local-1", "oops", None);
+        w.sent("C1", &Ts::new("local-1"), &Err(Failure::RateLimited));
+        w.cancel_local("C1", &Ts::new("local-1"));
+        assert!(w.cancelled.is_empty());
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! event changes in one workspace lives in [`super::workspace`]; this
 //! side adds what needs the backend: fetching, toasts and scrolling.
 
-use super::workspace::Arrived;
+use super::workspace::{Arrived, SendOutcome};
 use super::{App, Page, WorkspaceState};
 use crate::backend::{Change, Command, Event, SignIn, Socket};
 use crate::credentials::AppCredentials;
@@ -454,6 +454,13 @@ impl App {
     }
 
     fn message(&mut self, team: &str, channel: &str, message: Message, changed: bool) {
+        // The echo of a message you deleted while it was sending.
+        if self
+            .workspace_mut(team)
+            .is_some_and(|w| w.is_suppressed(channel, &message.ts))
+        {
+            return;
+        }
         let viewing = self.is_viewing(team, channel);
         // A message a poll announced already stays quiet when its live copy
         // comes too.
@@ -509,7 +516,18 @@ impl App {
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
-        workspace.sent(channel, local, &result);
+        if let SendOutcome::Cancelled { delete } = workspace.sent(channel, local, &result) {
+            // Deleted while it was sending: take it back now it is posted.
+            if let Some(ts) = delete {
+                self.backend.send(Command::Delete {
+                    team: team.to_owned(),
+                    channel: channel.to_owned(),
+                    ts,
+                    removed: None,
+                });
+            }
+            return;
+        }
         if let Err(error) = result {
             self.toast(
                 tf("Message not sent: {error}", &[("error", &error.message())]),

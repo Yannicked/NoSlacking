@@ -248,6 +248,12 @@ impl App {
             .active_workspace()
             .and_then(|w| w.find_message(&channel, &ts))
             .cloned();
+        if ts.is_local()
+            && let Some(workspace) = self.workspace_mut(&team)
+        {
+            // Still on its way: deleted once Slack has it.
+            workspace.cancel_local(&channel, &ts);
+        }
         self.remove_message(&team, &channel, &ts);
         if !ts.is_local() {
             self.backend.send(Command::Delete {
