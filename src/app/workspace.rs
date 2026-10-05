@@ -69,6 +69,10 @@ pub struct WorkspaceState {
 /// arriving twice comes close together, so a few hundred is plenty.
 const SEEN_LIMIT: usize = 512;
 
+/// How many live messages a conversation never opened keeps: about a
+/// page of history.
+const UNOPENED_LIMIT: usize = 50;
+
 impl WorkspaceState {
     /// A workspace with nothing loaded yet.
     pub(crate) fn new(info: Workspace) -> Self {
@@ -874,6 +878,7 @@ impl WorkspaceState {
             if mention {
                 self.count_mention(channel, &ts);
             }
+            self.trim_unopened(channel);
         }
         let fetch_conversation = !known && self.requested_conversations.insert(channel.to_owned());
         if !known {
@@ -881,6 +886,20 @@ impl WorkspaceState {
             arrived.users.clear();
         }
         (arrived, fetch_conversation)
+    }
+
+    /// Keeps only the newest messages that came live in a conversation
+    /// never opened (see [`Self::unopened`]): nobody reads them there, and
+    /// opening it loads its history anyway. Its counts live on the
+    /// conversation, and stay.
+    fn trim_unopened(&mut self, channel: &str) {
+        if !self.unopened(channel) {
+            return;
+        }
+        if let Some(timeline) = self.timelines.get_mut(channel) {
+            let over = timeline.messages.len().saturating_sub(UNOPENED_LIMIT);
+            timeline.messages.drain(..over);
+        }
     }
 
     /// Counts a new reply on every loaded copy of its parent, once. A reply
@@ -2509,6 +2528,31 @@ mod tests {
         w.message_arrived("C1", ping.clone(), false);
         w.message_arrived("C1", ping, false);
         assert_eq!(w.conversation("C1").map(|c| c.mentions), Some(1));
+    }
+
+    #[test]
+    fn an_unopened_conversation_keeps_only_its_newest_live_messages() {
+        let mut w = unopened("2.0");
+        for i in 0..(UNOPENED_LIMIT + 10) {
+            let ping = Message {
+                text: "hey <@U1>".into(),
+                ..theirs(&format!("{}.0", i + 3))
+            };
+            w.message_arrived("C1", ping, false);
+        }
+        let timeline = &w.timelines["C1"];
+        assert_eq!(timeline.messages.len(), UNOPENED_LIMIT);
+        let newest = format!("{}.0", UNOPENED_LIMIT + 12);
+        assert_eq!(timeline.newest().map(Ts::as_str), Some(newest.as_str()));
+        let c = w.conversation("C1").expect("C1");
+        assert_eq!(c.mentions as usize, UNOPENED_LIMIT + 10);
+        assert_eq!(c.latest, Some(Ts::new(newest)));
+        // An open one keeps everything.
+        let mut w = workspace_in_general();
+        for i in 0..(UNOPENED_LIMIT + 10) {
+            w.message_arrived("C1", theirs(&format!("{}.0", i + 3)), true);
+        }
+        assert_eq!(w.timelines["C1"].messages.len(), UNOPENED_LIMIT + 10);
     }
 
     #[test]
