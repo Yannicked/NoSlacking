@@ -119,8 +119,31 @@ pub struct Upload {
     pub sent: u64,
     /// Zero until the worker has opened the file.
     pub total: u64,
+    /// Slack is being told to share it ([`Event::UploadFinishing`]), which
+    /// can't be taken back.
+    pub finishing: bool,
     /// A pasted image's temporary file, removed once the upload ends.
     pasted: Option<PathBuf>,
+}
+
+impl Upload {
+    /// Whether Cancel can still stop it. Not during the last step: the
+    /// file is posted whatever the button says.
+    pub fn can_cancel(&self) -> bool {
+        !self.finishing
+    }
+
+    /// How much of it is done, for its progress bar: all of it once only
+    /// the sharing is left.
+    pub fn fraction(&self) -> f32 {
+        if self.finishing {
+            1.0
+        } else if self.total > 0 {
+            (self.sent as f32 / self.total as f32).min(1.0)
+        } else {
+            0.0
+        }
+    }
 }
 
 /// A draft can say anything; its debug form says only how long it is.
@@ -959,10 +982,12 @@ impl App {
             Action::Unstage(path) => self.unstage(&path),
             Action::PasteImage { thread } => self.paste_image(thread),
             Action::CopyImage(uris) => self.copying = uris,
+            // The row stays until the worker answers: it may find the
+            // upload already being shared, and then it is not cancelled.
             Action::CancelUpload(id) => {
-                self.backend.send(Command::CancelUpload { id });
-                self.upload_done(id);
-                self.toast(t("Upload cancelled").into_owned(), false);
+                if self.transfers.iter().any(|u| u.id == id && u.can_cancel()) {
+                    self.backend.send(Command::CancelUpload { id });
+                }
             }
             Action::Download { url, name } => {
                 if let Some(team) = self.active_team() {

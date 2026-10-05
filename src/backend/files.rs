@@ -12,6 +12,46 @@ use crate::slack::{Client, SlackError};
 
 const MAX_UPLOAD: u64 = 1024 * 1024 * 1024;
 
+/// Decides, once, whether an upload is cancelled or shared, so a Cancel
+/// and the start of the last step can never both win.
+///
+/// Slack posts the file once `files.completeUploadExternal` is sent, so
+/// from then on cancelling would only hide an upload that still happens.
+/// The worker and the upload's task each hold a clone.
+#[derive(Clone, Debug, Default)]
+pub struct UploadGate(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+impl UploadGate {
+    const SENDING: u8 = 0;
+    const CANCELLED: u8 = 1;
+    const FINISHING: u8 = 2;
+
+    /// Cancels the upload unless its last step has begun. True when it is
+    /// cancelled (now or before), false when it is too late.
+    pub fn cancel(&self) -> bool {
+        self.settle(Self::CANCELLED)
+    }
+
+    /// Starts the last step unless the upload was cancelled. True when
+    /// the upload may go on to be shared.
+    pub fn finish(&self) -> bool {
+        self.settle(Self::FINISHING)
+    }
+
+    /// Moves from sending to `to`, or reports whether the upload is
+    /// already there: whichever side asks first decides.
+    fn settle(&self, to: u8) -> bool {
+        use std::sync::atomic::Ordering;
+        match self
+            .0
+            .compare_exchange(Self::SENDING, to, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => true,
+            Err(now) => now == to,
+        }
+    }
+}
+
 /// Uploads one file for [`Worker::upload`](super::worker::Worker::upload),
 /// telling the interface how far it got along the way.
 #[allow(clippy::too_many_arguments)]
@@ -24,6 +64,7 @@ pub(super) async fn upload(
     path: std::path::PathBuf,
     comment: String,
     poll_after: bool,
+    gate: UploadGate,
     sink: &Sink,
 ) {
     let name = file_name(&path);
@@ -70,11 +111,27 @@ pub(super) async fn upload(
             }
         }
     };
+    let finish = {
+        let sink = sink.clone();
+        // The interface stops offering Cancel once this is said; the gate
+        // makes sure a Cancel already on its way is refused, not obeyed.
+        move || {
+            let go_on = gate.finish();
+            if go_on {
+                sink.send(Event::UploadFinishing { id });
+            }
+            go_on
+        }
+    };
     match client
-        .upload(&channel, thread, &name, file, size, &comment, progress)
+        .upload(
+            &channel, thread, &name, file, size, &comment, progress, finish,
+        )
         .await
     {
-        Ok(()) => {
+        // Cancelled in time: the worker has already told the interface.
+        Ok(false) => {}
+        Ok(true) => {
             sink.send(Event::Notice(format!("Uploaded {name}")));
             // Without a live socket the new file would only show
             // at the next poll.
@@ -375,6 +432,30 @@ fn safe_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancel_before_the_last_step_stops_the_upload() {
+        let gate = UploadGate::default();
+        assert!(gate.cancel());
+        assert!(gate.cancel(), "a second cancel still says cancelled");
+        assert!(!gate.finish());
+    }
+
+    #[test]
+    fn a_cancel_during_the_last_step_is_refused() {
+        let gate = UploadGate::default();
+        assert!(gate.finish());
+        assert!(!gate.cancel());
+        assert!(gate.finish(), "the upload stays on its way");
+    }
+
+    #[test]
+    fn clones_share_one_decision() {
+        let worker = UploadGate::default();
+        let task = worker.clone();
+        assert!(task.finish());
+        assert!(!worker.cancel());
+    }
 
     #[test]
     fn only_players_open_files() {

@@ -685,23 +685,31 @@ fn uploads(ui: &mut egui::Ui, composer: &Composer<'_>, actions: &mut Vec<Action>
                 .truncate(),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::icon_button(ui, palette, Icon::X, 14.0, &t("Cancel upload")).clicked() {
+                // In the last step Slack is already sharing the file, so
+                // the button goes rather than offer what it can't do; the
+                // label says why it went.
+                if upload.can_cancel()
+                    && theme::icon_button(ui, palette, Icon::X, 14.0, &t("Cancel upload")).clicked()
+                {
                     actions.push(Action::CancelUpload(upload.id));
                 }
-                let fraction = if upload.total > 0 {
-                    upload.sent as f32 / upload.total as f32
+                let fraction = upload.fraction();
+                let said = if upload.can_cancel() {
+                    tf(
+                        "{percent}% uploaded",
+                        &[("percent", &format!("{:.0}", fraction * 100.0))],
+                    )
                 } else {
-                    0.0
+                    t("Finishing upload…").into_owned()
                 };
-                let said = tf(
-                    "{percent}% uploaded",
-                    &[("percent", &format!("{:.0}", fraction * 100.0))],
-                );
-                ui.label(
+                let label = ui.label(
                     RichText::new(&said)
                         .font(theme::regular(12.0))
                         .color(palette.dim),
                 );
+                if !upload.can_cancel() {
+                    label.on_hover_text(t("Too late to cancel: Slack is posting the file"));
+                }
                 let bar = egui::ProgressBar::new(fraction)
                     .desired_width(ui.available_width().clamp(60.0, 220.0))
                     .desired_height(6.0)

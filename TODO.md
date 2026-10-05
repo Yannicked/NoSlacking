@@ -461,7 +461,6 @@ sections. Nothing below exists yet.
       manifest, so DND is local only for those sign-ins for now.
 - [ ] **No Dock or taskbar badge on macOS and Windows**: it would need
       `unsafe` platform calls. The unread count is in the window title.
-- [ ] **Cancelling an upload during its last step** may still post it.
 - [ ] **Test on macOS and Windows**: the platform code is only compiled on
       Linux so far.
 - [x] **Right-click menu on messages**, pictures and links, with Copy image.
@@ -492,10 +491,14 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       Done for polls of the open conversation, at most three notes per
       poll. Polling reads no threads and no other conversations, so their
       replies and messages still need the socket.
-- [ ] **Hide Cancel during an upload's last step.** Once
+- [x] **Hide Cancel during an upload's last step.** Once
       `completeUploadExternal` is sent, the upload can't be taken back, so
       Cancel should go away rather than promise something it can't do.
       *Small, and a broken promise in the UI.*
+      Done: the worker says `UploadFinishing`, the row then reads
+      "Finishing upload…" without Cancel, and a gate refuses a cancel that
+      arrives later, so "Upload cancelled" only shows when nothing was
+      posted.
 
 ### P2: Everyday gaps against the official client
 

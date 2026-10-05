@@ -897,6 +897,12 @@ msgstr "Uploaden annuleren"
 msgid "{percent}% uploaded"
 msgstr "{percent}% geüpload"
 
+msgid "Finishing upload…"
+msgstr "Upload afronden…"
+
+msgid "Too late to cancel: Slack is posting the file"
+msgstr "Te laat om te annuleren: Slack plaatst het bestand"
+
 msgid "Drop files to upload"
 msgstr "Sleep bestanden hierheen om te uploaden"
 

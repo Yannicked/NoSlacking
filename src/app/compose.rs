@@ -272,6 +272,7 @@ impl App {
             name,
             sent: 0,
             total: 0,
+            finishing: false,
             pasted,
         });
         self.backend.send(Command::Upload {
@@ -325,10 +326,11 @@ impl App {
     }
 
     /// An upload ended one way or another: it leaves the composer, and a
-    /// pasted image's temporary file goes.
-    pub(super) fn upload_done(&mut self, id: u64) {
+    /// pasted image's temporary file goes. False when it was already gone,
+    /// so a late answer says nothing about it.
+    pub(super) fn upload_done(&mut self, id: u64) -> bool {
         let Some(index) = self.transfers.iter().position(|u| u.id == id) else {
-            return;
+            return false;
         };
         let upload = self.transfers.remove(index);
         if let Some(path) = upload.pasted
@@ -337,6 +339,7 @@ impl App {
         {
             log::debug!("could not remove a pasted image: {error}");
         }
+        true
     }
 
     /// Uploads the clipboard's files or image, if it holds no text: Ctrl+V
@@ -374,5 +377,43 @@ impl App {
                 waker.wake();
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Upload;
+
+    fn upload(sent: u64, total: u64) -> Upload {
+        Upload {
+            id: 1,
+            key: "T1/C1".to_owned(),
+            name: "plan.pdf".to_owned(),
+            sent,
+            total,
+            finishing: false,
+            pasted: None,
+        }
+    }
+
+    #[test]
+    fn cancel_is_offered_while_the_bytes_go_up() {
+        let upload = upload(500, 1000);
+        assert!(upload.can_cancel());
+        assert!((upload.fraction() - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cancel_goes_in_the_last_step() {
+        let mut upload = upload(1000, 1000);
+        assert!(upload.can_cancel(), "all bytes up is not yet too late");
+        upload.finishing = true;
+        assert!(!upload.can_cancel());
+        assert!((upload.fraction() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn an_unopened_file_shows_nothing_done() {
+        assert!(upload(0, 0).fraction().abs() < f32::EPSILON);
     }
 }

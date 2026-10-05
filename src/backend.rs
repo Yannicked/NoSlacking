@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
 pub use fastframe_shell::Waker;
+pub use files::UploadGate;
 
 use crate::credentials::{AppCredentials, Credentials};
 use crate::failure::{Failure, Problem};
@@ -130,8 +131,8 @@ pub enum Command {
         name: String,
         add: bool,
     },
-    /// Uploads a file; its progress comes back as [`Event::UploadProgress`]
-    /// and [`Event::UploadDone`] under `id`.
+    /// Uploads a file; its progress comes back as [`Event::UploadProgress`],
+    /// [`Event::UploadFinishing`] and [`Event::UploadDone`] under `id`.
     Upload {
         id: u64,
         team: String,
@@ -148,8 +149,9 @@ pub enum Command {
         command: String,
         text: String,
     },
-    /// Stops the upload `id`. Before Slack is told to share the file,
-    /// nothing is posted.
+    /// Stops the upload `id` if Slack has not yet been told to share the
+    /// file, answered by [`Event::UploadCancelled`]. Later it is ignored
+    /// and the upload ends as usual with [`Event::UploadDone`].
     CancelUpload {
         id: u64,
     },
@@ -691,9 +693,18 @@ pub enum Event {
         command: String,
         result: Result<Option<String>, Failure>,
     },
-    /// Upload `id` ended: shared, failed (with its own error event) or
-    /// cancelled.
+    /// Upload `id` has all its bytes up and Slack is being told to share
+    /// it. That can't be taken back, so it can no longer be cancelled.
+    UploadFinishing {
+        id: u64,
+    },
+    /// Upload `id` ended: shared, or failed with its own error event.
     UploadDone {
+        id: u64,
+    },
+    /// Upload `id` was stopped before Slack was told to share it, so
+    /// nothing was posted.
+    UploadCancelled {
         id: u64,
     },
     /// An answer about starting, finding or looking after a conversation

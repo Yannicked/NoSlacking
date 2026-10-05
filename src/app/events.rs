@@ -39,7 +39,21 @@ impl App {
                     upload.total = total;
                 }
             }
-            Event::UploadDone { id } => self.upload_done(id),
+            Event::UploadFinishing { id } => {
+                if let Some(upload) = self.transfers.iter_mut().find(|u| u.id == id) {
+                    upload.finishing = true;
+                }
+            }
+            Event::UploadDone { id } => {
+                self.upload_done(id);
+            }
+            // Said only once the worker has really stopped it, so the
+            // toast never claims a cancel for a file that was posted.
+            Event::UploadCancelled { id } => {
+                if self.upload_done(id) {
+                    self.toast(t("Upload cancelled").into_owned(), false);
+                }
+            }
             Event::Slash { command, result } => self.slash_done(&command, result),
             Event::Notice(text) => self.toast(text, false),
             Event::Dnd { team, dnd } => self.dnd_arrived(&team, dnd),
