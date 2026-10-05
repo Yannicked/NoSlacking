@@ -411,16 +411,56 @@ fn list(
             },
         )
     });
-    for section in &shown {
+    let ctx = ui.ctx().clone();
+    let drawn = drawn(workspace, &shown, closed, filter, |key| folding(&ctx, key));
+    for section in &drawn {
+        section_view(ui, palette, workspace, section, actions);
+    }
+    if workspace.conversations.is_empty() {
+        ui.add_space(24.0);
+        ui.vertical_centered(|ui| {
+            ui.add(egui::Spinner::new().size(18.0).color(palette.dim));
+        });
+    }
+}
+
+/// A section as the sidebar draws it.
+pub(super) struct Drawn<'s, 'a> {
+    pub section: &'s sidebar::Shown<'a>,
+    /// What its folded and "Show more" state is remembered under.
+    pub key: String,
+    /// Whether it is unfolded, as remembered.
+    pub open: bool,
+    /// Whether it lists all its rows: unfolded, or searched through.
+    pub expanded: bool,
+    /// The rows on screen, in order.
+    pub rows: Vec<&'a Conversation>,
+    /// The rows "Show more" holds back.
+    pub more: usize,
+}
+
+/// Which rows of `shown` the sidebar draws, section by section, given
+/// each section's remembered (open, showing more) state by its key. The
+/// list and Alt+↑/↓ both use it, so the keys step through exactly the rows
+/// on screen.
+pub(super) fn drawn<'s, 'a>(
+    workspace: &WorkspaceState,
+    shown: &'s [sidebar::Shown<'a>],
+    closed: Option<&std::collections::BTreeMap<String, String>>,
+    filter: &str,
+    folding: impl Fn(&str) -> (bool, bool),
+) -> Vec<Drawn<'s, 'a>> {
+    let filter = filter.trim();
+    let active = |c: &Conversation| workspace.active.as_deref() == Some(c.id.as_str());
+    let mut drawn = Vec::new();
+    for section in shown {
         let rows: Vec<&Conversation> = section
             .conversations
             .iter()
             .copied()
             .filter(|c| matches(workspace, c, filter))
             // Closed ones stay out until something new arrives, unless open.
-            .filter(|c| {
-                workspace.active.as_deref() == Some(c.id.as_str()) || !sidebar::is_closed(closed, c)
-            })
+            .filter(|c| active(c) || !sidebar::is_closed(closed, c))
             .filter(|c| {
                 // Skip deactivated people's DMs unless they have something new.
                 c.user
@@ -437,42 +477,76 @@ fn list(
             .id
             .clone()
             .unwrap_or_else(|| format!("{:?}", section.kind));
-        let limit = (section.kind == SectionKind::DirectMessages).then_some(DM_LIMIT);
-        section_view(
-            ui, palette, workspace, section, &key, &rows, limit, filter, actions,
-        );
-    }
-    if workspace.conversations.is_empty() {
-        ui.add_space(24.0);
-        ui.vertical_centered(|ui| {
-            ui.add(egui::Spinner::new().size(18.0).color(palette.dim));
+        let (open, more) = folding(&key);
+        let expanded = open || !filter.is_empty();
+        let total = rows.len();
+        let rows: Vec<&Conversation> = if expanded {
+            let limit = match section.kind {
+                SectionKind::DirectMessages if !more && filter.is_empty() => DM_LIMIT,
+                _ => usize::MAX,
+            };
+            rows.into_iter().take(limit).collect()
+        } else {
+            // A folded section still shows what is unread or open.
+            rows.into_iter()
+                .filter(|c| workspace.is_unread(c) || active(c))
+                .collect()
+        };
+        let more = if expanded { total - rows.len() } else { 0 };
+        drawn.push(Drawn {
+            section,
+            key,
+            open,
+            expanded,
+            rows,
+            more,
         });
     }
+    drawn
 }
 
-#[allow(clippy::too_many_arguments)]
+/// A section's remembered (open, showing more) state.
+pub(super) fn folding(ctx: &egui::Context, key: &str) -> (bool, bool) {
+    // Folded state survives restarts, per section.
+    let open = ctx
+        .data_mut(|d| d.get_persisted::<bool>(open_id(key)))
+        .unwrap_or(true);
+    let more = ctx
+        .data(|d| d.get_temp::<bool>(more_id(key)))
+        .unwrap_or(false);
+    (open, more)
+}
+
+/// Where whether a section is unfolded is remembered.
+fn open_id(key: &str) -> egui::Id {
+    egui::Id::new(("section-open", key))
+}
+
+/// Where whether a section shows all its rows is remembered.
+fn more_id(key: &str) -> egui::Id {
+    egui::Id::new(("section-more", key))
+}
+
 fn section_view(
     ui: &mut egui::Ui,
     palette: &Palette,
     workspace: &WorkspaceState,
-    section: &sidebar::Shown<'_>,
-    key: &str,
-    rows: &[&Conversation],
-    limit: Option<usize>,
-    filter: &str,
+    drawn: &Drawn<'_, '_>,
     actions: &mut Vec<Action>,
 ) {
-    // Folded state survives restarts, per section.
-    let open_id = egui::Id::new(("section-open", key));
-    let open = ui
-        .data_mut(|d| d.get_persisted::<bool>(open_id))
-        .unwrap_or(true);
-    let more_id = egui::Id::new(("section-more", key));
-    let more = ui.data(|d| d.get_temp::<bool>(more_id)).unwrap_or(false);
+    let Drawn {
+        section,
+        key,
+        open,
+        expanded,
+        rows,
+        more,
+    } = drawn;
+    let (open, expanded, more) = (*open, *expanded, *more);
     ui.add_space(8.0);
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
-    let icon = if open || !filter.is_empty() {
+    let icon = if expanded {
         Icon::ChevronDown
     } else {
         Icon::ChevronRight
@@ -500,40 +574,23 @@ fn section_view(
     theme::describe_selected(
         &response,
         egui::WidgetType::CollapsingHeader,
-        open || !filter.is_empty(),
+        expanded,
         &section.title,
     );
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.clicked() {
-        ui.data_mut(|d| d.insert_persisted(open_id, !open));
+        ui.data_mut(|d| d.insert_persisted(open_id(key), !open));
     }
     if let (Some(id), Some(sections)) = (&section.id, workspace.sections.as_deref()) {
         section_menu(&response, id, section.kind, sections, actions);
     }
-    let rows_to_show: Vec<&&Conversation> = if open || !filter.is_empty() {
-        let shown = match limit {
-            Some(limit) if !more && filter.is_empty() => limit,
-            _ => usize::MAX,
-        };
-        rows.iter().take(shown).collect()
-    } else {
-        // A folded section still shows what is unread or open.
-        rows.iter()
-            .filter(|c| {
-                workspace.is_unread(c) || workspace.active.as_deref() == Some(c.id.as_str())
-            })
-            .collect()
-    };
-    for conversation in &rows_to_show {
+    for conversation in rows {
         row(ui, palette, workspace, conversation, section, actions);
     }
-    if (open || !filter.is_empty()) && rows.len() > rows_to_show.len() {
+    if more > 0 {
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
-        let label = tf(
-            "Show more ({count})",
-            &[("count", &(rows.len() - rows_to_show.len()).to_string())],
-        );
+        let label = tf("Show more ({count})", &[("count", &more.to_string())]);
         theme::focus_ring(ui, &response, palette, theme::RADIUS_SMALL);
         theme::describe(&response, egui::WidgetType::Button, &label);
         ui.painter().text(
@@ -547,7 +604,7 @@ fn section_view(
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked()
         {
-            ui.data_mut(|d| d.insert_temp(more_id, true));
+            ui.data_mut(|d| d.insert_temp(more_id(key), true));
         }
     }
 }

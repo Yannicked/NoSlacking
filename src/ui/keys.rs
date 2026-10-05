@@ -133,7 +133,14 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
                 unread_first: app.settings.unread_first,
                 hold: held.as_ref(),
             };
-            step(w, &arrange, forward, only_unread)
+            let order = visible(
+                w,
+                &arrange,
+                app.settings.closed.get(&w.info.team_id),
+                &app.sidebar_filter,
+                |key| super::sidebar::folding(ctx, key),
+            );
+            step(&order, w.active.as_deref(), forward, only_unread)
         });
         if let Some(next) = next {
             app.actions.push(Action::OpenConversation(next));
@@ -162,14 +169,16 @@ fn in_empty_composer(app: &App, ctx: &egui::Context) -> bool {
     })
 }
 
-/// The conversation before or after the open one, in sidebar order,
-/// wrapping around at either end.
-fn step(
-    workspace: &WorkspaceState,
+/// The conversations the sidebar shows, in its order: closed ones,
+/// deactivated people's DMs, those past "Show more" and the read rows of
+/// folded sections left out, as on screen.
+fn visible<'a>(
+    workspace: &'a WorkspaceState,
     arrange: &Arrange<'_>,
-    forward: bool,
-    only_unread: bool,
-) -> Option<String> {
+    closed: Option<&std::collections::BTreeMap<String, String>>,
+    filter: &str,
+    folding: impl Fn(&str) -> (bool, bool),
+) -> Vec<&'a Conversation> {
     let shown = crate::sidebar::layout(
         workspace.sections.as_deref(),
         &workspace.conversations,
@@ -178,17 +187,24 @@ fn step(
         |c| workspace.rank(c),
         arrange,
     );
-    let order: Vec<&Conversation> = shown
-        .iter()
-        .flat_map(|section| section.conversations.iter().copied())
-        .collect();
+    super::sidebar::drawn(workspace, &shown, closed, filter, folding)
+        .into_iter()
+        .flat_map(|section| section.rows)
+        .collect()
+}
+
+/// The conversation before or after the `active` one in `order`, wrapping
+/// around at either end.
+fn step(
+    order: &[&Conversation],
+    active: Option<&str>,
+    forward: bool,
+    only_unread: bool,
+) -> Option<String> {
     if order.is_empty() {
         return None;
     }
-    let current = workspace
-        .active
-        .as_deref()
-        .and_then(|id| order.iter().position(|c| c.id == id));
+    let current = active.and_then(|id| order.iter().position(|c| c.id == id));
     let len = order.len();
     let start = current.unwrap_or(if forward { len - 1 } else { 0 });
     for offset in 1..=len {
@@ -246,12 +262,9 @@ mod tests {
     }
 
     fn next(w: &WorkspaceState, forward: bool, only_unread: bool) -> Option<String> {
-        step(
-            w,
-            &Arrange::plain(crate::sidebar::Sort::Name),
-            forward,
-            only_unread,
-        )
+        let arrange = Arrange::plain(crate::sidebar::Sort::Name);
+        let order = visible(w, &arrange, None, "", |_| (true, false));
+        step(&order, w.active.as_deref(), forward, only_unread)
     }
 
     #[test]
@@ -278,5 +291,27 @@ mod tests {
         let mut w = workspace(Some("C1"));
         w.conversations.retain(|c| c.id != "C2");
         assert_eq!(next(&w, true, true), None);
+    }
+
+    #[test]
+    fn stepping_skips_rows_the_sidebar_hides() {
+        let arrange = Arrange::plain(crate::sidebar::Sort::Name);
+        let w = workspace(Some("C1"));
+        // C3 (gamma) is closed and nothing new has come since.
+        let closed = std::collections::BTreeMap::from([("C3".to_owned(), "9.0".to_owned())]);
+        let order = visible(&w, &arrange, Some(&closed), "", |_| (true, false));
+        let ids: Vec<&str> = order.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["C1", "C2"]);
+        // A folded section shows only what is unread or open.
+        let order = visible(&w, &arrange, None, "", |_| (false, false));
+        let ids: Vec<&str> = order.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["C1", "C2"]);
+        let w = workspace(None);
+        let order = visible(&w, &arrange, None, "", |_| (false, false));
+        assert_eq!(step(&order, None, true, false).as_deref(), Some("C2"));
+        // A filter leaves only the matches, as on screen.
+        let order = visible(&w, &arrange, None, "gam", |_| (true, false));
+        let ids: Vec<&str> = order.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["C3"]);
     }
 }
