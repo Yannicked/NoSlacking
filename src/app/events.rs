@@ -32,7 +32,12 @@ impl App {
             Event::WorkspaceReady(info) => self.workspace_ready(info),
             Event::SignedOut { team, reason } => self.signed_out(&team, reason),
             Event::Socket(socket) => self.socket_changed(socket),
-            Event::Error(problem) => self.toast(problem.message(), problem.is_error()),
+            Event::Error(problem) => {
+                if let crate::failure::Doing::Upload { name } = &problem.doing {
+                    self.upload_failed(name);
+                }
+                self.toast(problem.message(), problem.is_error());
+            }
             Event::UploadProgress { id, sent, total } => {
                 if let Some(upload) = self.transfers.iter_mut().find(|u| u.id == id) {
                     upload.sent = sent;
@@ -45,12 +50,12 @@ impl App {
                 }
             }
             Event::UploadDone { id } => {
-                self.upload_done(id);
+                self.upload_done(id, false);
             }
             // Said only once the worker has really stopped it, so the
             // toast never claims a cancel for a file that was posted.
             Event::UploadCancelled { id } => {
-                if self.upload_done(id) {
+                if self.upload_done(id, true) {
                     self.toast(t("Upload cancelled").into_owned(), false);
                 }
             }

@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use super::workspace::local_message;
-use super::{App, Upload, UploadTarget, to_wire};
+use super::{App, Draft, Upload, UploadTarget, to_wire};
 use crate::backend::Command;
 use crate::failure::Failure;
 use crate::i18n::{t, tf};
@@ -43,8 +43,16 @@ impl App {
             self.used_emoji(&crate::emoji::used_in(&wire));
             let target = (team, channel, thread);
             let mut comment = wire;
+            let mut kept = (!comment.trim().is_empty()).then(|| Draft {
+                attachments: Vec::new(),
+                ..draft.clone()
+            });
             for path in draft.attachments {
-                self.start_upload(target.clone(), path, std::mem::take(&mut comment));
+                let id = self.start_upload(target.clone(), path, std::mem::take(&mut comment));
+                // The text goes with the first file: kept until it is up.
+                if let Some(kept) = kept.take() {
+                    self.uploading.insert(id, (key.clone(), kept));
+                }
             }
             self.scroll_to_bottom.insert(key);
             return;
@@ -59,6 +67,8 @@ impl App {
                 "me" if thread.is_some() && !args.is_empty() => text = format!("_{args}_"),
                 _ => {
                     let text = to_wire(args, &draft.mentions);
+                    // Kept until it has run, to give back if it fails.
+                    self.slashing.push((command.clone(), key, draft));
                     self.backend.send(Command::Slash {
                         team,
                         channel,
@@ -315,7 +325,7 @@ impl App {
         (team, channel, thread): UploadTarget,
         path: PathBuf,
         comment: String,
-    ) {
+    ) -> u64 {
         self.next_upload += 1;
         let id = self.next_upload;
         let name = path.file_name().map_or_else(
@@ -331,6 +341,7 @@ impl App {
             total: 0,
             finishing: false,
             pasted,
+            failed: false,
         });
         self.backend.send(Command::Upload {
             id,
@@ -340,12 +351,42 @@ impl App {
             path,
             comment,
         });
+        id
+    }
+
+    /// Puts a draft that was sent back in its composer, as sending it
+    /// failed; unless something new was typed there meanwhile.
+    fn give_back_draft(&mut self, key: String, draft: Draft) {
+        let current = self.drafts.entry(key).or_default();
+        if current.text.trim().is_empty() {
+            current.text = draft.text;
+            current.mentions = draft.mentions;
+            current.broadcast = draft.broadcast;
+        }
+    }
+
+    /// The worker could not upload a file: the upload of that name still
+    /// going ends as failed, which gives its text back when it ends.
+    pub(super) fn upload_failed(&mut self, name: &str) {
+        if let Some(upload) = self
+            .transfers
+            .iter_mut()
+            .find(|u| u.name == name && !u.failed)
+        {
+            upload.failed = true;
+        }
     }
 
     /// A slash command finished: Slack's reply if it gave one, a word
     /// that it worked otherwise, or why not.
     pub(super) fn slash_done(&mut self, command: &str, result: Result<Option<String>, Failure>) {
         let name = format!("/{command}");
+        if let Some(index) = self.slashing.iter().position(|(c, _, _)| c == command) {
+            let (_, key, draft) = self.slashing.remove(index);
+            if result.is_err() {
+                self.give_back_draft(key, draft);
+            }
+        }
         match result {
             Ok(Some(reply)) => {
                 let reply = mrkdwn::plain(&reply, |_| None);
@@ -382,14 +423,20 @@ impl App {
         }
     }
 
-    /// An upload ended one way or another: it leaves the composer, and a
-    /// pasted image's temporary file goes. False when it was already gone,
-    /// so a late answer says nothing about it.
-    pub(super) fn upload_done(&mut self, id: u64) -> bool {
+    /// An upload ended one way or another (`cancelled`, say): it leaves
+    /// the composer, and a pasted image's temporary file goes. Its text
+    /// comes back if it did not go up. False when it was already gone, so
+    /// a late answer says nothing about it.
+    pub(super) fn upload_done(&mut self, id: u64, cancelled: bool) -> bool {
         let Some(index) = self.transfers.iter().position(|u| u.id == id) else {
             return false;
         };
         let upload = self.transfers.remove(index);
+        if let Some((key, draft)) = self.uploading.remove(&id)
+            && (upload.failed || cancelled)
+        {
+            self.give_back_draft(key, draft);
+        }
         if let Some(path) = upload.pasted
             && let Err(error) = std::fs::remove_file(&path)
             && error.kind() != std::io::ErrorKind::NotFound
@@ -450,6 +497,7 @@ mod tests {
             total,
             finishing: false,
             pasted: None,
+            failed: false,
         }
     }
 

@@ -124,6 +124,8 @@ pub struct Upload {
     pub finishing: bool,
     /// A pasted image's temporary file, removed once the upload ends.
     pasted: Option<PathBuf>,
+    /// Whether the worker said it failed, which it does before it ends.
+    failed: bool,
 }
 
 impl Upload {
@@ -285,6 +287,11 @@ pub struct App {
     copied: (mpsc::Sender<CopyResult>, mpsc::Receiver<CopyResult>),
     marks: HashMap<(String, String), (Ts, Instant)>,
     pending_marks: HashMap<(String, String), Ts>,
+    /// Drafts sent as a slash command or as an upload's comment, with
+    /// their composer's key, kept until it is done: by command (several
+    /// can run), and by upload. A failure puts the text back.
+    slashing: Vec<(String, String, Draft)>,
+    uploading: HashMap<u64, (String, Draft)>,
     window_focused: bool,
     /// When changed settings are next written, and the thread that writes them.
     settings_due: crate::settings::Debounce,
@@ -436,6 +443,8 @@ impl App {
             copied: mpsc::channel(),
             marks: HashMap::new(),
             pending_marks: HashMap::new(),
+            slashing: Vec::new(),
+            uploading: HashMap::new(),
             window_focused: true,
             settings_due: crate::settings::Debounce::default(),
             saver: crate::settings::Saver::new(),
