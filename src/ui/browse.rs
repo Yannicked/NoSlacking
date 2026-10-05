@@ -244,6 +244,9 @@ fn new_message(app: &mut App, ctx: &egui::Context) {
             } else {
                 t("Add someone else").into_owned()
             };
+            // Read before the field applies this frame's keys: else the
+            // Backspace that deletes the last letter also takes a person.
+            let was_empty = dialog.query.is_empty();
             let field = ui
                 .add_enabled(
                     !full && !dialog.busy,
@@ -260,10 +263,7 @@ fn new_message(app: &mut App, ctx: &egui::Context) {
             }
             // Backspace in an empty field takes back the last person, as
             // in Slack.
-            if field.has_focus()
-                && dialog.query.is_empty()
-                && ui.input(|i| i.key_pressed(Key::Backspace))
-            {
+            if field.has_focus() && was_empty && ui.input(|i| i.key_pressed(Key::Backspace)) {
                 unpick = dialog.picked.last().cloned();
             }
             ui.add_space(6.0);
