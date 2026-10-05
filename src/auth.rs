@@ -316,10 +316,16 @@ fn register_scheme_for(exe: &std::path::Path) -> Result<(), String> {
     if std::env::var_os("FLATPAK_ID").is_some() {
         return Ok(());
     }
-    let applications = directories::BaseDirs::new()
+    let data = directories::BaseDirs::new()
         .ok_or("no home directory")?
         .data_local_dir()
-        .join("applications");
+        .to_owned();
+    // The desktop file names its icon; without one installed, the taskbar
+    // shows a blank square (Wayland finds windows' icons only this way).
+    if let Err(error) = install_icons(&data) {
+        log::warn!("could not install the app icon: {error}");
+    }
+    let applications = data.join("applications");
     std::fs::create_dir_all(&applications).map_err(|e| e.to_string())?;
     let file = applications.join(format!("{APP_ID}.desktop"));
     let quoted = exe.display().to_string().replace('"', "\\\"");
@@ -356,6 +362,51 @@ fn register_scheme_for(exe: &std::path::Path) -> Result<(), String> {
                 Err("xdg-mime could not register the link handler".into())
             }
         })
+}
+
+/// The app's icons as the icon theme wants them, under the user's data
+/// folder: the SVG for desktops that scale it, and a PNG for those that
+/// take only bitmaps.
+#[cfg(target_os = "linux")]
+fn icon_files() -> [(String, &'static [u8]); 2] {
+    use crate::paths::APP_ID;
+    [
+        (
+            format!("icons/hicolor/scalable/apps/{APP_ID}.svg"),
+            include_bytes!("../packaging/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg"),
+        ),
+        (
+            format!("icons/hicolor/256x256/apps/{APP_ID}.png"),
+            include_bytes!("../packaging/icons/hicolor/256x256/apps/cloud.yannick.NoSlacking.png"),
+        ),
+    ]
+}
+
+/// Writes [`icon_files`] under `data`, leaving files that already hold the
+/// same bytes alone, so a start-up writes nothing once they are there.
+#[cfg(target_os = "linux")]
+fn install_icons(data: &std::path::Path) -> Result<(), String> {
+    let mut wrote = false;
+    for (relative, bytes) in icon_files() {
+        let path = data.join(relative);
+        if std::fs::read(&path).is_ok_and(|current| current == bytes) {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        wrote = true;
+    }
+    if wrote {
+        // GTK desktops read a cache when there is one; a missing tool or
+        // index only means they look the icon up without it.
+        let _ = std::process::Command::new("gtk-update-icon-cache")
+            .args(["--quiet", "--ignore-theme-index"])
+            .arg(data.join("icons/hicolor"))
+            .status();
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -399,6 +450,30 @@ fn register_scheme_for(_exe: &std::path::Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_icon_goes_where_the_desktop_file_looks() {
+        let dir = crate::paths::TestDir::new("auth-icons");
+        install_icons(&dir.0).expect("installed");
+        let svg = dir
+            .0
+            .join("icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg");
+        let png = dir
+            .0
+            .join("icons/hicolor/256x256/apps/cloud.yannick.NoSlacking.png");
+        assert!(std::fs::read(&svg).expect("svg").starts_with(b"<?xml"));
+        assert!(std::fs::read(&png).expect("png").starts_with(b"\x89PNG"));
+        // A second start finds them in place and leaves them alone.
+        let before = std::fs::metadata(&png)
+            .and_then(|m| m.modified())
+            .expect("time");
+        install_icons(&dir.0).expect("installed again");
+        let after = std::fs::metadata(&png)
+            .and_then(|m| m.modified())
+            .expect("time");
+        assert_eq!(before, after);
+    }
 
     fn app() -> AppCredentials {
         AppCredentials {
