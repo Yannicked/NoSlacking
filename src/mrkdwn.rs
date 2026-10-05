@@ -88,6 +88,9 @@ pub fn escape(text: &str) -> String {
 pub fn parse(text: &str) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut rest = text;
+    // Whether the last block is a quote that runs up to `rest`, so a quoted
+    // line there continues it rather than starting another.
+    let mut open = false;
     while !rest.is_empty() {
         match rest.find("```") {
             Some(start) => {
@@ -98,30 +101,39 @@ pub fn parse(text: &str) -> Vec<Block> {
                         let line_start = before.rfind('\n').map_or(0, |at| at + 1);
                         rest = match quote_marker(&before[line_start..]) {
                             Some(lead) => {
-                                lines(&before[..line_start], &mut blocks);
-                                quoted_fence(lead, &after[..end], &after[end + 3..], &mut blocks)
+                                open = lines(&before[..line_start], &mut blocks, open);
+                                let (rest, still) = quoted_fence(
+                                    lead,
+                                    &after[..end],
+                                    &after[end + 3..],
+                                    &mut blocks,
+                                    open,
+                                );
+                                open = still;
+                                rest
                             }
                             None => {
-                                lines(before, &mut blocks);
+                                lines(before, &mut blocks, open);
                                 let code = after[..end].trim_matches('\n');
                                 blocks.push(Block::Preformatted(unescape(code)));
+                                open = false;
                                 after[end + 3..].trim_start_matches('\n')
                             }
                         };
                     }
                     None => {
-                        lines(rest, &mut blocks);
+                        lines(rest, &mut blocks, open);
                         rest = "";
                     }
                 }
             }
             None => {
-                lines(rest, &mut blocks);
+                lines(rest, &mut blocks, open);
                 rest = "";
             }
         }
     }
-    join_quotes(blocks)
+    blocks
 }
 
 /// A line's text after its quote marker, if it is quoted.
@@ -134,8 +146,16 @@ fn quote_marker(line: &str) -> Option<&str> {
 /// A fence opened on a quoted line (`> ```code```  `): the code stays in
 /// the quote, a line of code at a time, instead of the quote being lost.
 /// `lead` is the quoted text before the fence, `code` what the fence holds
-/// and `after` the text after it. Returns what is left to parse.
-fn quoted_fence<'a>(lead: &str, code: &str, after: &'a str, blocks: &mut Vec<Block>) -> &'a str {
+/// and `after` the text after it; `join` says the quote before the fence
+/// runs up to it. Returns what is left to parse, and whether a quote still
+/// runs up to there.
+fn quoted_fence<'a>(
+    lead: &str,
+    code: &str,
+    after: &'a str,
+    blocks: &mut Vec<Block>,
+    join: bool,
+) -> (&'a str, bool) {
     let mut quote = Vec::new();
     inline(lead, Style::default(), &mut quote);
     // Each line of a quoted block carries its own marker after the first.
@@ -165,67 +185,85 @@ fn quoted_fence<'a>(lead: &str, code: &str, after: &'a str, blocks: &mut Vec<Blo
         quote.push(Inline::Newline);
         inline(tail.trim_start(), Style::default(), &mut quote);
     }
-    if !quote.is_empty() {
-        blocks.push(Block::Quote(quote));
+    if quote.is_empty() {
+        return (rest, join);
     }
-    rest
+    push_quote(blocks, quote, join);
+    (rest, true)
 }
 
-/// Joins quotes that follow each other, which only a quoted fence leaves
-/// apart: the lines before it, the fence and the lines after are one quote.
-fn join_quotes(blocks: Vec<Block>) -> Vec<Block> {
-    let mut joined: Vec<Block> = Vec::with_capacity(blocks.len());
-    for block in blocks {
-        match (joined.last_mut(), block) {
-            (Some(Block::Quote(previous)), Block::Quote(next)) => {
-                previous.push(Inline::Newline);
-                previous.extend(next);
-            }
-            (_, block) => joined.push(block),
+/// Ends a quote. With `join`, it continues the quote before it, which only
+/// a quoted fence splits: the lines before it, the fence and the lines
+/// after are one quote. Quotes a blank line apart stay apart.
+fn push_quote(blocks: &mut Vec<Block>, quote: Vec<Inline>, join: bool) {
+    match blocks.last_mut() {
+        Some(Block::Quote(previous)) if join => {
+            previous.push(Inline::Newline);
+            previous.extend(quote);
         }
+        _ => blocks.push(Block::Quote(quote)),
     }
-    joined
 }
 
-/// Groups lines into paragraphs and quotes.
-fn lines(text: &str, blocks: &mut Vec<Block>) {
+/// Groups lines into paragraphs and quotes. `join` says a quote runs up to
+/// the start of `text`; returns whether one runs to its end.
+fn lines(text: &str, blocks: &mut Vec<Block>, join: bool) -> bool {
     if text.is_empty() {
-        return;
+        return join;
     }
     let text = text.strip_suffix('\n').unwrap_or(text);
     let mut paragraph: Vec<Inline> = Vec::new();
+    // Whether the paragraph has a line yet, which may be an empty one.
+    let mut started = false;
     let mut quote: Vec<Inline> = Vec::new();
+    // Whether the quote being built continues the one before `text`.
+    let mut quote_joins = join;
+    // Whether no text came since the last quoted line, so a blank line
+    // here sets the text after a quote apart from it.
+    let mut after_quote = join;
     for line in text.split('\n') {
-        let quoted = quote_marker(line);
-        match quoted {
+        match quote_marker(line) {
             Some(inner) => {
+                trim_newline(&mut paragraph);
                 if !paragraph.is_empty() {
-                    trim_newline(&mut paragraph);
                     blocks.push(Block::Paragraph(std::mem::take(&mut paragraph)));
                 }
+                started = false;
                 if !quote.is_empty() {
                     quote.push(Inline::Newline);
                 }
                 inline(inner, Style::default(), &mut quote);
+                after_quote = true;
             }
             None => {
                 if !quote.is_empty() {
-                    blocks.push(Block::Quote(std::mem::take(&mut quote)));
+                    push_quote(blocks, std::mem::take(&mut quote), quote_joins);
                 }
-                if !paragraph.is_empty() {
+                quote_joins = false;
+                if !started && line.is_empty() {
+                    // A blank line before any text is kept only after a
+                    // quote, as the paragraph's first, empty line.
+                    started = after_quote;
+                    continue;
+                }
+                after_quote = false;
+                if started {
                     paragraph.push(Inline::Newline);
                 }
                 inline(line, Style::default(), &mut paragraph);
+                started = true;
             }
         }
     }
-    if !quote.is_empty() {
-        blocks.push(Block::Quote(quote));
+    let open = !quote.is_empty();
+    if open {
+        push_quote(blocks, quote, quote_joins);
     }
+    trim_newline(&mut paragraph);
     if !paragraph.is_empty() {
-        trim_newline(&mut paragraph);
         blocks.push(Block::Paragraph(paragraph));
     }
+    open
 }
 
 fn trim_newline(inlines: &mut Vec<Inline>) {
@@ -659,6 +697,9 @@ pub fn plain(text: &str, name_of: impl Fn(&Inline) -> Option<String>) -> String 
                 for inline in &inlines {
                     match inline {
                         Inline::Text(text, _) | Inline::Code(text) => out.push_str(text),
+                        // One space for a run of breaks, or a blank line
+                        // after a quote, which already has its space.
+                        Inline::Newline if out.ends_with(' ') => {}
                         Inline::Newline => out.push(' '),
                         Inline::Link { url, label, .. } => {
                             out.push_str(label.as_deref().unwrap_or(url));
@@ -1040,6 +1081,39 @@ mod tests {
         assert_eq!(paragraph("`` `x` ``"), [Inline::Code("`x`".into())]);
         assert_eq!(paragraph("``unclosed"), [text("``unclosed")]);
         assert_eq!(paragraph("``a`b"), [text("``a`b")]);
+    }
+
+    #[test]
+    fn quotes_a_blank_line_apart_stay_apart() {
+        assert_eq!(
+            parse("&gt; a\n\n&gt; b"),
+            [Block::Quote(vec![text("a")]), Block::Quote(vec![text("b")])]
+        );
+        // The blank line after a quote is kept, as the paragraph's first.
+        assert_eq!(
+            parse("&gt; a\n\nb"),
+            [
+                Block::Quote(vec![text("a")]),
+                Block::Paragraph(vec![Inline::Newline, text("b")])
+            ]
+        );
+        assert_eq!(
+            parse("&gt; a\nb"),
+            [
+                Block::Quote(vec![text("a")]),
+                Block::Paragraph(vec![text("b")])
+            ]
+        );
+        // So is one after a quoted fence.
+        assert_eq!(
+            parse("&gt; ```x```\n\n&gt; b"),
+            [
+                Block::Quote(vec![Inline::Code("x".into())]),
+                Block::Quote(vec![text("b")])
+            ]
+        );
+        assert_eq!(parse("\n\nb"), [Block::Paragraph(vec![text("b")])]);
+        assert_eq!(plain("&gt; a\n\nb", |_| None), "a b");
     }
 
     #[test]

@@ -300,7 +300,9 @@ fn flow(
     let workspace = rich.workspace;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
-        let mut previous_newline = false;
+        // A line break first is an empty first line, as after a quote and
+        // a blank line, which keeps its height too.
+        let mut previous_newline = true;
         for inline in inlines {
             let newline = matches!(inline, Inline::Newline);
             match inline {
