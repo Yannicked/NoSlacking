@@ -1,5 +1,6 @@
 //! What floats over the window: the quick switcher, the emoji picker, a
-//! person's card, an image preview, the delete confirmation and toasts.
+//! person's card, an image preview, the delete confirmation, the shortcut
+//! sheet and toasts.
 
 use egui::{CornerRadius, Key, Margin, Modifiers, RichText, Sense, Stroke, Vec2};
 
@@ -16,6 +17,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     confirm_delete(app, ctx);
     section_dialog(app, ctx);
     super::people::status_dialog(app, ctx);
+    super::shortcuts::show(app, ctx);
     toasts(app, ctx);
 }
 

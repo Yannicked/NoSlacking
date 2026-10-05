@@ -801,6 +801,8 @@ pub enum Action {
     Copy(String),
     ShowSettings,
     HideSettings,
+    /// Opens the sheet that lists the keyboard shortcuts.
+    ShowShortcuts,
     AddWorkspace,
     SignOut(String),
     Reconnect,

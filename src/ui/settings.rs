@@ -209,6 +209,23 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             app.settings.enter_sends = enter;
             app.settings_changed();
         }
+        row(
+            ui,
+            palette,
+            &t("Keyboard shortcuts"),
+            &tf(
+                "Every shortcut, also with {shortcut}.",
+                &[("shortcut", &super::keys::command("/"))],
+            ),
+            |ui, name| {
+                if theme::secondary_button(ui, palette, &t("Show"))
+                    .labelled_by(name)
+                    .clicked()
+                {
+                    app.actions.push(Action::ShowShortcuts);
+                }
+            },
+        );
         let mut density = app.settings.density;
         row(
             ui,

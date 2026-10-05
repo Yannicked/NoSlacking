@@ -186,7 +186,7 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
 }
 
 /// The letter that opens a view with Ctrl+Shift, if one does.
-fn shortcut(view: View) -> Option<egui::Key> {
+pub(super) fn shortcut(view: View) -> Option<egui::Key> {
     match view {
         View::Activity => Some(egui::Key::M),
         View::Unreads => Some(egui::Key::A),

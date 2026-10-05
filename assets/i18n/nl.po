@@ -1916,3 +1916,123 @@ msgstr "Demo: zou {name} opslaan"
 
 msgid "Demo: would play {name}"
 msgstr "Demo: zou {name} afspelen"
+
+msgid "Navigation"
+msgstr "Navigatie"
+
+msgid "Composer"
+msgstr "Invoerveld"
+
+msgid "Image viewer"
+msgstr "Afbeeldingsviewer"
+
+msgid "Jump to a conversation"
+msgstr "Naar een gesprek springen"
+
+msgid "Previous / next conversation"
+msgstr "Vorig / volgend gesprek"
+
+msgid "Previous / next unread conversation"
+msgstr "Vorig / volgend ongelezen gesprek"
+
+msgid "Jump to the first unread message"
+msgstr "Naar het eerste ongelezen bericht springen"
+
+msgid "Jump to the newest messages"
+msgstr "Naar de nieuwste berichten springen"
+
+msgid "Select the last message"
+msgstr "Het laatste bericht selecteren"
+
+msgid "Select the last message, from an empty composer"
+msgstr "Het laatste bericht selecteren, vanuit een leeg invoerveld"
+
+msgid "Previous / next message"
+msgstr "Vorig / volgend bericht"
+
+msgid "Add a reaction"
+msgstr "Een reactie toevoegen"
+
+msgid "Edit your message"
+msgstr "Je bericht bewerken"
+
+msgid "Delete your message"
+msgstr "Je bericht verwijderen"
+
+msgid "Copy the text"
+msgstr "De tekst kopiëren"
+
+msgid "Mark unread from here"
+msgstr "Vanaf hier als ongelezen markeren"
+
+msgid "Back to the composer"
+msgstr "Terug naar het invoerveld"
+
+msgid "Send, or save an edit"
+msgstr "Versturen, of een bewerking opslaan"
+
+msgid "New line"
+msgstr "Nieuwe regel"
+
+msgid "Edit your last message, from an empty composer"
+msgstr "Je laatste bericht bewerken, vanuit een leeg invoerveld"
+
+msgid "Bold"
+msgstr "Vet"
+
+msgid "Italic"
+msgstr "Cursief"
+
+msgid "Strikethrough"
+msgstr "Doorhalen"
+
+msgid "Code"
+msgstr "Code"
+
+msgid "Pick a suggestion"
+msgstr "Een suggestie kiezen"
+
+msgid "Accept a suggestion"
+msgstr "Een suggestie overnemen"
+
+msgid "Close the suggestions, or cancel an edit"
+msgstr "De suggesties sluiten, of een bewerking annuleren"
+
+msgid "Previous / next image"
+msgstr "Vorige / volgende afbeelding"
+
+msgid "Zoom in / out"
+msgstr "In- / uitzoomen"
+
+msgid "Fit to the window"
+msgstr "Passend in het venster"
+
+msgid "Close the viewer"
+msgstr "De viewer sluiten"
+
+msgid "Keyboard shortcuts"
+msgstr "Sneltoetsen"
+
+msgid "Actual size"
+msgstr "Werkelijke grootte"
+
+msgid "Move through a list: switcher, search, browser"
+msgstr "Door een lijst bewegen: springen, zoeken, bladeren"
+
+msgid "Open what is picked"
+msgstr "Het gekozen item openen"
+
+msgid "Close the thread or the open dialog"
+msgstr "De thread of het open venster sluiten"
+
+msgid "Open this list any time with {shortcut}."
+msgstr "Open deze lijst altijd met {shortcut}."
+
+msgid "Every shortcut, also with {shortcut}."
+msgstr "Alle sneltoetsen, ook met {shortcut}."
+
+msgid "Show"
+msgstr "Tonen"
+
+msgid "Also {keys}"
+msgstr "Ook {keys}"
