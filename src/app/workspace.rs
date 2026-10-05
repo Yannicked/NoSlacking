@@ -244,13 +244,10 @@ impl WorkspaceState {
         crate::sidebar::rank(conversation, self.is_unread(conversation))
     }
 
-    /// Whether a message mentions you (or everyone).
+    /// Whether a message mentions you (or everyone). Read as the activity
+    /// view reads it, so a longer id that starts with yours is not you.
     pub fn mentions_me(&self, message: &Message) -> bool {
-        let me = format!("<@{}", self.info.user_id);
-        message.text.contains(&me)
-            || message.text.contains("<!here")
-            || message.text.contains("<!channel")
-            || message.text.contains("<!everyone")
+        crate::views::mention_reason(&message.text, &self.info.user_id).is_some()
     }
 
     /// A message's text ready to edit, with people and channels named as
@@ -1635,6 +1632,20 @@ mod tests {
         w.message_arrived("C1", mine("7.0", "on it"), false);
         let c = w.conversation("C1").expect("C1");
         assert_eq!((c.mentions, c.last_read.clone()), (0, Some(Ts::new("7.0"))));
+    }
+
+    #[test]
+    fn a_longer_id_that_starts_with_yours_is_not_a_mention() {
+        let w = workspace_in_general();
+        let said = |text: &str| Message {
+            text: text.into(),
+            ..theirs("5.0")
+        };
+        assert!(!w.mentions_me(&said("hey <@U12>")));
+        assert!(!w.mentions_me(&said("hey <@U12|bob>")));
+        assert!(w.mentions_me(&said("hey <@U1>")));
+        assert!(w.mentions_me(&said("hey <@U1|me>")));
+        assert!(w.mentions_me(&said("<!here> look")));
     }
 
     #[test]
