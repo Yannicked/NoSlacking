@@ -208,12 +208,18 @@ mod tests {
         // literal dollar sign `\\$`.
         assert_eq!(exec_quote(r"a\b"), r#""a\\\\b""#);
         assert_eq!(exec_quote("$HOME"), r#""\\$HOME""#);
-        assert_eq!(exec_quote(r#"say "hi" `now`"#), r#""say \\"hi\\" \\`now\\`""#);
+        assert_eq!(
+            exec_quote(r#"say "hi" `now`"#),
+            r#""say \\"hi\\" \\`now\\`""#
+        );
         // A percent sign is never a field code.
         assert_eq!(exec_quote("/opt/100%u/app"), r#""/opt/100%%u/app""#);
         // A line break cannot start a new key.
         assert_eq!(exec_quote("a\nIcon=x"), r#""a\nIcon=x""#);
-        assert_eq!(exec_quote("/usr/bin/noslacking"), r#""/usr/bin/noslacking""#);
+        assert_eq!(
+            exec_quote("/usr/bin/noslacking"),
+            r#""/usr/bin/noslacking""#
+        );
     }
 
     #[test]
