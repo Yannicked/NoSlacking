@@ -300,9 +300,7 @@ impl Worker {
     }
 
     pub(super) fn sign_out(&mut self, team: &str) {
-        if let Some(live) = self.rtm.remove(team) {
-            let _ = live.stop.send(true);
-        }
+        self.stop_rtm(team);
         self.people.forget(team);
         if let Some(removed) = self.teams.remove(team) {
             // Before SignedOut goes out: nothing from a task still running
@@ -313,13 +311,20 @@ impl Worker {
             // A session token belongs to the browser login; revoking it would
             // sign the browser out too, so only OAuth tokens are revoked.
             let revoke = !removed.client.token().is_session();
+            // A token renewed on the way to revoking must not be saved
+            // again after it is deleted.
+            removed.client.stop_reporting();
             tokio::spawn(async move {
+                // Deleted first, with the token still in memory for the
+                // revoke: the keyring does its jobs in order, so a quick
+                // sign-in again saves after this and is kept, however long
+                // Slack takes to answer the revoke.
+                if let Err(error) = credentials.delete_token(&team).await {
+                    log::warn!("could not delete the token: {error}");
+                }
                 if revoke && let Err(error) = removed.client.act::<Value>("auth.revoke", &[]).await
                 {
                     log::info!("auth.revoke: {error}");
-                }
-                if let Err(error) = credentials.delete_token(&team).await {
-                    log::warn!("could not delete the token: {error}");
                 }
             });
         }

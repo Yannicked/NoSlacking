@@ -9,6 +9,18 @@ use serde_json::Value;
 
 use crate::model::{self, ConversationKind, Delivery, Ts};
 
+/// A field's value, with an explicit `null` read as its default. Slack
+/// sends `null` where it would usually leave a field out, and
+/// `#[serde(default)]` only covers a missing field: without this, one
+/// `null` would fail a whole page.
+fn null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ResponseMetadata {
@@ -564,31 +576,40 @@ impl Icons {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Message {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", deserialize_with = "null_default")]
     pub kind: String,
     pub subtype: Option<String>,
+    #[serde(deserialize_with = "null_default")]
     pub ts: String,
     pub user: Option<String>,
     pub bot_id: Option<String>,
     pub username: Option<String>,
+    #[serde(deserialize_with = "null_default")]
     pub text: String,
     pub thread_ts: Option<String>,
     /// Absent on a message that says nothing about its thread, as some
     /// edits and trimmed answers do; an explicit 0 means no replies.
     pub reply_count: Option<u32>,
+    #[serde(deserialize_with = "null_default")]
     pub reply_users: Vec<String>,
     pub latest_reply: Option<String>,
+    #[serde(deserialize_with = "null_default")]
     pub reactions: Vec<Reaction>,
+    #[serde(deserialize_with = "null_default")]
     pub files: Vec<File>,
+    #[serde(deserialize_with = "null_default")]
     pub attachments: Vec<Attachment>,
+    #[serde(deserialize_with = "null_default")]
     pub blocks: Vec<Value>,
     pub edited: Option<Edited>,
     pub bot_profile: Option<BotProfile>,
     pub icons: Option<Icons>,
     /// Set by Slack on a thread reply also sent to the channel.
     pub root: Option<Value>,
+    #[serde(deserialize_with = "null_default")]
     pub hidden: bool,
     /// The conversations it is pinned in.
+    #[serde(deserialize_with = "null_default")]
     pub pinned_to: Vec<String>,
     /// The huddle a `huddle_thread` message stands for: who is in it, and
     /// whether it has ended.
@@ -781,10 +802,15 @@ fn rich_text(node: &Value, out: &mut String) {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Profile {
+    #[serde(deserialize_with = "null_default")]
     pub display_name: String,
+    #[serde(deserialize_with = "null_default")]
     pub real_name: String,
+    #[serde(deserialize_with = "null_default")]
     pub title: String,
+    #[serde(deserialize_with = "null_default")]
     pub status_text: String,
+    #[serde(deserialize_with = "null_default")]
     pub status_emoji: String,
     pub image_72: Option<String>,
     pub image_192: Option<String>,
@@ -971,8 +997,11 @@ pub fn order_sections(sections: Vec<ChannelSection>) -> Vec<model::SidebarSectio
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ClientCounts {
+    #[serde(deserialize_with = "null_default")]
     pub channels: Vec<CountEntry>,
+    #[serde(deserialize_with = "null_default")]
     pub mpims: Vec<CountEntry>,
+    #[serde(deserialize_with = "null_default")]
     pub ims: Vec<CountEntry>,
 }
 
@@ -980,10 +1009,15 @@ pub struct ClientCounts {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct CountEntry {
+    #[serde(deserialize_with = "null_default")]
     pub id: String,
+    #[serde(deserialize_with = "null_default")]
     pub last_read: String,
+    #[serde(deserialize_with = "null_default")]
     pub latest: String,
+    #[serde(deserialize_with = "null_default")]
     pub mention_count: u32,
+    #[serde(deserialize_with = "null_default")]
     pub has_unreads: bool,
 }
 
@@ -1119,13 +1153,25 @@ pub struct UploadUrl {
     pub file_id: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+/// `apps.connections.open`: the socket to open.
+#[derive(Default, Deserialize)]
 #[serde(default)]
 pub struct ConnectionsOpen {
+    /// The `wss://` URL, whose ticket lets anyone open the socket.
     pub url: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+/// Leaves out the URL, which carries the socket's ticket.
+impl std::fmt::Debug for ConnectionsOpen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionsOpen")
+            .field("url", &crate::redact::REDACTED)
+            .finish()
+    }
+}
+
+/// The signed-in person in an `oauth.v2.access` answer, with their token.
+#[derive(Default, Deserialize)]
 #[serde(default)]
 pub struct AuthedUser {
     pub id: String,
@@ -1133,6 +1179,24 @@ pub struct AuthedUser {
     pub access_token: Option<String>,
     pub refresh_token: Option<String>,
     pub expires_in: Option<i64>,
+}
+
+/// Shows whether there are tokens, never the tokens.
+impl std::fmt::Debug for AuthedUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthedUser")
+            .field("id", &self.id)
+            .field("scope", &self.scope)
+            .field("access_token", &redacted(&self.access_token))
+            .field("refresh_token", &redacted(&self.refresh_token))
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
+/// A secret as Debug shows it: whether there is one, not what it is.
+fn redacted(secret: &Option<String>) -> Option<&'static str> {
+    secret.as_ref().map(|_| crate::redact::REDACTED)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1143,7 +1207,7 @@ pub struct OauthTeam {
 }
 
 /// `oauth.v2.access`, for both the code exchange and a refresh.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(default)]
 pub struct OauthAccess {
     pub authed_user: AuthedUser,
@@ -1153,6 +1217,20 @@ pub struct OauthAccess {
     pub refresh_token: Option<String>,
     pub expires_in: Option<i64>,
     pub token_type: Option<String>,
+}
+
+/// Shows whether there are tokens, never the tokens.
+impl std::fmt::Debug for OauthAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OauthAccess")
+            .field("authed_user", &self.authed_user)
+            .field("team", &self.team)
+            .field("access_token", &redacted(&self.access_token))
+            .field("refresh_token", &redacted(&self.refresh_token))
+            .field("expires_in", &self.expires_in)
+            .field("token_type", &self.token_type)
+            .finish()
+    }
 }
 
 /// A Socket Mode frame.
@@ -1185,6 +1263,57 @@ pub struct Authorization {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nulls_do_not_lose_a_page() {
+        let page: Vec<Message> = serde_json::from_str(
+            r#"[
+                {"type":"message","ts":"1.0","user":"U1","text":null,"reactions":null,
+                 "files":null,"attachments":null,"blocks":null,"reply_users":null,
+                 "pinned_to":null,"hidden":null},
+                {"type":null,"ts":"2.0","user":"U2","text":"hi"}
+            ]"#,
+        )
+        .expect("parses");
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].text, "");
+        assert!(page[0].reactions.is_empty() && !page[0].hidden);
+        assert_eq!(page[1].text, "hi");
+        let profile: Profile = serde_json::from_str(
+            r#"{"display_name":null,"real_name":"Ada","title":null,"status_text":null,"status_emoji":null}"#,
+        )
+        .expect("parses");
+        assert_eq!(profile.real_name, "Ada");
+        assert_eq!(profile.display_name, "");
+        let counts: ClientCounts = serde_json::from_str(
+            r#"{"channels":[{"id":"C1","last_read":null,"latest":null,"mention_count":null,"has_unreads":null}],"mpims":null}"#,
+        )
+        .expect("parses");
+        let by_id = counts.by_id();
+        assert_eq!(by_id["C1"].mention_count, 0);
+        assert!(!by_id["C1"].has_unreads);
+    }
+
+    #[test]
+    fn tokens_and_socket_tickets_never_print() {
+        let access: OauthAccess = serde_json::from_str(
+            r#"{"ok":true,"access_token":"xoxe.xoxp-top","refresh_token":"xoxe-1-top",
+                "authed_user":{"id":"U1","access_token":"xoxp-inner","refresh_token":"xoxe-1-inner"},
+                "team":{"id":"T1","name":"Acme"}}"#,
+        )
+        .expect("parses");
+        let shown = format!("{access:?}");
+        assert!(!shown.contains("xox"), "{shown}");
+        assert!(
+            shown.contains("<redacted>") && shown.contains("U1"),
+            "{shown}"
+        );
+        let open: ConnectionsOpen =
+            serde_json::from_str(r#"{"ok":true,"url":"wss://wss.slack.com/link/?ticket=secret"}"#)
+                .expect("parses");
+        let shown = format!("{open:?}");
+        assert!(!shown.contains("ticket"), "{shown}");
+    }
 
     #[test]
     fn user_groups_keep_the_ones_you_can_mention() {

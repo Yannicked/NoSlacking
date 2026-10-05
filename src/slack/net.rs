@@ -125,6 +125,10 @@ static NET: RwLock<Option<Arc<Net>>> = RwLock::new(None);
 /// How long a transfer may go without a single byte moving.
 const TRANSFER_STALL: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long opening a socket may take in all: the connection, the proxy's
+/// tunnel, TLS and the WebSocket upgrade. Without a bound, a stalled network
+/// leaves the socket waiting forever and its reconnect loop never runs.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = concat!("NoSlacking/", env!("CARGO_PKG_VERSION"));
 
 impl Net {
@@ -318,16 +322,31 @@ impl std::fmt::Debug for Kind {
 /// An open WebSocket, the type `connect_async` gives.
 pub type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Opens a `wss://` WebSocket through the current proxy.
-pub async fn websocket(
-    request: tokio_tungstenite::tungstenite::handshake::client::Request,
-) -> Result<
+/// What opening a socket gives: the socket and Slack's handshake answer.
+type Opened = Result<
     (
         Socket,
         tokio_tungstenite::tungstenite::handshake::client::Response,
     ),
     tokio_tungstenite::tungstenite::Error,
-> {
+>;
+
+/// Opens a `wss://` WebSocket through the current proxy, giving up after
+/// [`HANDSHAKE_TIMEOUT`].
+pub async fn websocket(
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+) -> Opened {
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, open(request))
+        .await
+        .unwrap_or_else(|_| {
+            Err(tokio_tungstenite::tungstenite::Error::Io(
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "the handshake timed out"),
+            ))
+        })
+}
+
+/// [`websocket`] without the overall time limit.
+async fn open(request: tokio_tungstenite::tungstenite::handshake::client::Request) -> Opened {
     use tokio_tungstenite::tungstenite::Error;
     let route = current().route.clone();
     let host = request.uri().host().unwrap_or_default().to_owned();

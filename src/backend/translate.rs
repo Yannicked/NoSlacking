@@ -275,4 +275,19 @@ mod tests {
             events(r#"{"type":"channel_created","channel":{"id":"C5","name":"x"}}"#).is_empty()
         );
     }
+
+    #[test]
+    fn preference_and_dnd_changes() {
+        assert!(matches!(
+            &events(r#"{"type":"pref_change","name":"muted_channels","value":"C1"}"#)[..],
+            [Translated::RefreshPrefs]
+        ));
+        assert!(events(r#"{"type":"pref_change","name":"theme","value":"dark"}"#).is_empty());
+        assert!(matches!(
+            &events(
+                r#"{"type":"dnd_updated","user":"U1","dnd_status":{"dnd_enabled":false,"snooze_enabled":true,"snooze_endtime":500}}"#
+            )[..],
+            [Translated::Event(Event::Dnd { team, .. })] if team == "T1"
+        ));
+    }
 }

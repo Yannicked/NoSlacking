@@ -34,6 +34,9 @@ pub enum SlackError {
     Network(String),
     #[error("unexpected response: {0}")]
     Decode(String),
+    /// A browser-session sign-in did not work, before Slack's API had a say.
+    #[error("session sign-in: {0:?}")]
+    Session(super::session::Refusal),
 }
 
 /// The error codes that mean a token no longer works and the workspace
@@ -187,9 +190,13 @@ fn refresh_wait(failures: u32) -> Duration {
 /// image loader or to tasks see a renewed token or a new app at once.
 struct Shared {
     token: Mutex<Token>,
-    /// Held for a whole refresh, including saving the new token, so
-    /// renewals happen and are stored strictly one after another.
+    /// Held while a refresh asks Slack, so renewals happen one at a time.
     refresh_lock: tokio::sync::Mutex<()>,
+    /// Held while a refresh's outcome is reported (the new token saved to
+    /// the keyring). Taken before `refresh_lock` is let go, so reports go
+    /// out in the order Slack issued the tokens, while calls that only
+    /// need the renewed token already in memory need not wait for the save.
+    report_lock: tokio::sync::Mutex<()>,
     failure: Mutex<Option<RefreshFailure>>,
     app: Mutex<Option<OauthApp>>,
     on_refresh: Mutex<Option<OnRefresh>>,
@@ -247,6 +254,7 @@ impl Client {
             shared: Arc::new(Shared {
                 token: Mutex::new(token),
                 refresh_lock: tokio::sync::Mutex::new(()),
+                report_lock: tokio::sync::Mutex::new(()),
                 failure: Mutex::new(None),
                 app: Mutex::new(None),
                 on_refresh: Mutex::new(None),
@@ -257,9 +265,9 @@ impl Client {
     }
 
     /// Renews a rotating token with `app`, reporting each outcome: the new
-    /// token, or why the refresh failed. The report is awaited before the
-    /// next refresh can start, so new tokens are stored in the order Slack
-    /// issued them.
+    /// token, or why the refresh failed. Reports go out one at a time, in
+    /// the order Slack issued the tokens; calls go on with the renewed
+    /// token while one is being saved.
     pub fn with_refresh<F, Fut>(self, app: Option<OauthApp>, on_refresh: F) -> Self
     where
         F: Fn(Result<Token, SlackError>) -> Fut + Send + Sync + 'static,
@@ -269,6 +277,12 @@ impl Client {
         let on_refresh: OnRefresh = Arc::new(move |result| Box::pin(on_refresh(result)));
         *lock(&self.shared.on_refresh) = Some(on_refresh);
         self
+    }
+
+    /// Stops reporting refreshes, for a client on its way out: a token
+    /// renewed from now on stays in memory and is never saved.
+    pub fn stop_reporting(&self) {
+        *lock(&self.shared.on_refresh) = None;
     }
 
     /// Switches the app that renews the token, for this client and every
@@ -296,7 +310,7 @@ impl Client {
         if !token.needs_refresh(now()) {
             return Ok(token.access);
         }
-        let _guard = self.shared.refresh_lock.lock().await;
+        let refreshing = self.shared.refresh_lock.lock().await;
         // Another call may have refreshed while this one waited.
         let token = self.token();
         if !token.needs_refresh(now()) {
@@ -321,7 +335,10 @@ impl Client {
                 *lock(&self.shared.failure) = None;
                 log::info!("renewed a rotating Slack token");
                 if let Some(on_refresh) = on_refresh {
+                    let reporting = self.shared.report_lock.lock().await;
+                    drop(refreshing);
                     on_refresh(Ok(renewed.clone())).await;
+                    drop(reporting);
                 }
                 Ok(renewed.access)
             }
@@ -336,7 +353,10 @@ impl Client {
                     retry_at: std::time::Instant::now() + refresh_wait(failures),
                 });
                 if let Some(on_refresh) = on_refresh {
+                    let reporting = self.shared.report_lock.lock().await;
+                    drop(refreshing);
                     on_refresh(Err(error.clone())).await;
+                    drop(reporting);
                 }
                 fallback(&token, error)
             }
@@ -372,6 +392,9 @@ impl Client {
         let mut attempt = 0;
         loop {
             attempt += 1;
+            // The token comes first: a refresh can wait on Slack and on
+            // another refresh, and must not hold a slot meanwhile.
+            let token = self.access_token().await?;
             // The permit covers one attempt, not the waits between them:
             // a call sitting out a Retry-After must not hold a slot that a
             // send could use.
@@ -381,7 +404,6 @@ impl Client {
                 .acquire()
                 .await
                 .map_err(|_| SlackError::Network("client closed".into()))?;
-            let token = self.access_token().await?;
             let mut request = self.http().post(&url).bearer_auth(&token).form(params);
             if let Some(cookie) = self.cookie() {
                 request = request.header(reqwest::header::COOKIE, format!("d={cookie}"));
@@ -414,10 +436,7 @@ impl Client {
             }
             let bytes = response.bytes().await?;
             drop(permit);
-            if !(200..300).contains(&status) && bytes.is_empty() {
-                return Err(SlackError::Http(status));
-            }
-            return decode(&bytes);
+            return answer(status, &bytes);
         }
     }
 
@@ -532,6 +551,23 @@ fn counted(
             }
         },
     )
+}
+
+/// Reads the answer to a Web API call that came back with HTTP `status`.
+/// An error status still carries Slack's own JSON at times, whose code says
+/// more than the status; anything else (an empty body, a proxy's or a load
+/// balancer's HTML page) is the status alone, not a decoding error.
+fn answer<T: DeserializeOwned>(status: u16, bytes: &[u8]) -> Result<T, SlackError> {
+    if !(200..300).contains(&status) && !is_slack_answer(bytes) {
+        return Err(SlackError::Http(status));
+    }
+    decode(bytes)
+}
+
+/// Whether `bytes` is a Web API answer: a JSON object with `ok`.
+fn is_slack_answer(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .is_ok_and(|value| value.get("ok").is_some_and(serde_json::Value::is_boolean))
 }
 
 /// Decodes a Web API answer, turning `ok: false` into [`SlackError::Api`].
@@ -702,6 +738,33 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_page_is_its_http_status() {
+        let html = b"<html><body><h1>502 Bad Gateway</h1></body></html>";
+        assert_eq!(
+            answer::<serde_json::Value>(502, html),
+            Err(SlackError::Http(502))
+        );
+        assert_eq!(
+            answer::<serde_json::Value>(503, b""),
+            Err(SlackError::Http(503))
+        );
+        assert_eq!(
+            answer::<serde_json::Value>(500, br#"{"message":"oops"}"#),
+            Err(SlackError::Http(500))
+        );
+        // Slack's own answer on an error status still gives its code.
+        assert_eq!(
+            answer::<serde_json::Value>(400, br#"{"ok":false,"error":"invalid_arguments"}"#),
+            Err(SlackError::Api("invalid_arguments".into()))
+        );
+        // A success that cannot be read stays a decoding error.
+        assert!(matches!(
+            answer::<serde_json::Value>(200, html),
+            Err(SlackError::Decode(_))
+        ));
+    }
 
     #[test]
     fn errors_decode_with_their_code() {

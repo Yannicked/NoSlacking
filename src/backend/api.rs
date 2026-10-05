@@ -5,6 +5,7 @@ use std::collections::HashSet;
 
 use crate::failure::Failure;
 use crate::slack::SlackError;
+use crate::slack::session::Refusal;
 
 /// What an API failure means for the interface, which words it.
 pub(super) fn failure(error: &SlackError) -> Failure {
@@ -38,6 +39,11 @@ pub(super) fn failure(error: &SlackError) -> Failure {
         SlackError::Http(status) => Failure::Http(*status),
         SlackError::Network(detail) => Failure::Network(detail.clone()),
         SlackError::Decode(detail) => Failure::Unexpected(detail.clone()),
+        SlackError::Session(refusal) => match refusal {
+            Refusal::NotACookie => Failure::NotACookie,
+            Refusal::NoToken => Failure::NoSessionToken,
+            Refusal::CookieRefused => Failure::CookieRefused,
+        },
     }
 }
 

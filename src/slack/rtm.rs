@@ -36,6 +36,9 @@ const SILENCE: Duration = Duration::from_secs(60);
 const PING_EVERY: Duration = Duration::from_secs(20);
 /// Attempts in a row that Slack refused before RTM is given up on.
 const MAX_REFUSED_ATTEMPTS: u32 = 3;
+/// A connection that lasted this long resets the reconnect backoff; one
+/// that dies sooner, even after hello, keeps backing off.
+const STABLE: Duration = Duration::from_secs(60);
 /// The longest wait between reconnect attempts.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
@@ -78,9 +81,9 @@ enum Next {
 }
 
 /// Decides what follows `ended`, counting Slack's refusals in a row in
-/// `refused`. Only refusals count; an outage, however long, never makes
-/// the socket give up.
-fn next(ended: &Ended, refused: &mut u32) -> Next {
+/// `refused`, for a connection that `lasted` this long. Only refusals
+/// count; an outage, however long, never makes the socket give up.
+fn next(ended: &Ended, refused: &mut u32, lasted: Duration) -> Next {
     match ended {
         // Refused outright: retrying will not help.
         Ended::AfterHello(error) | Ended::Refused(error) | Ended::Unreachable(error)
@@ -90,7 +93,9 @@ fn next(ended: &Ended, refused: &mut u32) -> Next {
         }
         Ended::AfterHello(_) => {
             *refused = 0;
-            Next::Retry { reset: true }
+            Next::Retry {
+                reset: lasted > STABLE,
+            }
         }
         Ended::Refused(_) => {
             *refused += 1;
@@ -122,11 +127,12 @@ pub async fn run(
         if *stop.borrow() {
             return;
         }
+        let started = tokio::time::Instant::now();
         let ended = tokio::select! {
             ended = connection(&client, &sink, &mut outgoing) => ended,
             _ = stop.changed() => return,
         };
-        match next(&ended, &mut refused) {
+        match next(&ended, &mut refused, started.elapsed()) {
             Next::GiveUp => {
                 let (Ended::AfterHello(error) | Ended::Refused(error) | Ended::Unreachable(error)) =
                     ended;
@@ -266,9 +272,8 @@ async fn connection(
                             .unwrap_or("error");
                         return end(hello, true, SlackError::Api(message.to_owned()));
                     }
-                    // Housekeeping frames carry no message.
-                    Some("pong" | "reconnect_url" | "pref_change" | "dnd_updated") | None => {}
-                    Some(_) => sink(RtmEvent::Event(value)),
+                    Some(kind) if !is_housekeeping(kind) => sink(RtmEvent::Event(value)),
+                    _ => {}
                 }
             }
             Frame::Close(frame) => {
@@ -278,6 +283,14 @@ async fn connection(
             _ => {}
         }
     }
+}
+
+/// Whether a frame of this type is only the socket's own bookkeeping, with
+/// nothing for the worker. Preference and Do Not Disturb changes are not:
+/// they are how a session workspace hears of mutes and snoozes made in
+/// another client.
+fn is_housekeeping(kind: &str) -> bool {
+    matches!(kind, "pong" | "reconnect_url")
 }
 
 /// An outgoing frame as text, with the `id` RTM wants on everything a
@@ -301,6 +314,15 @@ mod tests {
         assert_eq!(numbered(serde_json::json!("typing"), 1), None);
     }
 
+    #[test]
+    fn preference_and_dnd_changes_reach_the_worker() {
+        assert!(!is_housekeeping("pref_change"));
+        assert!(!is_housekeeping("dnd_updated"));
+        assert!(!is_housekeeping("message"));
+        assert!(is_housekeeping("pong"));
+        assert!(is_housekeeping("reconnect_url"));
+    }
+
     fn network() -> SlackError {
         SlackError::Network("no route to host".into())
     }
@@ -310,12 +332,16 @@ mod tests {
         let mut refused = 0;
         for _ in 0..100 {
             assert_eq!(
-                next(&Ended::Unreachable(network()), &mut refused),
+                next(&Ended::Unreachable(network()), &mut refused, Duration::ZERO),
                 Next::Retry { reset: false }
             );
         }
         assert_eq!(
-            next(&Ended::Unreachable(SlackError::RateLimited), &mut refused),
+            next(
+                &Ended::Unreachable(SlackError::RateLimited),
+                &mut refused,
+                Duration::ZERO
+            ),
             Next::Retry { reset: false }
         );
         assert_eq!(refused, 0);
@@ -325,22 +351,42 @@ mod tests {
     fn repeated_refusals_give_up() {
         let mut refused = 0;
         let refusal = || Ended::Refused(SlackError::Api("not_allowed".into()));
-        assert_eq!(next(&refusal(), &mut refused), Next::Retry { reset: false });
-        // An outage in between neither counts nor clears the count.
         assert_eq!(
-            next(&Ended::Unreachable(network()), &mut refused),
+            next(&refusal(), &mut refused, Duration::ZERO),
             Next::Retry { reset: false }
         );
-        assert_eq!(next(&refusal(), &mut refused), Next::Retry { reset: false });
-        assert_eq!(next(&refusal(), &mut refused), Next::GiveUp);
+        // An outage in between neither counts nor clears the count.
+        assert_eq!(
+            next(&Ended::Unreachable(network()), &mut refused, Duration::ZERO),
+            Next::Retry { reset: false }
+        );
+        assert_eq!(
+            next(&refusal(), &mut refused, Duration::ZERO),
+            Next::Retry { reset: false }
+        );
+        assert_eq!(next(&refusal(), &mut refused, Duration::ZERO), Next::GiveUp);
     }
 
     #[test]
     fn a_working_connection_clears_the_count() {
         let mut refused = 2;
         assert_eq!(
-            next(&Ended::AfterHello(network()), &mut refused),
+            next(&Ended::AfterHello(network()), &mut refused, STABLE * 2),
             Next::Retry { reset: true }
+        );
+        assert_eq!(refused, 0);
+    }
+
+    #[test]
+    fn a_drop_right_after_hello_keeps_backing_off() {
+        let mut refused = 2;
+        assert_eq!(
+            next(
+                &Ended::AfterHello(network()),
+                &mut refused,
+                Duration::from_secs(1)
+            ),
+            Next::Retry { reset: false }
         );
         assert_eq!(refused, 0);
     }
@@ -349,9 +395,12 @@ mod tests {
     fn a_dead_sign_in_gives_up_at_once() {
         let mut refused = 0;
         let auth = || SlackError::Api("invalid_auth".into());
-        assert_eq!(next(&Ended::AfterHello(auth()), &mut refused), Next::GiveUp);
         assert_eq!(
-            next(&Ended::Unreachable(auth()), &mut refused),
+            next(&Ended::AfterHello(auth()), &mut refused, Duration::ZERO),
+            Next::GiveUp
+        );
+        assert_eq!(
+            next(&Ended::Unreachable(auth()), &mut refused, Duration::ZERO),
             Next::GiveUp
         );
     }

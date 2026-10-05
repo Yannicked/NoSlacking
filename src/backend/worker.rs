@@ -7,7 +7,7 @@
 //! interface, so one slow call never holds up another.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, watch};
 
 use super::api::{failure, worth_retrying};
 use super::fetch::{
-    boot, conversation_info, conversations, edit_sidebar, history, sections, thread,
+    Boot, boot, conversation_info, conversations, edit_sidebar, history, sections, thread,
     workspace_details,
 };
 use super::files::{UploadGate, download, file_name, open_file, upload};
@@ -90,16 +90,67 @@ enum Internal {
     },
 }
 
+/// A workspace's start-up task, and how it went once it is over.
+struct Booting {
+    task: tokio::task::AbortHandle,
+    /// Set by the task as it ends; never set if it was stopped.
+    outcome: Arc<OnceLock<Boot>>,
+}
+
+/// The first wait before starting a workspace that could not be reached
+/// again, and the longest; each failure doubles it.
+const BOOT_RETRY_FIRST: Duration = Duration::from_secs(10);
+const BOOT_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
+
+/// When to try starting a workspace again after its start-up could not
+/// reach Slack.
+#[derive(Debug, Default)]
+struct BootRetry {
+    /// Start-ups in a row that could not reach Slack.
+    failures: u32,
+    /// When the next one is due, from when the last was seen to fail.
+    at: Option<std::time::Instant>,
+}
+
+impl BootRetry {
+    /// Whether to start again now, after a start-up that could not reach
+    /// Slack: when the wait is over, or `at_once` when there is news that
+    /// the network is back.
+    fn due(&mut self, now: std::time::Instant, at_once: bool) -> bool {
+        let failures = &mut self.failures;
+        let at = *self.at.get_or_insert_with(|| {
+            *failures = failures.saturating_add(1);
+            now + boot_wait(*failures)
+        });
+        if at_once || now >= at {
+            self.at = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// How long to wait after `failures` start-ups in a row that could not
+/// reach Slack.
+fn boot_wait(failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(10);
+    (BOOT_RETRY_FIRST * 2u32.pow(doublings)).min(BOOT_RETRY_MAX)
+}
+
 struct Team {
     client: Client,
-    user_id: String,
+    /// Who and what the workspace is, as it was signed in.
+    workspace: Workspace,
     /// What this workspace's tasks report through. Signing out closes
     /// `gate`, so nothing they send afterwards reaches the interface.
     sink: Sink,
     gate: Gate,
     /// The start-up work (lists, people, sections, the unread sweep),
     /// stopped on sign-out rather than left calling Slack for nothing.
-    boot: tokio::task::AbortHandle,
+    boot: Booting,
+    /// When to start again if the start-up could not reach Slack.
+    retry: BootRetry,
     /// The watch over every conversation while the socket is down (see
     /// [`super::poll`]). A round holds the lock while it runs, so two
     /// never overlap.
@@ -111,19 +162,14 @@ struct Team {
 
 impl Team {
     /// A signed-in workspace with nothing watched yet.
-    fn new(
-        client: Client,
-        user_id: String,
-        sink: Sink,
-        gate: Gate,
-        boot: tokio::task::AbortHandle,
-    ) -> Self {
+    fn new(client: Client, workspace: Workspace, sink: Sink, gate: Gate, boot: Booting) -> Self {
         Self {
             client,
-            user_id,
+            workspace,
             sink,
             gate,
             boot,
+            retry: BootRetry::default(),
             watch: Arc::new(tokio::sync::Mutex::new(super::poll::State::starting(
                 std::time::Instant::now(),
             ))),
@@ -134,7 +180,7 @@ impl Team {
     /// Stops everything still running for this workspace.
     fn shut(&self) {
         self.gate.close();
-        self.boot.abort();
+        self.boot.task.abort();
         if let Some(round) = &self.watching {
             round.abort();
         }
@@ -418,16 +464,10 @@ impl Worker {
         self.images.set_client(&workspace.team_id, client.clone());
         let session = client.token().is_session();
         self.sink.send(Event::WorkspaceReady(workspace.clone()));
-        let boot = tokio::spawn(boot(
-            client.clone(),
-            workspace.clone(),
-            self.cache.clone(),
-            sink.clone(),
-        ))
-        .abort_handle();
+        let boot = self.spawn_boot(&client, &workspace, &sink, false);
         let replaced = self.teams.insert(
             workspace.team_id.clone(),
-            Team::new(client.clone(), workspace.user_id.clone(), sink, gate, boot),
+            Team::new(client.clone(), workspace.clone(), sink, gate, boot),
         );
         tokio::spawn(super::desktop::dnd_info(
             client.clone(),
@@ -447,15 +487,74 @@ impl Worker {
         }
         if session {
             self.start_rtm(&workspace.team_id, client);
+        } else {
+            // An OAuth sign-in over a browser session: the session's socket
+            // would go on with the old token, so it stops, and people's
+            // presence goes back to polling.
+            self.stop_rtm(&workspace.team_id);
+            self.people.rtm_gone(&workspace.team_id);
         }
         self.report_socket();
     }
 
-    /// Opens (or reopens) the RTM socket for a session workspace.
-    fn start_rtm(&mut self, team: &str, client: Client) {
+    /// Starts a workspace's start-up work; see [`boot`] for `retry`.
+    fn spawn_boot(
+        &self,
+        client: &Client,
+        workspace: &Workspace,
+        sink: &Sink,
+        retry: bool,
+    ) -> Booting {
+        let outcome = Arc::new(OnceLock::new());
+        let set = outcome.clone();
+        let started = boot(
+            client.clone(),
+            workspace.clone(),
+            self.cache.clone(),
+            sink.clone(),
+            retry,
+        );
+        let task = tokio::spawn(async move {
+            let _ = set.set(started.await);
+        })
+        .abort_handle();
+        Booting { task, outcome }
+    }
+
+    /// Starts again each workspace whose start-up could not reach Slack,
+    /// once its wait is over or, `at_once`, now. Without this a workspace
+    /// that started offline would never load its emoji, people, sections
+    /// or unread state. Answers the workspaces started again.
+    fn retry_boots(&mut self, now: std::time::Instant, at_once: bool) -> HashSet<String> {
+        let due: Vec<String> = self
+            .teams
+            .iter_mut()
+            .filter(|(_, team)| team.boot.outcome.get() == Some(&Boot::Unreached))
+            .filter_map(|(id, team)| team.retry.due(now, at_once).then(|| id.clone()))
+            .collect();
+        for id in &due {
+            let Some(team) = self.teams.get(id) else {
+                continue;
+            };
+            log::info!("starting {id} again: Slack could not be reached before");
+            let boot = self.spawn_boot(&team.client, &team.workspace, &team.sink, true);
+            if let Some(team) = self.teams.get_mut(id) {
+                team.boot = boot;
+            }
+        }
+        due.into_iter().collect()
+    }
+
+    /// Closes a workspace's RTM socket, if it has one.
+    pub(super) fn stop_rtm(&mut self, team: &str) {
         if let Some(old) = self.rtm.remove(team) {
             let _ = old.stop.send(true);
         }
+    }
+
+    /// Opens (or reopens) the RTM socket for a session workspace.
+    fn start_rtm(&mut self, team: &str, client: Client) {
+        self.stop_rtm(team);
         let (stop, stopped) = watch::channel(false);
         let generation = self.generation();
         self.rtm.insert(
@@ -702,10 +801,13 @@ impl Worker {
             Command::SetProxy(proxy) => match crate::slack::net::configure(&proxy) {
                 // New clients only help once the sockets reconnect on them.
                 Ok(()) => self.reconnect(),
-                Err(error) => self.sink.send(Event::Error(Problem::new(
-                    Doing::UseProxy,
-                    Failure::Other(error.to_string()),
-                ))),
+                Err(error) => {
+                    log::info!("proxy not used: {error}");
+                    self.sink.send(Event::Error(Problem::new(
+                        Doing::UseProxy,
+                        Failure::BadProxy,
+                    )));
+                }
             },
             Command::Snooze { team, minutes } => {
                 if let Some((client, sink)) = self.team(&team) {
@@ -980,6 +1082,8 @@ impl Worker {
     /// again, to catch up on anything missed while offline.
     fn reconnect(&mut self) {
         self.restart_socket();
+        // These list their conversations as they start.
+        let restarted = self.retry_boots(std::time::Instant::now(), true);
         let session_teams: Vec<(String, Client)> = self
             .teams
             .iter()
@@ -989,7 +1093,7 @@ impl Worker {
         for (id, client) in session_teams {
             self.start_rtm(&id, client);
         }
-        for (id, team) in &self.teams {
+        for (id, team) in self.teams.iter().filter(|(id, _)| !restarted.contains(*id)) {
             tokio::spawn(conversations(
                 team.client.clone(),
                 id.clone(),
@@ -1218,7 +1322,11 @@ impl Worker {
 
     fn socket_event(&mut self, event: SocketEvent) {
         let status = match event {
-            SocketEvent::Connected => Socket::Connected,
+            SocketEvent::Connected => {
+                // The network is back: no need to wait out a retry.
+                self.retry_boots(std::time::Instant::now(), true);
+                Socket::Connected
+            }
             SocketEvent::Disconnected(error) => Socket::Disconnected(failure(&error)),
             // Slack's own code, shown as it is: the usual words for a
             // refused token speak of signing in again, which is not what an
@@ -1239,6 +1347,7 @@ impl Worker {
         use crate::slack::rtm::RtmEvent;
         let status = match event {
             RtmEvent::Connected => {
+                self.retry_boots(std::time::Instant::now(), true);
                 self.people.rtm_live(team, true);
                 Socket::Connected
             }
@@ -1268,7 +1377,7 @@ impl Worker {
 
     /// Routes one real-time event (from Socket Mode or RTM) to the interface.
     fn dispatch_event(&mut self, team: &str, event: &serde_json::Value) {
-        let Some(me) = self.teams.get(team).map(|t| t.user_id.clone()) else {
+        let Some(me) = self.teams.get(team).map(|t| t.workspace.user_id.clone()) else {
             log::debug!("event for a workspace not signed in here");
             return;
         };
@@ -1329,6 +1438,7 @@ impl Worker {
     /// What runs on each poll tick: the open conversation, then the watch
     /// over every workspace's other conversations.
     fn poll(&mut self) {
+        self.retry_boots(std::time::Instant::now(), false);
         self.poll_open();
         self.watch_all(std::time::Instant::now());
     }
@@ -1565,11 +1675,47 @@ mod tests {
     fn team(worker: &mut Worker, id: &str, token: Token) {
         let client = Client::new(reqwest::Client::new(), token);
         let (sink, gate) = worker.sink.gated();
-        let boot = tokio::spawn(async {}).abort_handle();
+        let boot = Booting {
+            task: tokio::spawn(async {}).abort_handle(),
+            outcome: Arc::new(OnceLock::from(Boot::Done)),
+        };
+        let workspace = Workspace {
+            team_id: id.to_owned(),
+            name: id.to_owned(),
+            domain: String::new(),
+            icon: None,
+            user_id: "U1".into(),
+        };
         worker.teams.insert(
             id.to_owned(),
-            Team::new(client, "U1".into(), sink, gate, boot),
+            Team::new(client, workspace, sink, gate, boot),
         );
+    }
+
+    #[test]
+    fn an_unreached_start_up_is_tried_again_later_and_later() {
+        let start = std::time::Instant::now();
+        let mut retry = BootRetry::default();
+        // Seen failing: the first wait starts.
+        assert!(!retry.due(start, false));
+        assert!(!retry.due(start + BOOT_RETRY_FIRST / 2, false));
+        assert!(retry.due(start + BOOT_RETRY_FIRST, false));
+        // Failed again: twice as long.
+        let later = start + BOOT_RETRY_FIRST;
+        assert!(!retry.due(later, false));
+        assert!(!retry.due(later + BOOT_RETRY_FIRST, false));
+        assert!(retry.due(later + BOOT_RETRY_FIRST * 2, false));
+        assert_eq!(boot_wait(100), BOOT_RETRY_MAX);
+    }
+
+    #[test]
+    fn news_of_the_network_tries_again_at_once() {
+        let start = std::time::Instant::now();
+        let mut retry = BootRetry::default();
+        assert!(retry.due(start, true));
+        // The count still grows, so the next wait is longer.
+        assert!(!retry.due(start, false));
+        assert_eq!(retry.failures, 2);
     }
 
     fn live(worker: &mut Worker, status: Socket) -> Live {
@@ -1829,7 +1975,7 @@ mod tests {
         let (_, sink) = worker.team("TA").expect("signed in");
         let pending = tokio::spawn(std::future::pending::<()>());
         if let Some(team) = worker.teams.get_mut("TA") {
-            team.boot = pending.abort_handle();
+            team.boot.task = pending.abort_handle();
         }
         worker.sign_out("TA");
         // A task that outlived the sign-out reports a late WorkspaceReady.
