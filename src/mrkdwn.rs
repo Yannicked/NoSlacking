@@ -84,6 +84,30 @@ pub fn escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The bytes the parser has looked at, so a test can tell linear from
+    /// quadratic work without a clock.
+    static WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts `bytes` of looking at text toward [`WORK`]; nothing outside
+/// tests. Every scan of a line goes through here, so a new one that reads
+/// the rest of the line on each marker shows up as quadratic.
+fn charge(bytes: usize) {
+    #[cfg(test)]
+    WORK.with(|work| work.set(work.get() + bytes));
+    #[cfg(not(test))]
+    let _ = bytes;
+}
+
+/// `haystack.find(needle)`, charging what it reads.
+fn find(haystack: &str, needle: &str) -> Option<usize> {
+    let found = haystack.find(needle);
+    charge(found.map_or(haystack.len(), |at| at + needle.len()));
+    found
+}
+
 /// Parses a message's text into blocks.
 pub fn parse(text: &str) -> Vec<Block> {
     let mut blocks = Vec::new();
@@ -92,13 +116,14 @@ pub fn parse(text: &str) -> Vec<Block> {
     // line there continues it rather than starting another.
     let mut open = false;
     while !rest.is_empty() {
-        match rest.find("```") {
+        match find(rest, "```") {
             Some(start) => {
                 let (before, after) = rest.split_at(start);
                 let after = &after[3..];
-                match after.find("```") {
+                match find(after, "```") {
                     Some(end) => {
                         let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+                        charge(before.len() - line_start);
                         rest = match quote_marker(&before[line_start..]) {
                             Some(lead) => {
                                 open = lines(&before[..line_start], &mut blocks, open);
@@ -212,6 +237,7 @@ fn lines(text: &str, blocks: &mut Vec<Block>, join: bool) -> bool {
         return join;
     }
     let text = text.strip_suffix('\n').unwrap_or(text);
+    charge(text.len());
     let mut paragraph: Vec<Inline> = Vec::new();
     // Whether the paragraph has a line yet, which may be an empty one.
     let mut started = false;
@@ -343,6 +369,7 @@ impl Marks {
             runs: HashMap::new(),
             closers: [Vec::new(), Vec::new(), Vec::new()],
         };
+        charge(text.len());
         let mut previous: Option<char> = None;
         // The ticks seen in a row so far.
         let mut run = 0;
@@ -385,6 +412,7 @@ impl Marks {
         let bytes = text.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
+            charge(1);
             match bytes[i] {
                 b'<' => {
                     let form = next_at(&self.closes, i + 1)
@@ -449,6 +477,7 @@ fn inline(text: &str, style: Style, out: &mut Vec<Inline>) {
     let mut i = 0;
     let bytes = text.as_bytes();
     while i < bytes.len() {
+        charge(1);
         let c = bytes[i];
         let before = text[..i].chars().next_back();
         let consumed = match c {
@@ -510,6 +539,7 @@ fn flush(out: &mut Vec<Inline>, text: &str, start: usize, end: usize, style: Sty
 /// What is between the brackets of a `<...>` form, which holds no `<` or
 /// line break. Returns whether it was one; if not, it stays text.
 fn special(inner: &str, style: Style, out: &mut Vec<Inline>) -> bool {
+    charge(inner.len());
     if inner.is_empty() {
         return false;
     }
@@ -592,6 +622,7 @@ fn code<'a>(text: &'a str, at: usize, marks: &Marks) -> Code<'a> {
         .iter()
         .take_while(|&&b| b == b'`')
         .count();
+    charge(run);
     if run == 1 {
         // One tick closes at the next tick, whatever follows it.
         return match next_at(&marks.ticks, at + 1) {
@@ -652,11 +683,11 @@ fn styled<'a>(
 /// `:name:` at the start of `text`: the name and the bytes consumed.
 fn emoji(text: &str) -> Option<(&str, usize)> {
     let after = &text[1..];
-    let end = after.find(':')?;
+    let end = find(after, ":")?;
     // A skin tone is part of the name: `:+1::skin-tone-2:`. A broken one
     // (`:ok::skin-tone- is fine`) leaves the emoji before it as it was.
     if after[end..].starts_with("::skin-tone-")
-        && let Some(close) = after[end + 2..].find(':')
+        && let Some(close) = find(&after[end + 2..], ":")
         && is_emoji_name(&after[..end + 2 + close])
     {
         let end = end + 2 + close;
@@ -998,15 +1029,18 @@ mod tests {
 
     #[test]
     fn long_unclosed_markup_parses_in_linear_time() {
-        // A generous budget for an unoptimized build on a busy machine;
-        // the quadratic parser took many seconds here.
-        let budget = std::time::Duration::from_secs(1);
+        // Counted work instead of a clock: the quadratic parser looked at
+        // each byte about once per marker before it, thousands of times.
         for (name, text) in pathological() {
-            let start = std::time::Instant::now();
+            WORK.with(|work| work.set(0));
             let blocks = parse(&text);
-            let took = start.elapsed();
+            let work = WORK.with(std::cell::Cell::get);
             assert!(!blocks.is_empty(), "{name}");
-            assert!(took < budget, "{name}: {took:?} for {} bytes", text.len());
+            assert!(
+                work <= 16 * text.len(),
+                "{name}: looked at {work} bytes for {}",
+                text.len()
+            );
         }
     }
 
