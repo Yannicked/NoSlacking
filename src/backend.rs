@@ -5,11 +5,15 @@
 //! [`Event`]s and wakes the window for each one, so egui sleeps when
 //! nothing happens.
 
+mod api;
 mod around;
 pub mod convos;
 pub mod desktop;
+mod fetch;
+mod files;
 pub mod people;
 mod search;
+mod translate;
 pub mod views;
 pub mod worker;
 

@@ -89,7 +89,7 @@ pub async fn snooze(client: Client, team: String, minutes: Option<u32>, sink: Si
             log::info!("could not change the snooze in Slack: {error}");
             sink.send(Event::Notice(format!(
                 "Slack did not take the snooze ({}); it holds on this computer only.",
-                super::worker::describe(&error)
+                super::api::describe(&error)
             )));
         }
     }
@@ -230,7 +230,7 @@ pub async fn mute(
     if let Err(error) = result {
         sink.send(Event::Error(format!(
             "Could not change the mute in Slack: {}",
-            super::worker::describe(&error)
+            super::api::describe(&error)
         )));
     }
     prefs(client, team, sink).await;
