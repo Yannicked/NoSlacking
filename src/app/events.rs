@@ -32,12 +32,7 @@ impl App {
             Event::WorkspaceReady(info) => self.workspace_ready(info),
             Event::SignedOut { team, reason } => self.signed_out(&team, reason),
             Event::Socket(socket) => self.socket_changed(socket),
-            Event::Error(problem) => {
-                if let crate::failure::Doing::Upload { name } = &problem.doing {
-                    self.upload_failed(name);
-                }
-                self.toast(problem.message(), problem.is_error());
-            }
+            Event::Error(problem) => self.toast(problem.message(), problem.is_error()),
             Event::UploadProgress { id, sent, total } => {
                 if let Some(upload) = self.transfers.iter_mut().find(|u| u.id == id) {
                     upload.sent = sent;
@@ -49,17 +44,21 @@ impl App {
                     upload.finishing = true;
                 }
             }
-            Event::UploadDone { id } => {
-                self.upload_done(id, false);
+            Event::UploadDone { id, shared } => {
+                self.upload_done(id, shared);
             }
             // Said only once the worker has really stopped it, so the
             // toast never claims a cancel for a file that was posted.
             Event::UploadCancelled { id } => {
-                if self.upload_done(id, true) {
+                if self.upload_done(id, false) {
                     self.toast(t("Upload cancelled").into_owned(), false);
                 }
             }
-            Event::Slash { command, result } => self.slash_done(&command, result),
+            Event::Slash {
+                id,
+                command,
+                result,
+            } => self.slash_done(id, &command, result),
             Event::Notice(notice) => self.toast(notice.message(), false),
             Event::Dnd { team, dnd } => self.dnd_arrived(&team, dnd),
             Event::SlackPrefs { team, prefs } => self.prefs_arrived(&team, prefs),
@@ -496,8 +495,12 @@ impl App {
         // The echo of a message you deleted while it was sending.
         if self
             .workspace_mut(team)
-            .is_some_and(|w| w.is_suppressed(channel, &message.ts))
+            .is_some_and(|w| w.is_suppressed(channel, &message.ts) || w.is_cancelled_echo(&message))
         {
+            // Settled by the workspace, so its send is still deleted.
+            if let Some(workspace) = self.workspace_mut(team) {
+                workspace.message_arrived(channel, message, false);
+            }
             return;
         }
         let viewing = self.is_viewing(team, channel);
@@ -555,17 +558,21 @@ impl App {
         let Some(workspace) = self.workspace_mut(team) else {
             return;
         };
-        if let SendOutcome::Cancelled { delete } = workspace.sent(channel, local, &result) {
+        match workspace.sent(channel, local, &result) {
             // Deleted while it was sending: take it back now it is posted.
-            if let Some(ts) = delete {
-                self.backend.send(Command::Delete {
-                    team: team.to_owned(),
-                    channel: channel.to_owned(),
-                    ts,
-                    removed: None,
-                });
+            SendOutcome::Cancelled { delete } => {
+                if let Some(ts) = delete {
+                    self.backend.send(Command::Delete {
+                        team: team.to_owned(),
+                        channel: channel.to_owned(),
+                        ts,
+                        removed: None,
+                    });
+                }
+                return;
             }
-            return;
+            SendOutcome::Posted => return,
+            SendOutcome::Settled => {}
         }
         if let Err(error) = result {
             self.toast(

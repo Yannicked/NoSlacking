@@ -53,7 +53,8 @@ impl UploadGate {
 }
 
 /// Uploads one file for [`Worker::upload`](super::worker::Worker::upload),
-/// telling the interface how far it got along the way.
+/// telling the interface how far it got along the way. Returns whether
+/// the file was shared.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn upload(
     id: u64,
@@ -66,7 +67,7 @@ pub(super) async fn upload(
     poll_after: bool,
     gate: UploadGate,
     sink: &Sink,
-) {
+) -> bool {
     let name = file_name(&path);
     // The size comes from the open file, so it is the size of what
     // gets streamed, not of whatever the path named a moment
@@ -78,6 +79,7 @@ pub(super) async fn upload(
     let failed = |why| {
         let doing = Doing::Upload { name: name.clone() };
         sink.send(Event::Error(Problem::new(doing, why)));
+        false
     };
     let (file, size) = match opened {
         Ok((_, meta)) if !meta.is_file() => return failed(Failure::NotAFile),
@@ -130,7 +132,7 @@ pub(super) async fn upload(
         .await
     {
         // Cancelled in time: the worker has already told the interface.
-        Ok(false) => {}
+        Ok(false) => false,
         Ok(true) => {
             sink.send(Event::Notice(crate::notice::Notice::Uploaded { name }));
             // Without a live socket the new file would only show
@@ -147,6 +149,7 @@ pub(super) async fn upload(
                 )
                 .await;
             }
+            true
         }
         Err(error) => failed(failure(&error)),
     }

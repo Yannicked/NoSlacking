@@ -244,6 +244,7 @@ fn message(seconds: u64, user: &str, text: &str) -> Message {
         delivery: Delivery::Sent,
         broadcast: false,
         pinned: false,
+        client_msg_id: None,
     }
 }
 
@@ -1000,13 +1001,14 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                         sink.send(Event::Notice(Notice::DemoUpload {
                             path: path.display().to_string(),
                         }));
-                        sink.send(Event::UploadDone { id });
+                        sink.send(Event::UploadDone { id, shared: true });
                     })
                 };
                 uploads.insert(id, (task.abort_handle(), gate));
             }
             // Every command works, as far as the demo can tell.
-            Command::Slash { command, .. } => sink.send(Event::Slash {
+            Command::Slash { id, command, .. } => sink.send(Event::Slash {
+                id,
                 command,
                 result: Ok(None),
             }),

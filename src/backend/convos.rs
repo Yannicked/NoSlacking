@@ -642,6 +642,7 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
                 delivery: crate::model::Delivery::Sent,
                 broadcast: false,
                 pinned: true,
+                client_msg_id: None,
             };
             let first = convos::Pin {
                 message: message.clone(),

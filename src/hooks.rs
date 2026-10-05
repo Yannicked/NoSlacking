@@ -289,6 +289,7 @@ mod tests {
             delivery: Delivery::Sent,
             broadcast: false,
             pinned: false,
+            client_msg_id: None,
         }
     }
 
