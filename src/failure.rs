@@ -65,6 +65,15 @@ pub enum Failure {
     NotAFile,
     /// The system has no downloads folder (nor a home folder).
     NoDownloadsFolder,
+    /// A file or folder is not there.
+    FileNotFound,
+    /// The system does not allow reading or writing a file or folder.
+    FileDenied,
+    /// The disk is full.
+    DiskFull,
+    /// Some other trouble with a file; the detail is the system's own and
+    /// technical.
+    Io(String),
     /// A file that could run code if opened, so only downloading is offered.
     NotOpenable,
     /// The sign-in by cookie needs the workspace's address.
@@ -77,6 +86,13 @@ pub enum Failure {
     NoClientId,
     /// What was pasted is not a Slack token.
     NotAToken,
+    /// What was pasted is not a `d` session cookie (`xoxd-…`).
+    NotACookie,
+    /// The cookie signed in, but the workspace's page carried no session
+    /// token.
+    NoSessionToken,
+    /// The cookie did not sign in to the workspace.
+    CookieRefused,
     /// A bot token was pasted where a user token is needed.
     BotToken,
     /// Slack signed in but set no session cookie.
@@ -99,6 +115,8 @@ pub enum Failure {
     NeedsSession,
     /// `/invite` with nobody named.
     NoInvitee,
+    /// The manual proxy's URL cannot be used.
+    BadProxy,
     /// Slack's error code, for codes not worded here: shown with its
     /// underscores as spaces, which mostly reads.
     Slack(String),
@@ -108,6 +126,19 @@ pub enum Failure {
 }
 
 impl Failure {
+    /// What a file operation's error means, by its kind; only an uncommon
+    /// error keeps the system's own (English) words, as a detail.
+    pub fn io(error: &std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::NotFound => Self::FileNotFound,
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem => {
+                Self::FileDenied
+            }
+            std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded => Self::DiskFull,
+            _ => Self::Io(error.to_string()),
+        }
+    }
+
     /// The failure in words, in the interface's language: a clause, such as
     /// "the channel is archived", to go after "Could not …:", except for
     /// the sign-in's own failures, which are whole sentences.
@@ -173,6 +204,15 @@ impl Failure {
             Self::TooLarge => t("it is larger than Slack's 1 GB limit"),
             Self::NotAFile => t("it is not a file"),
             Self::NoDownloadsFolder => t("there is no downloads folder"),
+            Self::FileNotFound => t("the file is not there"),
+            Self::FileDenied => t("the system does not allow access to the file"),
+            Self::DiskFull => t("the disk is full"),
+            Self::Io(detail) => {
+                return fill(
+                    &t("the file system failed: {detail}"),
+                    &[("detail", detail)],
+                );
+            }
             Self::NotOpenable => t("it cannot be opened here; download it instead"),
             Self::NoWorkspaceAddress => {
                 t("Enter your workspace's Slack address, such as acme.slack.com.")
@@ -187,6 +227,15 @@ impl Failure {
             Self::NotAToken => {
                 t("That does not look like a Slack token (it should start with xoxp-).")
             }
+            Self::NotACookie => t(
+                "That does not look like a session cookie (it should start with xoxd-). Copy the value of the cookie named d.",
+            ),
+            Self::NoSessionToken => t(
+                "Slack signed in, but did not put a session token on the page for this workspace.",
+            ),
+            Self::CookieRefused => t(
+                "The d cookie did not sign in. Copy a fresh one from a browser where this workspace is open.",
+            ),
             Self::BotToken => {
                 t("That is a bot token. NoSlacking needs the User OAuth Token (xoxp-).")
             }
@@ -206,6 +255,7 @@ impl Failure {
             Self::NoCode => t("Slack sent no authorization code."),
             Self::NeedsSession => t("it only works when you sign in with your browser"),
             Self::NoInvitee => t("name someone to invite with @"),
+            Self::BadProxy => t("the proxy URL cannot be used; check it in Settings"),
             Self::Slack(code) => return code.replace('_', " "),
             Self::Other(text) => return text.clone(),
         };
@@ -418,12 +468,19 @@ mod tests {
             Failure::TooLarge,
             Failure::NotAFile,
             Failure::NoDownloadsFolder,
+            Failure::FileNotFound,
+            Failure::FileDenied,
+            Failure::DiskFull,
+            Failure::Io("broken pipe".into()),
             Failure::NotOpenable,
             Failure::NoWorkspaceAddress,
             Failure::NoBrowser,
             Failure::NotASignInLink,
             Failure::NoClientId,
             Failure::NotAToken,
+            Failure::NotACookie,
+            Failure::NoSessionToken,
+            Failure::CookieRefused,
             Failure::BotToken,
             Failure::NoSessionCookie,
             Failure::NoWorkspace,
@@ -434,6 +491,7 @@ mod tests {
             Failure::NoCode,
             Failure::NeedsSession,
             Failure::NoInvitee,
+            Failure::BadProxy,
             Failure::Slack("some_new_code".into()),
             Failure::Other("disk full".into()),
         ]
@@ -530,6 +588,27 @@ mod tests {
             .worded(&english),
             "Could not upload {name}.png: it is larger than Slack's 1 GB limit"
         );
+    }
+
+    #[test]
+    fn file_errors_are_told_by_their_kind() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            Failure::io(&Error::from(ErrorKind::NotFound)),
+            Failure::FileNotFound
+        );
+        assert_eq!(
+            Failure::io(&Error::from(ErrorKind::PermissionDenied)),
+            Failure::FileDenied
+        );
+        assert_eq!(
+            Failure::io(&Error::from(ErrorKind::StorageFull)),
+            Failure::DiskFull
+        );
+        assert!(matches!(
+            Failure::io(&Error::other("odd")),
+            Failure::Io(detail) if detail == "odd"
+        ));
     }
 
     #[test]

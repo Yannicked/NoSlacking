@@ -34,6 +34,9 @@ pub enum SlackError {
     Network(String),
     #[error("unexpected response: {0}")]
     Decode(String),
+    /// A browser-session sign-in did not work, before Slack's API had a say.
+    #[error("session sign-in: {0:?}")]
+    Session(super::session::Refusal),
 }
 
 /// The error codes that mean a token no longer works and the workspace

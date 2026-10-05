@@ -82,7 +82,7 @@ pub(super) async fn upload(
     let (file, size) = match opened {
         Ok((_, meta)) if !meta.is_file() => return failed(Failure::NotAFile),
         Ok((file, meta)) => (file, meta.len()),
-        Err(error) => return failed(Failure::Other(error.to_string())),
+        Err(error) => return failed(Failure::io(&error)),
     };
     if size > MAX_UPLOAD {
         return failed(Failure::TooLarge);
@@ -197,14 +197,14 @@ pub(super) async fn open_file(
     } else {
         tokio::fs::create_dir_all(&dir)
             .await
-            .map_err(|error| Problem::new(saving(name), Failure::Other(error.to_string())))?;
+            .map_err(|error| Problem::new(saving(name), Failure::io(&error)))?;
         save(client, url, name, &dir).await?
     };
     tokio::task::spawn_blocking(move || open::that_detached(&path))
         .await
-        .map_err(|error| error.to_string())
-        .and_then(|opened| opened.map_err(|error| error.to_string()))
-        .map_err(|error| Problem::new(opening(name), Failure::Other(error)))
+        .map_err(|error| Failure::Io(error.to_string()))
+        .and_then(|opened| opened.map_err(|error| Failure::io(&error)))
+        .map_err(|failure| Problem::new(opening(name), failure))
 }
 
 /// Streams `url` into a new file named after `name` in `dir`, numbered if
@@ -228,8 +228,7 @@ async fn save(
         .download(url)
         .await
         .map_err(|e| downloading(failure(&e)))?;
-    let unsaved =
-        |error: std::io::Error| Problem::new(saving(name), Failure::Other(error.to_string()));
+    let unsaved = |error: std::io::Error| Problem::new(saving(name), Failure::io(&error));
     let dir = dir.to_path_buf();
     let safe = safe_name(name);
     let (part, mut file) = create_unique(&dir, |n| format!(".{}.part", numbered(&safe, n)))

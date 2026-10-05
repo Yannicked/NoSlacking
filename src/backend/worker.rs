@@ -702,10 +702,13 @@ impl Worker {
             Command::SetProxy(proxy) => match crate::slack::net::configure(&proxy) {
                 // New clients only help once the sockets reconnect on them.
                 Ok(()) => self.reconnect(),
-                Err(error) => self.sink.send(Event::Error(Problem::new(
-                    Doing::UseProxy,
-                    Failure::Other(error.to_string()),
-                ))),
+                Err(error) => {
+                    log::info!("proxy not used: {error}");
+                    self.sink.send(Event::Error(Problem::new(
+                        Doing::UseProxy,
+                        Failure::BadProxy,
+                    )));
+                }
             },
             Command::Snooze { team, minutes } => {
                 if let Some((client, sink)) = self.team(&team) {

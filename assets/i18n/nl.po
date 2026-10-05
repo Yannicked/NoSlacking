@@ -1888,6 +1888,31 @@ msgstr "Kan noslacking://-links niet registreren ({error}). Probeer de loopback-
 msgid "Mark unread"
 msgstr "Als ongelezen markeren"
 
+# Why a file could not be read or written.
+msgid "the file is not there"
+msgstr "het bestand is er niet"
+
+msgid "the system does not allow access to the file"
+msgstr "het systeem staat geen toegang tot het bestand toe"
+
+msgid "the disk is full"
+msgstr "de schijf is vol"
+
+msgid "the file system failed: {detail}"
+msgstr "het bestandssysteem faalde: {detail}"
+
+msgid "That does not look like a session cookie (it should start with xoxd-). Copy the value of the cookie named d."
+msgstr "Dat lijkt geen sessiecookie (die begint met xoxd-). Kopieer de waarde van de cookie met de naam d."
+
+msgid "Slack signed in, but did not put a session token on the page for this workspace."
+msgstr "Slack heeft je aangemeld, maar zette geen sessietoken op de pagina van deze werkruimte."
+
+msgid "The d cookie did not sign in. Copy a fresh one from a browser where this workspace is open."
+msgstr "De d-cookie meldde je niet aan. Kopieer een nieuwe uit een browser waarin deze werkruimte open is."
+
+msgid "the proxy URL cannot be used; check it in Settings"
+msgstr "de proxy-URL is niet bruikbaar; controleer hem in Instellingen"
+
 # What the keyring said when it failed.
 msgid "the keyring is locked"
 msgstr "de sleutelbos is vergrendeld"

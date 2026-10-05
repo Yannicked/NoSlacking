@@ -119,13 +119,22 @@ fn seeded_client(cookie: &str) -> Result<reqwest::Client, SlackError> {
         .map_err(|e| SlackError::Network(e.to_string()))
 }
 
+/// Why a cookie did not give a session, for the interface to word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// What was pasted is not a `d` cookie (`xoxd-…`).
+    NotACookie,
+    /// Signed in, but the workspace's page carried no session token.
+    NoToken,
+    /// The cookie did not sign in.
+    CookieRefused,
+}
+
 /// Derives and validates a session token for one workspace.
 pub async fn derive(cookie: &str, workspace_url: &str) -> Result<SessionSignIn, SlackError> {
     let cookie = clean_cookie(cookie);
     if !cookie.starts_with("xoxd-") {
-        return Err(SlackError::Api(
-            "the d cookie should start with xoxd-; copy its value from the cookie named d".into(),
-        ));
+        return Err(SlackError::Session(Refusal::NotACookie));
     }
     let http = seeded_client(&cookie)?;
     // The boot page returns HTTP 403 while still carrying the token, so the
@@ -139,12 +148,11 @@ pub async fn derive(cookie: &str, workspace_url: &str) -> Result<SessionSignIn, 
         looks_logged_in(&body)
     );
     let token = scrape_token(&body).ok_or_else(|| {
-        let reason = if looks_logged_in(&body) {
-            "signed in, but Slack did not put a session token on the page for this workspace"
+        SlackError::Session(if looks_logged_in(&body) {
+            Refusal::NoToken
         } else {
-            "the d cookie did not sign in; copy a fresh one from a browser where this workspace is open"
-        };
-        SlackError::Api(reason.into())
+            Refusal::CookieRefused
+        })
     })?;
     let session = Token::session(token, cookie, workspace_url);
     let client = client::Client::new(http, session.clone());
