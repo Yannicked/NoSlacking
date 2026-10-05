@@ -239,6 +239,8 @@ pub struct App {
     pub scroll_to_bottom: HashSet<String>,
     /// Focus the composer next frame.
     pub focus_composer: bool,
+    /// Focus the thread's reply field next frame: a thread just opened.
+    pub focus_thread_composer: bool,
     /// Conversations open in windows of their own.
     pub popouts: Vec<Popout>,
     /// Focus the field of the dialog or picker just opened, once: asking
@@ -394,6 +396,7 @@ impl App {
             prepended: None,
             scroll_to_bottom: HashSet::new(),
             focus_composer: true,
+            focus_thread_composer: false,
             popouts: Vec::new(),
             focus_overlay: false,
             jumps: Vec::new(),
@@ -1127,6 +1130,7 @@ impl App {
             return;
         };
         self.thread = Some((channel.clone(), ts.clone()));
+        self.focus_thread_composer = true;
         if let Some(workspace) = self.workspace_mut(&team) {
             workspace
                 .threads
