@@ -1,36 +1,43 @@
-//! What every Web API call shares: plain words for its failures, and
+//! What every Web API call shares: what its failures mean, and
 //! walking a listing page by page.
 
 use std::collections::HashSet;
 
+use crate::failure::Failure;
 use crate::slack::SlackError;
 
-/// A user-facing description of an API failure.
-pub(super) fn describe(error: &SlackError) -> String {
+/// What an API failure means for the interface, which words it.
+pub(super) fn failure(error: &SlackError) -> Failure {
     if error.is_auth() {
-        return "the sign-in is no longer valid; sign in again".into();
+        return Failure::SignedOut;
     }
     match error {
         SlackError::Api(code) => match code.as_str() {
-            "missing_scope" => {
-                "the Slack app lacks a permission; reinstall it from the manifest".into()
+            "missing_scope" => Failure::MissingPermission,
+            "channel_not_found" => Failure::ConversationGone,
+            "not_in_channel" => Failure::NotInChannel,
+            "is_archived" => Failure::Archived,
+            "msg_too_long" => Failure::TooLong,
+            "cant_update_message" | "edit_window_closed" => Failure::CantEdit,
+            "cant_delete_message" => Failure::CantDelete,
+            "invalid_code" | "code_already_used" => Failure::LinkExpired,
+            "bad_redirect_uri" => Failure::BadRedirect,
+            "invalid_client_id" | "bad_client_secret" => Failure::BadClient,
+            // Creating, renaming and leaving channels.
+            "name_taken" => Failure::NameTaken,
+            "invalid_name" | "invalid_name_specials" | "invalid_name_punctuation" => {
+                Failure::InvalidName
             }
-            "channel_not_found" => "the conversation no longer exists".into(),
-            "not_in_channel" => "you are not in that channel".into(),
-            "is_archived" => "the channel is archived".into(),
-            "msg_too_long" => "the message is too long".into(),
-            "cant_update_message" | "edit_window_closed" => {
-                "that message can no longer be edited".into()
-            }
-            "cant_delete_message" => "you cannot delete that message".into(),
-            "invalid_code" | "code_already_used" => "the sign-in link expired; try again".into(),
-            "bad_redirect_uri" => {
-                "the redirect URL does not match the Slack app; check its OAuth settings".into()
-            }
-            "invalid_client_id" | "bad_client_secret" => "the client ID or secret is wrong".into(),
-            other => other.replace('_', " "),
+            "invalid_name_maxlength" => Failure::NameTooLong,
+            "cant_leave_general" => Failure::CantLeaveGeneral,
+            "restricted_action" | "restricted_action_read_only_channel" => Failure::Restricted,
+            "method_not_supported_for_channel_type" => Failure::WrongKind,
+            other => Failure::Slack(other.to_owned()),
         },
-        other => other.to_string(),
+        SlackError::RateLimited => Failure::RateLimited,
+        SlackError::Http(status) => Failure::Http(*status),
+        SlackError::Network(detail) => Failure::Network(detail.clone()),
+        SlackError::Decode(detail) => Failure::Unexpected(detail.clone()),
     }
 }
 
@@ -192,22 +199,53 @@ mod tests {
     }
 
     #[test]
-    fn failures_read_as_plain_sentences() {
+    fn every_auth_code_means_signed_out() {
         for code in crate::slack::client::AUTH_ERRORS {
             assert_eq!(
-                describe(&SlackError::Api((*code).to_owned())),
-                "the sign-in is no longer valid; sign in again",
+                failure(&SlackError::Api((*code).to_owned())),
+                Failure::SignedOut,
                 "{code}"
             );
         }
+    }
+
+    #[test]
+    fn codes_map_to_what_they_mean() {
+        for (code, meant) in [
+            ("missing_scope", Failure::MissingPermission),
+            ("channel_not_found", Failure::ConversationGone),
+            ("not_in_channel", Failure::NotInChannel),
+            ("is_archived", Failure::Archived),
+            ("msg_too_long", Failure::TooLong),
+            ("edit_window_closed", Failure::CantEdit),
+            ("cant_update_message", Failure::CantEdit),
+            ("cant_delete_message", Failure::CantDelete),
+            ("code_already_used", Failure::LinkExpired),
+            ("bad_redirect_uri", Failure::BadRedirect),
+            ("bad_client_secret", Failure::BadClient),
+            ("name_taken", Failure::NameTaken),
+            ("invalid_name_specials", Failure::InvalidName),
+            ("invalid_name_maxlength", Failure::NameTooLong),
+            ("cant_leave_general", Failure::CantLeaveGeneral),
+            ("restricted_action", Failure::Restricted),
+            ("method_not_supported_for_channel_type", Failure::WrongKind),
+            ("some_new_code", Failure::Slack("some_new_code".into())),
+        ] {
+            assert_eq!(failure(&SlackError::Api(code.into())), meant, "{code}");
+        }
+    }
+
+    #[test]
+    fn transport_trouble_keeps_its_kind() {
+        assert_eq!(failure(&SlackError::RateLimited), Failure::RateLimited);
+        assert_eq!(failure(&SlackError::Http(502)), Failure::Http(502));
         assert_eq!(
-            describe(&SlackError::Api("channel_not_found".into())),
-            "the conversation no longer exists"
+            failure(&SlackError::Network("timed out".into())),
+            Failure::Network("timed out".into())
         );
         assert_eq!(
-            describe(&SlackError::Api("some_new_code".into())),
-            "some new code"
+            failure(&SlackError::Decode("eof".into())),
+            Failure::Unexpected("eof".into())
         );
-        assert_eq!(describe(&SlackError::Http(502)), "HTTP 502");
     }
 }

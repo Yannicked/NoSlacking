@@ -2,9 +2,10 @@
 //! downloads under names that are safe on every system, and opening a
 //! file in the app made for it.
 
-use super::api::describe;
+use super::api::failure;
 use super::fetch::history;
 use super::{Event, Sink};
+use crate::failure::{Doing, Failure, Problem};
 use crate::model::Ts;
 use crate::offline::Cache;
 use crate::slack::{Client, SlackError};
@@ -25,9 +26,7 @@ pub(super) async fn upload(
     poll_after: bool,
     sink: &Sink,
 ) {
-    let name = path
-        .file_name()
-        .map_or_else(|| "file".to_owned(), |n| n.to_string_lossy().into_owned());
+    let name = file_name(&path);
     // The size comes from the open file, so it is the size of what
     // gets streamed, not of whatever the path named a moment
     // earlier.
@@ -35,22 +34,17 @@ pub(super) async fn upload(
         Ok(file) => file.metadata().await.map(|meta| (file, meta)),
         Err(error) => Err(error),
     };
+    let failed = |why| {
+        let doing = Doing::Upload { name: name.clone() };
+        sink.send(Event::Error(Problem::new(doing, why)));
+    };
     let (file, size) = match opened {
-        Ok((_, meta)) if !meta.is_file() => {
-            sink.send(Event::Error(format!("{name} is not a file.")));
-            return;
-        }
+        Ok((_, meta)) if !meta.is_file() => return failed(Failure::NotAFile),
         Ok((file, meta)) => (file, meta.len()),
-        Err(error) => {
-            sink.send(Event::Error(format!("Could not read {name}: {error}")));
-            return;
-        }
+        Err(error) => return failed(Failure::Other(error.to_string())),
     };
     if size > MAX_UPLOAD {
-        sink.send(Event::Error(format!(
-            "{name} is larger than Slack's 1 GB limit."
-        )));
-        return;
+        return failed(Failure::TooLarge);
     }
     sink.send(Event::UploadProgress {
         id,
@@ -88,15 +82,12 @@ pub(super) async fn upload(
                 history(client, team, channel, None, Cache::disabled(), sink.clone()).await;
             }
         }
-        Err(error) => sink.send(Event::Error(format!(
-            "Could not upload {name}: {}",
-            describe(&error)
-        ))),
+        Err(error) => failed(failure(&error)),
     }
 }
 
-/// Saves the file at `url` in the downloads folder as `name`, or says in
-/// a sentence why not.
+/// Saves the file at `url` in the downloads folder as `name`, or says
+/// why not.
 ///
 /// The body streams into a hidden temporary file next to its final place,
 /// which is renamed once complete, so a large file never sits in memory
@@ -105,14 +96,13 @@ pub(super) async fn download(
     client: &Client,
     url: &str,
     name: &str,
-) -> Result<std::path::PathBuf, String> {
-    let saving = |error: std::io::Error| format!("Could not save {name}: {error}");
+) -> Result<std::path::PathBuf, Problem> {
     // Finding the folder can read a config file; keep it off the runtime.
     let dir = tokio::task::spawn_blocking(downloads_dir)
         .await
         .ok()
         .flatten()
-        .ok_or_else(|| saving(std::io::Error::other("no downloads folder")))?;
+        .ok_or_else(|| Problem::new(saving(name), Failure::NoDownloadsFolder))?;
     save(client, url, name, &dir).await
 }
 
@@ -125,14 +115,12 @@ pub(super) async fn open_file(
     dir: std::path::PathBuf,
     url: &str,
     name: &str,
-) -> Result<(), String> {
+) -> Result<(), Problem> {
     // The system opens a file by its name, and a name is whatever the
     // sender chose: only Slack's own files with a player's extension are
     // opened, so "clip.mp4.exe" can never be run.
     if !crate::slack::client::is_slack_file_url(url) || !plays_safely(&safe_name(name)) {
-        return Err(format!(
-            "{name} cannot be opened here; download it instead."
-        ));
+        return Err(Problem::new(opening(name), Failure::NotOpenable));
     }
     let saved = dir.join(safe_name(name));
     let have = tokio::fs::metadata(&saved)
@@ -143,14 +131,14 @@ pub(super) async fn open_file(
     } else {
         tokio::fs::create_dir_all(&dir)
             .await
-            .map_err(|error| format!("Could not save {name}: {error}"))?;
+            .map_err(|error| Problem::new(saving(name), Failure::Other(error.to_string())))?;
         save(client, url, name, &dir).await?
     };
     tokio::task::spawn_blocking(move || open::that_detached(&path))
         .await
         .map_err(|error| error.to_string())
         .and_then(|opened| opened.map_err(|error| error.to_string()))
-        .map_err(|error| format!("Could not open {name}: {error}"))
+        .map_err(|error| Problem::new(opening(name), Failure::Other(error)))
 }
 
 /// Streams `url` into a new file named after `name` in `dir`, numbered if
@@ -160,33 +148,42 @@ async fn save(
     url: &str,
     name: &str,
     dir: &std::path::Path,
-) -> Result<std::path::PathBuf, String> {
+) -> Result<std::path::PathBuf, Problem> {
     use tokio::io::AsyncWriteExt as _;
+    let downloading = |why| {
+        Problem::new(
+            Doing::Download {
+                name: name.to_owned(),
+            },
+            why,
+        )
+    };
     let mut response = client
         .download(url)
         .await
-        .map_err(|e| format!("Could not download {name}: {}", describe(&e)))?;
-    let saving = |error: std::io::Error| format!("Could not save {name}: {error}");
+        .map_err(|e| downloading(failure(&e)))?;
+    let unsaved =
+        |error: std::io::Error| Problem::new(saving(name), Failure::Other(error.to_string()));
     let dir = dir.to_path_buf();
     let safe = safe_name(name);
     let (part, mut file) = create_unique(&dir, |n| format!(".{}.part", numbered(&safe, n)))
         .await
-        .map_err(saving)?;
-    let written: Result<(), String> = async {
+        .map_err(unsaved)?;
+    let written: Result<(), Problem> = async {
         let mut size = 0u64;
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|e| format!("Could not download {name}: {}", SlackError::from(e)))?
+            .map_err(|e| downloading(failure(&SlackError::from(e))))?
         {
             size += chunk.len() as u64;
             if size > MAX_UPLOAD {
-                return Err(format!("{name} is larger than Slack's 1 GB limit."));
+                return Err(downloading(Failure::TooLarge));
             }
-            file.write_all(&chunk).await.map_err(saving)?;
+            file.write_all(&chunk).await.map_err(unsaved)?;
         }
-        file.flush().await.map_err(saving)?;
-        file.sync_all().await.map_err(saving)
+        file.flush().await.map_err(unsaved)?;
+        file.sync_all().await.map_err(unsaved)
     }
     .await;
     drop(file);
@@ -213,7 +210,28 @@ async fn save(
     if renamed.is_err() {
         let _ = tokio::fs::remove_file(&part).await;
     }
-    renamed.map_err(saving)
+    renamed.map_err(unsaved)
+}
+
+/// The name a file to upload goes by: its own, or "file" for a path that
+/// ends in none.
+pub(super) fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map_or_else(|| "file".to_owned(), |n| n.to_string_lossy().into_owned())
+}
+
+/// Writing `name` to disk, as a failure says it.
+fn saving(name: &str) -> Doing {
+    Doing::Save {
+        name: name.to_owned(),
+    }
+}
+
+/// Opening `name` in its app, as a failure says it.
+fn opening(name: &str) -> Doing {
+    Doing::Open {
+        name: name.to_owned(),
+    }
 }
 
 fn downloads_dir() -> Option<std::path::PathBuf> {

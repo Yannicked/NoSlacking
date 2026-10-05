@@ -8,9 +8,10 @@ use serde_json::Value;
 
 use super::{BROWSER_SIGN_IN_WINDOW, Internal, Worker};
 use crate::auth::{self, Flow, SignedIn};
-use crate::backend::api::describe;
+use crate::backend::api::failure;
 use crate::backend::{Event, SignIn};
 use crate::credentials::AppCredentials;
+use crate::failure::{Doing, Failure, Problem};
 use crate::settings::Redirect;
 use crate::slack::magic::TeamResult;
 use crate::slack::{Client, Token, types};
@@ -56,9 +57,8 @@ impl Worker {
 
     pub(super) fn sign_in_session(&mut self, cookie: String, workspace_url: &str) {
         let Some(workspace_url) = crate::slack::session::normalize_workspace(workspace_url) else {
-            self.sink.send(Event::SignIn(SignIn::Failed(
-                "Enter your workspace's Slack address, such as acme.slack.com.".into(),
-            )));
+            self.sink
+                .send(Event::SignIn(SignIn::Failed(Failure::NoWorkspaceAddress)));
             return;
         };
         let internal = self.internal.clone();
@@ -71,7 +71,7 @@ impl Worker {
                     user_id: signed.user_id,
                     token: signed.token,
                 })
-                .map_err(|e| describe(&e));
+                .map_err(|e| failure(&e));
             let _ = internal.send(Internal::SignedIn(result));
         });
     }
@@ -82,9 +82,8 @@ impl Worker {
         self.browser_sign_in = Some(std::time::Instant::now());
         if let Err(error) = open::that_detached(crate::slack::magic::SIGN_IN_URL) {
             log::warn!("could not open the browser: {error}");
-            self.sink.send(Event::SignIn(SignIn::Failed(
-                "Could not open the browser. Open app.slack.com/ssb/signin yourself.".into(),
-            )));
+            self.sink
+                .send(Event::SignIn(SignIn::Failed(Failure::NoBrowser)));
         }
     }
 
@@ -100,10 +99,8 @@ impl Worker {
     /// each team with that cookie like [`Self::sign_in_session`].
     pub(super) fn sign_in_link(&mut self, link: &str) {
         let Some(sets) = crate::slack::magic::parse_link(link) else {
-            self.sink.send(Event::SignIn(SignIn::Failed(
-                "That is not a Slack sign-in link. Copy the slack:// link the browser offers to open."
-                    .into(),
-            )));
+            self.sink
+                .send(Event::SignIn(SignIn::Failed(Failure::NotASignInLink)));
             return;
         };
         let internal = self.internal.clone();
@@ -116,7 +113,7 @@ impl Worker {
                 let redeemed = match crate::slack::magic::redeem(&set).await {
                     Ok(redeemed) => redeemed,
                     Err(error) => {
-                        problems.push(describe(&error));
+                        problems.push(failure(&error));
                         continue;
                     }
                 };
@@ -124,7 +121,7 @@ impl Worker {
                     match team {
                         TeamResult::SignedIn { url } => {
                             let Some(cookie) = redeemed.cookie.as_deref() else {
-                                problems.push("Slack signed in but set no session cookie".into());
+                                problems.push(Failure::NoSessionCookie);
                                 continue;
                             };
                             let result = crate::slack::session::derive(cookie, &url)
@@ -134,7 +131,7 @@ impl Worker {
                                     user_id: session.user_id,
                                     token: session.token,
                                 })
-                                .map_err(|e| describe(&e));
+                                .map_err(|e| failure(&e));
                             match result {
                                 Ok(session) => {
                                     signed += 1;
@@ -156,28 +153,28 @@ impl Worker {
                                     .into(),
                             ));
                         }
-                        TeamResult::Failed { reason } => problems.push(reason),
+                        TeamResult::Failed { reason } => {
+                            problems.push(failure(&crate::slack::SlackError::Api(reason)));
+                        }
                     }
                 }
             }
+            if !problems.is_empty() {
+                log::warn!("some workspaces did not sign in: {problems:?}");
+            }
             if signed == 0 {
-                let error = if problems.is_empty() {
-                    "Slack signed in to no workspace with that link.".to_owned()
-                } else {
-                    format!("Could not sign in: {}", problems.join("; "))
-                };
+                // The first reason stands for them all: mostly there is
+                // only the one workspace.
+                let error = problems.into_iter().next().unwrap_or(Failure::NoWorkspace);
                 let _ = internal.send(Internal::SignedIn(Err(error)));
-            } else if !problems.is_empty() {
-                log::warn!("some workspaces did not sign in: {}", problems.join("; "));
             }
         });
     }
 
     pub(super) fn start_sign_in(&mut self, redirect: Redirect, port: u16) {
         let Some(app) = self.app.clone().filter(AppCredentials::can_sign_in) else {
-            self.sink.send(Event::SignIn(SignIn::Failed(
-                "Enter the Slack app's client ID first.".into(),
-            )));
+            self.sink
+                .send(Event::SignIn(SignIn::Failed(Failure::NoClientId)));
             return;
         };
         if let Some(listener) = self.listener.take() {
@@ -188,8 +185,9 @@ impl Worker {
             Redirect::Scheme => {
                 if let Err(error) = auth::register_scheme() {
                     log::warn!("could not register noslacking:// links: {error}");
-                    self.sink.send(Event::Error(format!(
-                        "Could not register noslacking:// links ({error}). Try the loopback redirect in Settings."
+                    self.sink.send(Event::Error(Problem::new(
+                        Doing::RegisterLinks,
+                        Failure::Other(error),
                     )));
                 }
             }
@@ -257,7 +255,7 @@ impl Worker {
         tokio::spawn(async move {
             let result = auth::exchange(&http, &app, &flow, &code)
                 .await
-                .map_err(|e| describe(&e));
+                .map_err(|e| failure(&e));
             let _ = internal.send(Internal::SignedIn(result));
         });
     }
@@ -319,18 +317,18 @@ impl Worker {
 }
 
 /// Checks a pasted token and finds out whose it is.
-async fn validate(http: &reqwest::Client, token: Token) -> Result<SignedIn, String> {
+async fn validate(http: &reqwest::Client, token: Token) -> Result<SignedIn, Failure> {
     if !token.access.starts_with("xox") {
-        return Err("That does not look like a Slack token (it should start with xoxp-).".into());
+        return Err(Failure::NotAToken);
     }
     if token.access.starts_with("xoxb-") {
-        return Err("That is a bot token. NoSlacking needs the User OAuth Token (xoxp-).".into());
+        return Err(Failure::BotToken);
     }
     let client = Client::new(http.clone(), token.clone());
     let test: types::AuthTest = client
         .call("auth.test", &[])
         .await
-        .map_err(|e| describe(&e))?;
+        .map_err(|e| failure(&e))?;
     Ok(SignedIn {
         team_id: test.team_id,
         user_id: test.user_id,

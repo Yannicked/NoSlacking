@@ -7,7 +7,7 @@
 
 use serde::Deserialize;
 
-use super::api::describe;
+use super::api::failure;
 use super::{Event, Sink};
 use crate::model::{Message, Ts};
 use crate::slack::search::MessagesAnswer;
@@ -43,14 +43,14 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
         Command::Activity { me } => {
             let (result, searched) = match activity(&client, &me).await {
                 Ok((items, searched)) => (Ok(items), searched),
-                Err(error) => (Err(describe(&error)), false),
+                Err(error) => (Err(failure(&error)), false),
             };
             views::Event::Activity { result, searched }
         }
         Command::Unread { channel, after } => views::Event::Unread {
             result: unread(&client, &channel, after.as_ref())
                 .await
-                .map_err(|e| describe(&e)),
+                .map_err(|e| failure(&e)),
             channel,
         },
         Command::Threads { me } => match threads(&client, &me).await {
@@ -59,7 +59,7 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
                 searched,
             },
             Err(error) => views::Event::Threads {
-                result: Err(describe(&error)),
+                result: Err(failure(&error)),
                 searched: false,
             },
         },
@@ -93,7 +93,7 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
                 starred,
             },
             Err(error) => views::Event::Saved {
-                result: Err(describe(&error)),
+                result: Err(failure(&error)),
                 starred: false,
             },
         },
@@ -102,7 +102,7 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
                 .call::<RemindersList>("reminders.list", &[])
                 .await
                 .map(reminders)
-                .map_err(|e| describe(&e)),
+                .map_err(|e| failure(&e)),
         },
         Command::Save { channel, ts, save } => match keep(&client, &channel, &ts, save).await {
             Ok(()) => views::Event::Nothing,
@@ -110,11 +110,11 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
                 channel,
                 ts,
                 save,
-                error: describe(&error),
+                error: failure(&error),
             },
         },
         Command::Scheduled => views::Event::ScheduledList {
-            result: scheduled(&client).await.map_err(|e| describe(&e)),
+            result: scheduled(&client).await.map_err(|e| failure(&e)),
         },
         Command::Schedule {
             request,
@@ -133,7 +133,7 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
                     text,
                     thread,
                 })
-                .map_err(|e| describe(&e));
+                .map_err(|e| failure(&e));
             // The new one is in: the old one goes. Should that fail, both
             // stay, and the list shows them.
             if result.is_ok()
@@ -148,7 +148,7 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
             match unschedule(&client, &channel, &id).await {
                 Ok(()) => views::Event::Nothing,
                 Err(error) => views::Event::CancelFailed {
-                    error: describe(&error),
+                    error: failure(&error),
                 },
             }
         }
@@ -161,7 +161,7 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
             Err(SlackError::Api(code)) if code == "already_complete" => views::Event::Nothing,
             Err(error) => views::Event::CompleteFailed {
                 id,
-                error: describe(&error),
+                error: failure(&error),
             },
         },
     };

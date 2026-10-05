@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::app::{App, Draft, WorkspaceState};
 use crate::backend;
+use crate::failure::Failure;
 use crate::i18n::{t, tf};
 use crate::model::{Delivery, Message, Ts};
 
@@ -148,7 +149,7 @@ pub enum Command {
 
 impl Command {
     /// The answer that says this command could not be carried out at all.
-    pub fn failed(&self, error: String) -> Event {
+    pub fn failed(&self, error: Failure) -> Event {
         match self {
             Self::Activity { .. } => Event::Activity {
                 result: Err(error),
@@ -195,31 +196,31 @@ pub enum Event {
     /// from a search for your name rather than Slack's activity feed, so
     /// it holds mentions of you only.
     Activity {
-        result: Result<Vec<Activity>, String>,
+        result: Result<Vec<Activity>, Failure>,
         searched: bool,
     },
     /// A conversation's unread messages, oldest first. `more` says there
     /// are more than were read.
     Unread {
         channel: String,
-        result: Result<(Vec<Message>, bool), String>,
+        result: Result<(Vec<Message>, bool), Failure>,
     },
     /// The threads you follow, or why there are none. `searched` says they
     /// were found by searching for your replies rather than read from
     /// Slack's own list.
     Threads {
-        result: Result<Vec<Followed>, String>,
+        result: Result<Vec<Followed>, Failure>,
         searched: bool,
     },
     /// The messages saved for later, or why there are none. `starred` says
     /// they are the older starred messages (OAuth sign-ins, which cannot
     /// read Later).
     Saved {
-        result: Result<Vec<Saved>, String>,
+        result: Result<Vec<Saved>, Failure>,
         starred: bool,
     },
     Reminders {
-        result: Result<Vec<Reminder>, String>,
+        result: Result<Vec<Reminder>, Failure>,
     },
     /// Saving (`save`) or taking a message off the list failed; the list
     /// shows it as it was.
@@ -227,21 +228,21 @@ pub enum Event {
         channel: String,
         ts: Ts,
         save: bool,
-        error: String,
+        error: Failure,
     },
     /// Completing a reminder failed; the reminders are read again.
-    CompleteFailed { id: String, error: String },
+    CompleteFailed { id: String, error: Failure },
     /// The messages waiting to be sent, soonest first.
     ScheduledList {
-        result: Result<Vec<schedule::Scheduled>, String>,
+        result: Result<Vec<schedule::Scheduled>, Failure>,
     },
     /// Slack answered schedule request `request`.
     ScheduleDone {
         request: u64,
-        result: Result<schedule::Scheduled, String>,
+        result: Result<schedule::Scheduled, Failure>,
     },
     /// A scheduled message could not be cancelled; the list is read again.
-    CancelFailed { error: String },
+    CancelFailed { error: Failure },
     /// A command that needs no answer was carried out (or not, which
     /// changes nothing on screen).
     Nothing,
@@ -353,7 +354,7 @@ impl Activity {
 pub struct Fetch<T> {
     pub value: Option<T>,
     pub loading: bool,
-    pub error: Option<String>,
+    pub error: Option<Failure>,
 }
 
 impl<T> Default for Fetch<T> {
@@ -374,7 +375,7 @@ impl<T> Fetch<T> {
     }
 
     /// Takes in the answer; a failure keeps what was there.
-    pub fn arrived(&mut self, result: Result<T, String>) {
+    pub fn arrived(&mut self, result: Result<T, Failure>) {
         self.loading = false;
         match result {
             Ok(value) => {
@@ -910,7 +911,12 @@ fn confirm_schedule(app: &mut App, team: &str) {
 }
 
 /// Takes in Slack's answer to a schedule request.
-fn scheduled(app: &mut App, team: &str, request: u64, result: Result<schedule::Scheduled, String>) {
+fn scheduled(
+    app: &mut App,
+    team: &str,
+    request: u64,
+    result: Result<schedule::Scheduled, Failure>,
+) {
     let pending = app.views.pending.remove(&request);
     let busy = app.views.dialog.as_ref().is_some_and(|d| d.busy);
     match result {
@@ -943,7 +949,7 @@ fn scheduled(app: &mut App, team: &str, request: u64, result: Result<schedule::S
             app.toast(
                 tf(
                     "Could not schedule the message: {error}",
-                    &[("error", &error)],
+                    &[("error", &error.message())],
                 ),
                 true,
             );
@@ -1145,11 +1151,14 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                 .cloned();
             saved(app.views.team_mut(team), &channel, &ts, !save, message);
             let text = if save {
-                tf("Could not save the message: {error}", &[("error", &error)])
+                tf(
+                    "Could not save the message: {error}",
+                    &[("error", &error.message())],
+                )
             } else {
                 tf(
                     "Could not remove the message from Later: {error}",
-                    &[("error", &error)],
+                    &[("error", &error.message())],
                 )
             };
             app.toast(text, true);
@@ -1159,7 +1168,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
             app.toast(
                 tf(
                     "Could not complete the reminder: {error}",
-                    &[("error", &error)],
+                    &[("error", &error.message())],
                 ),
                 true,
             );
@@ -1172,7 +1181,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
             app.toast(
                 tf(
                     "Could not cancel the scheduled message: {error}",
-                    &[("error", &error)],
+                    &[("error", &error.message())],
                 ),
                 true,
             );
@@ -1393,8 +1402,8 @@ mod tests {
         fetch.arrived(Ok(vec![1]));
         fetch.start();
         assert!(!fetch.waiting(), "the old list stays on screen");
-        fetch.arrived(Err("down".into()));
+        fetch.arrived(Err(Failure::RateLimited));
         assert_eq!(fetch.value, Some(vec![1]));
-        assert_eq!(fetch.error.as_deref(), Some("down"));
+        assert_eq!(fetch.error, Some(Failure::RateLimited));
     }
 }

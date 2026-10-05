@@ -255,7 +255,7 @@ fn sign_in_status(app: &App, ui: &mut egui::Ui, palette: &Palette) {
         }
         Some(SignIn::Failed(error)) => {
             ui.label(
-                RichText::new(error)
+                RichText::new(error.sentence())
                     .font(theme::regular(13.0))
                     .color(palette.danger),
             );

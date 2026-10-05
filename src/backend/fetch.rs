@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::api::{describe, paginate, with_cursor, worth_retrying};
+use super::api::{failure, paginate, with_cursor, worth_retrying};
 use super::{Event, Sink};
+use crate::failure::{Doing, Problem};
 use crate::model::{Conversation, ConversationKind, Message, Ts, User, Workspace};
 use crate::offline::Cache;
 use crate::slack::{Client, SlackError, types};
@@ -83,15 +84,16 @@ pub(super) async fn boot(client: Client, workspace: Workspace, cache: Cache, sin
         Err(error) if error.is_auth() => {
             sink.send(Event::SignedOut {
                 team,
-                reason: Some(describe(&error)),
+                reason: Some(failure(&error)),
             });
             return;
         }
         Err(error) => {
-            sink.send(Event::Error(format!(
-                "Could not reach {}: {}",
-                workspace.name,
-                describe(&error)
+            sink.send(Event::Error(Problem::new(
+                Doing::Reach {
+                    workspace: workspace.name.clone(),
+                },
+                failure(&error),
             )));
             return;
         }
@@ -157,9 +159,9 @@ pub(super) async fn conversations(
     )
     .await;
     if let Err(error) = walked {
-        sink.send(Event::Error(format!(
-            "Could not list conversations: {}",
-            describe(&error)
+        sink.send(Event::Error(Problem::new(
+            Doing::ListConversations,
+            failure(&error),
         )));
         return None;
     }
@@ -422,9 +424,9 @@ pub(super) async fn edit_sidebar(
         };
         if let Err(error) = result {
             log::warn!("sidebar edit {call:?} failed: {error}");
-            sink.send(Event::Error(format!(
-                "Could not change the sidebar: {}",
-                describe(&error)
+            sink.send(Event::Error(Problem::new(
+                Doing::ChangeSidebar,
+                failure(&error),
             )));
             break;
         }
@@ -687,7 +689,7 @@ pub(super) async fn history(
         Err(error) => sink.send(Event::HistoryFailed {
             team,
             channel,
-            error: describe(&error),
+            error: failure(&error),
         }),
     }
 }
@@ -734,9 +736,9 @@ pub(super) async fn thread(client: Client, team: String, channel: String, ts: Ts
     )
     .await;
     if let Err(error) = walked {
-        sink.send(Event::Error(format!(
-            "Could not load the thread: {}",
-            describe(&error)
+        sink.send(Event::Error(Problem::new(
+            Doing::LoadThread,
+            failure(&error),
         )));
         return;
     }

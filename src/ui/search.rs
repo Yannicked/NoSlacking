@@ -7,9 +7,10 @@ use egui::text::{LayoutJob, TextFormat};
 use egui::{CornerRadius, Key, Margin, Modifiers, RichText, Sense, Vec2};
 
 use crate::app::{App, WorkspaceState};
+use crate::failure::Failure;
 use crate::i18n::{t, tf, tn};
 use crate::model::{Action, ConversationKind};
-use crate::search::{Failure, Heading, Hit, Scope, Sort};
+use crate::search::{Heading, Hit, Scope, Sort};
 use crate::theme::{self, Icon, Palette};
 
 /// The results list's tallest.
@@ -216,13 +217,13 @@ fn tab(ui: &mut egui::Ui, palette: &Palette, label: &str, on: bool) -> bool {
 /// How many results there are, or why there are none.
 fn status(ui: &mut egui::Ui, palette: &Palette, search: &crate::search::Search) {
     let text = match &search.failure {
-        Some(Failure::NoPermission) => Some((
+        Some(Failure::MissingPermission) => Some((
             t("Searching needs the search:read permission, which this sign-in lacks. Sign in to the workspace again to allow it; with your own Slack app, update it from the manifest first.")
                 .into_owned(),
             palette.warning,
         )),
-        Some(Failure::Other(error)) => Some((
-            tf("Could not search: {error}", &[("error", error)]),
+        Some(failure) => Some((
+            tf("Could not search: {error}", &[("error", &failure.message())]),
             palette.warning,
         )),
         None if search.query.is_none() => None,

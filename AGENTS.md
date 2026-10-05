@@ -14,6 +14,10 @@ ZapFast and Spotifast.
   `src/model.rs` types and push `model::Action`s, which `app.rs` applies after
   the frame. The worker translates Slack's JSON (`src/slack/types.rs`) into the
   model.
+- Failures cross as a `failure::Failure` (what went wrong) or a
+  `failure::Problem` (and what it stopped), never as English text: the
+  worker maps Slack's errors in `backend/api.rs`, the interface words them
+  through `t` when it shows them.
 - The UI is optimistic: a sent message or reaction shows at once and is
   reconciled on the server's echo or an error.
 

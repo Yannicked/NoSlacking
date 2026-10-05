@@ -12,16 +12,17 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
-use super::api::{describe, worth_retrying};
+use super::api::{failure, worth_retrying};
 use super::fetch::{
     boot, conversation_info, conversations, edit_sidebar, history, sections, thread,
     workspace_details,
 };
-use super::files::{download, open_file, upload};
+use super::files::{download, file_name, open_file, upload};
 use super::translate::{Translated, str_of, translate};
 use super::{Change, Command, Event, Gate, SignIn, Sink, Socket};
 use crate::auth::{Flow, SignedIn};
 use crate::credentials::{AppCredentials, Credentials};
+use crate::failure::{Doing, Failure, Problem};
 use crate::images::ImageLoader;
 use crate::model::{Ts, Workspace};
 use crate::offline::Cache;
@@ -38,8 +39,6 @@ const POLL_EVERY: Duration = Duration::from_secs(6);
 const PRESENCE_EVERY: Duration = Duration::from_secs(5);
 /// How long after "Sign in with your browser" a handed-over link is used.
 const BROWSER_SIGN_IN_WINDOW: Duration = Duration::from_secs(15 * 60);
-/// Why a command for a workspace the worker does not have cannot run.
-const NOT_SIGNED_IN: &str = "that workspace is not signed in";
 
 /// One workspace's saved sign-in, as read from the keyring at start-up.
 enum Stored {
@@ -63,7 +62,7 @@ enum Internal {
         cache_key: Option<crate::offline::CacheKey>,
     },
     Callback(String),
-    SignedIn(Result<SignedIn, String>),
+    SignedIn(Result<SignedIn, Failure>),
     TeamAdded {
         meta: Workspace,
         token: Token,
@@ -312,14 +311,12 @@ impl Worker {
                     self.add_team(workspace, token);
                     continue;
                 }
-                Stored::Missing => "No saved sign-in for this workspace.".to_owned(),
+                Stored::Missing => Failure::NoSavedSignIn,
                 Stored::Failed(error) => {
                     self.sink.send(Event::KeyringError(error.to_string()));
-                    format!("Could not read this workspace's sign-in: {error}.")
+                    Failure::KeyringUnread(Some(error.to_string()))
                 }
-                Stored::Skipped => {
-                    "Could not read this workspace's sign-in: the keyring failed.".to_owned()
-                }
+                Stored::Skipped => Failure::KeyringUnread(None),
             };
             // Every workspace gets an answer, so none is left waiting.
             self.sink.send(Event::SignedOut {
@@ -372,7 +369,7 @@ impl Worker {
                         }
                         Err(error) if error.is_auth() => sink.send(Event::SignedOut {
                             team,
-                            reason: Some(describe(&error)),
+                            reason: Some(failure(&error)),
                         }),
                         Err(_) => {}
                     }
@@ -584,7 +581,7 @@ impl Worker {
                 None => self.sink.send(Event::Search {
                     team: query.team,
                     request,
-                    result: Err(crate::search::Failure::Other(NOT_SIGNED_IN.to_owned())),
+                    result: Err(Failure::NotSignedIn),
                 }),
             },
             Command::LoadNewer {
@@ -683,9 +680,10 @@ impl Worker {
             Command::SetProxy(proxy) => match crate::slack::net::configure(&proxy) {
                 // New clients only help once the sockets reconnect on them.
                 Ok(()) => self.reconnect(),
-                Err(error) => self
-                    .sink
-                    .send(Event::Error(format!("Could not use the proxy: {error}"))),
+                Err(error) => self.sink.send(Event::Error(Problem::new(
+                    Doing::UseProxy,
+                    Failure::Other(error.to_string()),
+                ))),
             },
             Command::Snooze { team, minutes } => {
                 if let Some((client, sink)) = self.team(&team) {
@@ -718,7 +716,7 @@ impl Worker {
                     team,
                     event: crate::convos::Event::Failed {
                         what: command.failure(),
-                        error: NOT_SIGNED_IN.to_owned(),
+                        error: Failure::NotSignedIn,
                     },
                 }),
             },
@@ -727,7 +725,7 @@ impl Worker {
                     tokio::spawn(super::views::run(client, team, command, sink));
                 }
                 None => self.sink.send(Event::Views {
-                    event: command.failed(NOT_SIGNED_IN.to_owned()),
+                    event: command.failed(Failure::NotSignedIn),
                     team,
                 }),
             },
@@ -754,7 +752,7 @@ impl Worker {
         if let Some((client, sink)) = self.team(&team) {
             tokio::spawn(thread(client, team, channel, ts, sink));
         } else {
-            self.not_signed_in("load the thread");
+            self.not_signed_in(Doing::LoadThread);
         }
     }
 
@@ -766,7 +764,7 @@ impl Worker {
                 team: outgoing.team,
                 channel: outgoing.channel,
                 local: outgoing.local,
-                result: Err(NOT_SIGNED_IN.to_owned()),
+                result: Err(Failure::NotSignedIn),
             });
             return;
         };
@@ -789,12 +787,12 @@ impl Worker {
             let result = client
                 .act::<types::Posted>("chat.postMessage", &params)
                 .await
-                .map_err(|e| describe(&e))
+                .map_err(|e| failure(&e))
                 .and_then(|posted| {
                     let mut message = posted
                         .message
                         .and_then(types::Message::into_model)
-                        .ok_or_else(|| "Slack did not return the message".to_owned())?;
+                        .ok_or(Failure::NoMessage)?;
                     if message.ts.as_str().is_empty() {
                         message.ts = Ts::new(posted.ts);
                     }
@@ -818,7 +816,7 @@ impl Worker {
                 team,
                 channel,
                 change,
-                result: Err(NOT_SIGNED_IN.to_owned()),
+                result: Err(Failure::NotSignedIn),
             });
             return;
         };
@@ -828,7 +826,7 @@ impl Worker {
                 Ok(_) => Ok(()),
                 // Already as asked: nothing to undo.
                 Err(SlackError::Api(code)) if ignore.contains(&code.as_str()) => Ok(()),
-                Err(error) => Err(describe(&error)),
+                Err(error) => Err(failure(&error)),
             };
             sink.send(Event::Settled {
                 team,
@@ -849,7 +847,9 @@ impl Worker {
         comment: String,
     ) {
         let Some((client, sink)) = self.team(&team) else {
-            self.not_signed_in("upload the file");
+            self.not_signed_in(Doing::Upload {
+                name: file_name(&path),
+            });
             self.sink.send(Event::UploadDone { id });
             return;
         };
@@ -872,7 +872,7 @@ impl Worker {
         let Some((client, sink)) = self.team(&team) else {
             self.sink.send(Event::Slash {
                 command,
-                result: Err(NOT_SIGNED_IN.to_owned()),
+                result: Err(Failure::NotSignedIn),
             });
             return;
         };
@@ -884,7 +884,7 @@ impl Worker {
 
     fn download(&self, team: &str, url: String, name: String) {
         let Some((client, sink)) = self.team(team) else {
-            self.not_signed_in(&format!("download {name}"));
+            self.not_signed_in(Doing::Download { name });
             return;
         };
         tokio::spawn(async move {
@@ -897,7 +897,7 @@ impl Worker {
 
     fn open_file(&self, team: &str, url: String, name: String) {
         let Some((client, sink)) = self.team(team) else {
-            self.not_signed_in(&format!("open {name}"));
+            self.not_signed_in(Doing::Open { name });
             return;
         };
         let dir = self.images.open_dir(team, &url);
@@ -928,7 +928,7 @@ impl Worker {
         if let Some((client, sink)) = self.team(&team) {
             tokio::spawn(edit_sidebar(client, team, calls, sink));
         } else {
-            self.not_signed_in("change the sidebar");
+            self.not_signed_in(Doing::ChangeSidebar);
         }
     }
 
@@ -965,17 +965,20 @@ impl Worker {
         ignore: &'static [&'static str],
     ) {
         let Some((client, sink)) = self.team(team) else {
-            self.sink
-                .send(Event::Error(format!("{method} failed: {NOT_SIGNED_IN}")));
+            self.not_signed_in(Doing::Call {
+                method: method.to_owned(),
+            });
             return;
         };
         tokio::spawn(async move {
             match client.act::<Value>(method, &params).await {
                 Ok(_) => {}
                 Err(SlackError::Api(code)) if ignore.contains(&code.as_str()) => {}
-                Err(error) => sink.send(Event::Error(format!(
-                    "{method} failed: {}",
-                    describe(&error)
+                Err(error) => sink.send(Event::Error(Problem::new(
+                    Doing::Call {
+                        method: method.to_owned(),
+                    },
+                    failure(&error),
                 ))),
             }
         });
@@ -983,9 +986,9 @@ impl Worker {
 
     /// Says that `what` cannot be done because the workspace is not signed
     /// in here, rather than dropping the command without a word.
-    fn not_signed_in(&self, what: &str) {
+    fn not_signed_in(&self, doing: Doing) {
         self.sink
-            .send(Event::Error(format!("Could not {what}: {NOT_SIGNED_IN}")));
+            .send(Event::Error(Problem::new(doing, Failure::NotSignedIn)));
     }
 
     /// Ends a history load for a workspace that is not signed in, so the
@@ -994,7 +997,7 @@ impl Worker {
         self.sink.send(Event::HistoryFailed {
             team,
             channel,
-            error: NOT_SIGNED_IN.to_owned(),
+            error: Failure::NotSignedIn,
         });
     }
 
@@ -1117,9 +1120,8 @@ impl Worker {
             }
             Internal::Callback(url) => self.callback(url),
             Internal::SignInListenerFailed(error) => {
-                self.sink.send(Event::SignIn(SignIn::Failed(format!(
-                    "Could not listen for Slack's redirect: {error}. Is the port in use?"
-                ))));
+                self.sink
+                    .send(Event::SignIn(SignIn::Failed(Failure::NoListener(error))));
             }
             Internal::SignedIn(Err(error)) => self.sink.send(Event::SignIn(SignIn::Failed(error))),
             Internal::SignedIn(Ok(signed)) => {
@@ -1351,13 +1353,13 @@ async fn run_slash(
     channel: &str,
     command: &str,
     text: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, Failure> {
     let act = |method: &'static str, params: Vec<(&'static str, String)>| async move {
         client
             .act::<Value>(method, &params)
             .await
             .map(|_| None)
-            .map_err(|e| describe(&e))
+            .map_err(|e| failure(&e))
     };
     let channel = channel.to_owned();
     match command {
@@ -1371,13 +1373,13 @@ async fn run_slash(
         "away" | "active" => super::people::set_away(client, command == "away")
             .await
             .map(|()| None)
-            .map_err(|e| describe(&e)),
+            .map_err(|e| failure(&e)),
         "status" => {
             let (emoji, status) = crate::slash::status(&crate::mrkdwn::unescape(text));
             super::people::set_status(client, &emoji, &status, 0)
                 .await
                 .map(|()| None)
-                .map_err(|e| describe(&e))
+                .map_err(|e| failure(&e))
         }
         "topic" => {
             act(
@@ -1389,7 +1391,7 @@ async fn run_slash(
         "invite" => {
             let people = crate::slash::mentioned(text);
             if people.is_empty() {
-                return Err("name someone to invite with @".to_owned());
+                return Err(Failure::NoInvitee);
             }
             act(
                 "conversations.invite",
@@ -1412,9 +1414,9 @@ async fn run_slash(
                         .filter(|r| !r.is_empty())
                         .map(str::to_owned)
                 })
-                .map_err(|e| describe(&e))
+                .map_err(|e| failure(&e))
         }
-        _ => Err(super::SLASH_NEEDS_SESSION.to_owned()),
+        _ => Err(Failure::NeedsSession),
     }
 }
 

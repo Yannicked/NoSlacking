@@ -411,7 +411,7 @@ impl KitBlock {
 pub enum Delivery {
     Sent,
     Sending,
-    Failed(String),
+    Failed(crate::failure::Failure),
 }
 
 #[derive(Clone, Debug, PartialEq)]

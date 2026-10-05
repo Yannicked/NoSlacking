@@ -7,6 +7,7 @@ use egui::{CornerRadius, Margin, RichText, Sense, Stroke, Vec2};
 use super::rich::{self, Rich};
 use super::rows;
 use crate::app::{App, WorkspaceState};
+use crate::failure::Failure;
 use crate::i18n::{t, tf, tn};
 use crate::model::{Action, ConversationKind, Message, Ts};
 use crate::theme::{self, Icon, Palette};
@@ -302,7 +303,7 @@ fn note(ui: &mut egui::Ui, palette: &Palette, text: &str) {
 
 /// A spinner while the first answer is on its way, the error if the last
 /// one failed, or nothing.
-fn status(ui: &mut egui::Ui, palette: &Palette, waiting: bool, error: Option<&str>) {
+fn status(ui: &mut egui::Ui, palette: &Palette, waiting: bool, error: Option<&Failure>) {
     if waiting {
         ui.add_space(40.0);
         ui.vertical_centered(|ui| {
@@ -315,9 +316,12 @@ fn status(ui: &mut egui::Ui, palette: &Palette, waiting: bool, error: Option<&st
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(
-                    RichText::new(tf("Could not load this list: {error}", &[("error", error)]))
-                        .font(theme::regular(13.0))
-                        .color(palette.text),
+                    RichText::new(tf(
+                        "Could not load this list: {error}",
+                        &[("error", &error.message())],
+                    ))
+                    .font(theme::regular(13.0))
+                    .color(palette.text),
                 );
             });
     }
@@ -558,7 +562,7 @@ fn activity(
         ui,
         palette,
         data.activity.waiting(),
-        data.activity.error.as_deref(),
+        data.activity.error.as_ref(),
     );
     if data.searched {
         egui::Frame::new()
@@ -714,11 +718,11 @@ fn unreads(
                             ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
                         }
                         Some(fetch) => {
-                            let error = fetch.error.clone().unwrap_or_default();
+                            let error = fetch.error.as_ref().map(Failure::message);
                             ui.label(
                                 RichText::new(tf(
                                     "Could not load the messages: {error}",
-                                    &[("error", &error)],
+                                    &[("error", &error.unwrap_or_default())],
                                 ))
                                 .font(theme::regular(13.0))
                                 .color(palette.danger),
@@ -824,7 +828,7 @@ fn threads(
         ui,
         palette,
         data.threads.waiting(),
-        data.threads.error.as_deref(),
+        data.threads.error.as_ref(),
     );
     if data.threads_searched {
         egui::Frame::new()
@@ -1009,16 +1013,18 @@ fn later(
     actions: &mut Vec<Action>,
 ) {
     let errors = [
-        data.saved.error.as_deref().map(|error| {
+        data.saved.error.as_ref().map(|error| {
             tf(
                 "Could not load the saved messages: {error}",
-                &[("error", error)],
+                &[("error", &error.message())],
             )
         }),
-        data.reminders
-            .error
-            .as_deref()
-            .map(|error| tf("Could not load the reminders: {error}", &[("error", error)])),
+        data.reminders.error.as_ref().map(|error| {
+            tf(
+                "Could not load the reminders: {error}",
+                &[("error", &error.message())],
+            )
+        }),
     ];
     for error in errors.into_iter().flatten() {
         egui::Frame::new()
@@ -1240,7 +1246,7 @@ fn scheduled(
         ui,
         palette,
         data.scheduled.waiting(),
-        data.scheduled.error.as_deref(),
+        data.scheduled.error.as_ref(),
     );
     let items = data.scheduled.value.as_deref().unwrap_or_default();
     if items.is_empty() {

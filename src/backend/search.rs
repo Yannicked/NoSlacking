@@ -1,8 +1,8 @@
 //! Asks Slack's search for a page of results.
 
-use super::api::describe;
 use super::{Event, Sink};
-use crate::search::{Failure, PAGE_SIZE, Query, Scope, Sort};
+use crate::failure::Failure;
+use crate::search::{PAGE_SIZE, Query, Scope, Sort};
 use crate::slack::search::{FilesAnswer, MessagesAnswer};
 use crate::slack::{Client, SlackError};
 
@@ -25,12 +25,13 @@ pub fn params(query: &Query, page: u32) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// What a refusal means for the person searching.
+/// What a refusal means for the person searching: as for any call, but a
+/// token type search does not take also means a missing permission.
 pub fn failure(error: &SlackError) -> Failure {
     match error.code() {
         // An OAuth sign-in made before NoSlacking asked for search:read.
-        Some("missing_scope" | "not_allowed_token_type") => Failure::NoPermission,
-        _ => Failure::Other(describe(error)),
+        Some("not_allowed_token_type") => Failure::MissingPermission,
+        _ => super::api::failure(error),
     }
 }
 
@@ -75,13 +76,12 @@ mod tests {
 
     #[test]
     fn a_missing_permission_is_told_apart() {
-        assert_eq!(
-            failure(&SlackError::Api("missing_scope".into())),
-            Failure::NoPermission
-        );
-        assert!(matches!(
-            failure(&SlackError::RateLimited),
-            Failure::Other(_)
-        ));
+        for code in ["missing_scope", "not_allowed_token_type"] {
+            assert_eq!(
+                failure(&SlackError::Api(code.into())),
+                Failure::MissingPermission
+            );
+        }
+        assert_eq!(failure(&SlackError::RateLimited), Failure::RateLimited);
     }
 }

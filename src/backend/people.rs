@@ -238,7 +238,7 @@ pub fn call(client: Client, team: String, command: Command, sink: Sink) -> Optio
                 sink.send(Event::People {
                     team,
                     event: people::Event::StatusSet {
-                        result: result.map_err(|e| super::api::describe(&e)),
+                        result: result.map_err(|e| super::api::failure(&e)),
                     },
                 });
             });
@@ -251,7 +251,7 @@ pub fn call(client: Client, team: String, command: Command, sink: Sink) -> Optio
                     team,
                     event: people::Event::AwaySet {
                         away,
-                        result: result.map_err(|e| super::api::describe(&e)),
+                        result: result.map_err(|e| super::api::failure(&e)),
                     },
                 });
             });

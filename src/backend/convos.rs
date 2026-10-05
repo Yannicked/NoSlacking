@@ -4,7 +4,7 @@
 
 use serde::Deserialize;
 
-use super::api::describe;
+use super::api::failure;
 use super::{Event, Sink};
 use crate::convos::{self, Command};
 use crate::model::Conversation;
@@ -119,17 +119,17 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
         Command::Leave { channel } => leave(&client, &team, &channel, &sink).await,
         Command::Create { name, private } => create(&client, &team, &name, private, &sink).await,
         Command::About { channel } => {
-            let result = about(&client, &channel).await.map_err(|e| explain(&e));
+            let result = about(&client, &channel).await.map_err(|e| failure(&e));
             reply(&sink, &team, convos::Event::About { channel, result });
             Ok(())
         }
         Command::Members { channel } => {
-            let result = members(&client, &channel).await.map_err(|e| explain(&e));
+            let result = members(&client, &channel).await.map_err(|e| failure(&e));
             reply(&sink, &team, convos::Event::Members { channel, result });
             Ok(())
         }
         Command::Files { channel } => {
-            let result = files(&client, &channel).await.map_err(|e| explain(&e));
+            let result = files(&client, &channel).await.map_err(|e| failure(&e));
             reply(&sink, &team, convos::Event::Files { channel, result });
             Ok(())
         }
@@ -143,7 +143,7 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
                 .call::<PinsPage>("pins.list", &[("channel", channel.clone())])
                 .await
                 .map(pins)
-                .map_err(|e| explain(&e));
+                .map_err(|e| failure(&e));
             reply(&sink, &team, convos::Event::Pins { channel, result });
             Ok(())
         }
@@ -152,7 +152,7 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
                 .call::<BookmarksPage>("bookmarks.list", &[("channel_id", channel.clone())])
                 .await
                 .map(bookmarks)
-                .map_err(|e| explain(&e));
+                .map_err(|e| failure(&e));
             reply(&sink, &team, convos::Event::Bookmarks { channel, result });
             Ok(())
         }
@@ -341,28 +341,9 @@ fn fail(sink: &Sink, team: String, what: convos::Failure, error: &SlackError) {
         team,
         event: convos::Event::Failed {
             what,
-            error: explain(error),
+            error: failure(error),
         },
     });
-}
-
-/// [`describe`], with the refusals these calls can meet in plain words.
-fn explain(error: &SlackError) -> String {
-    match error.code() {
-        Some("name_taken") => "a channel by that name exists already".into(),
-        Some("invalid_name" | "invalid_name_specials" | "invalid_name_punctuation") => {
-            "Slack does not take that name".into()
-        }
-        Some("invalid_name_maxlength") => "the name is too long".into(),
-        Some("cant_leave_general") => "nobody can leave the general channel".into(),
-        Some("restricted_action" | "restricted_action_read_only_channel") => {
-            "the workspace does not allow you to do that".into()
-        }
-        Some("method_not_supported_for_channel_type") => {
-            "that cannot be done in this kind of conversation".into()
-        }
-        _ => describe(error),
-    }
 }
 
 /// Sends a channel you are now in, then asks the interface to open it.
@@ -851,18 +832,6 @@ mod tests {
         let file: serde_json::Value =
             serde_json::from_str(r#"{"type":"pin_added","item":{"type":"file"}}"#).expect("json");
         assert_eq!(pin_event("pin_added", &file), None);
-    }
-
-    #[test]
-    fn refusals_read_as_plain_sentences() {
-        assert_eq!(
-            explain(&SlackError::Api("name_taken".into())),
-            "a channel by that name exists already"
-        );
-        assert_eq!(
-            explain(&SlackError::Api("not_in_channel".into())),
-            "you are not in that channel"
-        );
     }
 
     #[test]

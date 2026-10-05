@@ -23,6 +23,7 @@ use sha2::Digest as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::credentials::AppCredentials;
+use crate::failure::Failure;
 use crate::settings::Redirect;
 use crate::slack::{SlackError, Token, client, types};
 
@@ -164,23 +165,21 @@ pub fn belongs_to(url: &str, expected_state: &str) -> bool {
 }
 
 /// The code in a redirect, after checking it belongs to this attempt.
-pub fn parse_callback(url: &str, expected_state: &str) -> Result<String, String> {
-    let foreign = || "This sign-in link does not belong to the current attempt.".to_owned();
-    let [code, state, error] = callback_params(url).ok_or_else(foreign)?;
+pub fn parse_callback(url: &str, expected_state: &str) -> Result<String, Failure> {
+    let [code, state, error] = callback_params(url).ok_or(Failure::ForeignLink)?;
     // The state comes first: a link without it must not be able to end, or
     // even cancel, the attempt.
     if state.as_deref() != Some(expected_state) {
-        return Err(foreign());
+        return Err(Failure::ForeignLink);
     }
     if let Some(error) = error {
         return Err(if error == "access_denied" {
-            "Sign-in was cancelled.".to_owned()
+            Failure::Cancelled
         } else {
-            format!("Slack refused the sign-in: {error}")
+            Failure::Refused(error)
         });
     }
-    code.filter(|c| !c.is_empty())
-        .ok_or_else(|| "Slack sent no authorization code.".to_owned())
+    code.filter(|c| !c.is_empty()).ok_or(Failure::NoCode)
 }
 
 /// Who signed in where, with which token.
@@ -443,9 +442,16 @@ mod tests {
                 "http://127.0.0.1:1/callback?error=access_denied&state=s1",
                 "s1"
             ),
-            Err("Sign-in was cancelled.".to_owned())
+            Err(Failure::Cancelled)
         );
-        assert!(parse_callback("noslacking://oauth/callback?state=s1", "s1").is_err());
+        assert_eq!(
+            parse_callback("noslacking://oauth/callback?state=s1", "s1"),
+            Err(Failure::NoCode)
+        );
+        assert_eq!(
+            parse_callback("x://cb?error=invalid_scope&state=s1", "s1"),
+            Err(Failure::Refused("invalid_scope".into()))
+        );
     }
 
     #[test]
@@ -453,7 +459,7 @@ mod tests {
         // An error without the state is not Slack's answer.
         assert_eq!(
             parse_callback("http://127.0.0.1:1/callback?error=access_denied", "s1"),
-            Err("This sign-in link does not belong to the current attempt.".to_owned())
+            Err(Failure::ForeignLink)
         );
         // Neither is a link that names a key twice.
         assert!(parse_callback("x://cb?code=a&state=s1&state=s1", "s1").is_err());
