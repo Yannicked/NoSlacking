@@ -46,7 +46,9 @@ impl Default for DesktopSettings {
             levels: BTreeMap::new(),
             muted: BTreeMap::new(),
             tray: true,
-            close_to_tray: false,
+            // As Slack's own app: closing the window keeps you reachable.
+            // Without a tray, closing quits all the same.
+            close_to_tray: true,
             start_on_login: false,
         }
     }
