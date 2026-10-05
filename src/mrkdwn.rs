@@ -660,10 +660,14 @@ pub fn plain(text: &str, name_of: impl Fn(&Inline) -> Option<String>) -> String 
                             out.push('@');
                             out.push_str(name);
                         }
-                        Inline::Emoji(name) => match crate::emoji::unicode(name, None) {
-                            Some(unicode) => out.push_str(&unicode),
-                            None => out.push_str(&format!(":{name}:")),
-                        },
+                        Inline::Emoji(name) => {
+                            // The tone is not part of the name the tables know.
+                            let (base, tone) = crate::emoji::split_tone(name);
+                            match crate::emoji::unicode(base, tone) {
+                                Some(unicode) => out.push_str(&unicode),
+                                None => out.push_str(&format!(":{name}:")),
+                            }
+                        }
                         other => out.push_str(&name_of(other).unwrap_or_default()),
                     }
                 }
@@ -855,6 +859,18 @@ mod tests {
                 "@Ann".into()
             )),
             "hi @Ann 🎉 link"
+        );
+    }
+
+    #[test]
+    fn plain_text_keeps_skin_tones() {
+        assert_eq!(
+            plain(":+1::skin-tone-2: :wave::skin-tone-6:", |_| None),
+            "👍🏻 👋🏿"
+        );
+        assert_eq!(
+            plain(":nope::skin-tone-2:", |_| None),
+            ":nope::skin-tone-2:"
         );
     }
 

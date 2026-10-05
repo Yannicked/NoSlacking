@@ -61,7 +61,7 @@ impl EmojiSet {
 }
 
 /// `+1::skin-tone-3` is `+1` at the third tone (Slack counts 2 to 6).
-fn split_tone(name: &str) -> (&str, Option<u8>) {
+pub fn split_tone(name: &str) -> (&str, Option<u8>) {
     match name.split_once("::skin-tone-") {
         Some((base, tone)) => (base, tone.parse().ok()),
         None => (name, None),
