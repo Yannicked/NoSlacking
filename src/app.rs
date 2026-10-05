@@ -243,6 +243,8 @@ pub struct App {
     /// A message waiting for "Delete?" to be answered.
     pub confirm_delete: Option<(String, Ts)>,
     pub section_dialog: Option<SectionDialog>,
+    /// Whether the keyboard shortcut sheet is open.
+    pub shortcuts: bool,
     /// The dialogs and panels for starting and finding conversations.
     pub convos: crate::convos::State,
     /// Watching the people on screen (see [`crate::people`]).
@@ -410,6 +412,7 @@ impl App {
             preview: None,
             confirm_delete: None,
             section_dialog: None,
+            shortcuts: false,
             convos: crate::convos::State::default(),
             people: crate::people::State::default(),
             views: crate::views::State::default(),
@@ -981,6 +984,7 @@ impl App {
                 }
             }
             Action::ShowSettings => self.page = Page::Settings,
+            Action::ShowShortcuts => self.shortcuts = true,
             Action::HideSettings => {
                 self.page = if self.workspaces.is_empty() {
                     Page::SignIn
@@ -1569,6 +1573,7 @@ impl App {
             || self.preview.is_some()
             || self.confirm_delete.is_some()
             || self.section_dialog.is_some()
+            || self.shortcuts
             || self.search.open
             || self.convos.overlay_open()
             || self.people.status.is_some()

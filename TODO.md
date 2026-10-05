@@ -529,7 +529,7 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       manifest does not ask for it yet (see the DND follow-up).*
 - [ ] **Share a message** to another conversation: a picker that posts
       the permalink with an optional comment, which Slack unfurls.
-- [ ] **Keyboard shortcut sheet** on `Ctrl+/` (⌘/) listing what
+- [x] **Keyboard shortcut sheet** on `Ctrl+/` (⌘/) listing what
       `ui/keys.rs` and the message focus handle. *Many shortcuts, and
       nowhere they are listed.*
 - [ ] **Quote Slack permalinks inline.** A link to a message in a known

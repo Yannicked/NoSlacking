@@ -10,6 +10,7 @@
 //!
 //!   Both leave a text field with text in it alone.
 //! - Ctrl+, : settings
+//! - Ctrl+/ (⌘/): the keyboard shortcut sheet
 //! - Ctrl+= / Ctrl+- / Ctrl+0: zoom
 //! - Esc: close the thread or the open overlay
 
@@ -57,6 +58,14 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
             app.switcher = None;
         } else {
             app.actions.push(Action::OpenSwitcher);
+        }
+    }
+    let sheet = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::Slash));
+    if sheet {
+        if app.shortcuts {
+            app.shortcuts = false;
+        } else if !overlay {
+            app.actions.push(Action::ShowShortcuts);
         }
     }
     let search = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::F));
