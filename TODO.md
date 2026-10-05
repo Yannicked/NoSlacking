@@ -540,3 +540,16 @@ These are the open follow-ups above, in the order to take them:
    `unsafe` code in fastframe or a winit patch.
 5. DND scopes for your-own-app sign-ins: wait for a manifest version bump
    that also brings `usergroups:read`.
+
+### Found while typing the errors
+
+- [ ] **Still untranslated:** `Event::Notice(String)` ("Uploaded {name}",
+      "Saved {path}", the browser-step notice), `Event::KeyringError`, and
+      `Socket::Disconnected` / `Rejected`. Give them typed payloads too.
+- [ ] **The catalog scan in `i18n.rs` misses wrapped calls.** It matches
+      `t("` on one line, so a `tf(` that rustfmt breaks before its string
+      is never checked (`convos.rs`, `views.rs`, `notify.rs`, several UI
+      files).
+- [ ] **A `.po` entry with no blank line before a `#` comment** merges
+      into the entry above it, and nothing catches that. Make `build.rs`
+      reject it.
