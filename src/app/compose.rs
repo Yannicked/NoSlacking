@@ -80,13 +80,26 @@ impl App {
         }
         let wire = crate::emoji::tone_shortcodes(&wire, self.settings.skin_tone);
         self.used_emoji(&crate::emoji::used_in(&wire));
+        self.post(team, channel, wire, thread, broadcast);
+    }
+
+    /// Shows a message in Slack's markup as sending at once, and posts it.
+    fn post(
+        &mut self,
+        team: String,
+        channel: String,
+        wire: String,
+        thread: Option<Ts>,
+        broadcast: bool,
+    ) {
         let local = self.next_local();
         let Some(workspace) = self.workspace_mut(&team) else {
             return;
         };
         let message = local_message(&workspace.info.user_id, &local, &wire, &thread, broadcast);
         workspace.add_local(&channel, message);
-        self.scroll_to_bottom.insert(key);
+        self.scroll_to_bottom
+            .insert(Self::draft_key(&team, &channel, thread.as_ref()));
         self.backend.send(Command::Send {
             team,
             channel,
@@ -95,6 +108,44 @@ impl App {
             broadcast,
             local,
         });
+    }
+
+    /// Shares message `ts` of `channel` (a reply in `thread`) to
+    /// conversation `to`: its permalink after the comment, sent as any
+    /// message, so it shows there at once. You stay where you are.
+    pub(super) fn share_to(
+        &mut self,
+        channel: &str,
+        ts: &Ts,
+        thread: Option<&Ts>,
+        to: String,
+        comment: &str,
+    ) {
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        let Some(workspace) = self.active_workspace() else {
+            return;
+        };
+        let Some(link) = crate::links::permalink(&workspace.info.domain, channel, ts, thread)
+        else {
+            self.toast(t("This message has no link yet"), true);
+            return;
+        };
+        let place = workspace
+            .conversations
+            .iter()
+            .find(|c| c.id == to)
+            .map(|c| crate::share::place(workspace, c));
+        let comment =
+            crate::emoji::tone_shortcodes(&to_wire(comment, &[]), self.settings.skin_tone);
+        self.used_emoji(&crate::emoji::used_in(&comment));
+        self.post(team, to, crate::share::text(&comment, &link), None, false);
+        let toast = match place {
+            Some(place) => tf("Shared to {conversation}", &[("conversation", &place)]),
+            None => t("Shared").into_owned(),
+        };
+        self.toast(toast, false);
     }
 
     pub(super) fn retry(&mut self, channel: &str, local: &Ts) {

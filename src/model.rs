@@ -797,6 +797,22 @@ pub enum Action {
         ts: Ts,
         thread: Option<Ts>,
     },
+    /// Opens the "Share message" dialog for a message; `thread` is its
+    /// parent for a reply.
+    Share {
+        channel: String,
+        ts: Ts,
+        thread: Option<Ts>,
+    },
+    /// Posts a link to a message, after an optional `comment`, in
+    /// conversation `to`, staying where you are.
+    ShareTo {
+        channel: String,
+        ts: Ts,
+        thread: Option<Ts>,
+        to: String,
+        comment: String,
+    },
     OpenProfile(String),
     Copy(String),
     ShowSettings,

@@ -62,6 +62,20 @@ pub fn permalink(domain: &str, channel: &str, ts: &Ts, thread: Option<&Ts>) -> O
     Some(link)
 }
 
+/// Whether a message's text, in Slack's markup, links to a Slack message:
+/// a shared message, or a permalink pasted in. Slack unfurls such a link
+/// as a quote of the message, which a post through the API asks for with
+/// `unfurl_links`.
+pub fn has_message_link(text: &str) -> bool {
+    text.split(|c: char| c.is_whitespace() || c == '<' || c == '>')
+        .map(|word| word.split('|').next().unwrap_or_default())
+        .filter(|word| word.starts_with("https://"))
+        .any(|word| {
+            parse_web(&word.replace("&amp;", "&"))
+                .is_some_and(|link| matches!(link.target, Target::Message { .. }))
+        })
+}
+
 /// Reads a web link to a conversation or message of a Slack workspace:
 /// `https://<domain>.slack.com/archives/<channel>[/p<ts>][?thread_ts=…]`,
 /// or the web app's `https://app.slack.com/client/<team>/<channel>`.
@@ -220,6 +234,24 @@ mod tests {
         );
         assert_eq!(permalink("", "C1", &ts, None), None);
         assert_eq!(permalink("acme", "C1", &Ts::new("local-1"), None), None);
+    }
+
+    #[test]
+    fn message_links_are_found_in_markup() {
+        assert!(has_message_link(
+            "Look\n<https://acme.slack.com/archives/C1/p1700000000123456>"
+        ));
+        assert!(has_message_link(
+            "<https://acme.slack.com/archives/C1/p1700000500000200?thread_ts=1700000000.000100&amp;cid=C1|this>"
+        ));
+        assert!(has_message_link(
+            "see https://acme.slack.com/archives/C1/p1700000000123456 too"
+        ));
+        assert!(!has_message_link(
+            "<https://acme.slack.com/archives/C1> is a channel"
+        ));
+        assert!(!has_message_link("<https://example.com/archives/C1/p17>"));
+        assert!(!has_message_link("no links"));
     }
 
     #[test]

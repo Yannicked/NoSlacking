@@ -10,7 +10,7 @@ use crate::theme::{self, Icon};
 use crate::ui::rich::{self, Rich};
 
 /// Quick reactions, react, reply, copy, edit, delete and a "More" menu
-/// (save for later, mark unread, copy link, pin), over the message's
+/// (save for later, mark unread, copy link, share, pin), over the message's
 /// top-right corner.
 pub(super) fn toolbar(
     ui: &mut egui::Ui,
@@ -307,6 +307,15 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
     }
     if ui.button(t("Copy link")).clicked() {
         actions.push(Action::CopyLink {
+            channel: row.channel.to_owned(),
+            ts: message.ts.clone(),
+            thread: message.thread_ts.clone(),
+        });
+        ui.close();
+    }
+    // A message still on its way has no link to share yet.
+    if !message.ts.is_local() && ui.button(t("Share message…")).clicked() {
+        actions.push(Action::Share {
             channel: row.channel.to_owned(),
             ts: message.ts.clone(),
             thread: message.thread_ts.clone(),

@@ -243,6 +243,8 @@ pub struct App {
     /// A message waiting for "Delete?" to be answered.
     pub confirm_delete: Option<(String, Ts)>,
     pub section_dialog: Option<SectionDialog>,
+    /// The "Share message" dialog, when open.
+    pub share: Option<crate::share::Share>,
     /// The dialogs and panels for starting and finding conversations.
     pub convos: crate::convos::State,
     /// Watching the people on screen (see [`crate::people`]).
@@ -410,6 +412,7 @@ impl App {
             preview: None,
             confirm_delete: None,
             section_dialog: None,
+            share: None,
             convos: crate::convos::State::default(),
             people: crate::people::State::default(),
             views: crate::views::State::default(),
@@ -1107,6 +1110,21 @@ impl App {
                 ts,
                 thread,
             } => self.copy_link(ctx, &channel, &ts, thread.as_ref()),
+            Action::Share {
+                channel,
+                ts,
+                thread,
+            } => {
+                self.focus_overlay = true;
+                self.share = Some(crate::share::Share::new(channel, ts, thread));
+            }
+            Action::ShareTo {
+                channel,
+                ts,
+                thread,
+                to,
+                comment,
+            } => self.share_to(&channel, &ts, thread.as_ref(), to, &comment),
             Action::Copy(text) => {
                 ctx.copy_text(text);
                 self.toast(t("Copied").into_owned(), false);
@@ -1569,6 +1587,7 @@ impl App {
             || self.preview.is_some()
             || self.confirm_delete.is_some()
             || self.section_dialog.is_some()
+            || self.share.is_some()
             || self.search.open
             || self.convos.overlay_open()
             || self.people.status.is_some()
