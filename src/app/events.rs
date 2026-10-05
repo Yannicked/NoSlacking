@@ -93,11 +93,22 @@ impl App {
                 polled,
             } => {
                 // Measured before the page joins what is loaded.
-                let fresh = self
+                let (fresh, unopened) = self
                     .workspace_mut(&team)
-                    .map(|w| w.polled_new(&channel, &messages, older, polled))
+                    .map(|w| {
+                        let fresh = w.polled_new(&channel, &messages, older, polled);
+                        (fresh, polled && !older && w.unopened(&channel))
+                    })
                     .unwrap_or_default();
-                self.history(&team, &channel, messages, has_more, cursor, older);
+                if unopened {
+                    // A poll of a conversation nobody opened only says what
+                    // is new there; opening it loads it properly.
+                    if let Some(workspace) = self.workspace_mut(&team) {
+                        workspace.polled_unopened(&channel, &messages);
+                    }
+                } else {
+                    self.history(&team, &channel, messages, has_more, cursor, older);
+                }
                 self.announce_polled(&team, &channel, &fresh);
             }
             Event::CachedHistory {
@@ -214,6 +225,21 @@ impl App {
             Event::Read { team, channel, ts } => {
                 if let Some(workspace) = self.workspace_mut(&team) {
                     workspace.read_elsewhere(&channel, ts);
+                }
+            }
+            Event::Activity {
+                team,
+                channel,
+                latest,
+                last_read,
+                mentions,
+            } => {
+                let unknown = self
+                    .workspace_mut(&team)
+                    .is_some_and(|w| w.activity(&channel, latest, last_read, mentions));
+                if unknown {
+                    self.backend
+                        .send(Command::FetchConversation { team, channel });
                 }
             }
             Event::Settled {
@@ -396,6 +422,9 @@ impl App {
                 continue;
             }
             notes.extend(self.note_for(team, channel, message, viewing));
+            if let Some(workspace) = self.workspace_mut(team) {
+                workspace.count_polled(channel, message, viewing);
+            }
             self.run_hooks(team, channel, message);
             crate::views::arrived(self, team, channel, message);
         }

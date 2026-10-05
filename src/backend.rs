@@ -661,6 +661,17 @@ pub enum Event {
         channel: String,
         ts: Ts,
     },
+    /// What a poll found about a conversation while the socket is down:
+    /// its newest message, your read marker and Slack's count of unread
+    /// mentions, each when the poll learnt it. Markers only move forward,
+    /// so a stale answer cannot undo anything newer.
+    Activity {
+        team: String,
+        channel: String,
+        latest: Option<Ts>,
+        last_read: Option<Ts>,
+        mentions: Option<u32>,
+    },
     Socket(Socket),
     /// A `slack://` link the desktop handed over, for a signed-in
     /// workspace: open what it names.
