@@ -279,6 +279,12 @@ impl Client {
         self
     }
 
+    /// Stops reporting refreshes, for a client on its way out: a token
+    /// renewed from now on stays in memory and is never saved.
+    pub fn stop_reporting(&self) {
+        *lock(&self.shared.on_refresh) = None;
+    }
+
     /// Switches the app that renews the token, for this client and every
     /// clone of it. A new app also gets a fresh chance to refresh.
     pub fn set_app(&self, app: Option<OauthApp>) {
