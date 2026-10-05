@@ -98,7 +98,9 @@ pub(super) fn plain_text(workspace: &WorkspaceState, message: &Message) -> Strin
                 .or_else(|| label.clone())
                 .unwrap_or_else(|| id.clone())
         )),
-        crate::mrkdwn::Inline::Group { label, .. } => label.clone(),
+        crate::mrkdwn::Inline::Group { id, label } => {
+            Some(workspace.group_label(id, label.as_deref()))
+        }
         _ => None,
     });
     if !text.trim().is_empty() {
@@ -621,6 +623,46 @@ mod tests {
         assert_eq!(unread(std::slice::from_ref(&w)), Unread::default());
         c.mentions = 1;
         assert!(w.is_unread(&c));
+    }
+
+    #[test]
+    fn notifications_name_user_groups_even_without_a_label() {
+        let mut w = WorkspaceState::new(crate::model::Workspace {
+            team_id: "T1".into(),
+            name: "One".into(),
+            domain: String::new(),
+            icon: None,
+            user_id: "U1".into(),
+        });
+        w.groups.push(crate::model::UserGroup {
+            id: "S1".into(),
+            handle: "design".into(),
+            name: "Design".into(),
+            members: None,
+        });
+        let message = Message {
+            ts: crate::model::Ts::new("1.0"),
+            user: None,
+            username: None,
+            bot_icon: None,
+            bot_id: None,
+            text: "<!subteam^S1> and <!subteam^S9> and <!subteam^S8|@ops>".into(),
+            thread_ts: None,
+            reply_count: 0,
+            replies_known: false,
+            reply_users: Vec::new(),
+            latest_reply: None,
+            reactions: Vec::new(),
+            files: Vec::new(),
+            attachments: Vec::new(),
+            blocks: Vec::new(),
+            edited: false,
+            subtype: None,
+            delivery: crate::model::Delivery::Sent,
+            broadcast: false,
+            pinned: false,
+        };
+        assert_eq!(plain_text(&w, &message), "@design and @S9 and @ops");
     }
 
     #[test]
