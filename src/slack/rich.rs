@@ -138,7 +138,14 @@ fn inlines(node: &Value, out: &mut Vec<Inline>) {
             }
             "emoji" => {
                 if let Some(name) = str_at(element, "name").filter(|name| !name.is_empty()) {
-                    out.push(Inline::Emoji(emoji_name(name, element)));
+                    // An emoji newer than the table still shows, as the
+                    // characters Slack gave alongside its name.
+                    match emoji_unicode(element) {
+                        Some(text) if crate::emoji::unicode(name, None).is_none() => {
+                            push(out, text, style);
+                        }
+                        _ => out.push(Inline::Emoji(emoji_name(name, element))),
+                    }
                 }
             }
             "user" => {
@@ -187,6 +194,17 @@ fn emoji_name(name: &str, element: &Value) -> String {
         Some(tone @ 2..=6) => format!("{name}::skin-tone-{tone}"),
         _ => name.to_owned(),
     }
+}
+
+/// The characters in an emoji element's `unicode` field, which Slack
+/// writes as code points in hex joined by dashes (`1f44d-1f3fc`), skin tone
+/// included.
+fn emoji_unicode(element: &Value) -> Option<String> {
+    let field = str_at(element, "unicode").filter(|field| !field.is_empty())?;
+    field
+        .split('-')
+        .map(|point| u32::from_str_radix(point, 16).ok().and_then(char::from_u32))
+        .collect()
 }
 
 fn style(element: &Value) -> Style {
@@ -242,7 +260,7 @@ fn plain(node: &Value) -> String {
             "emoji" => {
                 if let Some(name) = str_at(element, "name") {
                     out.push(':');
-                    out.push_str(name);
+                    out.push_str(&emoji_name(name, element));
                     out.push(':');
                 }
             }
@@ -286,6 +304,29 @@ mod tests {
                 Inline::Emoji("+1::skin-tone-3".into()),
             ])]
         );
+    }
+
+    #[test]
+    fn newer_emoji_show_their_unicode_and_code_keeps_tones() {
+        let blocks = read(&section(
+            r#"{"type":"emoji","name":"face_shaking_from_the_future","unicode":"1fae8"},
+               {"type":"emoji","name":"+1","unicode":"1f44d-1f3fc","skin_tone":3},
+               {"type":"emoji","name":"broken","unicode":"zz"}"#,
+        ));
+        assert_eq!(
+            blocks,
+            [Block::Paragraph(vec![
+                text("\u{1fae8}"),
+                Inline::Emoji("+1::skin-tone-3".into()),
+                Inline::Emoji("broken".into()),
+            ])]
+        );
+        let code = read(
+            r#"{"type":"rich_text","elements":[{"type":"rich_text_preformatted","elements":[
+                {"type":"text","text":"ok "},
+                {"type":"emoji","name":"wave","skin_tone":5}]}]}"#,
+        );
+        assert_eq!(code, [Block::Preformatted("ok :wave::skin-tone-5:".into())]);
     }
 
     #[test]
