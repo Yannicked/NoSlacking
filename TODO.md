@@ -606,3 +606,61 @@ These are the open follow-ups above, in the order to take them:
 - [x] **A `.po` entry with no blank line before a `#` comment** merges
       into the entry above it, and nothing catches that. Make `build.rs`
       reject it.
+
+## Huddles (researched 2026-10-06)
+
+Doable for browser sign-ins, but full audio is a project of months.
+`rooms.join` (`channel_id`, `regions`, `multidevice=true`; the session
+token and `d` cookie) answers Amazon Chime meeting and attendee
+credentials (`call.free_willy.meeting` / `.attendee`); the rest is a
+Chime SDK WebRTC session: a signaling WebSocket to the meeting's
+`SignalingUrl` (protobuf `SdkSignalFrame`, from AWS's Apache-2.0
+amazon-chime-sdk-js and C++ signaling client), TURN-only ICE and Opus.
+HuddleFM (AGPL, read, don't copy) does this without a browser. Slack's
+terms call undocumented methods unreliable and forbid reverse
+engineering, as for the rest of the session sign-in.
+
+- [ ] **Invitations and live state (days).** A `huddle_invite` becomes a
+      notification with Join (opens `app.slack.com/huddle/T/C`) and
+      Decline (`rooms.inviteResponse`); reconcile participants with
+      `screenhero.rooms.info` after reconnects and now and then, as join
+      and leave events go missing; "Open in Slack app" by the huddle
+      indicator. First check these events reach the RTM socket at all
+      (HuddleFM hears them on the desktop "flannel" gateway).
+- [ ] **Listen-only spike (1–2 weeks), behind a `huddle-audio` feature:**
+      join, receive Chime's mixed audio and play it (`str0m` or
+      `webrtc-rs`, `opus`, `cpal`), to prove the path and judge echo
+      cancellation (`webrtc-audio-processing`) before going further.
+- [ ] **Two-way audio (4–8 weeks more, plus 2–4 hardening)**, only if the
+      spike holds up: microphone with echo cancellation and noise
+      suppression, mute, devices, who is talking, reconnects. Video and
+      screen viewing after that (+4–8 weeks).
+
+## Media and file previews in the app (researched 2026-10-06)
+
+Slack already makes most previews; NoSlacking parses few of them.
+
+- [ ] **Use what Slack gives (small, no new crates).** Parse `mp4`,
+      `mp4_low`, `aac`, `converted_pdf`, `duration_ms`,
+      `audio_wave_samples`, `transcription`, `subtype`, `preview` /
+      `preview_plain_text`, `lines_more`: snippet preview cards, voice
+      clip cards with a waveform, duration and the transcript's start, a
+      duration on video stills, and the smaller `mp4_low` / `aac` for
+      "open in player".
+- [ ] **A viewer for spreadsheets, CSV, zip listings and whole text files
+      (medium).** `calamine` (MIT) and `csv`; a read-only
+      `egui_extras::TableBuilder` grid; caps on download size, rows,
+      columns, zip entries and compression ratio, like
+      `images::check_decoded_size`.
+- [ ] **Audio in the app (small–medium).** `rodio` + `symphonia` (aac,
+      isomp4, mp3, vorbis, flac, wav; no Opus) with `cpal`; the packages
+      need ALSA, the Flatpak `--socket=pulseaudio`.
+- [ ] **Every page of PDFs and Office files (medium)** through Slack's
+      `converted_pdf`, rendered with `hayro` (pure Rust, experimental),
+      falling back to `thumb_pdf` and "open".
+- [ ] **Video (large).** GStreamer (`gstreamer-rs`, the libraries LGPL
+      and from the system) behind a `video` feature for Linux, the
+      packages and the Flatpak (whose runtime has it); macOS and Windows
+      keep the system player. Fetch with our own client so the token
+      never leaves the process; prefer `mp4_low`. Not mpv (LGPL plus
+      `unsafe` GL) nor FFmpeg bindings (WTFPL, painful builds).
