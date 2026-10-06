@@ -209,6 +209,14 @@ pub enum Command {
         url: String,
         name: String,
     },
+    /// Fetches a sound into memory to play it in the app, as request
+    /// `id`, answered by [`Event::AudioFetched`].
+    FetchAudio {
+        team: String,
+        id: u64,
+        url: String,
+        name: String,
+    },
     Mark {
         team: String,
         channel: String,
@@ -469,6 +477,18 @@ impl std::fmt::Debug for Command {
             Self::OpenFile { team, url, name } => f
                 .debug_struct("OpenFile")
                 .field("team", team)
+                .field("url", url)
+                .field("name", name)
+                .finish(),
+            Self::FetchAudio {
+                team,
+                id,
+                url,
+                name,
+            } => f
+                .debug_struct("FetchAudio")
+                .field("team", team)
+                .field("id", id)
                 .field("url", url)
                 .field("name", name)
                 .finish(),
@@ -812,6 +832,12 @@ pub enum Event {
     Error(Problem),
     /// Something worth a calm toast.
     Notice(crate::notice::Notice),
+    /// The sound asked for by [`Command::FetchAudio`] `id`, whole, or why
+    /// not.
+    AudioFetched {
+        id: u64,
+        result: Result<crate::audio::Bytes, Problem>,
+    },
     /// Your Do Not Disturb state in a workspace.
     Dnd {
         team: String,

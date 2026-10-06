@@ -80,6 +80,7 @@ impl App {
                 }
             }
             Event::Notice(notice) => self.toast(notice.message(), false),
+            Event::AudioFetched { id, result } => self.audio_fetched(id, result),
             Event::Dnd { team, dnd } => self.dnd_arrived(&team, dnd),
             Event::SlackPrefs { team, prefs } => self.prefs_arrived(&team, prefs),
             Event::DeepLink(link) => {
@@ -468,6 +469,7 @@ impl App {
         self.popouts.retain(|p| p.team != team);
         self.views.teams.remove(team);
         self.convos.data.retain(|(t, _), _| t != team);
+        self.audio_signed_out(team);
         if self.active_team().as_deref() == Some(team) {
             // What is open names the workspace on screen.
             self.thread = None;

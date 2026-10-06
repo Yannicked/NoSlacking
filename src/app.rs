@@ -20,6 +20,7 @@ use crate::paths::AppDirs;
 use crate::settings::{Appearance, Settings};
 use crate::theme::{self, Catalog, Palette};
 
+mod audio;
 mod compose;
 mod desktop;
 mod emoji;
@@ -323,6 +324,10 @@ pub struct App {
     /// The desktop's side of the window: requests for it, and what its
     /// title and badge last showed.
     desktop: desktop::Desktop,
+    /// The sound playing in the app, if any (see [`crate::audio`]).
+    playback: crate::audio::Playback,
+    /// The thread that plays it.
+    audio_device: crate::audio::Device,
 }
 
 impl App {
@@ -478,6 +483,8 @@ impl App {
             quit: false,
             notifier: desktop::notifier(waker, options.demo),
             desktop: desktop::Desktop::new(options.demo),
+            playback: crate::audio::Playback::default(),
+            audio_device: crate::audio::Device::new(waker.clone()),
         };
         app.start_theme_scan();
         app.start_tray();
@@ -639,6 +646,7 @@ impl App {
             self.emoji_image_picked(picked);
         }
         self.copy_image_frame(ctx);
+        self.audio_frame(ctx);
         if self.catalog.poll() {
             self.refresh_custom_theme();
         }
@@ -1120,6 +1128,7 @@ impl App {
                     self.backend.send(Command::OpenFile { team, url, name });
                 }
             }
+            Action::Audio(request) => self.audio(request),
             Action::Sidebar(edit) => self.edit_sidebar(edit),
             // What floats over the window.
             Action::PickReaction { channel, ts } => {

@@ -799,6 +799,21 @@ fn history(channel: &str) -> Vec<Message> {
     }
 }
 
+/// What every demo sound plays: 14 seconds of soft beeps (as long as the
+/// voice clip), a WAV made in memory rather than a file in the repository.
+fn demo_sound() -> crate::audio::Bytes {
+    const RATE: u32 = 16_000;
+    crate::audio::wav(RATE, &crate::audio::beeps(RATE, 14.0)).into()
+}
+
+/// The voice clip in #random, for the screenshot that plays it.
+pub fn voice_clip() -> Option<File> {
+    shared_files()
+        .into_iter()
+        .flat_map(|message| message.files)
+        .find(|file| file.voice)
+}
+
 /// #random's files, one of each kind Slack previews: a code snippet, a
 /// text file, a PDF, a spreadsheet with Slack's PDF of it, a voice clip
 /// and a video.
@@ -1426,6 +1441,11 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
             Command::OpenFile { name, .. } => {
                 sink.send(Event::Notice(Notice::DemoOpen { name }));
             }
+            // Every sound is the same few seconds of beeps, made here.
+            Command::FetchAudio { id, .. } => sink.send(Event::AudioFetched {
+                id,
+                result: Ok(demo_sound()),
+            }),
             Command::Convos { team, command } => {
                 for event in crate::backend::convos::demo(&team, command) {
                     sink.send(event);

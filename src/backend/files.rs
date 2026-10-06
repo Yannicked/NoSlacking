@@ -214,6 +214,50 @@ pub(super) async fn open_file(
         .map_err(|failure| Problem::new(opening(name), failure))
 }
 
+/// Fetches the file at `url` into memory, as `name` in a failure, giving
+/// up with [`Failure::TooLarge`] past `cap` bytes: for a sound played in
+/// the app, which never touches the disk.
+pub(super) async fn fetch_bytes(
+    client: &Client,
+    url: &str,
+    name: &str,
+    cap: u64,
+) -> Result<Vec<u8>, Problem> {
+    let downloading = |why| {
+        Problem::new(
+            Doing::Download {
+                name: name.to_owned(),
+            },
+            why,
+        )
+    };
+    let mut response = client
+        .download(url)
+        .await
+        .map_err(|e| downloading(failure(&e)))?;
+    // Said up front by most servers, so a huge file is not even started.
+    if response.content_length().is_some_and(|len| len > cap) {
+        return Err(downloading(Failure::TooLarge));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| downloading(failure(&SlackError::from(e))))?
+    {
+        if over_cap(bytes.len(), chunk.len(), cap) {
+            return Err(downloading(Failure::TooLarge));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+/// Whether `chunk` more bytes on top of `have` pass `cap`.
+fn over_cap(have: usize, chunk: usize, cap: u64) -> bool {
+    (have as u64).saturating_add(chunk as u64) > cap
+}
+
 /// Streams `url` into a new file named after `name` in `dir`, numbered if
 /// the name is taken, and returns where it went. A `private` file (one
 /// kept in the workspace's cache) is readable by you alone on Unix; a
@@ -447,6 +491,14 @@ fn safe_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sound_in_memory_stops_at_the_cap() {
+        assert!(!over_cap(0, 10, 10));
+        assert!(over_cap(5, 6, 10));
+        assert!(!over_cap(5, 5, 10));
+        assert!(over_cap(usize::MAX, usize::MAX, u64::MAX - 1));
+    }
 
     #[test]
     fn a_cancel_before_the_last_step_stops_the_upload() {

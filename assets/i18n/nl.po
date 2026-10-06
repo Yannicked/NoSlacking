@@ -2377,3 +2377,23 @@ msgstr[1] "nog {count} regels"
 
 msgid "More in the file"
 msgstr "Meer in het bestand"
+
+# The player on voice clip and sound file cards.
+msgid "Pause {name}"
+msgstr "{name} pauzeren"
+
+msgid "Stop loading {name}"
+msgstr "Laden van {name} stoppen"
+
+# Why a sound opens in the system's player instead of playing in the app.
+msgid "This kind of sound can't play in the app."
+msgstr "Dit soort geluid kan niet in de app worden afgespeeld."
+
+msgid "This sound is too large to play in the app."
+msgstr "Dit geluid is te groot om in de app af te spelen."
+
+msgid "There is no sound device to play on."
+msgstr "Er is geen geluidsapparaat om op af te spelen."
+
+msgid "This sound could not be played in the app."
+msgstr "Dit geluid kon niet in de app worden afgespeeld."

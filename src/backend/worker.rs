@@ -18,7 +18,7 @@ use super::fetch::{
     Boot, boot, conversation_info, conversations, edit_sidebar, history, sections, thread,
     workspace_details,
 };
-use super::files::{UploadGate, download, file_name, open_file, upload};
+use super::files::{UploadGate, download, fetch_bytes, file_name, open_file, upload};
 use super::translate::{Translated, str_of, translate};
 use super::{Change, Command, Event, Gate, SignIn, Sink, Socket};
 use crate::auth::{Flow, SignedIn};
@@ -807,6 +807,12 @@ impl Worker {
             Command::CancelUpload { id } => self.cancel_upload(id),
             Command::Download { team, url, name } => self.download(&team, url, name),
             Command::OpenFile { team, url, name } => self.open_file(&team, url, name),
+            Command::FetchAudio {
+                team,
+                id,
+                url,
+                name,
+            } => self.fetch_audio(&team, id, url, name),
             Command::Mark { team, channel, ts } => self.mark(&team, channel, ts),
             Command::FetchUsers { team, ids } => self.fetch_users(team, ids),
             Command::FetchBots { team, ids } => self.fetch_bots(team, ids),
@@ -1185,6 +1191,25 @@ impl Worker {
             if let Err(error) = open_file(&client, dir, &url, &name).await {
                 sink.send(Event::Error(error));
             }
+        });
+    }
+
+    /// Fetches a sound whole, for playing in the app. Its answer always
+    /// comes, so the card never waits for ever.
+    fn fetch_audio(&self, team: &str, id: u64, url: String, name: String) {
+        let Some((client, sink)) = self.team(team) else {
+            let doing = Doing::Download { name };
+            self.sink.send(Event::AudioFetched {
+                id,
+                result: Err(Problem::new(doing, Failure::NotSignedIn)),
+            });
+            return;
+        };
+        tokio::spawn(async move {
+            let result = fetch_bytes(&client, &url, &name, crate::audio::MAX_BYTES)
+                .await
+                .map(crate::audio::Bytes::from);
+            sink.send(Event::AudioFetched { id, result });
         });
     }
 

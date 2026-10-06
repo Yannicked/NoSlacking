@@ -691,7 +691,17 @@ impl DemoSetup {
             Some("media") => app.actions.push(Action::OpenConversation("C03".into())),
             // #random's files: Slack's previews of a snippet, a text file,
             // a PDF, a spreadsheet, a voice clip and a video.
-            Some("previews") => app.actions.push(Action::OpenConversation("C04".into())),
+            // The voice clip plays, to show the card mid-play.
+            Some("previews") => {
+                app.actions.push(Action::OpenConversation("C04".into()));
+                if let Some(track) = noslacking::demo::voice_clip()
+                    .as_ref()
+                    .and_then(noslacking::audio::Track::of)
+                {
+                    app.actions
+                        .push(Action::Audio(noslacking::audio::Request::Toggle(track)));
+                }
+            }
             // Search results, with a second page to scroll to.
             Some("search") => {
                 app.search.text = "standup in:#general".into();

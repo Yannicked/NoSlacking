@@ -699,9 +699,18 @@ Slack already makes most previews; NoSlacking parses few of them.
       `egui_extras::TableBuilder` grid; caps on download size, rows,
       columns, zip entries and compression ratio, like
       `images::check_decoded_size`.
-- [ ] **Audio in the app (small–medium).** `rodio` + `symphonia` (aac,
+- [x] **Audio in the app (small–medium).** `rodio` + `symphonia` (aac,
       isomp4, mp3, vorbis, flac, wav; no Opus) with `cpal`; the packages
       need ALSA, the Flatpak `--socket=pulseaudio`.
+      - Done (`src/audio.rs`, the `audio` feature, on by default): voice
+        clips and sound files play on their cards: play/pause, the
+        waveform (or a bar) fills in and seeks on click, position /
+        length. The worker fetches the sound into memory (50 MB cap);
+        a thread of its own decodes and plays it, opening the device
+        only while something plays. One sound at a time; signing out
+        stops it. Opus/WebM, larger files, no sound device and
+        undecodable files open in the system's player with a toast;
+        without the feature every sound does, as before.
 - [ ] **Every page of PDFs and Office files (medium)** through Slack's
       `converted_pdf`, rendered with `hayro` (pure Rust, experimental),
       falling back to `thumb_pdf` and "open".
