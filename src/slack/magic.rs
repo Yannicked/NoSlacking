@@ -17,12 +17,8 @@
 //! comes from Make Slack Great Again (msga). None of these endpoints are
 //! documented; they may change at any time.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use reqwest::cookie::{CookieStore as _, Jar};
-
 use super::client::SlackError;
+use super::cookies::{self, Cookies};
 
 /// Where the browser sign-in starts.
 pub const SIGN_IN_URL: &str = "https://app.slack.com/ssb/signin";
@@ -191,16 +187,6 @@ fn team_results(body: &serde_json::Value) -> Result<Vec<TeamResult>, SlackError>
     Ok(teams)
 }
 
-/// The value of the `d` cookie in a `Cookie` header's worth of cookies.
-fn d_cookie(header: &str) -> Option<String> {
-    header
-        .split(';')
-        .filter_map(|pair| pair.trim().split_once('='))
-        .find(|(name, _)| *name == "d")
-        .map(|(_, value)| value.to_owned())
-        .filter(|value| !value.is_empty())
-}
-
 /// Redeems one host's tokens with `auth.loginMagicBulk`, keeping the session
 /// cookie Slack sets.
 pub async fn redeem(set: &TokenSet) -> Result<Redeemed, SlackError> {
@@ -210,29 +196,20 @@ pub async fn redeem(set: &TokenSet) -> Result<Redeemed, SlackError> {
             set.host
         );
     }
-    let jar = Arc::new(Jar::default());
-    let http = super::net::builder()
-        .user_agent(USER_AGENT)
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(60))
-        .cookie_provider(jar.clone())
-        .build()?;
-    let api = reqwest::Url::parse(&format!("https://{}/api/auth.loginMagicBulk", set.host))
+    let mut api = reqwest::Url::parse(&format!("https://{}/api/auth.loginMagicBulk", set.host))
         .map_err(|e| SlackError::Network(e.to_string()))?;
-    let body: serde_json::Value = http
-        .get(api.clone())
-        .query(&[("magic_tokens", set.tokens.join(",")), ("ssb", "1".into())])
-        .send()
+    api.query_pairs_mut()
+        .append_pair("magic_tokens", &set.tokens.join(","))
+        .append_pair("ssb", "1");
+    // Slack sets the `d` cookie on this answer (or on a redirect before
+    // it); `cookies::get` keeps every cookie a hop sets.
+    let mut jar = Cookies::default();
+    let body: serde_json::Value = cookies::get(&cookies::client(USER_AGENT)?, api, &mut jar)
         .await?
         .json()
         .await?;
     let teams = team_results(&body)?;
-    // The cookie is set for `.slack.com`; any Slack URL reads it back.
-    let cookie = ["https://slack.com/", api.as_str()]
-        .iter()
-        .filter_map(|u| reqwest::Url::parse(u).ok())
-        .filter_map(|u| jar.cookies(&u))
-        .find_map(|header| header.to_str().ok().and_then(d_cookie));
+    let cookie = jar.get("d").map(str::to_owned);
     Ok(Redeemed { cookie, teams })
 }
 
@@ -321,15 +298,5 @@ mod tests {
                 .map(|e| e.to_string()),
             Some(SlackError::Api("ratelimited".into()).to_string())
         );
-    }
-
-    #[test]
-    fn the_d_cookie_is_read_from_the_jar_header() {
-        assert_eq!(
-            d_cookie("lc=1; d=xoxd-abc%2F; x=2").as_deref(),
-            Some("xoxd-abc%2F")
-        );
-        assert_eq!(d_cookie("lc=1"), None);
-        assert_eq!(d_cookie("d="), None);
     }
 }

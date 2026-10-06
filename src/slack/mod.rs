@@ -1,6 +1,7 @@
 //! Slack: the Web API, Socket Mode and their JSON.
 
 pub mod client;
+pub mod cookies;
 pub mod magic;
 pub mod net;
 pub mod rich;

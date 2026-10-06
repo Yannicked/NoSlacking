@@ -55,7 +55,7 @@ fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
 # TLS stack and builds without OpenSSL on every platform.
 # socks and system-proxy: Settings → Network (the system's proxy settings
 # on macOS and Windows as well as the environment, or a SOCKS5 proxy).
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "http2", "multipart", "cookies", "stream", "socks", "system-proxy"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "http2", "multipart", "stream", "socks", "system-proxy"] }
 # Already under reqwest: its proxy matcher, so the WebSockets pick the same
 # proxy as every HTTP request.
 hyper-util = { version = "0.1.21", default-features = false, features = ["client-proxy", "client-proxy-system"] }
