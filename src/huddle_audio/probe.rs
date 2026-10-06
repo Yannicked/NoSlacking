@@ -208,7 +208,7 @@ async fn probe(
         let _ = stop.send(true);
     });
     let feed = speaker.as_ref().map(|(_, feed)| feed.clone());
-    let (report, result) = media::listen(&joined, feed, stopped, None).await;
+    let (report, result) = media::listen(&joined, feed, stopped, None, None).await;
     timer.abort();
 
     log::info!(

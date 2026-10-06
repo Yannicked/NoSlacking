@@ -29,6 +29,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use super::chime::{self, FrameType};
 use super::dtls;
 use super::join::ChimeJoin;
+use super::roster::{self, Roster, Voices};
 use super::sdp::{self, Mids};
 use super::signaling::{Ending, Handshake, Incoming, Socket, Step, TurnCredentials};
 use super::speaker::Feed;
@@ -109,6 +110,9 @@ pub struct Report {
     pub audio_bytes: u64,
     /// The most attendees Chime listed at once.
     pub most_attendees: usize,
+    /// Whether it ended because the meeting did: Chime's close 4410 or
+    /// its audio status 410. Not a failure; the huddle is over.
+    pub meeting_ended: bool,
 }
 
 /// A relay being set up or in use.
@@ -341,6 +345,12 @@ struct Session<'a> {
     feed: Option<Feed>,
     /// Told once the audio connection is up.
     live: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Told who is in the huddle and speaking, when that changes.
+    roster: Option<tokio::sync::watch::Sender<Roster>>,
+    /// When each attendee was last heard.
+    voices: Voices,
+    /// Chime's head count, from the last INDEX.
+    count: Option<u32>,
     report: Report,
     /// How it ended, once it has.
     over: Option<Result<(), Failure>>,
@@ -411,6 +421,18 @@ impl Session<'_> {
         log::info!("signaling: over: {ending}");
         self.report.ending = Some(ending.to_string());
         if self.over.is_some() {
+            return;
+        }
+        let meeting_ended = matches!(
+            ending,
+            Ending::Closed {
+                code: super::signaling::MEETING_ENDED_CLOSE,
+                ..
+            } | Ending::Audio(chime::AudioStatus::MeetingEnded)
+        );
+        if meeting_ended {
+            self.report.meeting_ended = true;
+            self.over = Some(Ok(()));
             return;
         }
         let stage = match self.handshake_stage() {
@@ -847,11 +869,40 @@ impl Session<'_> {
             }
             self.next_stats = now + STATS_EVERY;
         }
+        // Speaking marks fade even when no frame comes to say so.
+        self.tell_roster(now);
+    }
+
+    /// Tells who is in the huddle and speaking, if that changed.
+    fn tell_roster(&mut self, now: Instant) {
+        let Some(tell) = &self.roster else {
+            return;
+        };
+        let now = roster::roster(
+            self.handshake.attendees(),
+            &self.join.attendee_id,
+            &self.voices,
+            self.count,
+            now,
+        );
+        tell.send_if_modified(|roster| {
+            let changed = *roster != now;
+            if changed {
+                *roster = now;
+            }
+            changed
+        });
     }
 
     /// One frame from Chime.
     async fn on_frame(&mut self, frame: &chime::Frame) {
         self.last_inbound = Instant::now();
+        if let Some(metadata) = &frame.audio_metadata {
+            self.voices.metadata(metadata, self.last_inbound);
+        }
+        if let Some(count) = frame.index.as_ref().and_then(|i| i.num_participants) {
+            self.count = Some(count);
+        }
         let name = chime::type_name(frame);
         *self.report.frames.entry(name).or_default() += 1;
         if quiet(frame) {
@@ -861,6 +912,7 @@ impl Session<'_> {
         }
         let steps = self.handshake.on_frame(frame, now_ms());
         self.carry(steps).await;
+        self.tell_roster(self.last_inbound);
     }
 
     /// Starts leaving: LEAVE, then up to three seconds for LEAVE_ACK.
@@ -909,13 +961,15 @@ async fn stopped(
 }
 
 /// Listens to the huddle `join` describes until `stop` turns true or the
-/// session ends, feeding the audio to `feed` and telling `live` once the
-/// audio connection is up. Leaves cleanly either way.
+/// session ends, feeding the audio to `feed`, telling `live` once the
+/// audio connection is up and `roster` who is in it whenever that
+/// changes. Leaves cleanly either way.
 pub async fn listen(
     join: &ChimeJoin,
     feed: Option<Feed>,
     mut stop: tokio::sync::watch::Receiver<bool>,
     live: Option<tokio::sync::oneshot::Sender<()>>,
+    roster: Option<tokio::sync::watch::Sender<Roster>>,
 ) -> (Report, Result<(), Failure>) {
     log::info!(
         "signaling: opening {} for attendee {}",
@@ -970,6 +1024,9 @@ pub async fn listen(
         audio_time: 0,
         feed,
         live,
+        roster,
+        voices: Voices::default(),
+        count: None,
         report: Report::default(),
         over: None,
     };
@@ -1478,7 +1535,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(3)).await;
             let _ = stop.send(true);
         });
-        let (report, result) = listen(&join, None, stopped, None).await;
+        let (report, result) = listen(&join, None, stopped, None, None).await;
         assert_eq!(result, Ok(()), "{report:?}");
         assert_eq!(report.ending.as_deref(), Some("left"));
         assert!(report.relay.is_some(), "{report:?}");

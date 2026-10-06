@@ -29,6 +29,7 @@ pub mod join;
 pub mod media;
 pub mod probe;
 pub mod region;
+pub mod roster;
 pub mod sdp;
 pub mod signaling;
 pub mod speaker;

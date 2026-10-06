@@ -489,8 +489,35 @@ pub fn demo_huddle(team: &str) -> Event {
 pub fn demo(team: &str, command: Command) -> Vec<Event> {
     match command {
         Command::Typing { .. } | Command::Active | Command::CheckHuddle { .. } => Vec::new(),
+        // Listening plays nothing in the demo, but the call bar shows as
+        // it would: joined, live, and who is in #design's huddle.
         #[cfg(feature = "huddle-audio")]
-        Command::ListenHuddle { .. } | Command::LeaveHuddle => Vec::new(),
+        Command::ListenHuddle { channel } => {
+            let roster = crate::demo::listening().roster;
+            [
+                crate::huddles::Listen::Joining,
+                crate::huddles::Listen::Live,
+                crate::huddles::Listen::Roster(roster),
+            ]
+            .into_iter()
+            .map(|state| Event::People {
+                team: team.to_owned(),
+                event: people::Event::Listening {
+                    channel: channel.clone(),
+                    state,
+                },
+            })
+            .collect()
+        }
+        // Left at once; the demo has one huddle to leave, in #design.
+        #[cfg(feature = "huddle-audio")]
+        Command::LeaveHuddle => vec![Event::People {
+            team: team.to_owned(),
+            event: people::Event::Listening {
+                channel: "C03".into(),
+                state: crate::huddles::Listen::Ended(Ok(crate::huddles::Left::Asked)),
+            },
+        }],
         Command::DeclineHuddle { .. } => vec![Event::People {
             team: team.to_owned(),
             event: people::Event::InviteDeclined { result: Ok(()) },

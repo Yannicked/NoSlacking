@@ -3,6 +3,8 @@
 
 mod add_emoji;
 mod browse;
+#[cfg(feature = "huddle-audio")]
+mod call_bar;
 mod composer;
 mod context;
 mod conversation;
@@ -86,6 +88,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         Page::SignIn => login::show(app, ui),
         Page::Settings => {
             sidebar::rail(app, ui);
+            // The settings have no sidebar: the call bar stays in sight
+            // at their foot.
+            #[cfg(feature = "huddle-audio")]
+            call_bar::panel(
+                ui,
+                "settings-call-bar",
+                &app.palette,
+                app.huddles.listening.as_ref(),
+                &app.workspaces,
+                true,
+                &mut app.actions,
+            );
             settings::show(app, ui);
         }
         Page::Main => {

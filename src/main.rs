@@ -75,7 +75,8 @@ struct Cli {
     /// Open a view before the screenshot: thread, settings, sign-in,
     /// switcher, palette, picker, profile, share, upload, drafts, lightbox,
     /// media, previews, viewer-sheet, viewer-csv, viewer-zip, viewer-text,
-    /// compact, held-media, shortcuts, delete-file or add-emoji.
+    /// compact, held-media, shortcuts, delete-file, add-emoji or (with
+    /// huddle-audio) listening.
     #[cfg(feature = "demo")]
     #[arg(long, value_name = "VIEW")]
     demo_view: Option<String>,
@@ -763,6 +764,12 @@ impl DemoSetup {
             }
             // #design, with a huddle going on.
             Some("huddle") => app.actions.push(Action::OpenConversation("C03".into())),
+            // Listening to #design's huddle: the call bar.
+            #[cfg(feature = "huddle-audio")]
+            Some("listening") => {
+                app.huddles.listening = Some(noslacking::demo::listening());
+                app.actions.push(Action::OpenConversation("C03".into()));
+            }
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             // The deploy bot's Approve button pressed: its question.
             Some("approve") => {
