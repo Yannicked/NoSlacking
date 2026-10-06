@@ -721,6 +721,69 @@ engineering, as for the rest of the session sign-in.
       join, receive Chime's mixed audio and play it (`str0m` or
       `webrtc-rs`, `opus`, `cpal`), to prove the path and judge echo
       cancellation (`webrtc-audio-processing`) before going further.
+      - Built, off by default, unproven against Slack
+        (`src/huddle_audio/`): `rooms.join` → `ChimeJoin` (join token
+        redacted); Chime signaling (the vendored Apache-2.0 proto,
+        compiled ahead of time by `tools/chime-protogen` with `protox`,
+        so no `protoc`; JOIN, JOIN_ACK's TURN credentials, INDEX,
+        SUBSCRIBE/SUBSCRIBE_ACK, pings, AUDIO_STATUS, presence, LEAVE) as
+        a state machine; our own TURN client (Allocate with the long-term
+        credential, CreatePermission, Send/Data; UDP, then TLS, then TCP);
+        `str0m` with the relay as its only candidate; Opus through a
+        jitter buffer (60 ms, concealment, trimming past 300 ms) to the
+        default device at the system's volume. Muted: SUBSCRIBE says so
+        and only Opus silence goes out. No UI yet.
+      - Checked offline: frame round trips, the join as data, RFC 5769's
+        STUN vectors, the SDP both ways through a second `str0m`, ICE,
+        DTLS and Opus through the relay against a pretend TURN server,
+        and (ignored by default, loopback sockets) the whole session
+        against a pretend Chime: `cargo test --all-features -- --ignored
+        loopback`.
+      - WebRTC: **`str0m`**. Sans-IO, so the TURN relay is ours to put
+        under it, and its SDP and ICE are small enough to read. Neither it
+        nor `webrtc-rs` (0.21, now on its sans-IO `rtc` crates) relays
+        over TCP or TLS (`webrtc-rs` skips non-UDP TURN URLs), and a TURN
+        client is a few hundred lines with RFC test vectors, so that
+        decided it. Crypto: its default, aws-lc-rs. Its "pure Rust"
+        backend still builds aws-lc (dimpl makes its certificate with
+        rcgen on aws-lc-rs), so the choice buys nothing; aws-lc-sys builds
+        with the C compiler `ring` already needs, no CMake, and with
+        prebuilt NASM objects on Windows (`prebuilt-nasm`).
+      - Opus: **`opus-decoder`** (pure Rust, `forbid(unsafe_code)`, no C,
+        MIT/Apache, passes the 12 RFC 8251 vectors by its own account,
+        but young: 0.1, March 2026). libopus through the `opus` crate
+        builds its bundled C with CMake on Windows and macOS (or needs
+        the system's library on Linux, which the Flatpak runtime has);
+        it is the fallback if the decoder sounds wrong.
+      - Cost when on: about 55 more crates (aws-lc, str0m, dimpl, prost),
+        several duplicates of older RustCrypto versions (digest 0.10,
+        sha1/sha2 0.10, hmac 0.12, aes 0.8, rand 0.9, itertools 0.14);
+        `cargo deny` passes as is. The default build pulls none of it.
+      - Try it: `cargo run --release --features huddle-audio --
+        --huddle-probe TEAM CHANNEL [--seconds 30]
+        [--huddle-region us-east-1]`, with the browser sign-in saved for
+        TEAM. It joins (and so starts one, if none is going on: use a
+        quiet channel or a DM), plays for N seconds, leaves (also on
+        Ctrl+C), and ends with a summary and "probe: OK" or "probe:
+        FAILED at <step>". More detail: `--verbose`, and
+        `NOSLACKING_LOG=noslacking=debug,str0m=debug,dimpl=debug,info` for
+        ICE and DTLS. The log is also in the state folder's
+        `noslacking.log`.
+      - Open questions, for the probe to answer: what `regions` takes
+        (HuddleFM passes its config's media region; `us-east-1` is a
+        guess); whether `free_willy`'s keys are Chime's PascalCase (read
+        in any case here); whether `rooms.leave` exists (the probe calls
+        it with `channel_id` and `room_id`, a guess, and logs the answer;
+        HuddleFM only sends Chime's LEAVE); whether Chime takes `str0m`'s
+        offer (origin line and media ids rewritten to a browser's, but
+        its own extmaps, `a=ice-options:trickle` and H.264 list), the
+        muted SUBSCRIBE (`audio_muted`, which HuddleFM leaves false) and
+        HuddleFM's `receive_stream_ids: [0]`; whether aws-lc's DTLS 1.2
+        agrees with Chime's media servers; and how Chime's own clock
+        drifts against the device's (the jitter buffer trims, never
+        stretches). Not done: reconnecting, the TURN control URL (JOIN_ACK
+        carries the credentials in SDK 3.31), TURN through a proxy,
+        zlib-compressed SDP.
 - [ ] **Two-way audio (4–8 weeks more, plus 2–4 hardening)**, only if the
       spike holds up: microphone with echo cancellation and noise
       suppression, mute, devices, who is talking, reconnects. Video and
