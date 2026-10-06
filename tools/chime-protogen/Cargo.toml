@@ -1,0 +1,17 @@
+# Writes src/huddle_audio/chime/signaling_protocol.rs from Chime's
+# SignalingProtocol.proto. Not part of the app's build: the generated Rust
+# is checked in, so building NoSlacking needs neither protoc nor this.
+[package]
+name = "chime-protogen"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+prost-build = "0.14"
+# A protobuf compiler in Rust, in place of protoc.
+protox = "0.9"
+
+# Its own workspace, so the app's never includes it.
+[workspace]

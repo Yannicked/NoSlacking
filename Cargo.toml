@@ -93,6 +93,12 @@ spellbook = "0.4.2"
 # Opus decoder; those open in the system's player.
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp4", "mp3", "vorbis", "flac", "wav"], optional = true }
 
+# Listening to huddles (the `huddle-audio` feature, a spike; see TODO.md).
+# Chime's signaling frames are protobuf; the Rust for them is generated
+# ahead of time and checked in (src/huddle_audio/chime/), so the build
+# needs no protoc, only prost's derive.
+prost = { version = "0.14", default-features = false, features = ["derive", "std"], optional = true }
+
 # The file viewer (src/viewer.rs): spreadsheets (MIT, pure Rust; only its
 # XML readers are used), CSV and TSV (Unlicense/MIT), and zip listings.
 # zip and quick-xml are calamine's own, at its versions and features, named
@@ -189,7 +195,7 @@ bundled-emoji = []
 demo = []
 # Listening to huddles (src/huddle_audio.rs): a spike, off until it is
 # proven against Slack. Adds `noslacking --huddle-probe`.
-huddle-audio = ["audio"]
+huddle-audio = ["audio", "dep:prost"]
 # Colours code blocks that name their language (```` ```rust ````). Our own
 # small lexer, a few kilobytes; turn it off for plain code blocks.
 highlight = []

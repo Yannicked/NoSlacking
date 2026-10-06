@@ -20,7 +20,9 @@
 //! types holding them print `<redacted>`. Chime's URLs are logged by host
 //! only.
 
+pub mod chime;
 pub mod join;
+pub mod signaling;
 
 /// The host of `url`, for the log: what a protocol mismatch needs to
 /// know, without the path or query a URL could carry a secret in.
