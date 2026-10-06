@@ -153,7 +153,7 @@ async fn probe(
     let client = crate::slack::Client::shared(token);
 
     // The device first, so a missing one shows before joining anything.
-    let speaker = match Speaker::open() {
+    let speaker = match Speaker::open(None) {
         Ok((speaker, feed)) => {
             log::info!("sound: the default output device is open");
             Some((speaker, feed))

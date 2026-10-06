@@ -10,11 +10,16 @@
 //! (`media`, with `str0m`), and Opus decoded into the sound device
 //! (`jitter`, `speaker`).
 //!
-//! Only listening: the microphone stays off and Chime is told this
-//! attendee is muted. `probe` runs the whole path from the command line
-//! (`noslacking --huddle-probe`) so it can be tried against a real huddle
-//! and its log sent back. Nothing here is proven against Slack yet; see
-//! TODO.md.
+//! Talking: joined muted, the microphone closed and Opus silence going
+//! out, as a muted browser sends. Unmuting opens the microphone
+//! (`microphone`), cleans it up with WebRTC's echo cancellation, noise
+//! suppression and gain control against what the huddle plays
+//! (`processing`), encodes it (`encoder`) and sends it on the same audio
+//! track (`uplink`); Chime hears of each mute and unmute in an
+//! AUDIO_CONTROL frame. `probe` runs the whole path from the command line
+//! (`noslacking --huddle-probe`, with `--send-tone` to be heard without
+//! talking) so it can be tried against a real huddle and its log sent
+//! back. See TODO.md for what is proven.
 //!
 //! Secrets: the join token and the TURN password never reach the log; the
 //! types holding them print `<redacted>`. Chime's URLs are logged by host
@@ -23,15 +28,19 @@
 #![warn(missing_docs)]
 
 pub mod chime;
+pub mod encoder;
 pub mod jitter;
 pub mod join;
 pub mod media;
+pub mod microphone;
 pub mod probe;
+pub mod processing;
 pub mod region;
 pub mod sdp;
 pub mod signaling;
 pub mod speaker;
 pub mod turn;
+pub mod uplink;
 
 /// The host of `url`, for the log: what a protocol mismatch needs to
 /// know, without the path or query a URL could carry a secret in.

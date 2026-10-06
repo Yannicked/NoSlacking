@@ -93,7 +93,7 @@ async fn run(
         });
     };
     tell(Listen::Joining);
-    let (speaker, feed) = match tokio::task::spawn_blocking(Speaker::open).await {
+    let (speaker, feed) = match tokio::task::spawn_blocking(|| Speaker::open(None)).await {
         Ok(Ok(opened)) => opened,
         Ok(Err(why)) => {
             log::warn!("huddle audio: {why}");

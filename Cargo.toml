@@ -93,7 +93,8 @@ spellbook = "0.4.2"
 # Opus decoder; those open in the system's player.
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp4", "mp3", "vorbis", "flac", "wav"], optional = true }
 
-# Listening to huddles (the `huddle-audio` feature, a spike; see TODO.md).
+# Listening and talking in huddles (the `huddle-audio` feature, a spike;
+# see TODO.md).
 # Chime's signaling frames are protobuf; the Rust for them is generated
 # ahead of time and checked in (src/huddle_audio/chime/), so the build
 # needs no protoc, only prost's derive.
@@ -115,6 +116,20 @@ rustls-native-certs = { version = "0.8", optional = true }
 # str0m and its DTLS log through tracing; with this they reach the app's
 # log too, so a probe run can show ICE and DTLS (NOSLACKING_LOG=str0m=debug).
 tracing = { version = "0.1.44", default-features = false, features = ["log", "std"], optional = true }
+
+# Talking in a huddle (also `huddle-audio`): the microphone through cpal
+# (rodio's), WebRTC's audio processing and an Opus encoder, all pure Rust.
+# opus-rs: libopus 1.6 ported (BSD-3-Clause, no dependencies); its unsafe
+# is SIMD and unchecked indexing. sonora: WebRTC's AEC3, noise
+# suppression, AGC2 and high-pass filter, M145, ported (BSD-3-Clause);
+# its unsafe is SIMD behind runtime CPU detection. sonora-agc2's RNN
+# voice detector decides what DTX leaves out; sonora-common-audio's sinc
+# resampler brings a 44.1 kHz microphone to 48. Both come with sonora.
+opus-rs = { version = "0.1.34", optional = true }
+sonora = { version = "0.2.0", optional = true }
+sonora-agc2 = { version = "0.2.0", optional = true }
+sonora-common-audio = { version = "0.2.0", optional = true }
+sonora-simd = { version = "0.2.0", optional = true }
 
 # The file viewer (src/viewer.rs): spreadsheets (MIT, pure Rust; only its
 # XML readers are used), CSV and TSV (Unlicense/MIT), and zip listings.
@@ -220,7 +235,7 @@ bundled-emoji = []
 demo = []
 # Listening to huddles (src/huddle_audio.rs): a spike, off until it is
 # proven against Slack. Adds `noslacking --huddle-probe`.
-huddle-audio = ["audio", "dep:prost", "dep:str0m", "dep:aws-lc-sys", "dep:opus-decoder", "dep:hmac", "dep:md-5", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:tracing", "tokio/signal"]
+huddle-audio = ["audio", "dep:prost", "dep:str0m", "dep:aws-lc-sys", "dep:opus-decoder", "dep:hmac", "dep:md-5", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:tracing", "tokio/signal", "dep:opus-rs", "dep:sonora", "dep:sonora-agc2", "dep:sonora-common-audio", "dep:sonora-simd"]
 # Huddle audio with OpenSSL's DTLS (Linux, needs its headers): a trial of
 # whether Chime takes OpenSSL's handshake where it refused dimpl's.
 huddle-openssl = ["huddle-audio", "dep:str0m-openssl"]
