@@ -679,13 +679,21 @@ engineering, as for the rest of the session sign-in.
 
 Slack already makes most previews; NoSlacking parses few of them.
 
-- [ ] **Use what Slack gives (small, no new crates).** Parse `mp4`,
+- [x] **Use what Slack gives (small, no new crates).** Parse `mp4`,
       `mp4_low`, `aac`, `converted_pdf`, `duration_ms`,
       `audio_wave_samples`, `transcription`, `subtype`, `preview` /
       `preview_plain_text`, `lines_more`: snippet preview cards, voice
       clip cards with a waveform, duration and the transcript's start, a
       duration on video stills, and the smaller `mp4_low` / `aac` for
       "open in player".
+      - Done: text and code cards (Slack's `preview`, at most 8 lines,
+        coloured by `filetype` or extension, "N more lines"); "Open as
+        PDF" for Office files with `converted_pdf`, whose `thumb_pdf`
+        still now opens that PDF instead of failing; voice clip cards;
+        video lengths; `mp4_low` / `aac` for the player. Every card has
+        a height known before it is drawn. `mp4`, `hls`, `vtt` and the
+        larger image thumbnails are left for the players and viewer
+        below, which will need them.
 - [ ] **A viewer for spreadsheets, CSV, zip listings and whole text files
       (medium).** `calamine` (MIT) and `csv`; a read-only
       `egui_extras::TableBuilder` grid; caps on download size, rows,

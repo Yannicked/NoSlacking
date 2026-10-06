@@ -209,26 +209,209 @@ pub struct File {
     pub url_private: Option<String>,
     pub url_private_download: Option<String>,
     pub permalink: Option<String>,
+    // Sizes are read loosely (see `size_of`): exports carry them as text,
+    // or as "" when there is none, and one odd size must not lose the
+    // message.
     pub thumb_360: Option<String>,
-    pub thumb_360_w: Option<f32>,
-    pub thumb_360_h: Option<f32>,
+    pub thumb_360_w: Option<Value>,
+    pub thumb_360_h: Option<Value>,
     pub thumb_480: Option<String>,
-    pub thumb_480_w: Option<f32>,
-    pub thumb_480_h: Option<f32>,
+    pub thumb_480_w: Option<Value>,
+    pub thumb_480_h: Option<Value>,
     pub thumb_720: Option<String>,
-    pub thumb_720_w: Option<f32>,
-    pub thumb_720_h: Option<f32>,
-    pub original_w: Option<f32>,
-    pub original_h: Option<f32>,
+    pub thumb_720_w: Option<Value>,
+    pub thumb_720_h: Option<Value>,
+    pub original_w: Option<Value>,
+    pub original_h: Option<Value>,
     pub thumb_video: Option<String>,
-    pub thumb_video_w: Option<f32>,
-    pub thumb_video_h: Option<f32>,
+    pub thumb_video_w: Option<Value>,
+    pub thumb_video_h: Option<Value>,
     pub thumb_pdf: Option<String>,
-    pub thumb_pdf_w: Option<f32>,
-    pub thumb_pdf_h: Option<f32>,
+    pub thumb_pdf_w: Option<Value>,
+    pub thumb_pdf_h: Option<Value>,
+    // What Slack adds for previews, all read loosely: a field missing,
+    // `null` or of another type than expected only means no preview.
+    /// Slack's kind for it: `python`, `json`, `xlsx`.
+    pub filetype: Option<Value>,
+    /// `slack_audio` for a voice clip recorded in Slack.
+    pub subtype: Option<Value>,
+    /// A snippet's or text file's first lines, plain.
+    pub preview: Option<Value>,
+    pub preview_plain_text: Option<Value>,
+    pub preview_is_truncated: Option<Value>,
+    pub lines: Option<Value>,
+    pub lines_more: Option<Value>,
+    /// A PDF Slack made of an Office document.
+    pub converted_pdf: Option<Value>,
+    /// A smaller copy of a video.
+    pub mp4_low: Option<Value>,
+    /// An MP4 copy of an old WebM voice clip.
+    pub aac: Option<Value>,
+    pub duration_ms: Option<Value>,
+    pub audio_wave_samples: Option<Value>,
+    /// `{ status, locale, preview: { content, has_more } }`.
+    pub transcription: Option<Value>,
+}
+
+/// A string from loosely typed JSON, when it is one and not blank.
+fn loose_str(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_owned)
+}
+
+/// A count from loosely typed JSON: a whole number, or one written as
+/// text.
+fn loose_count(value: Option<&Value>) -> Option<u64> {
+    match value? {
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// The kinds Slack gives files whose text reads as it is (`filetype`).
+const TEXT_TYPES: &[&str] = &[
+    "text",
+    "markdown",
+    "post",
+    "csv",
+    "tsv",
+    "json",
+    "yaml",
+    "xml",
+    "html",
+    "css",
+    "javascript",
+    "typescript",
+    "python",
+    "ruby",
+    "rust",
+    "go",
+    "java",
+    "kotlin",
+    "swift",
+    "c",
+    "cpp",
+    "csharp",
+    "php",
+    "shell",
+    "bash",
+    "powershell",
+    "sql",
+    "diff",
+    "dockerfile",
+    "toml",
+    "ini",
+    "log",
+    "perl",
+    "lua",
+    "r",
+    "scala",
+    "groovy",
+    "haskell",
+    "clojure",
+    "elixir",
+    "erlang",
+    "dart",
+    "objc",
+    "matlab",
+    "ocaml",
+    "fsharp",
+    "vb",
+    "verilog",
+    "vhdl",
+    "latex",
+    "puppet",
+    "smalltalk",
+    "tcl",
+    "apex",
+    "coffeescript",
+    "d",
+    "lisp",
+    "pascal",
+    "scheme",
+    "vbscript",
+];
+
+/// Whether a file is text that Slack previews as its first lines: a
+/// snippet, or a text, data or code file. Pictures, sound, video and PDFs
+/// never are, whatever a stray `preview` field says.
+fn is_text_like(mode: &str, mimetype: &str, filetype: &str) -> bool {
+    let mimetype = mimetype.to_ascii_lowercase();
+    if ["image/", "video/", "audio/"]
+        .iter()
+        .any(|kind| mimetype.starts_with(kind))
+        || mimetype == "application/pdf"
+    {
+        return false;
+    }
+    mode == "snippet"
+        || mimetype.starts_with("text/")
+        || matches!(
+            mimetype.as_str(),
+            "application/json"
+                | "application/xml"
+                | "application/yaml"
+                | "application/x-yaml"
+                | "application/toml"
+                | "application/javascript"
+                | "application/x-sh"
+                | "application/sql"
+        )
+        || TEXT_TYPES.contains(&filetype.to_ascii_lowercase().as_str())
 }
 
 impl File {
+    /// What Slack previews of a text file: `preview`, else
+    /// `preview_plain_text`, with how much of the file it leaves out.
+    fn text_preview(&self, filetype: &str) -> Option<model::TextPreview> {
+        if !is_text_like(&self.mode, &self.mimetype, filetype) {
+            return None;
+        }
+        let text = loose_str(self.preview.as_ref())
+            .or_else(|| loose_str(self.preview_plain_text.as_ref()))?
+            .replace("\r\n", "\n")
+            .replace('\t', "    ");
+        let count = |value: &Option<Value>| {
+            loose_count(value.as_ref()).map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+        };
+        Some(model::TextPreview {
+            text,
+            lines_more: count(&self.lines_more),
+            lines: count(&self.lines),
+            truncated: self
+                .preview_is_truncated
+                .as_ref()
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        })
+    }
+
+    /// A voice clip's loudness over time, each sample clamped to 0..=100;
+    /// a sample that is not a number reads as silence, so the rest keep
+    /// their place.
+    fn wave(&self) -> Vec<u8> {
+        let Some(Value::Array(samples)) = &self.audio_wave_samples else {
+            return Vec::new();
+        };
+        samples
+            .iter()
+            .take(1000)
+            .map(|sample| {
+                let level = sample.as_f64().filter(|n| n.is_finite()).unwrap_or(0.0);
+                level.clamp(0.0, 100.0).round() as u8
+            })
+            .collect()
+    }
+
+    /// The start of what Slack heard, once it has written it down.
+    fn transcript(&self) -> Option<String> {
+        let content = self.transcription.as_ref()?.get("preview")?.get("content");
+        loose_str(content).map(|text| text.trim().to_owned())
+    }
+
     pub fn into_model(self) -> Option<model::File> {
         // Files past the free plan's limit show nothing.
         if self.mode == "hidden_by_limit" || self.id.is_empty() {
@@ -243,16 +426,24 @@ impl File {
                 ..model::File::default()
             });
         }
+        let filetype = loose_str(self.filetype.as_ref()).unwrap_or_default();
+        let preview = self.text_preview(&filetype);
+        let wave = self.wave();
+        let transcript = self.transcript();
+        let voice = self.subtype.as_ref().and_then(Value::as_str) == Some("slack_audio");
+        let sized = |url: Option<String>, w: Option<Value>, h: Option<Value>| {
+            url.map(|url| (Some(url), size_of(w.as_ref(), h.as_ref())))
+        };
         let (thumb, size) = [
             (self.thumb_720, self.thumb_720_w, self.thumb_720_h),
             (self.thumb_480, self.thumb_480_w, self.thumb_480_h),
             (self.thumb_360, self.thumb_360_w, self.thumb_360_h),
         ]
         .into_iter()
-        .find_map(|(url, w, h)| url.map(|url| (Some(url), w.zip(h).map(|(w, h)| [w, h]))))
+        .find_map(|(url, w, h)| sized(url, w, h))
         .unwrap_or((None, None));
         // Small GIFs and PNGs come without thumbnails; show the file itself.
-        let original_size = self.original_w.zip(self.original_h).map(|(w, h)| [w, h]);
+        let original_size = size_of(self.original_w.as_ref(), self.original_h.as_ref());
         let (thumb, size) = match thumb {
             Some(thumb) => (Some(thumb), size),
             None if self.mimetype.starts_with("image/") && self.size < 4 * 1024 * 1024 => {
@@ -260,15 +451,16 @@ impl File {
             }
             None => (None, None),
         };
-        // A still for what is not a picture: a video's frame, a PDF's
-        // first page, or the ordinary thumbnail Slack made of it.
+        // A still for what is not a picture: a video's frame, a PDF's or
+        // Office document's first page, or the ordinary thumbnail Slack
+        // made of it.
         let is_image = self.mimetype.starts_with("image/");
         let (poster, poster_size) = [
             (self.thumb_video, self.thumb_video_w, self.thumb_video_h),
             (self.thumb_pdf, self.thumb_pdf_w, self.thumb_pdf_h),
         ]
         .into_iter()
-        .find_map(|(url, w, h)| url.map(|url| (Some(url), w.zip(h).map(|(w, h)| [w, h]))))
+        .find_map(|(url, w, h)| sized(url, w, h))
         .unwrap_or_else(|| {
             if is_image {
                 (None, None)
@@ -292,6 +484,15 @@ impl File {
             poster_size,
             user: self.user.filter(|user| !user.is_empty()),
             deleted: false,
+            filetype,
+            preview,
+            converted_pdf: loose_str(self.converted_pdf.as_ref()),
+            mp4_low: loose_str(self.mp4_low.as_ref()),
+            aac: loose_str(self.aac.as_ref()),
+            duration_ms: loose_count(self.duration_ms.as_ref()).filter(|ms| *ms > 0),
+            voice,
+            wave,
+            transcript,
         })
     }
 }
@@ -1610,6 +1811,209 @@ mod tests {
             Some("https://files.slack.com/tiny.gif")
         );
         assert_eq!(tiny.thumb_size, Some([64.0, 48.0]));
+    }
+
+    /// The one file of a message carrying `file`'s JSON.
+    fn file_of(file: &str) -> model::File {
+        let mut message = parsed(&format!(
+            r#"{{"type":"message","ts":"1.0","user":"U1","text":"","files":[{file}]}}"#
+        ));
+        assert_eq!(message.files.len(), 1, "one file");
+        message.files.remove(0)
+    }
+
+    // The fixtures below are files from public Slack exports, cut down to
+    // the fields that matter and with their tokens taken out.
+
+    #[test]
+    fn a_snippet_keeps_slacks_preview_of_its_first_lines() {
+        let file = file_of(
+            r#"{"id":"F07A2TVQ7C0","name":"channels.json","title":"channels.json",
+            "mimetype":"text/plain","filetype":"json","pretty_type":"JSON","mode":"snippet",
+            "size":1563,"editable":true,
+            "preview":"[\n{\n    \"id\": \"C06NRA6JLER\",\n    \"name\": \"random\",\n    \"created\": 1710128735,",
+            "preview_highlight":"<div class=\"CodeMirror cm-s-default CodeMirrorServer\">…</div>",
+            "edit_link":"https://ds-py62195.slack.com/files/U06NU4E26M9/F07A2TVQ7C0/channels.json/edit",
+            "url_private":"https://files.slack.com/files-pri/T06NRA6HM3P-F07A2TVQ7C0/channels.json"}"#,
+        );
+        assert_eq!(file.filetype, "json");
+        let preview = file.preview.expect("a preview");
+        assert!(
+            preview.text.starts_with("[\n{\n    \"id\""),
+            "plain, not the HTML"
+        );
+        assert_eq!(preview.text.lines().count(), 5);
+        assert_eq!(preview.lines_more, None);
+        assert!(!preview.truncated);
+    }
+
+    #[test]
+    fn a_text_file_falls_back_to_the_plain_text_preview_and_reads_counts_loosely() {
+        let file = file_of(
+            r#"{"id":"F1","name":"server.log","mimetype":"text/plain","filetype":"text",
+            "mode":"hosted","size":20480,"preview":null,
+            "preview_plain_text":"line one\r\n\tindented\r\nline three",
+            "preview_is_truncated":true,"lines":"120","lines_more":117}"#,
+        );
+        let preview = file.preview.expect("a preview");
+        assert_eq!(preview.text, "line one\n    indented\nline three");
+        assert_eq!(preview.lines, Some(120));
+        assert_eq!(preview.lines_more, Some(117));
+        assert!(preview.truncated);
+    }
+
+    #[test]
+    fn a_snippet_an_export_left_without_a_preview_has_none() {
+        let file = file_of(
+            r#"{"id":"F0216RZRY7Q","name":"GMT20210507-120844_Recording.txt",
+            "title":"GMT20210507-120844_Recording.txt","mimetype":"text/plain",
+            "filetype":"text","pretty_type":"Plain Text","mode":"snippet","size":9946,
+            "edit_link":"https://data-ft-ber-03-2021.slack.com/files/U01RW140HBP/F0216RZRY7Q/gmt20210507-120844_recording.txt/edit",
+            "url_private":"https://files.slack.com/files-pri/T01RBRV5F7H-F0216RZRY7Q/gmt20210507-120844_recording.txt"}"#,
+        );
+        assert_eq!(file.preview, None);
+    }
+
+    #[test]
+    fn pictures_never_take_a_text_preview() {
+        // Old file objects carry empty text fields on every file.
+        let jpg = file_of(
+            r#"{"id":"F02PM6A1AUA","name":"Chevy.jpg","mimetype":"image/jpeg","filetype":"jpg",
+            "mode":"hosted","size":359002,"original_h":1080,"original_w":1920,
+            "url_private":"https://files.slack.com/files-pri/THY5HTZ8U-F02PM6A1AUA/chevy.jpg",
+            "edit_link":"","preview":"","preview_highlight":"","lines":0,"lines_more":0}"#,
+        );
+        assert_eq!(jpg.preview, None);
+        let png = file_of(
+            r#"{"id":"F1","name":"a.png","mimetype":"image/png","mode":"hosted",
+            "preview":"not text","lines":3}"#,
+        );
+        assert_eq!(png.preview, None);
+    }
+
+    #[test]
+    fn an_office_file_keeps_its_first_page_and_slacks_pdf_of_it() {
+        let file = file_of(
+            r#"{"id":"F079SQ721A5","name":"Slack-bot-scopes-List.xlsx",
+            "title":"Slack-bot-scopes-List.xlsx",
+            "mimetype":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "filetype":"xlsx","pretty_type":"Excel Spreadsheet","mode":"hosted","size":75813,
+            "converted_pdf":"https://files.slack.com/files-tmb/T06NRA6HM3P-F079SQ721A5-315d1a255c/slack-bot-scopes-list_converted.pdf",
+            "thumb_pdf":"https://files.slack.com/files-tmb/T06NRA6HM3P-F079SQ721A5-315d1a255c/slack-bot-scopes-list_thumb_pdf.png",
+            "thumb_pdf_w":1210,"thumb_pdf_h":935,"media_display_type":"unknown",
+            "url_private":"https://files.slack.com/files-pri/T06NRA6HM3P-F079SQ721A5/slack-bot-scopes-list.xlsx",
+            "url_private_download":"https://files.slack.com/files-pri/T06NRA6HM3P-F079SQ721A5/download/slack-bot-scopes-list.xlsx"}"#,
+        );
+        assert_eq!(
+            file.poster.as_deref(),
+            Some(
+                "https://files.slack.com/files-tmb/T06NRA6HM3P-F079SQ721A5-315d1a255c/slack-bot-scopes-list_thumb_pdf.png"
+            )
+        );
+        assert_eq!(file.poster_size, Some([1210.0, 935.0]));
+        assert_eq!(file.preview, None, "a spreadsheet is not text");
+        let (url, name) = file.as_pdf().expect("a PDF to open");
+        assert!(url.ends_with("/slack-bot-scopes-list_converted.pdf"));
+        assert!(
+            crate::slack::client::is_slack_file_url(&url),
+            "fetched with the token"
+        );
+        assert_eq!(name, "Slack-bot-scopes-List.pdf");
+    }
+
+    #[test]
+    fn a_video_keeps_its_smaller_copy_its_length_and_its_transcript() {
+        let file = file_of(
+            r#"{"id":"F0BAXAHN5HB","name":"Logicflow - Technical Overview_1080p.mp4",
+            "mimetype":"video/mp4","filetype":"mp4","mode":"hosted","size":13017562,
+            "mp4":"https://files.slack.com/files-tmb/T5TCAFTA9-F0BAXAHN5HB-ae07560ca6/logicflow_-_technical_overview_1080p.mp4",
+            "mp4_low":"https://files.slack.com/files-tmb/T5TCAFTA9-F0BAXAHN5HB-ae07560ca6/logicflow_-_technical_overview_1080p_trans.mp4",
+            "hls":"https://files.slack.com/files-tmb/T5TCAFTA9-F0BAXAHN5HB-ae07560ca6/file.m3u8?_xcb=a1098",
+            "vtt":"https://files.slack.com/files-tmb/T5TCAFTA9-F0BAXAHN5HB-ae07560ca6/file.vtt?_xcb=a1098",
+            "duration_ms":389322,"media_display_type":"video",
+            "transcription":{"status":"complete","locale":"en-GB","preview":{"content":"Logic Flow is a live visual programming environment based on the principles of data transformation through functional pipes. Let's start the demo by","has_more":true}},
+            "thumb_video":"https://files.slack.com/files-tmb/T5TCAFTA9-F0BAXAHN5HB-ae07560ca6/logicflow_-_technical_overview_1080p_thumb_video.jpeg",
+            "thumb_video_w":1920,"thumb_video_h":1080,
+            "url_private":"https://files.slack.com/files-tmb/T5TCAFTA9-F0BAXAHN5HB-ae07560ca6/logicflow_-_technical_overview_1080p.mp4"}"#,
+        );
+        assert_eq!(file.duration_ms, Some(389_322));
+        assert_eq!(file.poster_size, Some([1920.0, 1080.0]));
+        assert!(
+            file.transcript
+                .as_deref()
+                .is_some_and(|t| t.starts_with("Logic Flow is"))
+        );
+        assert!(!file.voice);
+        let (url, name) = file.player().expect("something to play");
+        assert!(url.ends_with("_trans.mp4"), "the smaller copy");
+        assert_eq!(name, "Logicflow - Technical Overview_1080p.mp4");
+    }
+
+    #[test]
+    fn a_voice_clip_keeps_its_waveform_length_and_transcript() {
+        let file = file_of(
+            r#"{"id":"F03V9NETH3J","name":"Audio clip (2022-08-22_15-11-01-551).m4a",
+            "mimetype":"audio/mp4","filetype":"m4a","mode":"hosted","subtype":"slack_audio",
+            "size":171020,"duration_ms":13977,"media_display_type":"audio",
+            "vtt":"https://files.slack.com/files-tmb/T03U4J8HMUG-F03V9NETH3J-3231bb718b/file.vtt?_xcb=0c2db",
+            "transcription":{"status":"complete","locale":"en-US","preview":{"content":"Get to Work.","has_more":false}},
+            "audio_wave_samples":[0,0,2,34,75,57,53,45,46,48,66,89,78,54,68,68,61,48,51,47,47,45,69,72,47,40,46,41,37,34,35,35,36,36,28,36,39,40,39,36,41,40,42,33,51,46,39,32,39,34,37,32,37,36,37,32,34,39,27,41,43,48,68,72,56,66,52,53,53,43,39,42,41,46,49,34,37,39,20,25,40,37,34,76,100,53,89,94,34,48,26,25,59,29,74,71,68,23,54,58],
+            "url_private":"https://files.slack.com/files-pri/T03U4J8HMUG-F03V9NETH3J/audio_clip__2022-08-22_15-11-01-551_.m4a"}"#,
+        );
+        assert!(file.voice);
+        assert_eq!(file.wave.len(), 100);
+        assert_eq!(file.wave.iter().max(), Some(&100));
+        assert_eq!(file.duration_ms, Some(13_977));
+        assert_eq!(file.transcript.as_deref(), Some("Get to Work."));
+        let (url, name) = file.player().expect("something to play");
+        assert!(url.ends_with(".m4a"), "the clip itself");
+        assert_eq!(name, "Audio clip (2022-08-22_15-11-01-551).m4a");
+    }
+
+    #[test]
+    fn an_old_webm_voice_clip_plays_from_its_mp4_copy() {
+        let file = file_of(
+            r#"{"id":"F03C90NKC9H","name":"audio_message.webm","mimetype":"audio/webm",
+            "filetype":"webm","mode":"hosted","subtype":"slack_audio","size":2270608,
+            "aac":"https://files.slack.com/files-tmb/TJE58GTJL-F03C90NKC9H-a1c3f4a445/audio_message_audio.mp4",
+            "duration_ms":140061,"media_display_type":"audio",
+            "transcription":{"status":"complete","locale":"en-US"},
+            "audio_wave_samples":[73,73,57,74,56,42,27,38,45,57],
+            "url_private":"https://files.slack.com/files-pri/TJE58GTJL-F03C90NKC9H/audio_message.webm"}"#,
+        );
+        assert_eq!(file.transcript, None, "a transcript without its preview");
+        let (url, name) = file.player().expect("something to play");
+        assert!(url.ends_with("audio_message_audio.mp4"));
+        assert_eq!(name, "audio_message.m4a", "named for what it is");
+    }
+
+    #[test]
+    fn odd_preview_fields_mean_no_preview_and_keep_the_message() {
+        let file = file_of(
+            r#"{"id":"F1","name":"clip.mp4","mimetype":"video/mp4","mode":"hosted",
+            "subtype":3,"duration_ms":"soon","mp4_low":5,"aac":null,
+            "audio_wave_samples":"loud","transcription":"none","converted_pdf":"",
+            "thumb_video":"https://files.slack.com/t.jpg","thumb_video_w":"","thumb_video_h":null,
+            "preview":["x"],"lines_more":null}"#,
+        );
+        assert_eq!(file.duration_ms, None);
+        assert_eq!(file.mp4_low, None);
+        assert_eq!(file.aac, None);
+        assert!(file.wave.is_empty());
+        assert_eq!(file.transcript, None);
+        assert_eq!(file.converted_pdf, None);
+        assert!(!file.voice);
+        assert_eq!(
+            file.poster.as_deref(),
+            Some("https://files.slack.com/t.jpg")
+        );
+        assert_eq!(file.poster_size, None, "an empty size is no size");
+        // Samples out of range or not numbers stay in place.
+        let clip = file_of(
+            r#"{"id":"F2","name":"a.m4a","mimetype":"audio/mp4","subtype":"slack_audio",
+            "audio_wave_samples":[50,250,-3,"x",null,12.6]}"#,
+        );
+        assert_eq!(clip.wave, vec![50, 100, 0, 0, 0, 13]);
     }
 
     #[test]

@@ -16,7 +16,7 @@ mod menu;
 mod quote;
 
 use cards::{attachment_media, attachment_view, blocks_view, kit_image_size};
-use files::{file_view, poster_size, thumb_size};
+use files::{card_height, file_view, poster_size, thumb_size};
 use menu::{context_id, context_menu, toolbar};
 
 pub struct Row<'a> {
@@ -161,9 +161,9 @@ pub fn guess_height(message: &Message, lead: Lead, look: Look) -> f32 {
             picture(thumb_size(file, 420.0).y + 4.0)
         } else if file.poster.is_some() {
             // A still above the card.
-            picture(poster_size(file, 420.0).y + 4.0) + 64.0
+            picture(poster_size(file, 420.0).y + 4.0) + card_height(file) + 4.0
         } else {
-            64.0
+            card_height(file) + 4.0
         };
     }
     for attachment in &message.attachments {
