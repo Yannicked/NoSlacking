@@ -134,11 +134,15 @@ pub enum Place<'a> {
     Direct(&'a str),
 }
 
-/// The call bar's title: "Listening in #design", "Listening with Ana".
-pub fn title_text(place: Place<'_>) -> String {
-    match place {
-        Place::Channel(name) => tf("Listening in #{channel}", &[("channel", name)]),
-        Place::Direct(name) => tf("Listening with {name}", &[("name", name)]),
+/// The call bar's title: "Listening in #design", "Listening with Ana";
+/// "Talking in #design", "Talking with Ana" while `talking`, the
+/// microphone live.
+pub fn title_text(place: Place<'_>, talking: bool) -> String {
+    match (place, talking) {
+        (Place::Channel(name), false) => tf("Listening in #{channel}", &[("channel", name)]),
+        (Place::Direct(name), false) => tf("Listening with {name}", &[("name", name)]),
+        (Place::Channel(name), true) => tf("Talking in #{channel}", &[("channel", name)]),
+        (Place::Direct(name), true) => tf("Talking with {name}", &[("name", name)]),
     }
 }
 
@@ -354,8 +358,19 @@ mod tests {
         assert_eq!(clock(Duration::from_secs(5)), "0:05");
         assert_eq!(clock(Duration::from_secs(12 * 60 + 34)), "12:34");
         assert_eq!(clock(Duration::from_secs(3723)), "1:02:03");
-        assert_eq!(title_text(Place::Channel("design")), "Listening in #design");
-        assert_eq!(title_text(Place::Direct("Ana")), "Listening with Ana");
+        assert_eq!(
+            title_text(Place::Channel("design"), false),
+            "Listening in #design"
+        );
+        assert_eq!(
+            title_text(Place::Direct("Ana"), false),
+            "Listening with Ana"
+        );
+        assert_eq!(
+            title_text(Place::Channel("design"), true),
+            "Talking in #design"
+        );
+        assert_eq!(title_text(Place::Direct("Ana"), true), "Talking with Ana");
         let now = Instant::now();
         assert_eq!(status_text(&Phase::Joining, now), "Joining…");
         assert_eq!(

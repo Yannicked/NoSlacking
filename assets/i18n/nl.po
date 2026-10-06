@@ -2623,6 +2623,13 @@ msgstr "Luisteren in #{channel}"
 msgid "Listening with {name}"
 msgstr "Luisteren met {name}"
 
+# The same while your microphone is on.
+msgid "Talking in #{channel}"
+msgstr "Praten in #{channel}"
+
+msgid "Talking with {name}"
+msgstr "Praten met {name}"
+
 # How long you have been listening, as a clock (2:14).
 msgid "Live · {time}"
 msgstr "Live · {time}"
