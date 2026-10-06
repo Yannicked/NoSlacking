@@ -13,7 +13,14 @@
 //! Every step logs a line at info level, named so a probe's log shows
 //! where a mismatch is: the frames (by [`super::chime::describe`]), the
 //! SDP (by [`super::sdp::summary`]), the relay, ICE and DTLS, the first
-//! audio, and counts every five seconds. Secrets never appear.
+//! audio, and counts every five seconds, with what Chime's RTCP receiver
+//! reports say of what we send. Secrets never appear.
+//!
+//! Sending: the audio track carries Opus silence every 20 ms while muted
+//! (a muted browser's track does the same) and, once unmuted, the frames
+//! an [`Uplink`] brings from the microphone, on one RTP clock
+//! ([`Outbound`]). Each mute and unmute also goes to Chime as an
+//! AUDIO_CONTROL frame, as the JS SDK sends it, so the others see it.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -33,6 +40,7 @@ use super::sdp::{self, Mids};
 use super::signaling::{Ending, Handshake, Incoming, Socket, Step, TurnCredentials};
 use super::speaker::Feed;
 use super::turn::{self, Server, Transport};
+use super::uplink::{Outbound, Outgoing, Stamp};
 
 /// How long each step may take.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
@@ -46,7 +54,7 @@ const SILENCE_LIMIT: Duration = Duration::from_secs(15);
 const PING_EVERY: Duration = Duration::from_secs(10);
 const STATS_EVERY: Duration = Duration::from_secs(5);
 /// Muted is still sending, as a browser does: Opus's 20 ms of silence.
-const SILENT_OPUS: [u8; 3] = [0xF8, 0xFF, 0xFE];
+pub const SILENT_OPUS: [u8; 3] = [0xF8, 0xFF, 0xFE];
 const AUDIO_TICK: Duration = Duration::from_millis(20);
 
 /// The step that failed.
@@ -109,6 +117,23 @@ pub struct Report {
     pub audio_bytes: u64,
     /// The most attendees Chime listed at once.
     pub most_attendees: usize,
+    /// Opus frames sent from the microphone (or the probe's tone).
+    pub sent_frames: u64,
+    /// Their bytes.
+    pub sent_bytes: u64,
+    /// Frames of silence sent while muted.
+    pub silent_frames: u64,
+}
+
+/// What a session sends besides silence: frames from the microphone, and
+/// whether it is muted. Muted, frames that still come are dropped.
+#[derive(Debug)]
+pub struct Uplink {
+    /// Encoded frames, in order.
+    pub frames: tokio::sync::mpsc::Receiver<Outgoing>,
+    /// Whether the microphone is muted (closed); the session starts as it
+    /// says.
+    pub muted: tokio::sync::watch::Receiver<bool>,
 }
 
 /// A relay being set up or in use.
@@ -264,6 +289,8 @@ fn new_peer(relayed: SocketAddr, local: SocketAddr) -> Result<Rtc, String> {
         .enable_vp8(true)
         .enable_h264(true)
         .set_crypto_provider(Arc::new(crypto()))
+        // Brings Chime's RTCP receiver reports on what we send.
+        .set_stats_interval(Some(STATS_EVERY))
         .build(Instant::now());
     let candidate =
         Candidate::relayed(relayed, local, "udp").map_err(|e| format!("relay candidate: {e}"))?;
@@ -346,7 +373,16 @@ struct Session<'a> {
     ping_id: u32,
     next_stats: Instant,
     next_audio: Option<Instant>,
-    audio_time: u64,
+    /// The audio track's RTP clock.
+    outbound: Outbound,
+    /// Frames from the microphone, if there is one.
+    frames: Option<tokio::sync::mpsc::Receiver<Outgoing>>,
+    /// Whether it is muted, as it changes.
+    muted_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Muted now: silence goes out.
+    muted: bool,
+    /// Unmuted and the microphone's frames have started: silence stops.
+    flowing: bool,
     feed: Option<Feed>,
     /// Told once the audio connection is up.
     live: Option<tokio::sync::oneshot::Sender<()>>,
@@ -566,7 +602,7 @@ impl Session<'_> {
             sdp_offer: offer,
             audio_host: self.join.audio_host_url.clone(),
             attendee_id: self.join.attendee_id.clone(),
-            muted: true,
+            muted: self.muted,
         };
         let steps = self.handshake.subscribe(&sub, now_ms());
         Box::pin(self.carry(steps)).await;
@@ -709,6 +745,25 @@ impl Session<'_> {
                 added.kind,
                 added.direction
             ),
+            RtcEvent::MediaEgressStats(stats) if Some(stats.mid) == self.audio => {
+                let remote = stats.remote.as_ref().map_or_else(
+                    || "no report yet".to_owned(),
+                    |r| {
+                        format!(
+                            "jitter {} (48 kHz units), {} lost in all, up to seq {}",
+                            r.jitter, r.packets_lost, *r.maximum_sequence_number
+                        )
+                    },
+                );
+                log::info!(
+                    "media: Chime receives ours: {} packets ({} bytes) sent; loss {:?}, rtt {:?}; \
+                     {remote}",
+                    stats.packets,
+                    stats.bytes,
+                    stats.loss,
+                    stats.rtt
+                );
+            }
             RtcEvent::MediaData(data) => {
                 if Some(data.mid) != self.audio {
                     return;
@@ -733,27 +788,80 @@ impl Session<'_> {
         }
     }
 
-    /// Sends 20 ms of silence, keeping the audio stream alive.
-    fn send_silence(&mut self) {
+    /// Writes one Opus packet on the audio track: its RTP time and marker
+    /// from `stamp`, and its level for the RFC 6464 extension (written
+    /// only if Chime's answer took it). False if it could not.
+    fn write_audio(&mut self, stamp: Stamp, payload: Vec<u8>, level: (u8, bool)) -> bool {
         let now = Instant::now();
         let (Some(rtc), Some(mid)) = (&mut self.rtc, self.audio) else {
-            return;
+            return false;
         };
         let Some(writer) = rtc.writer(mid) else {
-            return;
+            return false;
         };
         let Some(pt) = writer
             .payload_params()
             .find(|p| p.spec().codec == Codec::Opus)
             .map(|p| p.pt())
         else {
-            return;
+            return false;
         };
-        let time = MediaTime::new(self.audio_time, str0m::media::Frequency::FORTY_EIGHT_KHZ);
-        if let Err(error) = writer.write(pt, now, time, SILENT_OPUS.to_vec()) {
-            log::debug!("media: could not send silence: {error}");
+        // str0m takes the level negative, 0 to -127.
+        let (level, voice) = level;
+        let negative = -i8::try_from(level.min(127)).unwrap_or(127);
+        let writer = writer
+            .start_of_talkspurt(stamp.talkspurt)
+            .audio_level(negative, voice);
+        let time = MediaTime::new(stamp.time, str0m::media::Frequency::FORTY_EIGHT_KHZ);
+        match writer.write(pt, now, time, payload) {
+            Ok(()) => true,
+            Err(error) => {
+                log::debug!("media: could not send audio: {error}");
+                false
+            }
         }
-        self.audio_time += u64::from(super::jitter::FRAME);
+    }
+
+    /// Sends 20 ms of silence, keeping the audio stream alive while
+    /// muted, or until the microphone's first frame.
+    fn send_silence(&mut self) {
+        if !self.muted && self.flowing {
+            return;
+        }
+        let stamp = self.outbound.stamp(0);
+        if self.write_audio(stamp, SILENT_OPUS.to_vec(), (127, false)) {
+            self.report.silent_frames += 1;
+        }
+    }
+
+    /// Sends a frame from the microphone, unless muted.
+    fn send_frame(&mut self, frame: Outgoing) {
+        if self.muted || self.report.dtls_up.is_none() || self.leave_deadline.is_some() {
+            return;
+        }
+        self.flowing = true;
+        let stamp = self.outbound.stamp(frame.gap);
+        let bytes = frame.payload.len() as u64;
+        if self.write_audio(stamp, frame.payload, (frame.level, frame.voice)) {
+            self.report.sent_frames += 1;
+            self.report.sent_bytes += bytes;
+        }
+    }
+
+    /// The microphone was muted or unmuted: tell Chime, as the JS SDK
+    /// does, once it has been subscribed to (until then SUBSCRIBE says
+    /// it).
+    async fn mute_changed(&mut self, muted: bool) {
+        use super::signaling::Phase;
+        if muted == self.muted {
+            return;
+        }
+        self.muted = muted;
+        self.flowing = false;
+        log::info!("media: {}", if muted { "muted" } else { "unmuted" });
+        if matches!(self.handshake.phase(), Phase::Subscribing | Phase::Live) {
+            self.send(&chime::audio_control(muted, now_ms())).await;
+        }
     }
 
     fn stats(&self) {
@@ -768,6 +876,14 @@ impl Session<'_> {
             self.report.audio_frames,
             self.report.audio_bytes,
             self.handshake.attendees().len(),
+        );
+        log::info!(
+            "media: {} s out: {} frames ({} bytes) sent, {} of silence; {}",
+            self.since().as_secs(),
+            self.report.sent_frames,
+            self.report.sent_bytes,
+            self.report.silent_frames,
+            if self.muted { "muted" } else { "unmuted" }
         );
     }
 
@@ -917,12 +1033,37 @@ async fn stopped(
     }
 }
 
+/// The next frame from the microphone, or never while there is none.
+async fn next_frame(
+    frames: &mut Option<tokio::sync::mpsc::Receiver<Outgoing>>,
+) -> Option<Outgoing> {
+    match frames {
+        Some(frames) => frames.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The mute state's next change, or never while there is none.
+async fn mute_change(
+    muted: &mut Option<tokio::sync::watch::Receiver<bool>>,
+) -> Result<bool, tokio::sync::watch::error::RecvError> {
+    match muted {
+        Some(muted) => {
+            muted.changed().await?;
+            Ok(*muted.borrow_and_update())
+        }
+        None => std::future::pending().await,
+    }
+}
+
 /// Listens to the huddle `join` describes until `stop` turns true or the
 /// session ends, feeding the audio to `feed` and telling `live` once the
-/// audio connection is up. Leaves cleanly either way.
+/// audio connection is up; talks too, if given an `uplink` (otherwise
+/// muted throughout). Leaves cleanly either way.
 pub async fn listen(
     join: &ChimeJoin,
     feed: Option<Feed>,
+    uplink: Option<Uplink>,
     mut stop: tokio::sync::watch::Receiver<bool>,
     live: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> (Report, Result<(), Failure>) {
@@ -953,6 +1094,11 @@ pub async fn listen(
     };
     log::info!("signaling: open");
     let started = Instant::now();
+    let (frames, mut muted_rx) = match uplink {
+        Some(uplink) => (Some(uplink.frames), Some(uplink.muted)),
+        None => (None, None),
+    };
+    let muted = muted_rx.as_mut().is_none_or(|m| *m.borrow_and_update());
     let mut session = Session {
         join,
         started,
@@ -976,7 +1122,11 @@ pub async fn listen(
         ping_id: 0,
         next_stats: started + STATS_EVERY,
         next_audio: None,
-        audio_time: 0,
+        outbound: Outbound::default(),
+        frames,
+        muted_rx,
+        muted,
+        flowing: false,
         feed,
         live,
         report: Report::default(),
@@ -1032,6 +1182,18 @@ pub async fn listen(
                 session.on_time().await;
                 session.relay_events().await;
             }
+            frame = next_frame(&mut session.frames) => match frame {
+                Some(frame) => session.send_frame(frame),
+                // The microphone's side is gone: silence from here.
+                None => session.frames = None,
+            },
+            muted = mute_change(&mut session.muted_rx) => match muted {
+                Ok(muted) => session.mute_changed(muted).await,
+                Err(_) => {
+                    session.muted_rx = None;
+                    session.mute_changed(true).await;
+                }
+            },
             changed = stopped(&mut stop, stopping) => {
                 if changed.is_err() || *stop.borrow() {
                     stopping = true;
@@ -1277,14 +1439,25 @@ mod tests {
 
     /// A pretend Chime on loopback: a signaling WebSocket, a TURN server
     /// on UDP and a `str0m` media server sending Opus, all driven by
-    /// [`listen`] itself. Ignored by default: it opens local sockets and
-    /// runs for seconds. `cargo test --all-features -- --ignored loopback`.
+    /// [`listen`] itself. We talk too, the probe's tone through the real
+    /// encoder: the pretend media server decodes what we send, and the
+    /// signaling server hears the mute that ends it. Ignored by default:
+    /// it opens local sockets and runs for seconds.
+    /// `cargo test --all-features -- --ignored loopback`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "opens loopback sockets and takes a few seconds"]
     async fn loopback_session_joins_listens_and_leaves() {
         use futures_util::{SinkExt as _, StreamExt as _};
+        use std::sync::Mutex;
         use tokio_tungstenite::tungstenite::Message as Ws;
         use turn::{Class, Message, Method, attr, read_xor_address, xor_address};
+
+        // What the pretend Chime hears from us: Opus with its RTP time and
+        // audio level, and the AUDIO_CONTROL frames.
+        type Heard = Vec<(u64, Option<i8>, Vec<u8>)>;
+        let heard: Arc<Mutex<Heard>> = Arc::default();
+        let controls: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let (media_heard, signaling_controls) = (heard.clone(), controls.clone());
 
         let media_server: SocketAddr = "127.0.0.2:3478".parse().expect("an address");
         let relayed: SocketAddr = "127.0.0.3:50000".parse().expect("an address");
@@ -1329,6 +1502,15 @@ mod tests {
                                 }
                             }
                             Ok(Output::Event(RtcEvent::Connected)) => connected = true,
+                            Ok(Output::Event(RtcEvent::MediaData(data))) => {
+                                if let Ok(mut heard) = media_heard.lock() {
+                                    heard.push((
+                                        data.time.numer(),
+                                        data.ext_vals.audio_level,
+                                        data.data.to_vec(),
+                                    ));
+                                }
+                            }
                             Ok(Output::Event(RtcEvent::MediaAdded(added)))
                                 if added.kind == MediaKind::Audio =>
                             {
@@ -1463,6 +1645,13 @@ mod tests {
                         });
                         let _ = ws.send(reply(ack)).await;
                     }
+                    Ok(FrameType::AudioControl) => {
+                        if let (Ok(mut controls), Some(control)) =
+                            (signaling_controls.lock(), frame.audio_control)
+                        {
+                            controls.push(control.muted.unwrap_or_default());
+                        }
+                    }
                     Ok(FrameType::Leave) => {
                         let _ = ws.send(reply(chime::frame(FrameType::LeaveAck, 4))).await;
                     }
@@ -1483,16 +1672,70 @@ mod tests {
             join_token: super::super::join::JoinToken::new("the-token"),
         };
         let (stop, stopped) = tokio::sync::watch::channel(false);
+        // Unmuted from the start, sending the tone; muted after two
+        // seconds, then silence until leaving at three.
+        let (frames, frames_in) = tokio::sync::mpsc::channel(25);
+        let tone = super::super::microphone::ToneSource::start(frames).expect("a tone");
+        let (mute, muted) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let _ = mute.send(true);
+            tokio::time::sleep(Duration::from_secs(1)).await;
             let _ = stop.send(true);
         });
-        let (report, result) = listen(&join, None, stopped, None).await;
+        let uplink = Uplink {
+            frames: frames_in,
+            muted,
+        };
+        let (report, result) = listen(&join, None, Some(uplink), stopped, None).await;
+        drop(tone);
         assert_eq!(result, Ok(()), "{report:?}");
         assert_eq!(report.ending.as_deref(), Some("left"));
         assert!(report.relay.is_some(), "{report:?}");
         assert!(report.dtls_up.is_some(), "{report:?}");
         assert!(report.audio_frames > 20, "{report:?}");
+        assert!(report.sent_frames > 20, "{report:?}");
+        assert!(report.silent_frames > 10, "muted for a second: {report:?}");
+
+        // Chime heard the mute.
+        assert_eq!(*controls.lock().expect("controls"), vec![true]);
+        // And it decodes what we sent: the tone, then silence; one RTP
+        // clock throughout, 960 a frame; the level negotiated and sent.
+        let heard = heard.lock().expect("heard").clone();
+        assert!(
+            heard.len() as u64 >= report.sent_frames / 2,
+            "{}",
+            heard.len()
+        );
+        assert!(
+            heard.windows(2).all(|w| w[1].0 > w[0].0),
+            "RTP time goes forward"
+        );
+        assert!(
+            heard
+                .iter()
+                .all(|(time, _, _)| time % 960 == heard[0].0 % 960)
+        );
+        let mut decoder = opus_decoder::OpusDecoder::new(48_000, 1).expect("a decoder");
+        let mut loud = 0;
+        for (_, level, payload) in &heard {
+            let mut pcm = vec![0.0; decoder.max_frame_size_per_channel()];
+            let n = decoder
+                .decode_float(payload, &mut pcm, false)
+                .expect("our Opus decodes");
+            assert_eq!(n, 960);
+            if super::super::uplink::level(&pcm[..n]) < 30 {
+                loud += 1;
+                assert_eq!(*level, Some(-23), "the tone's level");
+            }
+        }
+        assert!(loud > 20, "only {loud} frames of tone decoded");
+        assert!(
+            heard
+                .iter()
+                .any(|(_, level, payload)| payload[..] == SILENT_OPUS[..] && *level == Some(-127)),
+            "silence after the mute"
+        );
     }
 
     #[test]

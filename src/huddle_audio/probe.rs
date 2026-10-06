@@ -208,7 +208,7 @@ async fn probe(
         let _ = stop.send(true);
     });
     let feed = speaker.as_ref().map(|(_, feed)| feed.clone());
-    let (report, result) = media::listen(&joined, feed, stopped, None).await;
+    let (report, result) = media::listen(&joined, feed, None, stopped, None).await;
     timer.abort();
 
     // Slack learns of the leave from Chime; this asks it as well and logs

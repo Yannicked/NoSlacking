@@ -116,7 +116,7 @@ async fn run(
         }
     };
     let (live, connected) = oneshot::channel();
-    let listening = media::listen(&joined, Some(feed), stopped, Some(live));
+    let listening = media::listen(&joined, Some(feed), None, stopped, Some(live));
     tokio::pin!(listening);
     let mut connected = Some(connected);
     let (report, result) = loop {
