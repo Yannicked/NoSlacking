@@ -831,6 +831,18 @@ impl Worker {
                     ));
                 }
             }
+            Command::AddEmoji {
+                team,
+                name,
+                image,
+                file_name,
+                mime,
+            } => self.add_emoji(team, name, image, file_name, mime),
+            Command::FetchEmoji { team } => {
+                if let Some((client, sink)) = self.team(&team) {
+                    tokio::spawn(async move { super::fetch::emoji(&client, &team, &sink).await });
+                }
+            }
             Command::FetchDnd { team } => {
                 if let Some((client, sink)) = self.team(&team) {
                     tokio::spawn(super::desktop::dnd_info(client, team, sink));
@@ -988,6 +1000,36 @@ impl Worker {
                 name,
                 result,
             });
+        });
+    }
+
+    /// `emoji.add` as the web client sends it; only a browser session
+    /// may, so any other sign-in is told so without asking Slack.
+    fn add_emoji(
+        &self,
+        team: String,
+        name: String,
+        image: Vec<u8>,
+        file_name: String,
+        mime: String,
+    ) {
+        let answer = |sink: &Sink, team, name, result| {
+            sink.send(Event::EmojiAdded { team, name, result });
+        };
+        let Some((client, sink)) = self.team(&team) else {
+            answer(&self.sink, team, name, Err(Failure::NotSignedIn));
+            return;
+        };
+        if !client.token().is_session() {
+            answer(&sink, team, name, Err(Failure::NeedsSession));
+            return;
+        }
+        tokio::spawn(async move {
+            let result = client
+                .add_emoji(&name, image, &file_name, &mime)
+                .await
+                .map_err(|e| failure(&e));
+            answer(&sink, team, name, result);
         });
     }
 

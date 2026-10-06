@@ -22,6 +22,7 @@ use crate::theme::{self, Catalog, Palette};
 
 mod compose;
 mod desktop;
+mod emoji;
 mod events;
 mod hooks;
 mod popout;
@@ -246,6 +247,8 @@ pub struct App {
     pub confirm_delete: Option<(String, Ts)>,
     /// Your file waiting for "Delete?" to be answered: its id and name.
     pub confirm_delete_file: Option<(String, String)>,
+    /// The "Add emoji" dialog, when open.
+    pub add_emoji: Option<crate::custom_emoji::Dialog>,
     pub section_dialog: Option<SectionDialog>,
     /// Whether the keyboard shortcut sheet is open.
     pub shortcuts: bool,
@@ -283,6 +286,12 @@ pub struct App {
     pub jumps: Vec<crate::jump::Jump>,
     local_counter: u64,
     uploads: (mpsc::Sender<PickedFile>, mpsc::Receiver<PickedFile>),
+    emoji_images: (
+        mpsc::Sender<emoji::PickedImage>,
+        mpsc::Receiver<emoji::PickedImage>,
+    ),
+    /// Pictures picked for new emoji so far, numbering their previews.
+    emoji_picks: u64,
     /// A picture on its way to the clipboard: the image loader URIs still
     /// to try, best first, and the answers of the threads that copy.
     copying: Vec<String>,
@@ -424,6 +433,7 @@ impl App {
             preview: None,
             confirm_delete: None,
             confirm_delete_file: None,
+            add_emoji: None,
             section_dialog: None,
             shortcuts: false,
             share: None,
@@ -443,6 +453,8 @@ impl App {
             search: crate::search::Search::default(),
             local_counter: 0,
             uploads: mpsc::channel(),
+            emoji_images: mpsc::channel(),
+            emoji_picks: 0,
             copying: Vec::new(),
             copied: mpsc::channel(),
             marks: HashMap::new(),
@@ -615,6 +627,9 @@ impl App {
         }
         while let Ok((target, path)) = self.uploads.1.try_recv() {
             self.stage(target, path);
+        }
+        while let Ok(picked) = self.emoji_images.1.try_recv() {
+            self.emoji_image_picked(picked);
         }
         self.copy_image_frame(ctx);
         if self.catalog.poll() {
@@ -1069,6 +1084,9 @@ impl App {
             Action::MarkUnread { channel, ts } => self.mark_unread(&channel, &ts),
             Action::AskDelete { channel, ts } => self.confirm_delete = Some((channel, ts)),
             Action::AskDeleteFile { file, name } => self.confirm_delete_file = Some((file, name)),
+            Action::AddEmoji => self.open_add_emoji(),
+            Action::PickEmojiImage => self.pick_emoji_image(),
+            Action::SendEmoji => self.send_emoji(),
             Action::DeleteFile { file, name } => self.delete_file(file, name),
             Action::NameSection { rename, channel } => self.name_section(rename, channel),
             Action::Preview { uri, name } => {
@@ -1611,6 +1629,7 @@ impl App {
             || self.preview.is_some()
             || self.confirm_delete.is_some()
             || self.confirm_delete_file.is_some()
+            || self.add_emoji.is_some()
             || self.section_dialog.is_some()
             || self.shortcuts
             || self.share.is_some()

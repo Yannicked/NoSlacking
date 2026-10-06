@@ -551,7 +551,17 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       "This file was deleted.", as Slack's tombstone does, and `file_deleted`
       keeps it gone. `files:write` was already in the manifest. Not yet
       tried against a real workspace.*
-- [ ] **Upload custom emoji** (`emoji.add`, session sign-ins only).
+- [x] **Upload custom emoji** (`emoji.add`, session sign-ins only).
+      *The emoji picker's + opens "Add emoji": a PNG, JPEG or GIF up to
+      128 KB, a name checked like Slack's (lowercase letters, digits, `-`,
+      `_`, not taken), a preview. It posts a multipart `emoji.add` to the
+      workspace's own address with `token`, `name`, `mode=data` and
+      `image`, and the `d` cookie, as Slack's web client does (and as
+      jackellenberger/emojme `lib/emoji-add.js` and
+      smashwilson/slack-emojinator `upload.py` do). The new emoji shows at
+      once and `emoji.list` is fetched again. OAuth sign-ins don't see the
+      +. Untested against a real workspace: the request shape and Slack's
+      error codes come from those tools and `admin.emoji.add`'s docs.*
 
 ### Blocked or needs a real workspace
 

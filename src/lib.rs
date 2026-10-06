@@ -11,6 +11,7 @@ pub mod backend;
 pub mod badge;
 pub mod convos;
 pub mod credentials;
+pub mod custom_emoji;
 #[cfg(feature = "demo")]
 pub mod demo;
 pub mod desktop;

@@ -27,6 +27,11 @@ pub struct WorkspaceState {
     /// Your Slack sidebar sections, when Slack shares them (sessions).
     pub sections: Option<Vec<SidebarSection>>,
     pub emoji: EmojiSet,
+    /// Whether this sign-in can add custom emoji (browser sessions).
+    pub can_add_emoji: bool,
+    /// Custom emoji added here, kept until Slack's own list has them: a
+    /// list fetched right after may not yet.
+    added_emoji: HashMap<String, String>,
     /// User groups you can mention. Empty when the sign-in may
     /// not list them, which leaves group mentions out of the suggestions.
     pub groups: Vec<UserGroup>,
@@ -119,6 +124,8 @@ impl WorkspaceState {
             bots: HashMap::new(),
             sections: None,
             emoji: EmojiSet::default(),
+            can_add_emoji: false,
+            added_emoji: HashMap::new(),
             groups: Vec::new(),
             timelines: HashMap::new(),
             threads: HashMap::new(),
@@ -1330,6 +1337,24 @@ impl WorkspaceState {
         before
     }
 
+    /// The workspace's custom emoji arrived; those added here that the
+    /// list does not have yet stay.
+    pub(super) fn emoji_arrived(&mut self, mut emoji: HashMap<String, String>, can_add: bool) {
+        self.added_emoji.retain(|name, _| !emoji.contains_key(name));
+        for (name, url) in &self.added_emoji {
+            emoji.insert(name.clone(), url.clone());
+        }
+        self.emoji = EmojiSet::new(emoji);
+        self.can_add_emoji = can_add;
+    }
+
+    /// You added custom emoji `name`: it shows at once, from `url` (the
+    /// picture you picked) until Slack's list brings its own.
+    pub(super) fn emoji_added(&mut self, name: String, url: String) {
+        self.emoji.insert(name.clone(), url.clone());
+        self.added_emoji.insert(name, url);
+    }
+
     /// You deleted file `id`: it is hidden at once, wherever it shows,
     /// until Slack answers ([`Self::file_delete_settled`]).
     pub(super) fn hide_file(&mut self, id: &str) {
@@ -1827,6 +1852,42 @@ mod tests {
         w.file_gone("F9");
         assert!(!w.shows_file("F9"));
         assert!(!w.file_delete_settled("F9", false), "never hidden here");
+    }
+
+    #[test]
+    fn a_new_emoji_shows_at_once_and_survives_a_list_without_it() {
+        let mut w = workspace();
+        w.emoji_arrived(
+            HashMap::from([("a".to_owned(), "https://x/a.png".to_owned())]),
+            true,
+        );
+        assert!(w.can_add_emoji);
+        w.emoji_added("shipit".into(), "bytes://new/shipit.png".into());
+        assert!(w.emoji.contains("shipit"));
+        // Slack's list from just after may not have it yet.
+        w.emoji_arrived(
+            HashMap::from([("a".to_owned(), "https://x/a.png".to_owned())]),
+            true,
+        );
+        assert_eq!(
+            w.emoji.resolve("shipit"),
+            crate::emoji::Resolved::Image("bytes://new/shipit.png".into())
+        );
+        // Once it does, Slack's address wins.
+        w.emoji_arrived(
+            HashMap::from([("shipit".to_owned(), "https://x/shipit.png".to_owned())]),
+            true,
+        );
+        assert_eq!(
+            w.emoji.resolve("shipit"),
+            crate::emoji::Resolved::Image("https://x/shipit.png".into())
+        );
+        w.emoji_arrived(HashMap::new(), false);
+        assert!(
+            !w.emoji.contains("shipit"),
+            "Slack's word is final after that"
+        );
+        assert!(!w.can_add_emoji);
     }
 
     /// A workspace with a parent in C1 and two replies loaded in its thread.

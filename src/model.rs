@@ -804,6 +804,12 @@ pub enum Action {
         channel: String,
         ts: Ts,
     },
+    /// Opens the "Add emoji" dialog (browser-session sign-ins).
+    AddEmoji,
+    /// Shows a file picker for the new emoji's picture.
+    PickEmojiImage,
+    /// Adds the emoji the dialog holds to the workspace.
+    SendEmoji,
     /// Asks before deleting your file `file`, called `name`.
     AskDeleteFile {
         file: String,

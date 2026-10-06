@@ -22,6 +22,18 @@ pub(super) fn failure(error: &SlackError) -> Failure {
             "cant_update_message" | "edit_window_closed" => Failure::CantEdit,
             "cant_delete_message" => Failure::CantDelete,
             "cant_delete_file" => Failure::CantDeleteFile,
+            // `emoji.add`, as the web client calls it.
+            "error_name_taken" | "error_name_taken_i18n" => Failure::EmojiNameTaken,
+            "error_bad_name_i18n" | "error_lower_case_names_only" | "error_missing_name" => {
+                Failure::InvalidName
+            }
+            "error_too_big" | "resized_but_still_too_large" | "too_many_frames" => {
+                Failure::EmojiTooBig
+            }
+            "error_bad_upload" | "error_bad_format" | "error_bad_wide" | "error_no_image"
+            | "no_image_uploaded" => Failure::BadEmojiImage,
+            "not_allowed_token_type" => Failure::NeedsSession,
+            "no_permission" => Failure::Restricted,
             "invalid_code" | "code_already_used" => Failure::LinkExpired,
             "bad_redirect_uri" => Failure::BadRedirect,
             "invalid_client_id" | "bad_client_secret" => Failure::BadClient,
@@ -229,6 +241,11 @@ mod tests {
             ("cant_update_message", Failure::CantEdit),
             ("cant_delete_message", Failure::CantDelete),
             ("cant_delete_file", Failure::CantDeleteFile),
+            ("error_name_taken", Failure::EmojiNameTaken),
+            ("error_lower_case_names_only", Failure::InvalidName),
+            ("resized_but_still_too_large", Failure::EmojiTooBig),
+            ("error_bad_upload", Failure::BadEmojiImage),
+            ("not_allowed_token_type", Failure::NeedsSession),
             ("code_already_used", Failure::LinkExpired),
             ("bad_redirect_uri", Failure::BadRedirect),
             ("bad_client_secret", Failure::BadClient),

@@ -16,6 +16,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     super::lightbox::show(app, ctx);
     confirm_delete(app, ctx);
     confirm_delete_file(app, ctx);
+    super::add_emoji::dialog(app, ctx);
     section_dialog(app, ctx);
     super::share::dialog(app, ctx);
     super::people::status_dialog(app, ctx);
@@ -457,6 +458,8 @@ fn picker(app: &mut App, ctx: &egui::Context) {
     };
     let mut chosen: Option<String> = None;
     let mut close = false;
+    let mut add = false;
+    let can_add = workspace.can_add_emoji;
     let needle = query.trim().to_lowercase();
     // What matches the query, kept until the query or the custom emoji
     // change: filtering and sorting about 1,900 emoji on every frame was
@@ -489,6 +492,14 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if theme::icon_button(ui, &palette, Icon::X, 16.0, &t("Close")).clicked() {
                         close = true;
+                    }
+                    // Only browser sessions can; Slack offers no call for
+                    // apps.
+                    if can_add
+                        && theme::icon_button(ui, &palette, Icon::Plus, 16.0, &t("Add emoji…"))
+                            .clicked()
+                    {
+                        add = true;
                     }
                 });
             });
@@ -605,6 +616,9 @@ fn picker(app: &mut App, ctx: &egui::Context) {
     }
     if close || response.should_close() {
         app.picker = None;
+    }
+    if add {
+        app.actions.push(Action::AddEmoji);
     }
     // What Enter picks gets your tone like a click would.
     let chosen = chosen.map(|name| crate::emoji::toned(&name, tone));

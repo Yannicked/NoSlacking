@@ -528,6 +528,91 @@ impl Client {
     }
 }
 
+/// Where and what [`Client::add_emoji`] posts, but the picture: the
+/// workspace's own `emoji.add` (as Slack's web client and the tools built
+/// on it do), and the form fields `token`, `name` and `mode=data`. `None`
+/// for a sign-in that is not a browser session, which Slack would refuse.
+///
+/// The workspace URL is used only when it is an `https` Slack address;
+/// otherwise the call goes to `base`, so the token never leaves Slack.
+pub fn emoji_add_request(
+    token: &Token,
+    base: &str,
+    name: &str,
+) -> Option<(String, Vec<(&'static str, String)>)> {
+    if !token.is_session() {
+        return None;
+    }
+    let workspace = token
+        .workspace_url
+        .as_deref()
+        .and_then(|url| reqwest::Url::parse(url).ok())
+        .filter(|url| {
+            url.scheme() == "https"
+                && url.port().is_none()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url
+                    .host_str()
+                    .is_some_and(|host| host.ends_with(".slack.com"))
+        })
+        .and_then(|url| url.host_str().map(|host| format!("https://{host}/api/")));
+    let url = format!("{}emoji.add", workspace.as_deref().unwrap_or(base));
+    let fields = vec![
+        ("token", token.access.clone()),
+        ("name", name.to_owned()),
+        ("mode", "data".to_owned()),
+    ];
+    Some((url, fields))
+}
+
+impl Client {
+    /// Adds custom emoji `name` with `image` (`mime`, from `file_name`)
+    /// the way Slack's web client does: a multipart `emoji.add` with the
+    /// session's token and cookie. Not part of Slack's public API, so
+    /// only browser sessions get here. Not retried: Slack may have added
+    /// it before a connection broke.
+    pub async fn add_emoji(
+        &self,
+        name: &str,
+        image: Vec<u8>,
+        file_name: &str,
+        mime: &str,
+    ) -> Result<(), SlackError> {
+        let token = self.token();
+        let Some((url, fields)) = emoji_add_request(&token, &self.base, name) else {
+            return Err(SlackError::Api("not_allowed_token_type".into()));
+        };
+        let mut form = reqwest::multipart::Form::new();
+        for (key, value) in fields {
+            form = form.text(key, value);
+        }
+        let part = reqwest::multipart::Part::bytes(image)
+            .file_name(file_name.to_owned())
+            .mime_str(mime)
+            .map_err(|e| SlackError::Decode(e.to_string()))?;
+        form = form.part("image", part);
+        let permit = self
+            .shared
+            .limit
+            .acquire()
+            .await
+            .map_err(|_| SlackError::Network("client closed".into()))?;
+        let mut request = self.http().post(&url).multipart(form);
+        if let Some(cookie) = token.cookie.as_deref() {
+            request = request.header(reqwest::header::COOKIE, format!("d={cookie}"));
+        }
+        let response = request.send().await?;
+        let status = response.status().as_u16();
+        if retry_after(status, response.headers().get("retry-after")).is_some() {
+            return Err(SlackError::RateLimited);
+        }
+        let bytes = response.bytes().await?;
+        drop(permit);
+        answer::<serde_json::Value>(status, &bytes).map(|_| ())
+    }
+}
+
 /// The bytes of `file` as a stream for a request body, telling `progress`
 /// the running total after each chunk. A read error ends the stream after
 /// it is passed on, which fails the request.
@@ -741,6 +826,37 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emoji_add_goes_to_the_workspace_with_the_web_clients_fields() {
+        let session = Token::session("xoxc-1", "xoxd-2", "https://acme.slack.com/");
+        let (url, fields) = emoji_add_request(&session, API, "shipit").expect("a session");
+        assert_eq!(url, "https://acme.slack.com/api/emoji.add");
+        assert_eq!(
+            fields,
+            vec![
+                ("token", "xoxc-1".to_owned()),
+                ("name", "shipit".to_owned()),
+                ("mode", "data".to_owned()),
+            ]
+        );
+        // The token goes to Slack only, whatever the saved address says.
+        for odd in [
+            "http://acme.slack.com",
+            "https://acme.slack.com.evil.example",
+            "https://evil.example",
+            "https://user@acme.slack.com",
+            "not a url",
+        ] {
+            let token = Token::session("xoxc-1", "xoxd-2", odd);
+            let (url, _) = emoji_add_request(&token, API, "shipit").expect("a session");
+            assert_eq!(url, "https://slack.com/api/emoji.add", "{odd}");
+        }
+        assert!(
+            emoji_add_request(&Token::plain("xoxp-1"), API, "shipit").is_none(),
+            "an OAuth token cannot add emoji"
+        );
+    }
 
     #[test]
     fn an_error_page_is_its_http_status() {

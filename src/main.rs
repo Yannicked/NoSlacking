@@ -49,7 +49,7 @@ struct Cli {
 
     /// Open a view before the screenshot: thread, settings, sign-in,
     /// switcher, picker, profile, share, upload, drafts, lightbox, media,
-    /// compact, held-media, shortcuts or delete-file.
+    /// compact, held-media, shortcuts, delete-file or add-emoji.
     #[cfg(feature = "demo")]
     #[arg(long, value_name = "VIEW")]
     demo_view: Option<String>,
@@ -560,6 +560,19 @@ impl DemoSetup {
                 ts: parent,
             }),
             Some("settings") => app.actions.push(Action::ShowSettings),
+            // A new custom emoji, its picture picked and a name typed.
+            Some("add-emoji") => {
+                app.add_emoji = Some(noslacking::custom_emoji::Dialog {
+                    team: noslacking::demo::TEAM.into(),
+                    name: "shipit".into(),
+                    picked: Some(noslacking::custom_emoji::Picked::new(
+                        "shipit.gif".into(),
+                        noslacking::demo::PARROT_BYTES.to_vec(),
+                        0,
+                    )),
+                    ..Default::default()
+                });
+            }
             // #engineering's Files tab, asking whether to delete your file.
             Some("delete-file") => {
                 app.actions

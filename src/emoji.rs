@@ -33,6 +33,16 @@ impl EmojiSet {
         Self { custom }
     }
 
+    /// Whether the workspace has a custom emoji or an alias by this name.
+    pub fn contains(&self, name: &str) -> bool {
+        self.custom.contains_key(name)
+    }
+
+    /// Adds a custom emoji just made here, before Slack's list says so.
+    pub fn insert(&mut self, name: String, url: String) {
+        self.custom.insert(name, url);
+    }
+
     pub fn custom_names(&self) -> impl Iterator<Item = (&str, &str)> {
         self.custom
             .iter()

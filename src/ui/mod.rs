@@ -1,6 +1,7 @@
 //! The interface: a workspace rail, the conversation list, the open
 //! conversation and, when one is open, its thread.
 
+mod add_emoji;
 mod browse;
 mod composer;
 mod context;

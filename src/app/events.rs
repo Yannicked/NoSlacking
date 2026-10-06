@@ -9,7 +9,6 @@ use super::workspace::{Arrived, SendOutcome};
 use super::{App, Page, WorkspaceState};
 use crate::backend::{Change, Command, Event, SignIn, Socket};
 use crate::credentials::AppCredentials;
-use crate::emoji::EmojiSet;
 use crate::failure::Failure;
 use crate::i18n::{t, tf};
 use crate::model::{Conversation, Message, Ts, Workspace};
@@ -95,11 +94,16 @@ impl App {
                     workspace.sections = Some(sections);
                 }
             }
-            Event::Emoji { team, emoji } => {
+            Event::Emoji {
+                team,
+                emoji,
+                can_add,
+            } => {
                 if let Some(workspace) = self.workspace_mut(&team) {
-                    workspace.emoji = EmojiSet::new(emoji);
+                    workspace.emoji_arrived(emoji, can_add);
                 }
             }
+            Event::EmojiAdded { team, name, result } => self.emoji_added(&team, name, result),
             Event::UserGroups { team, groups } => {
                 if let Some(workspace) = self.workspace_mut(&team) {
                     workspace.groups = groups;
@@ -422,6 +426,7 @@ impl App {
             self.selected = None;
             self.confirm_delete = None;
             self.confirm_delete_file = None;
+            self.add_emoji = None;
             self.picker = None;
             self.share = None;
             self.views.open = None;
