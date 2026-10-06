@@ -99,6 +99,10 @@ pub struct Settings {
     /// Unread conversations at the top of their sidebar sections, mentions
     /// and direct messages first; on by default.
     pub unread_first: bool,
+    /// After how long without a new message a conversation is hidden
+    /// from the sidebar, behind its section's "N more"; a month by
+    /// default.
+    pub hide_inactive: crate::sidebar::HideInactive,
     /// Notifications and the rest of the desktop integration.
     pub desktop: crate::desktop::DesktopSettings,
     /// Your skin tone for emoji that have them, as Slack counts: 2 (light)
@@ -141,6 +145,7 @@ impl Default for Settings {
             enter_sends: true,
             sidebar_sort: crate::sidebar::Sort::Name,
             unread_first: true,
+            hide_inactive: crate::sidebar::HideInactive::Month,
             desktop: crate::desktop::DesktopSettings::default(),
             skin_tone: 0,
             recent_emoji: Vec::new(),
@@ -240,6 +245,7 @@ impl Settings {
             enter_sends,
             sidebar_sort,
             unread_first,
+            hide_inactive,
             desktop,
             skin_tone,
             recent_emoji,
@@ -670,6 +676,38 @@ mod tests {
         assert!(!again.unread_first);
         let (bad, problems) = Settings::from_json(serde_json::json!({"unread_first": "yes"}));
         assert!(bad.unread_first, "unreadable falls back to on");
+        assert_eq!(problems.len(), 1);
+    }
+
+    #[test]
+    fn hiding_inactive_conversations_defaults_to_a_month() {
+        use crate::sidebar::HideInactive;
+        // Older files do not have it: quiet conversations hide after a
+        // month.
+        let old: Settings = serde_json::from_str("{}").expect("parses");
+        assert_eq!(old.hide_inactive, HideInactive::Month);
+        for choice in [
+            HideInactive::Off,
+            HideInactive::Week,
+            HideInactive::Month,
+            HideInactive::ThreeMonths,
+        ] {
+            let settings = Settings {
+                hide_inactive: choice,
+                ..Settings::default()
+            };
+            let encoded = settings.encode().expect("encodes");
+            let again: Settings = serde_json::from_slice(&encoded).expect("parses");
+            assert_eq!(again.hide_inactive, choice);
+        }
+        let off: Settings = serde_json::from_str(r#"{"hide_inactive":"off"}"#).expect("parses");
+        assert_eq!(off.hide_inactive, HideInactive::Off);
+        let (bad, problems) = Settings::from_json(serde_json::json!({
+            "hide_inactive": "fortnight",
+            "zoom": 1.5,
+        }));
+        assert_eq!(bad.hide_inactive, HideInactive::Month, "unknown falls back");
+        assert_eq!(bad.zoom, 1.5, "the other fields are kept");
         assert_eq!(problems.len(), 1);
     }
 

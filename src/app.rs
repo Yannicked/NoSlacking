@@ -1671,6 +1671,17 @@ impl App {
         }
     }
 
+    /// The time now in Unix seconds, for hiding quiet conversations in
+    /// the sidebar: the demo's own fixed day in the demo, so its
+    /// screenshots never change.
+    pub fn now_seconds(&self) -> i64 {
+        #[cfg(feature = "demo")]
+        if self.demo {
+            return crate::demo::now();
+        }
+        desktop::now_seconds()
+    }
+
     /// The conversations in `team` with a draft, in it or one of its
     /// threads, for the sidebar's pencil.
     pub fn channels_with_drafts(&self, team: &str) -> HashSet<String> {

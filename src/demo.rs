@@ -73,6 +73,15 @@ impl egui::load::BytesLoader for SlowImages {
 /// A fixed "now" so screenshots never change: 2026-09-30 14:00 UTC.
 const NOW: u64 = 1_790_172_000;
 
+/// The demo's fixed "now" in Unix seconds, for what the interface
+/// measures against the clock, such as hiding quiet conversations.
+pub fn now() -> i64 {
+    i64::try_from(NOW).unwrap_or_default()
+}
+
+/// A day in seconds, for the demo's older conversations.
+const DAY: u64 = 24 * 60 * 60;
+
 fn user(id: &str, name: &str, real: &str, title: &str) -> User {
     User {
         id: id.into(),
@@ -200,10 +209,28 @@ fn conversations() -> Vec<Conversation> {
             )
         },
     ];
+    // Channels quiet for longer than a month, which the sidebar hides
+    // behind "N more" by default.
+    for (id, name, kind, days) in [
+        ("C07", "website-2025", ConversationKind::Channel, 45),
+        ("C08", "offsite-planning", ConversationKind::Channel, 120),
+        ("C09", "design-archive", ConversationKind::Channel, 60),
+        ("G02", "hiring-backend", ConversationKind::Private, 80),
+    ] {
+        list.push(conversation(
+            id,
+            name,
+            kind,
+            NOW - days * DAY,
+            NOW - days * DAY,
+        ));
+    }
     for (id, user, latest, read) in [
         ("D01", "U01", NOW - 200, NOW - 900),
         ("D02", "U02", NOW - 7200, NOW - 7200),
         ("D03", "U03", NOW - 86_000, NOW - 86_000),
+        // Quiet for over a month: hidden behind "N more".
+        ("D05", "U04", NOW - 40 * DAY, NOW - 40 * DAY),
         // A DM with the deploy bot, which Slack files under Apps.
         ("D04", "U05", NOW - 5000, NOW - 5000),
     ] {
@@ -891,7 +918,7 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                 SectionKind::Custom,
                 "Design team",
                 "art",
-                &["C03", "G01", "D01"],
+                &["C03", "G01", "D01", "C09"],
             ),
             section("L03", SectionKind::Channels, "", "", &[]),
             section("L04", SectionKind::DirectMessages, "", "", &[]),

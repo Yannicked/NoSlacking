@@ -310,6 +310,40 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             app.settings.unread_first = unread_first;
             app.settings_changed();
         }
+        let mut hide = app.settings.hide_inactive;
+        let label = |choice: crate::sidebar::HideInactive| match choice {
+            crate::sidebar::HideInactive::Off => t("Off"),
+            crate::sidebar::HideInactive::Week => t("After 1 week"),
+            crate::sidebar::HideInactive::Month => t("After 1 month"),
+            crate::sidebar::HideInactive::ThreeMonths => t("After 3 months"),
+        };
+        row(
+            ui,
+            palette,
+            &t("Hide inactive conversations"),
+            &t("Under “more” in their section. Unread, starred and open ones stay."),
+            |ui, name| {
+                egui::ComboBox::from_id_salt("hide-inactive")
+                    .selected_text(label(hide))
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        for choice in [
+                            crate::sidebar::HideInactive::Off,
+                            crate::sidebar::HideInactive::Week,
+                            crate::sidebar::HideInactive::Month,
+                            crate::sidebar::HideInactive::ThreeMonths,
+                        ] {
+                            ui.selectable_value(&mut hide, choice, label(choice));
+                        }
+                    })
+                    .response
+                    .labelled_by(name);
+            },
+        );
+        if hide != app.settings.hide_inactive {
+            app.settings.hide_inactive = hide;
+            app.settings_changed();
+        }
     });
 
     super::desktop::settings_group(app, ui, palette);

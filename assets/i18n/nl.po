@@ -220,8 +220,13 @@ msgstr "Opnieuw aanmelden"
 msgid "Find a conversation"
 msgstr "Gesprek zoeken"
 
-msgid "Show more ({count})"
-msgstr "Meer tonen ({count})"
+msgid "{count} more"
+msgid_plural "{count} more"
+msgstr[0] "nog {count}"
+msgstr[1] "nog {count}"
+
+msgid "Show less"
+msgstr "Minder tonen"
 
 msgid "New section…"
 msgstr "Nieuwe sectie…"
@@ -426,6 +431,24 @@ msgstr "Ongelezen gesprekken eerst"
 
 msgid "At the top of each sidebar section, mentions and direct messages before the rest."
 msgstr "Bovenaan elke sectie van de zijbalk, vermeldingen en privéberichten vóór de rest."
+
+msgid "Hide inactive conversations"
+msgstr "Inactieve gesprekken verbergen"
+
+msgid "Under “more” in their section. Unread, starred and open ones stay."
+msgstr "Onder „nog” in hun sectie. Ongelezen, met ster en geopende blijven staan."
+
+msgid "Off"
+msgstr "Uit"
+
+msgid "After 1 week"
+msgstr "Na 1 week"
+
+msgid "After 1 month"
+msgstr "Na 1 maand"
+
+msgid "After 3 months"
+msgstr "Na 3 maanden"
 
 msgid "By name"
 msgstr "Op naam"

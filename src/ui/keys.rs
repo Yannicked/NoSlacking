@@ -129,10 +129,16 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
             // The order the sidebar shows, the open conversation held in
             // its place.
             let held = super::sidebar::held(ctx, &w.info.team_id);
+            let drafts = app.channels_with_drafts(&w.info.team_id);
             let arrange = Arrange {
                 sort: app.settings.sidebar_sort,
                 unread_first: app.settings.unread_first,
                 hold: held.as_ref(),
+                tidy: Some(crate::sidebar::Tidy {
+                    after: app.settings.hide_inactive,
+                    now: app.now_seconds(),
+                    drafts: Some(&drafts),
+                }),
             };
             let order = visible(
                 w,
@@ -171,8 +177,9 @@ fn in_empty_composer(app: &App, ctx: &egui::Context) -> bool {
 }
 
 /// The conversations the sidebar shows, in its order: closed ones,
-/// deactivated people's DMs, those past "Show more" and the read rows of
-/// folded sections left out, as on screen.
+/// deactivated people's DMs, those held back behind "N more" (quiet ones
+/// too, unless their section is expanded) and the read rows of folded
+/// sections left out, as on screen.
 fn visible<'a>(
     workspace: &'a WorkspaceState,
     arrange: &Arrange<'_>,
@@ -314,5 +321,130 @@ mod tests {
         let order = visible(&w, &arrange, None, "gam", |_| (true, false));
         let ids: Vec<&str> = order.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["C3"]);
+    }
+
+    /// A "now" long after the sample's 1970 messages.
+    const NOW: i64 = 1_000_000_800;
+
+    /// Name order with quiet conversations hidden after a month.
+    fn tidied<'a>(
+        hold: Option<&'a crate::sidebar::Hold>,
+        drafts: Option<&'a std::collections::HashSet<String>>,
+    ) -> Arrange<'a> {
+        Arrange {
+            hold,
+            tidy: Some(crate::sidebar::Tidy {
+                after: crate::sidebar::HideInactive::Month,
+                now: NOW,
+                drafts,
+            }),
+            ..Arrange::plain(crate::sidebar::Sort::Name)
+        }
+    }
+
+    fn ids(order: &[&Conversation]) -> Vec<String> {
+        order.iter().map(|c| c.id.clone()).collect()
+    }
+
+    #[test]
+    fn quiet_conversations_wait_behind_n_more() {
+        let w = workspace(None);
+        let arrange = tidied(None, None);
+        let shown = crate::sidebar::layout(
+            None,
+            &w.conversations,
+            &w.users,
+            |c| w.title(c),
+            |c| w.rank(c),
+            &arrange,
+        );
+        // Alpha and gamma are long quiet; beta is unread.
+        let tidy = super::super::sidebar::drawn(&w, &shown, None, "", |_| (true, false));
+        assert_eq!(ids(&tidy[0].rows), ["C2"]);
+        assert_eq!((tidy[0].more, tidy[0].less), (2, false));
+        assert_eq!((tidy[1].more, tidy[1].less), (0, false), "nothing to hide");
+        // Expanded: everything, in order, and "Show less".
+        let all = super::super::sidebar::drawn(&w, &shown, None, "", |_| (true, true));
+        assert_eq!(ids(&all[0].rows), ["C1", "C2", "C3"]);
+        assert_eq!((all[0].more, all[0].less), (0, true));
+        assert!(!all[1].less, "an expanded section with nothing hidden");
+        // Searching finds quiet ones too.
+        let found = super::super::sidebar::drawn(&w, &shown, None, "gam", |_| (true, false));
+        assert_eq!(ids(&found[0].rows), ["C3"]);
+        assert_eq!(found[0].more, 0);
+    }
+
+    #[test]
+    fn n_more_counts_quiet_ones_and_direct_messages_past_the_limit() {
+        let mut w = workspace(None);
+        let at = |seconds: i64| Ts::new(format!("{seconds}.000100"));
+        // 28 people spoke lately, 5 long ago.
+        w.conversations = (0..33)
+            .map(|i| {
+                let latest = if i < 28 {
+                    at(NOW - 60 - i)
+                } else {
+                    at(NOW - 100 * 86_400 - i)
+                };
+                Conversation {
+                    kind: ConversationKind::Direct,
+                    last_read: Some(latest.clone()),
+                    latest: Some(latest),
+                    ..channel(&format!("D{i}"), &format!("person {i}"), false)
+                }
+            })
+            .collect();
+        w.conversations.push(Conversation {
+            kind: ConversationKind::Direct,
+            last_read: Some(at(NOW - 5000)),
+            latest: Some(at(NOW - 10)),
+            ..channel("D99", "still unread", false)
+        });
+        let arrange = tidied(None, None);
+        let order = visible(&w, &arrange, None, "", |_| (true, false));
+        assert_eq!(order.len(), 25, "the first 25 that are not quiet");
+        assert_eq!(order[0].id, "D99");
+        let shown = crate::sidebar::layout(
+            None,
+            &w.conversations,
+            &w.users,
+            |c| w.title(c),
+            |c| w.rank(c),
+            &arrange,
+        );
+        let drawn = super::super::sidebar::drawn(&w, &shown, None, "", |_| (true, false));
+        assert_eq!(drawn[1].more, 4 + 5, "past the limit, and the quiet ones");
+        let all = visible(&w, &arrange, None, "", |_| (true, true));
+        assert_eq!(all.len(), 34);
+    }
+
+    #[test]
+    fn stepping_skips_quiet_conversations_until_expanded() {
+        let w = workspace(None);
+        let arrange = tidied(None, None);
+        let order = visible(&w, &arrange, None, "", |_| (true, false));
+        assert_eq!(ids(&order), ["C2"]);
+        assert_eq!(step(&order, None, true, false).as_deref(), Some("C2"));
+        let order = visible(&w, &arrange, None, "", |_| (true, true));
+        assert_eq!(ids(&order), ["C1", "C2", "C3"]);
+        // The open one shows while open, found from the switcher or not.
+        let w = workspace(Some("C1"));
+        let held = crate::sidebar::Hold {
+            id: "C1".into(),
+            rank: crate::sidebar::Rank::Read,
+        };
+        let order = visible(&w, &tidied(Some(&held), None), None, "", |_| (true, false));
+        assert_eq!(ids(&order), ["C1", "C2"]);
+        assert_eq!(
+            step(&order, w.active.as_deref(), true, false).as_deref(),
+            Some("C2")
+        );
+        // One with a draft stays too.
+        let drafts = std::collections::HashSet::from(["C3".to_owned()]);
+        let w = workspace(None);
+        let order = visible(&w, &tidied(None, Some(&drafts)), None, "", |_| {
+            (true, false)
+        });
+        assert_eq!(ids(&order), ["C2", "C3"]);
     }
 }

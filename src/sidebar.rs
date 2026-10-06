@@ -26,6 +26,102 @@ pub enum Sort {
     Recent,
 }
 
+/// When the sidebar tucks away a conversation that has gone quiet, as
+/// Slack's own client tidies its sidebar.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum HideInactive {
+    /// Every conversation shows.
+    Off,
+    /// After a week without a new message.
+    Week,
+    /// After a month without a new message.
+    #[default]
+    Month,
+    /// After three months without a new message.
+    ThreeMonths,
+}
+
+impl HideInactive {
+    /// How long a conversation must have been quiet to be hidden, in
+    /// seconds; `None` when nothing is hidden.
+    pub fn age(self) -> Option<i64> {
+        const DAY: i64 = 24 * 60 * 60;
+        match self {
+            HideInactive::Off => None,
+            HideInactive::Week => Some(7 * DAY),
+            HideInactive::Month => Some(30 * DAY),
+            HideInactive::ThreeMonths => Some(90 * DAY),
+        }
+    }
+}
+
+/// How finely the time is taken for hiding quiet conversations, in
+/// seconds. Hiding reads the clock, and the remembered layout is made
+/// again whenever what it reads changes: by the hour it is made again
+/// once an hour, not every frame, and nobody notices a conversation
+/// going quiet an hour late.
+pub const TIME_STEP: i64 = 60 * 60;
+
+/// What hiding quiet conversations reads besides the conversations.
+#[derive(Clone, Copy, Debug)]
+pub struct Tidy<'a> {
+    /// After how long a quiet conversation is hidden.
+    pub after: HideInactive,
+    /// The time now in Unix seconds. Only the [`TIME_STEP`] it falls in
+    /// counts.
+    pub now: i64,
+    /// The conversations with a draft, which always show so what you
+    /// started writing is not lost from sight.
+    pub drafts: Option<&'a HashSet<String>>,
+}
+
+impl Tidy<'_> {
+    /// The newest-message time before which a conversation counts as
+    /// inactive, or `None` when nothing is hidden. Taken from the start
+    /// of the [`TIME_STEP`], so it moves only when the step does.
+    pub fn cutoff(&self) -> Option<i64> {
+        let now = self.now.div_euclid(TIME_STEP) * TIME_STEP;
+        Some(now.saturating_sub(self.after.age()?))
+    }
+}
+
+/// Whether the sidebar hides `conversation`, in a section of `kind`, for
+/// having gone quiet: its newest message is older than the cutoff.
+///
+/// Never hidden, whatever their age: one whose newest message is not
+/// known (an OAuth sign-in may not know it), one that shows as unread
+/// (`rank`, which follows the mute rules) or mentions you, one held open
+/// (`hold`, which is the open conversation), one with a draft, and
+/// anything in Starred, which you chose to keep in sight, or in Apps,
+/// where apps are tools you go to rather than talks that run dry.
+pub fn is_inactive(
+    conversation: &Conversation,
+    kind: SectionKind,
+    rank: Rank,
+    hold: Option<&Hold>,
+    tidy: &Tidy<'_>,
+) -> bool {
+    let Some(cutoff) = tidy.cutoff() else {
+        return false;
+    };
+    let kept = matches!(kind, SectionKind::Starred | SectionKind::Apps)
+        || rank != Rank::Read
+        || conversation.mentions > 0
+        || hold.is_some_and(|held| held.id == conversation.id)
+        || tidy
+            .drafts
+            .is_some_and(|drafts| drafts.contains(&conversation.id));
+    !kept
+        && conversation
+            .latest
+            .as_ref()
+            .and_then(crate::model::Ts::seconds)
+            .is_some_and(|latest| latest < cutoff)
+}
+
 /// How much a conversation asks for you, for putting unread ones first.
 /// The order of the variants is the order in a section.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -74,8 +170,12 @@ pub struct Arrange<'a> {
     /// Mentions and unread direct messages first, then other unread
     /// conversations, then the rest, each group in the `sort` order.
     pub unread_first: bool,
-    /// The open conversation's held rank, used in place of its own.
+    /// The open conversation's held rank, used in place of its own. The
+    /// held conversation is never hidden as inactive either.
     pub hold: Option<&'a Hold>,
+    /// Which conversations to mark as gone quiet (see [`is_inactive`]);
+    /// `None` marks none.
+    pub tidy: Option<Tidy<'a>>,
 }
 
 impl Arrange<'_> {
@@ -85,6 +185,7 @@ impl Arrange<'_> {
             sort,
             unread_first: false,
             hold: None,
+            tidy: None,
         }
     }
 }
@@ -310,6 +411,9 @@ pub struct Shown<'a> {
     pub kind: SectionKind,
     pub title: String,
     pub conversations: Vec<&'a Conversation>,
+    /// For each of `conversations`, in the same order, whether it has gone
+    /// quiet and is hidden until the section is expanded.
+    pub inactive: Vec<bool>,
 }
 
 /// The title Slack shows for a section.
@@ -360,6 +464,15 @@ pub fn layout<'a>(
 ) -> Vec<Shown<'a>> {
     let sort = arrange.sort;
     let order = |rows: &mut [&Conversation], sort: Sort| order(rows, sort, &titled, &rank, arrange);
+    let inactive = |rows: &[&Conversation], kind: SectionKind| -> Vec<bool> {
+        rows.iter()
+            .map(|c| {
+                arrange
+                    .tidy
+                    .is_some_and(|tidy| is_inactive(c, kind, rank(c), arrange.hold, &tidy))
+            })
+            .collect()
+    };
     let is_bot_dm = |c: &Conversation| {
         c.user
             .as_deref()
@@ -378,12 +491,14 @@ pub fn layout<'a>(
                 id: None,
                 kind: SectionKind::Channels,
                 title: crate::i18n::t("Channels").into_owned(),
+                inactive: inactive(&channels, SectionKind::Channels),
                 conversations: channels,
             },
             Shown {
                 id: None,
                 kind: SectionKind::DirectMessages,
                 title: crate::i18n::t("Direct messages").into_owned(),
+                inactive: inactive(&direct, SectionKind::DirectMessages),
                 conversations: direct,
             },
         ];
@@ -449,6 +564,7 @@ pub fn layout<'a>(
                 id: Some(section.id.clone()),
                 kind: section.kind,
                 title: title(section),
+                inactive: inactive(&rows, section.kind),
                 conversations: rows,
             }
         })
@@ -460,6 +576,7 @@ pub fn layout<'a>(
             id: None,
             kind: SectionKind::Channels,
             title: crate::i18n::t("Other").into_owned(),
+            inactive: inactive(&stray, SectionKind::Channels),
             conversations: stray,
         });
     }
@@ -502,7 +619,8 @@ fn placed_rank(
 /// conversations without sorting or allocating, where [`layout`] sorts by
 /// lower-cased titles and builds maps. It covers what `titled` may read: a
 /// conversation's name and, for a direct message, the person's label; and
-/// what `rank` answers, which is cheap to ask.
+/// what `rank` answers, which is cheap to ask; and for hiding quiet
+/// conversations, the setting, the time step and who has a draft.
 pub fn fingerprint(
     sections: Option<&[SidebarSection]>,
     conversations: &[Conversation],
@@ -515,6 +633,11 @@ pub fn fingerprint(
     std::mem::discriminant(&arrange.sort).hash(&mut hasher);
     arrange.unread_first.hash(&mut hasher);
     arrange.hold.map(|h| (&h.id, h.rank)).hash(&mut hasher);
+    // The cutoff, not the time: it moves once a step, and not at all
+    // with hiding off.
+    let cutoff = arrange.tidy.and_then(|tidy| tidy.cutoff());
+    cutoff.hash(&mut hasher);
+    let drafts = arrange.tidy.and_then(|tidy| tidy.drafts);
     // Section titles are translated.
     std::mem::discriminant(&crate::i18n::locale()).hash(&mut hasher);
     match sections {
@@ -540,6 +663,12 @@ pub fn fingerprint(
         // Hashed even with unread-first off, so the ranks the memo keeps
         // for holding are never stale when it is turned on.
         rank(conversation).hash(&mut hasher);
+        conversation.mentions.hash(&mut hasher);
+        if cutoff.is_some() {
+            drafts
+                .is_some_and(|drafts| drafts.contains(&conversation.id))
+                .hash(&mut hasher);
+        }
         if let Some(user) = conversation.user.as_deref().and_then(|id| users.get(id)) {
             user.label().hash(&mut hasher);
             user.is_bot.hash(&mut hasher);
@@ -556,6 +685,7 @@ struct Placed {
     kind: SectionKind,
     title: String,
     rows: Vec<usize>,
+    inactive: Vec<bool>,
 }
 
 /// [`layout`], remembered until its [`fingerprint`] changes: the sidebar
@@ -638,30 +768,40 @@ impl Memo {
                 .collect();
             self.placed = layout(sections, conversations, users, titled, &rank, arrange)
                 .into_iter()
-                .map(|shown| Placed {
-                    id: shown.id,
-                    kind: shown.kind,
-                    title: shown.title,
-                    rows: shown
+                .map(|shown| {
+                    let (rows, inactive) = shown
                         .conversations
                         .iter()
-                        .filter_map(|c| index.get(c.id.as_str()).copied())
-                        .collect(),
+                        .zip(shown.inactive)
+                        .filter_map(|(c, quiet)| index.get(c.id.as_str()).map(|&i| (i, quiet)))
+                        .unzip();
+                    Placed {
+                        id: shown.id,
+                        kind: shown.kind,
+                        title: shown.title,
+                        rows,
+                        inactive,
+                    }
                 })
                 .collect();
             self.key = Some(key);
         }
         self.placed
             .iter()
-            .map(|placed| Shown {
-                id: placed.id.clone(),
-                kind: placed.kind,
-                title: placed.title.clone(),
-                conversations: placed
+            .map(|placed| {
+                let (conversations, inactive) = placed
                     .rows
                     .iter()
-                    .filter_map(|&i| conversations.get(i))
-                    .collect(),
+                    .zip(&placed.inactive)
+                    .filter_map(|(&i, &quiet)| conversations.get(i).map(|c| (c, quiet)))
+                    .unzip();
+                Shown {
+                    id: placed.id.clone(),
+                    kind: placed.kind,
+                    title: placed.title.clone(),
+                    conversations,
+                    inactive,
+                }
             })
             .collect()
     }
@@ -964,6 +1104,7 @@ mod tests {
             sort,
             unread_first: true,
             hold: None,
+            tidy: None,
         }
     }
 
@@ -1032,6 +1173,7 @@ mod tests {
                 sort,
                 unread_first: false,
                 hold: Some(&held),
+                tidy: None,
             };
             assert_eq!(
                 arranged(&sections, &conversations, &off),
@@ -1083,6 +1225,7 @@ mod tests {
                     sort: Sort::Name,
                     unread_first: true,
                     hold: held.as_ref(),
+                    tidy: None,
                 },
             );
             shown
@@ -1222,6 +1365,7 @@ mod tests {
             sort: Sort::Name,
             unread_first: true,
             hold: None,
+            tidy: None,
         };
         assert_ne!(plain, arranged(&first));
         let held = Hold {
@@ -1752,5 +1896,289 @@ mod tests {
             .map(|(id, _)| id)
             .collect();
         assert_eq!(targets, ["S3", "S4"]);
+    }
+
+    /// A fixed "now" for hiding, on the hour: 2001-09-09 01:00 UTC.
+    const NOW: i64 = 1_000_000_800;
+    const DAY: i64 = 24 * 60 * 60;
+
+    /// A read channel whose newest message is `days` old.
+    fn aged(id: &str, days: i64) -> Conversation {
+        let at = format!("{}.000100", NOW - days * DAY);
+        read_to(id, id, ConversationKind::Channel, &at, &at, 0)
+    }
+
+    fn tidy(after: HideInactive) -> Tidy<'static> {
+        Tidy {
+            after,
+            now: NOW,
+            drafts: None,
+        }
+    }
+
+    #[test]
+    fn a_conversation_hides_once_quiet_past_the_cutoff() {
+        let month = tidy(HideInactive::Month);
+        let quiet = |c: &Conversation| is_inactive(c, SectionKind::Channels, live(c), None, &month);
+        assert!(quiet(&aged("C1", 31)));
+        assert!(!quiet(&aged("C2", 29)));
+        let week = tidy(HideInactive::Week);
+        assert!(is_inactive(
+            &aged("C2", 8),
+            SectionKind::Channels,
+            Rank::Read,
+            None,
+            &week
+        ));
+        let quarter = tidy(HideInactive::ThreeMonths);
+        assert!(!is_inactive(
+            &aged("C1", 31),
+            SectionKind::Channels,
+            Rank::Read,
+            None,
+            &quarter
+        ));
+        assert!(is_inactive(
+            &aged("C1", 91),
+            SectionKind::DirectMessages,
+            Rank::Read,
+            None,
+            &quarter
+        ));
+    }
+
+    #[test]
+    fn with_hiding_off_nothing_hides() {
+        let off = tidy(HideInactive::Off);
+        assert_eq!(off.cutoff(), None);
+        let ancient = aged("C1", 10_000);
+        assert!(!is_inactive(
+            &ancient,
+            SectionKind::Channels,
+            Rank::Read,
+            None,
+            &off
+        ));
+        let (sections, _) = unread_sample();
+        let conversations = [aged("C1", 400), aged("C9", 400)];
+        let shown = layout(
+            Some(&sections),
+            &conversations,
+            &HashMap::new(),
+            |c| c.name.clone(),
+            live,
+            &Arrange {
+                tidy: Some(off),
+                ..Arrange::plain(Sort::Name)
+            },
+        );
+        assert!(shown.iter().all(|s| s.inactive.iter().all(|quiet| !quiet)));
+    }
+
+    #[test]
+    fn an_unknown_newest_message_is_never_hidden() {
+        let month = tidy(HideInactive::Month);
+        let mut unknown = aged("C1", 400);
+        unknown.latest = None;
+        assert!(!is_inactive(
+            &unknown,
+            SectionKind::Channels,
+            Rank::Read,
+            None,
+            &month
+        ));
+        unknown.latest = Some(Ts::new("not a time"));
+        assert!(!is_inactive(
+            &unknown,
+            SectionKind::Channels,
+            Rank::Read,
+            None,
+            &month
+        ));
+    }
+
+    #[test]
+    fn unread_mentioned_open_and_drafted_ones_never_hide() {
+        let drafts = HashSet::from(["C5".to_owned()]);
+        let month = Tidy {
+            drafts: Some(&drafts),
+            ..tidy(HideInactive::Month)
+        };
+        let old = aged("C1", 400);
+        let quiet = |c: &Conversation, kind, rank, hold| is_inactive(c, kind, rank, hold, &month);
+        assert!(quiet(&old, SectionKind::Channels, Rank::Read, None));
+        // Unread, as `WorkspaceState::is_unread` says (mutes included).
+        assert!(!quiet(&old, SectionKind::Channels, Rank::Unread, None));
+        assert!(!quiet(&old, SectionKind::Channels, Rank::Urgent, None));
+        // A mention of you, even counted as read.
+        let mentioned = Conversation {
+            mentions: 1,
+            ..old.clone()
+        };
+        assert!(!quiet(&mentioned, SectionKind::Channels, Rank::Read, None));
+        // The open one, held in its place.
+        let held = Hold {
+            id: "C1".into(),
+            rank: Rank::Read,
+        };
+        assert!(!quiet(&old, SectionKind::Channels, Rank::Read, Some(&held)));
+        let other = Hold {
+            id: "C2".into(),
+            rank: Rank::Read,
+        };
+        assert!(quiet(&old, SectionKind::Channels, Rank::Read, Some(&other)));
+        // One with a draft.
+        assert!(!quiet(
+            &aged("C5", 400),
+            SectionKind::Channels,
+            Rank::Read,
+            None
+        ));
+        // Starred, and apps in their own section.
+        assert!(!quiet(&old, SectionKind::Starred, Rank::Read, None));
+        assert!(!quiet(&old, SectionKind::Apps, Rank::Read, None));
+        // Every other section hides, your own included.
+        for kind in [
+            SectionKind::Custom,
+            SectionKind::Channels,
+            SectionKind::DirectMessages,
+        ] {
+            assert!(quiet(&old, kind, Rank::Read, None), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn layout_marks_quiet_ones_in_every_section_but_starred_and_apps() {
+        let (sections, mut conversations, users) = sample();
+        // Everything a year quiet and read.
+        for c in &mut conversations {
+            let at = Ts::new(format!("{}.000100", NOW - 365 * DAY));
+            c.latest = Some(at.clone());
+            c.last_read = Some(at);
+        }
+        // But one channel spoke yesterday.
+        conversations[3].latest = Some(Ts::new(format!("{}.000100", NOW - DAY)));
+        conversations[3].last_read = conversations[3].latest.clone();
+        let shown = layout(
+            Some(&sections),
+            &conversations,
+            &users,
+            |c| c.name.clone(),
+            live,
+            &Arrange {
+                tidy: Some(tidy(HideInactive::Month)),
+                ..Arrange::plain(Sort::Name)
+            },
+        );
+        let marks: Vec<(SectionKind, Vec<(&str, bool)>)> = shown
+            .iter()
+            .map(|s| {
+                let rows = ids(s).into_iter().zip(s.inactive.iter().copied()).collect();
+                (s.kind, rows)
+            })
+            .collect();
+        assert_eq!(
+            marks,
+            [
+                (SectionKind::Starred, vec![("C3", false)]),
+                (SectionKind::Custom, vec![("C2", true), ("D2", true)]),
+                (SectionKind::Channels, vec![("C4", false), ("C1", true)]),
+                (SectionKind::DirectMessages, vec![("D1", true)]),
+                (SectionKind::Apps, vec![("D3", false)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_cutoff_moves_by_the_hour() {
+        let at = |now| {
+            Tidy {
+                now,
+                ..tidy(HideInactive::Week)
+            }
+            .cutoff()
+        };
+        assert_eq!(at(NOW), Some(NOW - 7 * DAY));
+        assert_eq!(at(NOW + TIME_STEP - 1), at(NOW), "within the hour");
+        assert_eq!(at(NOW + TIME_STEP), Some(NOW + TIME_STEP - 7 * DAY));
+    }
+
+    #[test]
+    fn the_fingerprint_sees_what_hiding_reads() {
+        let (sections, conversations, users) = sample();
+        let drafts = HashSet::from(["C1".to_owned()]);
+        let key = |tidy: Option<Tidy<'_>>| {
+            fingerprint(
+                Some(&sections),
+                &conversations,
+                &users,
+                live,
+                &Arrange {
+                    tidy,
+                    ..Arrange::plain(Sort::Name)
+                },
+            )
+        };
+        let month = tidy(HideInactive::Month);
+        let base = key(Some(month));
+        assert_eq!(base, key(Some(month)));
+        // The setting.
+        assert_ne!(base, key(Some(tidy(HideInactive::Week))));
+        assert_ne!(base, key(Some(tidy(HideInactive::Off))));
+        // The time, but only by the hour.
+        let later = |now| Some(Tidy { now, ..month });
+        assert_eq!(base, key(later(NOW + 60)), "a minute later");
+        assert_ne!(base, key(later(NOW + TIME_STEP)), "the next hour");
+        // With hiding off, the clock does not matter.
+        let off = tidy(HideInactive::Off);
+        assert_eq!(
+            key(Some(off)),
+            key(Some(Tidy {
+                now: NOW + 99 * DAY,
+                ..off
+            }))
+        );
+        // Who has a draft.
+        let drafted = Tidy {
+            drafts: Some(&drafts),
+            ..month
+        };
+        assert_ne!(base, key(Some(drafted)));
+    }
+
+    #[test]
+    fn the_memo_hides_again_after_the_hour_turns() {
+        let (sections, _) = unread_sample();
+        let users = HashMap::new();
+        // Quiet for 30 days less half an hour: hidden from the next hour.
+        let at = format!("{}.000100", NOW - 30 * DAY + 1800);
+        let conversations = [read_to(
+            "C1",
+            "alpha",
+            ConversationKind::Channel,
+            &at,
+            &at,
+            0,
+        )];
+        let mut memo = Memo::default();
+        let mut quiet = |now| {
+            let shown = memo.layout(
+                Some(&sections),
+                &conversations,
+                &users,
+                |c| c.name.clone(),
+                live,
+                &Arrange {
+                    tidy: Some(Tidy {
+                        now,
+                        ..tidy(HideInactive::Month)
+                    }),
+                    ..Arrange::plain(Sort::Name)
+                },
+            );
+            shown[1].inactive.clone()
+        };
+        assert_eq!(quiet(NOW), [false]);
+        assert_eq!(quiet(NOW + TIME_STEP), [true]);
     }
 }
