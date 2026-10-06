@@ -125,6 +125,17 @@ Slack session; neither needs anything registered.
   documents and supports, with live Socket Mode updates; a workspace admin
   may need to approve the app.
 
+The manifest is at version 2 (its description says "manifest v2"). Version
+2 adds `dnd:read`, `dnd:write`, `usergroups:read` and `bookmarks:write`, for
+Do Not Disturb kept in step with Slack, `@group` suggestions and editing
+bookmarks. An app made from the first manifest still signs in: if Slack
+refuses the newer permissions, NoSlacking asks again for the ones the app
+has, and those features stay off for that workspace. Settings → Workspaces
+then says what is missing. To update the app, copy the new manifest there,
+open your app on [api.slack.com/apps](https://api.slack.com/apps), paste it
+under App Manifest and save, reinstall the app when Slack asks, and press
+Sign in again.
+
 Session sign-ins get live messages over Slack's session socket. Tokens and
 cookies are stored only in your operating system's keyring (Secret Service on
 Linux, the Keychain on macOS, the Credential Manager on Windows), never in a

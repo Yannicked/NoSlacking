@@ -456,12 +456,21 @@ sections. Nothing below exists yet.
       belongs in fastframe-macos.*
 - [x] **Close DMs** (`conversations.close`).
 - [x] **The new-message icon touches the sidebar edge.**
-- [ ] **DND for your-own-app sign-ins** needs the `dnd:read` and
-      `dnd:write` scopes. Adding them breaks apps made from the old
-      manifest, so DND is local only for those sign-ins for now. The same
-      goes for `usergroups:read`: without it, `@group` isn't suggested;
-      and for `bookmarks:write`: without it, changing a bookmark is
-      undone with a toast naming the permission.
+- [x] **DND for your-own-app sign-ins** needs the `dnd:read` and
+      `dnd:write` scopes, `@group` suggestions `usergroups:read`, and
+      bookmark editing `bookmarks:write`. *Manifest version 2 asks for all
+      four (and the `dnd_updated` event); its description says "manifest
+      v2". Sign-in asks for them too; if Slack refuses them
+      (`invalid_scope` or `unapproved_scope`), it asks again without them
+      and remembers the app is an older one, and the waiting sign-in offers
+      that by hand in case Slack shows an error page instead. The scopes
+      Slack grants (`authed_user.scope`, then each answer's
+      `x-oauth-scopes` header) are kept per workspace in the settings, and
+      DND, groups and bookmark editing are offered only when granted;
+      `missing_scope` still undoes a change when the grant is not known.
+      Settings → Workspaces says what an older app lacks, with the manifest
+      to copy and Sign in again. Not yet tried against a real workspace:
+      whether Slack refuses or quietly grants scopes the app lacks.*
 - [ ] **No Dock or taskbar badge on macOS and Windows**: it would need
       `unsafe` platform calls. The unread count is in the window title.
 - [ ] **Test on macOS and Windows**: the platform code is only compiled on
@@ -527,8 +536,8 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       notified, but `@team` can't be typed. Fetch `usergroups.list`
       (OAuth needs `usergroups:read`; mind the manifest, as with DND) and
       add groups to the suggestions. *Sessions get them; your-own-app
-      sign-ins only if the app happens to have `usergroups:read`, as the
-      manifest does not ask for it yet (see the DND follow-up).*
+      sign-ins when the app has `usergroups:read`, which manifest version 2
+      asks for (see the DND follow-up).*
 - [x] **Share a message** to another conversation: a picker that posts
       the permalink with an optional comment, which Slack unfurls.
 - [x] **Keyboard shortcut sheet** on `Ctrl+/` (⌘/) listing what
@@ -556,9 +565,10 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       answer (`views.open`), which only Slack itself shows.
 - [x] **Add and edit bookmarks** (`bookmarks.add`, `bookmarks.edit`,
       `bookmarks.remove`); today they can only be listed. *Sessions can;
-      your-own-app sign-ins only if the app has `bookmarks:write`, which
-      the manifest does not ask for yet (see the DND follow-up). Others'
-      changes arrive as `bookmark_added`/`_changed`/`_removed` events.*
+      your-own-app sign-ins when the app has `bookmarks:write`, which
+      manifest version 2 asks for; without it the controls are hidden (see
+      the DND follow-up). Others' changes arrive as
+      `bookmark_added`/`_changed`/`_removed` events.*
 - [x] **Delete your own files** (`files.delete`) from file cards and the
       channel's Files tab. *Right-click a file you uploaded (a card, a
       picture, a video or a row of the Files tab), confirm, and it goes at
@@ -630,8 +640,10 @@ These are the open follow-ups above, in the order to take them:
    drawing only.
 4. macOS link events, Dock and taskbar badges, Wayland drops: blocked on
    `unsafe` code in fastframe or a winit patch.
-5. DND scopes for your-own-app sign-ins: wait for a manifest version bump
-   that also brings `usergroups:read` and `bookmarks:write`.
+5. Manifest version 2 against a real workspace: sign in with an app made
+   from the first manifest and see whether Slack refuses the newer scopes
+   or grants what the app has; keep the `oauth.v2.access` answer as a
+   fixture.
 
 ### Found while typing the errors
 
