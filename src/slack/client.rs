@@ -342,7 +342,7 @@ struct Shared {
 /// One workspace's API access.
 #[derive(Clone)]
 pub struct Client {
-    /// A client of its own (a cookie jar, a test), or `None` for
+    /// A client of its own (a browser-like agent, a test), or `None` for
     /// [`super::net::api`], taken afresh for each call so a new proxy
     /// setting applies at once.
     http: Option<reqwest::Client>,
@@ -372,7 +372,7 @@ pub fn now() -> i64 {
 }
 
 impl Client {
-    /// A client that goes through `http` alone: one with a cookie jar, or
+    /// A client that goes through `http` alone: a browser-like one, or
     /// a test's.
     pub fn new(http: reqwest::Client, token: Token) -> Self {
         Self::with_http(Some(http), token)
