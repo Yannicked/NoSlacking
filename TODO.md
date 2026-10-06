@@ -709,7 +709,11 @@ engineering, as for the rest of the session sign-in.
         every 3 minutes (doubling after failures, at most 30) and every
         known huddle after an RTM reconnect. Socket Mode carries none of
         this.
-      - Unverified: `sh_room_*` reach `rtm.connect` sockets (slack-go's
+      - Verified 2026-10-06: a real invitation reached NoSlacking's
+        `rtm.connect` socket and showed its card, so the flannel gateway
+        is not needed for invitations. With `huddle-audio` the card offers
+        Listen here (opens the conversation and listens) and Open in Slack.
+      - Was unverified: `sh_room_*` reach `rtm.connect` sockets (slack-go's
         RTM maps them), but no open-source `rtm.connect` client handles
         `huddle_invite`; HuddleFM hears it on the flannel gateway
         (`wss-primary.slack.com`, `flannel=3`). If RTM never carries it,

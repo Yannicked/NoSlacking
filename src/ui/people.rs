@@ -438,15 +438,34 @@ pub fn word(presence: Presence) -> std::borrow::Cow<'static, str> {
     }
 }
 
+/// The answer that listens to an invitation's huddle here; only reached
+/// in builds with huddle audio.
+#[cfg(feature = "huddle-audio")]
+fn listen_to(team: &str, room: &str) -> crate::huddles::Action {
+    crate::huddles::Action::ListenInvite {
+        team: team.to_owned(),
+        room: room.to_owned(),
+    }
+}
+
+#[cfg(not(feature = "huddle-audio"))]
+fn listen_to(team: &str, room: &str) -> crate::huddles::Action {
+    crate::huddles::Action::Join {
+        team: team.to_owned(),
+        room: room.to_owned(),
+    }
+}
+
 /// The huddle invitations ringing, each a card in the top right corner
-/// with Join and Decline (see [`crate::huddles`]).
+/// with Join (or, with huddle audio, Listen here and Open in Slack) and
+/// Decline (see [`crate::huddles`]).
 pub fn invites(app: &mut App, ctx: &egui::Context) {
     if app.huddles.invites.list().is_empty() {
         return;
     }
     let palette = app.palette;
     let several = app.workspaces.len() > 1;
-    let cards: Vec<(String, String, String, String)> = app
+    let cards: Vec<(String, String, String, String, bool)> = app
         .huddles
         .invites
         .list()
@@ -467,7 +486,15 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
             if several {
                 body = format!("{body} · {}", workspace.info.name);
             }
-            Some((invite.team.clone(), invite.room.clone(), title, body))
+            // Only a browser sign-in can listen here.
+            let session = workspace.info.sign_in == crate::model::SignInKind::Session;
+            Some((
+                invite.team.clone(),
+                invite.room.clone(),
+                title,
+                body,
+                session,
+            ))
         })
         .collect();
     let mut answers = Vec::new();
@@ -477,7 +504,7 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
         .interactable(true)
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
-            for (team, room, title, body) in cards {
+            for (team, room, title, body, session) in cards {
                 egui::Frame::new()
                     .fill(palette.overlay)
                     .stroke(Stroke::new(1.5, ACTIVE))
@@ -509,8 +536,19 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
                         });
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
+                            // With huddle audio, listening here comes first
+                            // and Slack takes the call with a microphone.
+                            let here = cfg!(feature = "huddle-audio") && session;
+                            let (label, hint) = if here {
+                                (
+                                    t("Listen here"),
+                                    t("Listen to the huddle here, with your microphone off"),
+                                )
+                            } else {
+                                (t("Join"), t("Join the huddle in Slack"))
+                            };
                             let join = egui::Button::new(
-                                RichText::new(t("Join"))
+                                RichText::new(label)
                                     .font(theme::medium(14.0))
                                     .color(Color32::WHITE),
                             )
@@ -520,8 +558,22 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
                             if ui
                                 .add(join)
                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                .on_hover_text(t("Join the huddle in Slack"))
+                                .on_hover_text(hint)
                                 .clicked()
+                            {
+                                answers.push(if here {
+                                    listen_to(&team, &room)
+                                } else {
+                                    crate::huddles::Action::Join {
+                                        team: team.clone(),
+                                        room: room.clone(),
+                                    }
+                                });
+                            }
+                            if here
+                                && theme::secondary_button(ui, &palette, &t("Open in Slack"))
+                                    .on_hover_text(t("Join the huddle in Slack"))
+                                    .clicked()
                             {
                                 answers.push(crate::huddles::Action::Join {
                                     team: team.clone(),

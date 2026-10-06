@@ -228,6 +228,10 @@ pub enum Action {
     /// Listens to the huddle in `channel` here, muted, leaving any other.
     #[cfg(feature = "huddle-audio")]
     Listen { team: String, channel: String },
+    /// Answers an invitation by listening here: opens the huddle's
+    /// conversation, where its Leave button is, and listens.
+    #[cfg(feature = "huddle-audio")]
+    ListenInvite { team: String, room: String },
     /// Leaves the huddle being listened to.
     #[cfg(feature = "huddle-audio")]
     Leave,
@@ -250,6 +254,23 @@ pub fn apply(app: &mut App, action: Action) {
                         room,
                     },
                 });
+            }
+        }
+        #[cfg(feature = "huddle-audio")]
+        Action::ListenInvite { team, room } => {
+            if let Some(invite) = app.huddles.invites.answered(&team, &room) {
+                app.actions
+                    .push(crate::model::Action::SelectWorkspace(team.clone()));
+                app.actions.push(crate::model::Action::OpenConversation(
+                    invite.channel.clone(),
+                ));
+                apply(
+                    app,
+                    Action::Listen {
+                        team,
+                        channel: invite.channel,
+                    },
+                );
             }
         }
         #[cfg(feature = "huddle-audio")]

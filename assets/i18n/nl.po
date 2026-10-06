@@ -2615,3 +2615,6 @@ msgstr "de geluidsverbinding kon niet worden gemaakt"
 
 msgid "the audio connection was lost"
 msgstr "de geluidsverbinding is verbroken"
+
+msgid "Listen here"
+msgstr "Hier luisteren"
