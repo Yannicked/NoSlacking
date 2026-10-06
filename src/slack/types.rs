@@ -709,6 +709,9 @@ pub struct Message {
     pub room: Option<Value>,
     /// The id the sending client gave it, if any.
     pub client_msg_id: Option<String>,
+    /// On a thread's parent, for a browser session: whether you follow
+    /// the thread.
+    pub subscribed: Option<bool>,
 }
 
 impl Message {
@@ -777,6 +780,7 @@ impl Message {
             broadcast,
             pinned: !self.pinned_to.is_empty(),
             client_msg_id: self.client_msg_id.filter(|id| !id.is_empty()),
+            subscribed: self.subscribed,
         })
     }
 }

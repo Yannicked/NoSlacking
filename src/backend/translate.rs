@@ -199,6 +199,26 @@ pub(super) fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> 
                 }));
             }
         }
+        // A thread followed or no longer followed, here or in another
+        // client. Only a browser session's socket says so; wee-slack reads
+        // the same events (`slack_workspace.py`).
+        "thread_subscribed" | "thread_unsubscribed" => {
+            let subscription = event.get("subscription").unwrap_or(&Value::Null);
+            if let (Some(channel), Some(thread)) = (
+                str_of(subscription, "channel"),
+                str_of(subscription, "thread_ts"),
+            ) && str_of(subscription, "type").is_none_or(|t| t == "thread")
+            {
+                out.push(Translated::Event(Event::Views {
+                    team,
+                    event: crate::views::Event::Followed {
+                        channel: channel.to_owned(),
+                        thread: Ts::new(thread),
+                        follow: kind == "thread_subscribed",
+                    },
+                }));
+            }
+        }
         _ => match super::people::translate(event) {
             Some(event) => out.push(Translated::Event(Event::People { team, event })),
             None => log::debug!("unhandled event {kind}"),
@@ -228,6 +248,34 @@ mod tests {
             );
         }
         assert!(events(r#"{"type":"channel_marked","channel":"C1"}"#).is_empty());
+    }
+
+    #[test]
+    fn threads_followed_elsewhere_show_as_followed() {
+        let followed = events(
+            r#"{"type":"thread_subscribed","subscription":{"type":"thread",
+                "channel":"C1","thread_ts":"1700000000.000100","active":true,
+                "last_read":"1700000000.000300"},"event_ts":"1700000001.000000"}"#,
+        );
+        assert!(
+            matches!(&followed[..], [Translated::Event(Event::Views {
+                team,
+                event: crate::views::Event::Followed { channel, thread, follow: true },
+            })] if team == "T1" && channel == "C1" && thread.0 == "1700000000.000100"),
+            "{followed:?}"
+        );
+        let dropped = events(
+            r#"{"type":"thread_unsubscribed","subscription":{"type":"thread",
+                "channel":"C1","thread_ts":"1700000000.000100"}}"#,
+        );
+        assert!(matches!(
+            &dropped[..],
+            [Translated::Event(Event::Views {
+                event: crate::views::Event::Followed { follow: false, .. },
+                ..
+            })]
+        ));
+        assert!(events(r#"{"type":"thread_subscribed","subscription":{}}"#).is_empty());
     }
 
     #[test]

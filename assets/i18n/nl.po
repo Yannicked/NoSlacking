@@ -2318,3 +2318,21 @@ msgstr "Voor een herinnering is de machtiging reminders:write nodig, die je Slac
 
 msgid "Could not set the reminder: {error}"
 msgstr "Kon de herinnering niet zetten: {error}"
+
+msgid "Following"
+msgstr "Volgend"
+
+msgid "Follow"
+msgstr "Volgen"
+
+msgid "Stop following: replies no longer notify you or show under Threads"
+msgstr "Niet meer volgen: antwoorden geven geen melding meer en staan niet meer onder Threads"
+
+msgid "Follow: replies notify you and show under Threads"
+msgstr "Volgen: antwoorden geven een melding en staan onder Threads"
+
+msgid "Could not follow the thread: {error}"
+msgstr "Kon de thread niet volgen: {error}"
+
+msgid "Could not stop following the thread: {error}"
+msgstr "Kon de thread niet ontvolgen: {error}"

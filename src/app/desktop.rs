@@ -665,6 +665,7 @@ mod tests {
             broadcast: false,
             pinned: false,
             client_msg_id: None,
+            subscribed: None,
         };
         assert_eq!(plain_text(&w, &message), "@design and @S9 and @ops");
     }

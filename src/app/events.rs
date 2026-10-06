@@ -405,6 +405,7 @@ impl App {
                 self.workspaces.push(state);
             }
         }
+        crate::views::warm_threads(self, &team);
         if self.settings.active_workspace.is_none() {
             self.settings.active_workspace = Some(team);
         }

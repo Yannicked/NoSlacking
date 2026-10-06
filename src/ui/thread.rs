@@ -51,6 +51,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .conversation(&channel)
         .map(|c| workspace.title(c))
         .unwrap_or_default();
+    // Whether you follow the thread, for a sign-in that can change it. A
+    // parent that does not say is taken as not followed. The parent shows
+    // in the conversation too, where history may not say: any copy that
+    // does counts.
+    let following = crate::views::can_follow(workspace.info.sign_in).then(|| {
+        workspace
+            .timelines_for(&channel)
+            .find_map(|t| t.messages.iter().find(|m| m.ts == ts)?.subscribed)
+            .unwrap_or(false)
+    });
     let response = egui::Panel::right("thread")
         .resizable(true)
         .default_size(width)
@@ -100,6 +110,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                 .clicked()
                             {
                                 actions.push(Action::CloseThread);
+                            }
+                            if let Some(following) = following
+                                && follow_button(ui, &palette, following).clicked()
+                            {
+                                actions.push(Action::Views(crate::views::Action::Follow {
+                                    channel: channel.clone(),
+                                    thread: ts.clone(),
+                                    follow: !following,
+                                }));
                             }
                         });
                     });
@@ -328,4 +347,38 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.settings.thread_width = width;
         app.settings_changed();
     }
+}
+
+/// The header's Follow / Following toggle: lit while you follow the
+/// thread, as in Slack.
+fn follow_button(ui: &mut egui::Ui, palette: &theme::Palette, following: bool) -> egui::Response {
+    let (label, tip, color) = if following {
+        (
+            t("Following"),
+            t("Stop following: replies no longer notify you or show under Threads"),
+            palette.accent,
+        )
+    } else {
+        (
+            t("Follow"),
+            t("Follow: replies notify you and show under Threads"),
+            palette.secondary,
+        )
+    };
+    ui.add(
+        egui::Button::new(RichText::new(label).font(theme::medium(13.0)).color(color))
+            .fill(palette.surface)
+            .stroke(Stroke::new(
+                1.0,
+                if following {
+                    palette.accent.gamma_multiply(0.6)
+                } else {
+                    palette.outline
+                },
+            ))
+            .corner_radius(egui::CornerRadius::same(theme::RADIUS_SMALL + 2))
+            .min_size(egui::Vec2::new(0.0, 26.0)),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
+    .on_hover_text(tip)
 }

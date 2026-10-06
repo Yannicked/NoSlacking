@@ -584,6 +584,18 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       `reminders:write` was already in the manifest; an app without it gets
       a toast naming it. The Later view's reminders are read again after.
       Not yet tried against a real workspace.*
+- [x] **Follow and unfollow threads** (browser sessions). *The thread
+      panel's header has a Follow / Following toggle. Slack has no public
+      method; the web client's `subscriptions.thread.add` and `.remove`
+      take `channel`, `thread_ts` and `last_read` (as emacs-slack
+      `slack-thread.el` sends them). Whether you follow comes from the
+      parent's `subscribed` (`conversations.replies` documents it) and the
+      `thread_subscribed` / `thread_unsubscribed` socket events. The
+      Threads list drops a thread you unfollow, takes in one you follow,
+      counts replies past the parent's `last_read` when Slack leaves out
+      `unread_replies`, and is read when a session's workspace is ready so
+      the sidebar counts unread threads at once. OAuth sign-ins don't show
+      the toggle. Not yet tried against a real workspace.*
 
 ### Blocked or needs a real workspace
 

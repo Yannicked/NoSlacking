@@ -1590,6 +1590,7 @@ mod tests {
             broadcast: false,
             pinned: false,
             client_msg_id: None,
+            subscribed: None,
         };
         // A thread's parent is in the channel and in its thread.
         workspace

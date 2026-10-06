@@ -119,6 +119,13 @@ pub enum Action {
         ts: Ts,
         thread: Option<Ts>,
     },
+    /// Follows the thread under `thread` in `channel`, or with `follow`
+    /// false stops following it (browser sessions; see [`can_follow`]).
+    Follow {
+        channel: String,
+        thread: Ts,
+        follow: bool,
+    },
 }
 
 /// What the interface asks the worker to do for one workspace.
@@ -162,6 +169,14 @@ pub enum Command {
     CancelScheduled { channel: String, id: String },
     /// `reminders.add` with this text, at `time` (seconds since the epoch).
     Remind { text: String, time: i64 },
+    /// Follows a thread or stops following it, already shown (see
+    /// [`follow_request`]).
+    Follow {
+        channel: String,
+        thread: Ts,
+        last_read: Ts,
+        follow: bool,
+    },
 }
 
 impl Command {
@@ -205,6 +220,17 @@ impl Command {
             Self::Remind { time, .. } => Event::Reminded {
                 time: *time,
                 result: Err(error),
+            },
+            Self::Follow {
+                channel,
+                thread,
+                follow,
+                ..
+            } => Event::FollowFailed {
+                channel: channel.clone(),
+                thread: thread.clone(),
+                follow: *follow,
+                error,
             },
         }
     }
@@ -269,6 +295,21 @@ pub enum Event {
         time: i64,
         result: Result<(), Failure>,
     },
+    /// Following (`follow`) a thread, or stopping, failed: it shows as it
+    /// was.
+    FollowFailed {
+        channel: String,
+        thread: Ts,
+        follow: bool,
+        error: Failure,
+    },
+    /// You followed a thread or stopped, here or in another Slack client
+    /// (`thread_subscribed` and `thread_unsubscribed`).
+    Followed {
+        channel: String,
+        thread: Ts,
+        follow: bool,
+    },
     /// A command that needs no answer was carried out (or not, which
     /// changes nothing on screen).
     Nothing,
@@ -331,6 +372,89 @@ impl Followed {
 /// reply first.
 pub fn sort_threads(threads: &mut [Followed]) {
     threads.sort_by(|a, b| b.latest().cmp(a.latest()));
+}
+
+/// Whether a sign-in can follow and unfollow threads. Slack has no public
+/// method for it: its web client calls `subscriptions.thread.add` and
+/// `.remove`, which only a browser session's token may.
+pub fn can_follow(sign_in: crate::model::SignInKind) -> bool {
+    sign_in == crate::model::SignInKind::Session
+}
+
+/// The web client's method and form to follow (`follow`) the thread under
+/// `thread` in `channel`, or to stop following it, read up to
+/// `last_read`. The fields are those emacs-slack sends to both methods.
+pub fn follow_request(
+    channel: &str,
+    thread: &Ts,
+    last_read: &Ts,
+    follow: bool,
+) -> (&'static str, Vec<(&'static str, String)>) {
+    let method = if follow {
+        "subscriptions.thread.add"
+    } else {
+        "subscriptions.thread.remove"
+    };
+    (
+        method,
+        vec![
+            ("channel", channel.to_owned()),
+            ("thread_ts", thread.as_str().to_owned()),
+            ("last_read", last_read.as_str().to_owned()),
+        ],
+    )
+}
+
+/// Shows thread `thread` of `channel` as followed or not: on its parent,
+/// wherever it is loaded, and in the threads list, which it leaves when
+/// unfollowed and joins when followed (if its parent is loaded here).
+pub fn show_followed(app: &mut App, team: &str, channel: &str, thread: &Ts, follow: bool) {
+    let Some(workspace) = app.workspaces.iter_mut().find(|w| w.info.team_id == team) else {
+        return;
+    };
+    for timeline in workspace.timelines_for_mut(channel) {
+        if let Some(parent) = timeline.messages.iter_mut().find(|m| m.ts == *thread) {
+            parent.subscribed = Some(follow);
+        }
+    }
+    let parent = workspace.find_message(channel, thread).cloned();
+    let replies: Vec<Message> = workspace
+        .threads
+        .get(&(channel.to_owned(), thread.clone()))
+        .map(|t| {
+            t.messages
+                .iter()
+                .filter(|m| m.ts != *thread && !m.ts.is_local())
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let Some(threads) = app.views.team_mut(team).threads.value.as_mut() else {
+        return;
+    };
+    let listed = threads
+        .iter()
+        .position(|t| t.channel == channel && t.parent.ts == *thread);
+    match (follow, listed) {
+        (false, Some(at)) => {
+            threads.remove(at);
+        }
+        (true, None) => {
+            if let Some(parent) = parent {
+                let mut replies = replies;
+                let extra = replies.len().saturating_sub(THREAD_REPLIES);
+                replies.drain(..extra);
+                threads.push(Followed {
+                    channel: channel.to_owned(),
+                    parent,
+                    replies,
+                    unread: 0,
+                });
+                sort_threads(threads);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Why a message is in your activity.
@@ -579,6 +703,7 @@ pub fn bare_message(ts: Ts, user: Option<String>, text: String, thread: Option<T
         broadcast: false,
         pinned: false,
         client_msg_id: None,
+        subscribed: None,
     }
 }
 
@@ -615,13 +740,21 @@ pub fn arrived(app: &mut App, team: &str, channel: &str, message: &Message) {
     {
         let me = workspace.info.user_id.as_str();
         let known = workspace.find_message(channel, parent).cloned();
+        // Whether you follow the thread, as any loaded copy of its parent
+        // says: one you stopped following stays off the list.
+        let followed = workspace
+            .timelines_for(channel)
+            .find_map(|t| t.messages.iter().find(|m| m.ts == *parent)?.subscribed);
         match threads
             .iter_mut()
             .find(|t| t.channel == channel && t.parent.ts == *parent)
         {
             Some(thread) => thread.add_reply(message, me),
-            // A reply to a thread of yours that the list does not hold yet.
-            None if reason == Some(Reason::Reply) => {
+            // A reply to a thread of yours, or one you follow, that the
+            // list does not hold yet.
+            None if followed == Some(true)
+                || (reason == Some(Reason::Reply) && followed.is_none()) =>
+            {
                 if let Some(parent) = known {
                     let mut thread = Followed {
                         channel: channel.to_owned(),
@@ -806,6 +939,35 @@ pub fn apply(app: &mut App, action: Action) {
                 None,
                 &jiff::Zoned::now(),
             ));
+        }
+        Action::Follow {
+            channel,
+            thread,
+            follow,
+        } => {
+            let Some(workspace) = app.workspaces.iter().find(|w| w.info.team_id == team) else {
+                return;
+            };
+            if !can_follow(workspace.info.sign_in) {
+                return;
+            }
+            // Followed from here, read up to its newest reply known here.
+            let last_read = workspace
+                .threads
+                .get(&(channel.clone(), thread.clone()))
+                .and_then(|t| t.messages.iter().rev().find(|m| !m.ts.is_local()))
+                .map_or_else(|| thread.clone(), |m| m.ts.clone());
+            show_followed(app, &team, &channel, &thread, follow);
+            send(
+                app,
+                &team,
+                Command::Follow {
+                    channel,
+                    thread,
+                    last_read,
+                    follow,
+                },
+            );
         }
         Action::OpenThread { channel, ts } => {
             let newest = app
@@ -1095,6 +1257,27 @@ fn load_unread(app: &mut App, team: &str, channel: &str) {
     );
 }
 
+/// Reads the threads you follow when a browser session's workspace is
+/// ready, so the sidebar counts the unread ones before Threads is opened:
+/// Slack's own list is one call. Other sign-ins would search and read up
+/// to [`crate::backend`]'s limit of threads one by one, so they wait for
+/// the view to open.
+pub fn warm_threads(app: &mut App, team: &str) {
+    let Some(workspace) = app.workspaces.iter().find(|w| w.info.team_id == team) else {
+        return;
+    };
+    if !can_follow(workspace.info.sign_in) {
+        return;
+    }
+    let me = workspace.info.user_id.clone();
+    let threads = &mut app.views.team_mut(team).threads;
+    if threads.value.is_some() || threads.loading {
+        return;
+    }
+    threads.start();
+    send(app, team, Command::Threads { me });
+}
+
 /// Asks for what `view` lists in `team`.
 fn load(app: &mut App, team: &str, view: View) {
     let me = app
@@ -1283,6 +1466,29 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
             }
             Err(error) => app.toast(remind_failure(&error), true),
         },
+        Event::FollowFailed {
+            channel,
+            thread,
+            follow,
+            error,
+        } => {
+            show_followed(app, team, &channel, &thread, !follow);
+            let error = error.message();
+            let text = if follow {
+                tf("Could not follow the thread: {error}", &[("error", &error)])
+            } else {
+                tf(
+                    "Could not stop following the thread: {error}",
+                    &[("error", &error)],
+                )
+            };
+            app.toast(text, true);
+        }
+        Event::Followed {
+            channel,
+            thread,
+            follow,
+        } => show_followed(app, team, &channel, &thread, follow),
         Event::Nothing => {}
     }
 }
@@ -1312,6 +1518,32 @@ mod tests {
             message: bare_message(Ts::new(ts), Some("U1".into()), text.into(), None),
             unread: false,
         }
+    }
+
+    #[test]
+    fn only_browser_sessions_follow_threads() {
+        use crate::model::SignInKind;
+        assert!(can_follow(SignInKind::Session));
+        assert!(!can_follow(SignInKind::App));
+    }
+
+    #[test]
+    fn following_sends_the_web_clients_fields() {
+        let thread = Ts::new("1700000000.000100");
+        let read = Ts::new("1700000000.000300");
+        let fields = vec![
+            ("channel", "C1".to_owned()),
+            ("thread_ts", "1700000000.000100".to_owned()),
+            ("last_read", "1700000000.000300".to_owned()),
+        ];
+        assert_eq!(
+            follow_request("C1", &thread, &read, true),
+            ("subscriptions.thread.add", fields.clone())
+        );
+        assert_eq!(
+            follow_request("C1", &thread, &read, false),
+            ("subscriptions.thread.remove", fields)
+        );
     }
 
     #[test]

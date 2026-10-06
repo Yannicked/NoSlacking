@@ -1653,6 +1653,7 @@ pub(super) fn local_message(
         broadcast,
         pinned: false,
         client_msg_id: Some(crate::model::new_client_msg_id()),
+        subscribed: None,
     }
 }
 
@@ -1796,6 +1797,7 @@ mod tests {
             broadcast: false,
             pinned: false,
             client_msg_id: None,
+            subscribed: None,
         }
     }
 
@@ -3080,6 +3082,7 @@ mod tests {
         let copy = &w.sending[&Ts::new(local)];
         Message {
             client_msg_id: copy.client_msg_id.clone(),
+            subscribed: None,
             ..mine(ts, &copy.text)
         }
     }
@@ -3131,6 +3134,7 @@ mod tests {
         sending(&mut w, "local-1", "ok", None);
         let elsewhere = Message {
             client_msg_id: Some(crate::model::new_client_msg_id()),
+            subscribed: None,
             ..mine("5.0", "ok")
         };
         w.message_arrived("C1", elsewhere, true);

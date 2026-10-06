@@ -655,6 +655,9 @@ pub struct Message {
     /// [`new_client_msg_id`]). Slack keeps it, so a message you send here
     /// comes back from Slack carrying the id of its optimistic copy.
     pub client_msg_id: Option<String>,
+    /// On a thread's parent, whether you follow the thread, when Slack
+    /// said (browser sessions are told; other sign-ins are not).
+    pub subscribed: Option<bool>,
 }
 
 /// A fresh id for a message about to be sent, in the form Slack's own
@@ -806,6 +809,10 @@ impl Timeline {
                 if message.thread_ts.is_none() {
                     message.thread_ts = existing.thread_ts.take();
                 }
+            }
+            // Only some copies say whether you follow the thread.
+            if message.subscribed.is_none() {
+                message.subscribed = existing.subscribed;
             }
             *existing = message;
             return;
@@ -1167,6 +1174,7 @@ mod tests {
             broadcast: false,
             pinned: false,
             client_msg_id: None,
+            subscribed: None,
         }
     }
 
@@ -1262,6 +1270,22 @@ mod tests {
         sorted.sort();
         let order: Vec<&str> = sorted.iter().map(Ts::as_str).collect();
         assert_eq!(order, ["1.0", "2.0", "local-9", "local-10", "bad"]);
+    }
+
+    #[test]
+    fn a_copy_that_does_not_say_keeps_whether_you_follow_the_thread() {
+        let mut timeline = Timeline::default();
+        timeline.upsert(Message {
+            subscribed: Some(true),
+            ..message("1.0")
+        });
+        timeline.upsert(message("1.0"));
+        assert_eq!(timeline.messages[0].subscribed, Some(true));
+        timeline.upsert(Message {
+            subscribed: Some(false),
+            ..message("1.0")
+        });
+        assert_eq!(timeline.messages[0].subscribed, Some(false));
     }
 
     #[test]

@@ -152,6 +152,30 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
                 },
             }
         }
+        Command::Follow {
+            channel,
+            thread,
+            last_read,
+            follow,
+        } => {
+            let (method, params) = views::follow_request(&channel, &thread, &last_read, follow);
+            // Only a browser session's token may call the web client's
+            // methods; the interface never asks otherwise.
+            let result = if client.token().is_session() {
+                client.act::<serde_json::Value>(method, &params).await
+            } else {
+                Err(SlackError::Api("not_allowed_token_type".to_owned()))
+            };
+            match result {
+                Ok(_) => views::Event::Nothing,
+                Err(error) => views::Event::FollowFailed {
+                    channel,
+                    thread,
+                    follow,
+                    error: failure(&error),
+                },
+            }
+        }
         Command::Remind { text, time } => views::Event::Reminded {
             time,
             result: client
@@ -475,6 +499,27 @@ struct PlacedMessage {
     #[serde(flatten)]
     message: types::Message,
     channel: String,
+    /// On a thread's parent you follow: the last reply you read.
+    last_read: Option<String>,
+}
+
+/// How many of a followed thread's replies you have not read: those Slack
+/// lists as unread, or else those of its newest replies past the parent's
+/// `last_read`. Slack leaves `unread_replies` out of some answers (slk's
+/// captures of the web client show none), and the read marker still
+/// tells; a thread whose newest reply is past the marker has at least one.
+fn unread_count(
+    unread_replies: usize,
+    last_read: Option<&Ts>,
+    latest_reply: Option<&Ts>,
+    replies: &[Message],
+) -> u32 {
+    let past = last_read.map_or(0, |read| {
+        let newer = replies.iter().filter(|m| m.ts > *read).count();
+        let moved = latest_reply.is_some_and(|latest| latest > read);
+        newer.max(usize::from(moved))
+    });
+    u32::try_from(unread_replies.max(past)).unwrap_or(u32::MAX)
 }
 
 /// The threads of the web client's list, as the view shows them.
@@ -490,7 +535,14 @@ fn viewed_threads(view: ThreadView) -> Vec<Followed> {
                     .map(|r| r.channel.clone())
                     .find(|c| !c.is_empty())
             })?;
-            let parent = root.message.into_model()?;
+            let last_read = root.last_read.filter(|t| !t.is_empty()).map(Ts::new);
+            let mut parent = root.message.into_model()?;
+            // A thread you stopped following is not yours to list.
+            if parent.subscribed == Some(false) {
+                return None;
+            }
+            // The list holds only the threads you follow.
+            parent.subscribed = Some(true);
             let mut replies: Vec<Message> = thread
                 .latest_replies
                 .into_iter()
@@ -498,13 +550,19 @@ fn viewed_threads(view: ThreadView) -> Vec<Followed> {
                 .filter(|m| m.ts != parent.ts)
                 .collect();
             replies.sort_by(|a, b| a.ts.cmp(&b.ts));
+            let unread = unread_count(
+                thread.unread_replies.len(),
+                last_read.as_ref(),
+                parent.latest_reply.as_ref(),
+                &replies,
+            );
             let extra = replies.len().saturating_sub(views::THREAD_REPLIES);
             replies.drain(..extra);
             Some(Followed {
                 channel,
                 parent,
                 replies,
-                unread: u32::try_from(thread.unread_replies.len()).unwrap_or(u32::MAX),
+                unread,
             })
         })
         .collect()
@@ -968,6 +1026,39 @@ mod tests {
         let texts: Vec<&str> = messages.iter().map(|m| m.text.as_str()).collect();
         assert_eq!(texts, ["b", "c"]);
         assert!(more);
+    }
+
+    #[test]
+    fn unread_replies_come_from_the_read_marker_when_slack_does_not_list_them() {
+        let view: ThreadView = serde_json::from_str(
+            r#"{"ok":true,"threads":[
+              {"root_msg":{"type":"message","ts":"1.000100","user":"U0","text":"plan",
+                 "thread_ts":"1.000100","reply_count":3,"latest_reply":"4.000100",
+                 "subscribed":true,"last_read":"2.000100","channel":"C1"},
+               "latest_replies":[
+                 {"type":"message","ts":"2.000100","user":"U1","text":"b","thread_ts":"1.000100","channel":"C1"},
+                 {"type":"message","ts":"3.000100","user":"U1","text":"c","thread_ts":"1.000100","channel":"C1"},
+                 {"type":"message","ts":"4.000100","user":"U1","text":"d","thread_ts":"1.000100","channel":"C1"}]},
+              {"root_msg":{"type":"message","ts":"5.000100","user":"U0","text":"old",
+                 "thread_ts":"5.000100","reply_count":1,"subscribed":false,"channel":"C1"},
+               "latest_replies":[]}
+            ]}"#,
+        )
+        .expect("parses");
+        let threads = viewed_threads(view);
+        assert_eq!(threads.len(), 1, "an unfollowed thread is left out");
+        assert_eq!(threads[0].unread, 2);
+        assert_eq!(threads[0].parent.subscribed, Some(true));
+    }
+
+    #[test]
+    fn a_reply_past_the_read_marker_counts_even_when_not_loaded() {
+        let read = Ts::new("2.0");
+        let latest = Ts::new("9.0");
+        assert_eq!(unread_count(0, Some(&read), Some(&latest), &[]), 1);
+        assert_eq!(unread_count(3, Some(&read), Some(&latest), &[]), 3);
+        assert_eq!(unread_count(0, Some(&latest), Some(&latest), &[]), 0);
+        assert_eq!(unread_count(0, None, Some(&latest), &[]), 0);
     }
 
     #[test]

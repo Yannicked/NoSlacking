@@ -272,6 +272,7 @@ fn message(seconds: u64, user: &str, text: &str) -> Message {
         broadcast: false,
         pinned: false,
         client_msg_id: None,
+        subscribed: None,
     }
 }
 
@@ -884,6 +885,8 @@ fn thread() -> Vec<Message> {
         .find(|m| m.ts == ts(THREAD))
         .unwrap_or_else(|| message(THREAD, "U03", ""));
     parent.thread_ts = Some(ts(THREAD));
+    // You follow it, as Slack tells a browser session.
+    parent.subscribed = Some(true);
     let reply = |seconds, user, text| Message {
         thread_ts: Some(ts(THREAD)),
         ..message(seconds, user, text)
