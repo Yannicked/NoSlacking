@@ -116,18 +116,52 @@ impl Mids {
         }))
     }
 
-    /// Chime's answer, for `str0m`: our media ids back, and only the
-    /// candidates a UDP relay can reach.
+    /// Chime's answer, for `str0m`: our media ids back, only the
+    /// candidates a UDP relay can reach, and each payload type described
+    /// once (see `once_per_payload`).
     pub fn answer_from_chime(&self, answer: &str) -> String {
         let renamed = self.rename(answer, false);
-        join(
+        once_per_payload(&join(
             lines(&renamed)
                 .filter(|line| {
                     candidate(line).is_none_or(|c| c.protocol == "udp" && c.kind != "srflx")
                 })
                 .map(str::to_owned),
-        )
+        ))
     }
+}
+
+/// The SDP with each media section naming a payload type once: on its
+/// `m=` line, and in one `a=rtpmap` and one `a=fmtp` (the first). Chime's
+/// answers have repeated `a=rtpmap:109` in the video section, which
+/// browsers let pass and `str0m` refuses as a parse error.
+fn once_per_payload(sdp: &str) -> String {
+    let mut seen_map = std::collections::HashSet::new();
+    let mut seen_fmtp = std::collections::HashSet::new();
+    let payload = |rest: &str| rest.split_whitespace().next().unwrap_or("").to_owned();
+    join(lines(sdp).filter_map(|line| {
+        if let Some(media) = line.strip_prefix("m=") {
+            seen_map.clear();
+            seen_fmtp.clear();
+            // "kind port proto pt pt …": the payload types start at the fourth.
+            let mut parts = media.split_whitespace();
+            let head: Vec<&str> = parts.by_ref().take(3).collect();
+            let mut types: Vec<&str> = Vec::new();
+            for pt in parts {
+                if !types.contains(&pt) {
+                    types.push(pt);
+                }
+            }
+            return Some(format!("m={} {}", head.join(" "), types.join(" ")));
+        }
+        if let Some(rest) = line.strip_prefix("a=rtpmap:") {
+            return seen_map.insert(payload(rest)).then(|| line.to_owned());
+        }
+        if let Some(rest) = line.strip_prefix("a=fmtp:") {
+            return seen_fmtp.insert(payload(rest)).then(|| line.to_owned());
+        }
+        Some(line.to_owned())
+    }))
 }
 
 /// The addresses of an SDP's candidates, for TURN permissions.
@@ -280,6 +314,35 @@ a=inactive\r\n";
             candidate_addresses(&answer),
             vec!["192.0.2.10:3478".parse::<SocketAddr>().expect("an address")]
         );
+    }
+
+    #[test]
+    fn a_payload_type_described_twice_is_kept_once() {
+        // As Chime answered a real huddle: 109 twice in the video section.
+        let answer = "v=0\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=fmtp:111 minptime=10;useinbandfec=1\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 108 109 96 109\r\n\
+a=rtpmap:108 H264/90000\r\n\
+a=rtpmap:109 rtx/90000\r\n\
+a=fmtp:109 apt=108\r\n\
+a=rtpmap:96 VP8/90000\r\n\
+a=rtpmap:109 rtx/90000\r\n\
+a=fmtp:109 apt=108\r\n\
+a=inactive\r\n";
+        let tidy = once_per_payload(answer);
+        assert_eq!(tidy.matches("a=rtpmap:109 ").count(), 1);
+        assert_eq!(tidy.matches("a=fmtp:109 ").count(), 1);
+        assert!(tidy.contains("m=video 9 UDP/TLS/RTP/SAVPF 108 109 96\r\n"));
+        // Other sections and lines are untouched, in order.
+        assert!(tidy.starts_with(
+            "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\n"
+        ));
+        assert!(tidy.ends_with("a=rtpmap:96 VP8/90000\r\na=inactive\r\n"));
+        // The same payload type in two sections is no repeat.
+        let two = "m=audio 9 P 109\r\na=rtpmap:109 a/1\r\nm=video 9 P 109\r\na=rtpmap:109 b/1\r\n";
+        assert_eq!(once_per_payload(two).matches("a=rtpmap:109").count(), 2);
     }
 
     #[test]
