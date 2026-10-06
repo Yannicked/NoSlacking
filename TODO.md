@@ -802,6 +802,55 @@ engineering, as for the rest of the session sign-in.
       spike holds up: microphone with echo cancellation and noise
       suppression, mute, devices, who is talking, reconnects. Video and
       screen viewing after that (+4–8 weeks).
+      - Built, unproven against Slack (steps 1 and 2; also `huddle-audio`):
+        microphone → 48 kHz mono → WebRTC's audio processing → Opus → the
+        audio track we already send silence on. `src/huddle_audio/`:
+        `microphone` (cpal's default input, opened on a thread of its own
+        only while unmuted, closed on mute and on leaving; `MicControl`
+        is that rule, tested against a pretend device), `processing`
+        (**`sonora`** 0.2, WebRTC M145 in pure Rust: high-pass, AEC3,
+        noise suppression at High, AGC2's adaptive digital gain; the far
+        end tapped in `speaker` as it is decoded; stream delay guessed
+        from cpal's input latency + 40 ms, AEC3 measures the rest; the
+        sinc resampler for 44.1 kHz microphones; AGC2's RNN VAD for DTX),
+        `encoder` (**`opus-rs`** 0.1.34, libopus 1.6 in pure Rust, VOIP,
+        32 kbit/s VBR, behind an `Encoder` trait), `uplink` (10 → 20 ms
+        framing, DTX outside the encoder: 200 ms hangover, then one frame
+        in 20; RTP time +960 a frame counting the frames left out, the
+        marker bit after a gap; RFC 6464 levels, which `str0m` writes
+        when the answer takes `ssrc-audio-level`, as its offer asks).
+        Muting is signalled as the JS SDK does (`DefaultSignalingClient
+        .mute`: an AUDIO_CONTROL frame with `muted`, on every mute and
+        unmute; SUBSCRIBE carries the state at the time), while silence
+        keeps flowing. In the app: a mute button beside Leave (red while
+        live; Cmd+Shift+Space), joined muted. `--huddle-probe … --send-tone`
+        joins unmuted and sends a quiet 440 Hz tone instead of the
+        microphone, logging what was sent and Chime's RTCP receiver
+        reports every 5 s. The loopback test now has the pretend Chime
+        decode our Opus and hear the mute.
+      - In-band FEC is off: `opus-rs` 0.1.34's VOIP packets with FEC on
+        decode wrong whenever the sound is voiced (a tone, a vowel) in
+        both decoders, so the fault is its encoder's LBRR. Turn it on
+        when fixed upstream; `encoded_speech_decodes_back_with_both_decoders`
+        shows it. Playing stays on `opus-decoder`: `opus-rs`'s decoder
+        conceals a loss but cannot decode FEC.
+      - Cost: `opus-rs` (no dependencies; its unsafe is SIMD and
+        unchecked indexing), `sonora` and its six crates (unsafe only in
+        SIMD behind runtime CPU detection), `derive_more`; all
+        BSD-3-Clause or MIT/Apache, `cargo deny` passes. The default build
+        is unchanged. With `huddle-audio`, the release binary grows from
+        49.3 to 54.0 MB (Linux, x86-64).
+      - Packaging: macOS's Info.plist has `NSMicrophoneUsageDescription`
+        (ad-hoc signed without the hardened runtime, so no entitlement);
+        the Flatpak's `--socket=pulseaudio` carries recording too; on
+        Windows, a refused microphone says to check the privacy settings.
+      - Try it: the probe with `--send-tone` (above) first, then the app
+        with headphones (no echo path; is our voice clear, the level
+        right?), then without (does the far end hear itself back?).
+      - Not done: choosing the input device (the system's default for
+        now), a level meter, reconnects, the far end's speaking state,
+        a microphone that fails while open (it logs and goes quiet; mute
+        and unmute again).
 
 ## Media and file previews in the app (researched 2026-10-06)
 
