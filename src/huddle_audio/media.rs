@@ -294,6 +294,18 @@ fn make_offer(rtc: &mut Rtc) -> Option<Offer> {
     })
 }
 
+/// Frames that come every few seconds and say little: logged at debug
+/// level only, and counted.
+fn quiet(frame: &chime::Frame) -> bool {
+    matches!(
+        FrameType::try_from(frame.r#type),
+        Ok(FrameType::PingPong
+            | FrameType::Bitrates
+            | FrameType::AudioMetadata
+            | FrameType::ClientMetric)
+    )
+}
+
 /// Milliseconds since 1970, for frame timestamps.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -338,7 +350,11 @@ impl Session<'_> {
     }
 
     async fn send(&mut self, frame: &chime::Frame) {
-        log::debug!("signaling: sending {}", chime::describe(frame));
+        if quiet(frame) {
+            log::debug!("signaling: sending {}", chime::describe(frame));
+        } else {
+            log::info!("signaling: sending {}", chime::describe(frame));
+        }
         if let Err(error) = self.socket.send(frame).await {
             log::warn!(
                 "signaling: could not send {}: {error}",
@@ -351,10 +367,7 @@ impl Session<'_> {
     async fn carry(&mut self, steps: Vec<Step>) {
         for step in steps {
             match step {
-                Step::Send(frame) => {
-                    log::info!("signaling: sending {}", chime::describe(&frame));
-                    self.send(&frame).await;
-                }
+                Step::Send(frame) => self.send(&frame).await,
                 Step::Turn(turn) => {
                     log::info!(
                         "join: JOIN_ACK; TURN servers {:?}, ttl {:?} s",
@@ -473,7 +486,7 @@ impl Session<'_> {
                     relay.relayed = Some(relayed);
                     self.relay_deadline = None;
                     let line = format!(
-                        "{} relays at {relayed} (we are {} to it; {lifetime} s)",
+                        "{} relays at {relayed} (it sees us at {}; {lifetime} s)",
                         relay.server,
                         mapped.map_or_else(|| "?".to_owned(), |m| m.to_string())
                     );
@@ -836,14 +849,7 @@ impl Session<'_> {
         self.last_inbound = Instant::now();
         let name = chime::type_name(frame);
         *self.report.frames.entry(name).or_default() += 1;
-        let quiet = matches!(
-            FrameType::try_from(frame.r#type),
-            Ok(FrameType::PingPong
-                | FrameType::Bitrates
-                | FrameType::AudioMetadata
-                | FrameType::ClientMetric)
-        );
-        if quiet {
+        if quiet(frame) {
             log::debug!("signaling: received {}", chime::describe(frame));
         } else {
             log::info!("signaling: received {}", chime::describe(frame));
@@ -1250,6 +1256,226 @@ mod tests {
         );
         assert!(received.len() >= 10, "only {} frames came", received.len());
         assert_eq!(received[..], sent[..received.len()]);
+    }
+
+    /// A pretend Chime on loopback: a signaling WebSocket, a TURN server
+    /// on UDP and a `str0m` media server sending Opus, all driven by
+    /// [`listen`] itself. Ignored by default: it opens local sockets and
+    /// runs for seconds. `cargo test --all-features -- --ignored loopback`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "opens loopback sockets and takes a few seconds"]
+    async fn loopback_session_joins_listens_and_leaves() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message as Ws;
+        use turn::{Class, Message, Method, attr, read_xor_address, xor_address};
+
+        let media_server: SocketAddr = "127.0.0.2:3478".parse().expect("an address");
+        let relayed: SocketAddr = "127.0.0.3:50000".parse().expect("an address");
+
+        // The TURN server and, behind it, the media server.
+        let turn_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bound");
+        let turn_port = turn_socket.local_addr().expect("an address").port();
+        let (offers, mut offer_inbox) =
+            tokio::sync::mpsc::channel::<(String, tokio::sync::oneshot::Sender<String>)>(1);
+        tokio::spawn(async move {
+            let mut chime: Option<Rtc> = None;
+            let mut client: Option<SocketAddr> = None;
+            let mut audio: Option<(Mid, str0m::media::Pt)> = None;
+            let mut connected = false;
+            let mut sent = 0u64;
+            let mut buf = vec![0u8; 2048];
+            loop {
+                let now = Instant::now();
+                // Drive the media server.
+                let mut wake = now + Duration::from_millis(20);
+                if let Some(rtc) = &mut chime {
+                    let _ = rtc.handle_input(Input::Timeout(now));
+                    loop {
+                        match rtc.poll_output() {
+                            Ok(Output::Timeout(at)) => {
+                                wake = wake.min(at);
+                                break;
+                            }
+                            Ok(Output::Transmit(t)) => {
+                                if let Some(client) = client {
+                                    let data =
+                                        Message::new(Method::Data, Class::Indication, [5; 12])
+                                            .with(
+                                                attr::XOR_PEER_ADDRESS,
+                                                xor_address(media_server, &[5; 12]),
+                                            )
+                                            .with(attr::DATA, t.contents.to_vec())
+                                            .encode(None);
+                                    let _ = turn_socket.send_to(&data, client).await;
+                                }
+                            }
+                            Ok(Output::Event(RtcEvent::Connected)) => connected = true,
+                            Ok(Output::Event(RtcEvent::MediaAdded(added)))
+                                if added.kind == MediaKind::Audio =>
+                            {
+                                let pt = rtc.writer(added.mid).and_then(|w| {
+                                    w.payload_params()
+                                        .find(|p| p.spec().codec == Codec::Opus)
+                                        .map(|p| p.pt())
+                                });
+                                audio = pt.map(|pt| (added.mid, pt));
+                            }
+                            Ok(Output::Event(_)) => {}
+                            Err(_) => break,
+                        }
+                    }
+                    if connected
+                        && let Some((mid, pt)) = audio
+                        && let Some(writer) = rtc.writer(mid)
+                    {
+                        let time =
+                            MediaTime::new(sent * 960, str0m::media::Frequency::FORTY_EIGHT_KHZ);
+                        let _ = writer.write(pt, now, time, SILENT_OPUS.to_vec());
+                        sent += 1;
+                    }
+                }
+                tokio::select! {
+                    offer = offer_inbox.recv() => {
+                        let Some((offer, reply)) = offer else { return };
+                        let mut rtc = RtcConfig::new()
+                            .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
+                            .build(Instant::now());
+                        rtc.add_local_candidate(Candidate::host(media_server, "udp").expect("a candidate"));
+                        let answer = rtc.sdp_api()
+                            .accept_offer(str0m::change::SdpOffer::from_sdp_string(&offer).expect("parses"))
+                            .expect("accepted");
+                        let _ = reply.send(answer.to_sdp_string());
+                        chime = Some(rtc);
+                    }
+                    got = turn_socket.recv_from(&mut buf) => {
+                        let Ok((n, from)) = got else { return };
+                        client = Some(from);
+                        let message = Message::decode(&buf[..n]).expect("STUN");
+                        match (message.method(), message.class) {
+                            (Some(Method::Send), Class::Indication) => {
+                                let peer = message.get(attr::XOR_PEER_ADDRESS)
+                                    .and_then(|v| read_xor_address(v, &message.transaction));
+                                if let (Some(rtc), Some(data), Some(peer)) = (&mut chime, message.get(attr::DATA), peer)
+                                    && peer == media_server
+                                    && let Ok(receive) = Receive::new(Protocol::Udp, relayed, media_server, data)
+                                {
+                                    let _ = rtc.handle_input(Input::Receive(Instant::now(), receive));
+                                }
+                            }
+                            (_, Class::Request) => {
+                                let extra = if message.method() == Some(Method::Allocate) {
+                                    vec![(attr::XOR_RELAYED_ADDRESS, xor_address(relayed, &message.transaction))]
+                                } else {
+                                    vec![]
+                                };
+                                let answer = Message {
+                                    method: message.method,
+                                    class: Class::Success,
+                                    transaction: message.transaction,
+                                    attributes: extra,
+                                }
+                                .encode(None);
+                                let _ = turn_socket.send_to(&answer, from).await;
+                            }
+                            _ => {}
+                        }
+                    }
+                    () = tokio::time::sleep_until(wake.into()) => {}
+                }
+            }
+        });
+
+        // The signaling server.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bound");
+        let signaling_port = listener.local_addr().expect("an address").port();
+        tokio::spawn(async move {
+            let Ok((tcp, _)) = listener.accept().await else {
+                return;
+            };
+            #[allow(clippy::result_large_err, reason = "tungstenite's callback type")]
+            let check = |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                         mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                let protocols = request
+                    .headers()
+                    .get("Sec-WebSocket-Protocol")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                assert_eq!(protocols, "_aws_wt_session, the-token");
+                assert!(request.uri().query().unwrap_or_default().contains("X-Chime-Control-Protocol-Version=3"));
+                response.headers_mut().insert(
+                    "Sec-WebSocket-Protocol",
+                    tokio_tungstenite::tungstenite::http::HeaderValue::from_static("_aws_wt_session"),
+                );
+                Ok(response)
+            };
+            let mut ws = tokio_tungstenite::accept_hdr_async(tcp, check)
+                .await
+                .expect("a socket");
+            let reply = |frame: chime::Frame| Ws::Binary(chime::encode(&frame).into());
+            while let Some(Ok(message)) = ws.next().await {
+                let Ws::Binary(bytes) = message else { continue };
+                let frame = chime::decode(&bytes).expect("a frame");
+                match FrameType::try_from(frame.r#type) {
+                    Ok(FrameType::Join) => {
+                        let mut ack = chime::frame(FrameType::JoinAck, 1);
+                        ack.joinack = Some(chime::proto::SdkJoinAckFrame {
+                            turn_credentials: Some(chime::proto::SdkTurnCredentials {
+                                username: Some("u".into()),
+                                password: Some("p".into()),
+                                ttl: Some(300),
+                                uris: vec![format!("turn:127.0.0.1:{turn_port}?transport=udp")],
+                            }),
+                            ..Default::default()
+                        });
+                        let _ = ws.send(reply(ack)).await;
+                        let _ = ws.send(reply(chime::frame(FrameType::Index, 2))).await;
+                    }
+                    Ok(FrameType::Subscribe) => {
+                        let offer = frame.sub.and_then(|s| s.sdp_offer).expect("an offer");
+                        let (answer_to, answer) = tokio::sync::oneshot::channel();
+                        let _ = offers.send((offer, answer_to)).await;
+                        let mut ack = chime::frame(FrameType::SubscribeAck, 3);
+                        ack.suback = Some(chime::proto::SdkSubscribeAckFrame {
+                            sdp_answer: Some(answer.await.expect("an answer")),
+                            ..Default::default()
+                        });
+                        let _ = ws.send(reply(ack)).await;
+                    }
+                    Ok(FrameType::Leave) => {
+                        let _ = ws.send(reply(chime::frame(FrameType::LeaveAck, 4))).await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let join = ChimeJoin {
+            call_id: Some("R1".into()),
+            meeting_id: Some("M1".into()),
+            media_region: Some("us-east-1".into()),
+            signaling_url: format!("ws://127.0.0.1:{signaling_port}/control/M1"),
+            turn_control_url: None,
+            audio_host_url: "127.0.0.1:1".into(),
+            attendee_id: "A1".into(),
+            external_user_id: Some("U1".into()),
+            join_token: super::super::join::JoinToken::new("the-token"),
+        };
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let _ = stop.send(true);
+        });
+        let (report, result) = listen(&join, None, stopped).await;
+        assert_eq!(result, Ok(()), "{report:?}");
+        assert_eq!(report.ending.as_deref(), Some("left"));
+        assert!(report.relay.is_some(), "{report:?}");
+        assert!(report.dtls_up.is_some(), "{report:?}");
+        assert!(report.audio_frames > 20, "{report:?}");
     }
 
     #[test]

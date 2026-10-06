@@ -26,6 +26,7 @@ pub mod chime;
 pub mod jitter;
 pub mod join;
 pub mod media;
+pub mod probe;
 pub mod sdp;
 pub mod signaling;
 pub mod speaker;
