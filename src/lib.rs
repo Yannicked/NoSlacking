@@ -32,6 +32,7 @@ pub mod mrkdwn;
 pub mod notice;
 pub mod notify;
 pub mod offline;
+pub mod palette;
 pub mod paste;
 pub mod paths;
 pub mod people;

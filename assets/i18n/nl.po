@@ -351,8 +351,8 @@ msgstr "Hernoemen"
 msgid "Create"
 msgstr "Maken"
 
-msgid "Jump to a channel or person…"
-msgstr "Ga naar een kanaal of persoon…"
+msgid "Jump to a channel or person, or type > for commands"
+msgstr "Ga naar een kanaal of persoon, of typ > voor opdrachten"
 
 msgid "Nothing matches."
 msgstr "Niets gevonden."
@@ -2292,3 +2292,69 @@ msgstr "Slack kon de afbeelding niet lezen"
 # The "+" on the Direct messages line.
 msgid "Message someone"
 msgstr "Iemand een bericht sturen"
+
+msgid "Remind me"
+msgstr "Herinner me"
+
+msgid "In 20 minutes"
+msgstr "Over 20 minuten"
+
+msgid "In 1 hour"
+msgstr "Over 1 uur"
+
+msgid "In 3 hours"
+msgstr "Over 3 uur"
+
+msgid "Next Monday at 9:00"
+msgstr "Volgende maandag om 9:00"
+
+msgid "Remind me at a time of your choosing"
+msgstr "Herinner me op een zelfgekozen tijd"
+
+msgid "Slack sets reminders at most five years ahead."
+msgstr "Slack zet herinneringen hooguit vijf jaar vooruit."
+
+msgid "I will remind you {when}"
+msgstr "Je krijgt een herinnering op {when}"
+
+msgid "Setting a reminder needs the reminders:write permission, which your Slack app does not have."
+msgstr "Voor een herinnering is de machtiging reminders:write nodig, die je Slack-app niet heeft."
+
+msgid "Could not set the reminder: {error}"
+msgstr "Kon de herinnering niet zetten: {error}"
+
+msgid "Following"
+msgstr "Volgend"
+
+msgid "Follow"
+msgstr "Volgen"
+
+msgid "Stop following: replies no longer notify you or show under Threads"
+msgstr "Niet meer volgen: antwoorden geven geen melding meer en staan niet meer onder Threads"
+
+msgid "Follow: replies notify you and show under Threads"
+msgstr "Volgen: antwoorden geven een melding en staan onder Threads"
+
+msgid "Could not follow the thread: {error}"
+msgstr "Kon de thread niet volgen: {error}"
+
+msgid "Could not stop following the thread: {error}"
+msgstr "Kon de thread niet ontvolgen: {error}"
+
+msgid "Stop always showing as active"
+msgstr "Niet meer altijd als actief tonen"
+
+msgid "Switch to the light theme"
+msgstr "Overschakelen naar het lichte thema"
+
+msgid "Switch to the dark theme"
+msgstr "Overschakelen naar het donkere thema"
+
+msgid "Open settings"
+msgstr "Instellingen openen"
+
+msgid "Pause notifications for 1 hour"
+msgstr "Meldingen 1 uur pauzeren"
+
+msgid "Hide inactive conversations: {choice}"
+msgstr "Inactieve gesprekken verbergen: {choice}"

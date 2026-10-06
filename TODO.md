@@ -589,6 +589,33 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       same rich text, and editing starts from a message's rich text.
       `SEND_RICH_TEXT` switches it all off. Not yet tried against a real
       workspace.*
+- [x] **Remind me about a message.** *The message menu's "Remind me":
+      in 20 minutes, 1 or 3 hours, tomorrow at 9:00, next Monday at 9:00,
+      or a time of your own. `reminders.add` has no message parameter, so
+      the text quotes the message's first line and carries its permalink.
+      `reminders:write` was already in the manifest; an app without it gets
+      a toast naming it. The Later view's reminders are read again after.
+      Not yet tried against a real workspace.*
+- [x] **Follow and unfollow threads** (browser sessions). *The thread
+      panel's header has a Follow / Following toggle. Slack has no public
+      method; the web client's `subscriptions.thread.add` and `.remove`
+      take `channel`, `thread_ts` and `last_read` (as emacs-slack
+      `slack-thread.el` sends them). Whether you follow comes from the
+      parent's `subscribed` (`conversations.replies` documents it) and the
+      `thread_subscribed` / `thread_unsubscribed` socket events. The
+      Threads list drops a thread you unfollow, takes in one you follow,
+      counts replies past the parent's `last_read` when Slack leaves out
+      `unread_replies`, and is read when a session's workspace is ready so
+      the sidebar counts unread threads at once. OAuth sign-ins don't show
+      the toggle. Not yet tried against a real workspace.*
+- [x] **Command palette.** *Type `>` first in the quick switcher
+      (Ctrl+K), as in VS Code, rather than learning another chord: mark all
+      as read, set a status, away or active, always show as active, the
+      theme, settings, the shortcut sheet, new message, browse channels,
+      search, pause notifications for an hour, and the next "hide inactive
+      conversations" choice. Each sends the action its menu sends; names
+      match by start, word, substring or letters in order, and show the
+      shortcut sheet's keys when there are any.*
 
 ### Blocked or needs a real workspace
 

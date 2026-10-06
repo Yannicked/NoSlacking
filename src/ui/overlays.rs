@@ -114,6 +114,8 @@ pub(super) fn modal_frame(app: &App) -> egui::Frame {
         .inner_margin(Margin::same(16))
 }
 
+/// The quick switcher, which with `>` typed first is the command palette
+/// (see [`crate::palette`]).
 fn switcher(app: &mut App, ctx: &egui::Context) {
     let Some((mut query, mut selected)) = app.switcher.take() else {
         return;
@@ -123,7 +125,25 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
     let Some(workspace) = app.active_workspace() else {
         return;
     };
-    let matches = matching(ctx, "switcher", workspace, &query, |_| true, 12);
+    let commands = crate::palette::query(&query).map(|needle| {
+        let me = &workspace.info.user_id;
+        let state = crate::palette::State {
+            away: workspace.people.presence(me) == Some(crate::people::Presence::Away),
+            stay_active: app.settings.desktop.stay_active,
+            dark: palette.dark,
+            hide_inactive: app.settings.hide_inactive,
+        };
+        let found = crate::palette::matching(needle, &state);
+        (state, found)
+    });
+    let matches = if commands.is_some() {
+        Vec::new()
+    } else {
+        matching(ctx, "switcher", workspace, &query, |_| true, 12)
+    };
+    let count = commands
+        .as_ref()
+        .map_or(matches.len(), |(_, found)| found.len());
     let (down, up, enter, escape) = ctx.input_mut(|input| {
         (
             input.consume_key(Modifiers::NONE, Key::ArrowDown),
@@ -132,16 +152,18 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
             input.consume_key(Modifiers::NONE, Key::Escape),
         )
     });
-    if !matches.is_empty() {
+    if count > 0 {
         if down {
-            selected = (selected + 1) % matches.len();
+            selected = (selected + 1) % count;
         }
         if up {
-            selected = (selected + matches.len() - 1) % matches.len();
+            selected = (selected + count - 1) % count;
         }
-        selected = selected.min(matches.len() - 1);
+        selected = selected.min(count - 1);
     }
+    let mac = cfg!(target_os = "macos");
     let mut open = None;
+    let mut run = None;
     let mut close = escape;
     let response = egui::Modal::new(egui::Id::new("switcher"))
         .frame(modal_frame(app))
@@ -150,7 +172,7 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
             let field = ui.add(
                 egui::TextEdit::singleline(&mut query)
                     .id(egui::Id::new("switcher-query"))
-                    .hint_text(t("Jump to a channel or person…"))
+                    .hint_text(t("Jump to a channel or person, or type > for commands"))
                     .font(theme::regular(16.0))
                     .desired_width(f32::INFINITY)
                     .margin(Margin::symmetric(10, 8)),
@@ -159,20 +181,42 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
                 field.request_focus();
             }
             ui.add_space(8.0);
-            for (index, found) in matches.iter().enumerate() {
-                if conversation_row(ui, &palette, found, index == selected).clicked() {
-                    open = Some(found.id.clone());
+            if let Some((state, found)) = &commands {
+                for (index, command) in found.iter().enumerate() {
+                    let keys = command
+                        .shortcut()
+                        .and_then(super::shortcuts::keys_of)
+                        .map(|k| super::shortcuts::spell(k, mac));
+                    let label = command.label(state);
+                    if command_row(ui, &palette, &label, keys.as_deref(), index == selected)
+                        .clicked()
+                    {
+                        run = Some(command.action(state));
+                    }
+                }
+            } else {
+                for (index, found) in matches.iter().enumerate() {
+                    if conversation_row(ui, &palette, found, index == selected).clicked() {
+                        open = Some(found.id.clone());
+                    }
                 }
             }
-            if matches.is_empty() {
+            if count == 0 {
                 ui.label(RichText::new(t("Nothing matches.")).color(palette.dim));
             }
         });
     if response.should_close() {
         close = true;
     }
-    if enter && let Some(found) = matches.get(selected) {
-        open = Some(found.id.clone());
+    if enter {
+        match &commands {
+            Some((state, found)) => run = found.get(selected).map(|c| c.action(state)),
+            None => open = matches.get(selected).map(|found| found.id.clone()),
+        }
+    }
+    if let Some(action) = run {
+        app.actions.push(action);
+        return;
     }
     if let Some(id) = open {
         app.actions.push(Action::OpenConversation(id));
@@ -285,6 +329,69 @@ pub(super) fn conversation_row(
         selected,
         &found.title,
     );
+    response
+}
+
+/// One command of the palette: its name, and on the right the keys that
+/// do the same, if any; lit when `selected`.
+fn command_row(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    label: &str,
+    keys: Option<&str>,
+    selected: bool,
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::click());
+    if selected || response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::same(theme::RADIUS_SMALL),
+            if selected {
+                palette.accent.gamma_multiply(0.25)
+            } else {
+                palette.surface_hover
+            },
+        );
+    }
+    Icon::ChevronRight.image(palette.secondary, 15.0).paint_at(
+        ui,
+        egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 18.0, rect.center().y),
+            Vec2::splat(15.0),
+        ),
+    );
+    ui.painter().text(
+        egui::pos2(rect.left() + 36.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        theme::regular(14.5),
+        palette.text,
+    );
+    if let Some(keys) = keys {
+        let galley =
+            ui.painter()
+                .layout_no_wrap(keys.to_owned(), theme::medium(12.5), palette.secondary);
+        let size = galley.size() + Vec2::new(12.0, 6.0);
+        let cap = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - 8.0 - size.x, rect.center().y - size.y / 2.0),
+            size,
+        );
+        ui.painter().rect(
+            cap,
+            CornerRadius::same(theme::RADIUS_SMALL),
+            palette.surface,
+            Stroke::new(1.0, palette.outline),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter()
+            .galley(cap.min + Vec2::new(6.0, 3.0), galley, palette.secondary);
+    }
+    let spoken = match keys {
+        Some(keys) => format!("{label}, {keys}"),
+        None => label.to_owned(),
+    };
+    theme::describe_selected(&response, egui::WidgetType::Button, selected, &spoken);
     response
 }
 

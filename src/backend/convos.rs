@@ -818,6 +818,7 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
                 broadcast: false,
                 pinned: true,
                 client_msg_id: None,
+                subscribed: None,
             };
             let first = convos::Pin {
                 message: message.clone(),

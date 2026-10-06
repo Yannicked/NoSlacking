@@ -1342,6 +1342,7 @@ pub fn dialog(app: &mut App, ctx: &egui::Context) {
         return;
     };
     let editing = matches!(dialog.target, Target::Edit(_));
+    let reminding = matches!(dialog.target, Target::Remind { .. });
     let mut confirm = false;
     let mut close = false;
     let response = egui::Modal::new(egui::Id::new("send-at"))
@@ -1350,6 +1351,8 @@ pub fn dialog(app: &mut App, ctx: &egui::Context) {
             ui.set_width(380.0);
             let title = if editing {
                 t("Change the scheduled message")
+            } else if reminding {
+                t("Remind me at a time of your choosing")
             } else {
                 t("Send at a time of your choosing")
             };
@@ -1407,7 +1410,13 @@ pub fn dialog(app: &mut App, ctx: &egui::Context) {
                 if theme::secondary_button(ui, &palette, &t("Cancel")).clicked() {
                     close = true;
                 }
-                let label = if editing { t("Save") } else { t("Schedule") };
+                let label = if editing {
+                    t("Save")
+                } else if reminding {
+                    t("Remind me")
+                } else {
+                    t("Schedule")
+                };
                 let button = ui.add_enabled_ui(!dialog.busy, |ui| {
                     theme::primary_button(ui, &palette, &label)
                 });

@@ -45,6 +45,18 @@ pub enum HideInactive {
 }
 
 impl HideInactive {
+    /// What the settings call the choice.
+    pub fn label(self) -> String {
+        use crate::i18n::t;
+        match self {
+            HideInactive::Off => t("Off"),
+            HideInactive::Week => t("After 1 week"),
+            HideInactive::Month => t("After 1 month"),
+            HideInactive::ThreeMonths => t("After 3 months"),
+        }
+        .into_owned()
+    }
+
     /// How long a conversation must have been quiet to be hidden, in
     /// seconds; `None` when nothing is hidden.
     pub fn age(self) -> Option<i64> {

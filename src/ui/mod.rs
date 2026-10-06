@@ -14,6 +14,7 @@ mod keys;
 mod lightbox;
 mod login;
 mod message;
+pub use message::plain_text;
 mod overlays;
 mod people;
 mod rich;

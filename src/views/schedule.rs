@@ -67,6 +67,24 @@ pub enum Target {
     },
     /// A scheduled message, sent again at a new time with new text.
     Edit(Scheduled),
+    /// Not a message to send: a reminder about message `ts` of `channel`
+    /// (a reply in `thread`), set at the time chosen.
+    Remind {
+        channel: String,
+        ts: Ts,
+        thread: Option<Ts>,
+    },
+}
+
+impl Target {
+    /// How far ahead Slack takes the time: a reminder may be set years
+    /// ahead, a message only months.
+    pub fn max_ahead(&self) -> i64 {
+        match self {
+            Self::Remind { .. } => super::remind::MAX_AHEAD,
+            Self::Draft { .. } | Self::Edit(_) => MAX_AHEAD,
+        }
+    }
 }
 
 /// The dialog that asks when to send, and for a scheduled message what.
@@ -126,6 +144,8 @@ pub enum Problem {
     Past,
     /// Further ahead than Slack schedules.
     TooFar,
+    /// Further ahead than Slack sets a reminder.
+    TooFarToRemind,
     /// A changed message with no text.
     Empty,
 }
@@ -138,6 +158,7 @@ impl fmt::Display for Problem {
             Self::Time => t("Write the time as 14:30."),
             Self::Past => t("That time has passed."),
             Self::TooFar => t("Slack schedules at most 120 days ahead."),
+            Self::TooFarToRemind => t("Slack sets reminders at most five years ahead."),
             Self::Empty => t("The message is empty."),
         })
     }
@@ -146,6 +167,18 @@ impl fmt::Display for Problem {
 /// The moment `date` and `time` name in `zone`, in seconds since the
 /// epoch, if it is one Slack can send at, seen from `now` (seconds).
 pub fn moment(date: &str, time: &str, zone: &TimeZone, now: i64) -> Result<i64, Problem> {
+    moment_within(date, time, zone, now, MAX_AHEAD)
+}
+
+/// [`moment`], for a time at most `max_ahead` seconds from `now`: the
+/// limit of a message, or of a reminder ([`super::remind::MAX_AHEAD`]).
+pub fn moment_within(
+    date: &str,
+    time: &str,
+    zone: &TimeZone,
+    now: i64,
+    max_ahead: i64,
+) -> Result<i64, Problem> {
     let date: Date = date.trim().parse().map_err(|_| Problem::Date)?;
     let time = parse_time(time).ok_or(Problem::Time)?;
     let zoned = date
@@ -156,8 +189,12 @@ pub fn moment(date: &str, time: &str, zone: &TimeZone, now: i64) -> Result<i64, 
     if seconds < now + MIN_AHEAD {
         return Err(Problem::Past);
     }
-    if seconds > now + MAX_AHEAD {
-        return Err(Problem::TooFar);
+    if seconds > now + max_ahead {
+        return Err(if max_ahead > MAX_AHEAD {
+            Problem::TooFarToRemind
+        } else {
+            Problem::TooFar
+        });
     }
     Ok(seconds)
 }
@@ -236,6 +273,13 @@ mod tests {
         assert_eq!(
             moment("2026-12-31", "09:00", &zone, seconds),
             Err(Problem::TooFar)
+        );
+        // A reminder may be set that far ahead, but not past five years.
+        let reminder = super::super::remind::MAX_AHEAD;
+        assert!(moment_within("2026-12-31", "09:00", &zone, seconds, reminder).is_ok());
+        assert_eq!(
+            moment_within("2032-12-31", "09:00", &zone, seconds, reminder),
+            Err(Problem::TooFarToRemind)
         );
     }
 

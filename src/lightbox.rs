@@ -228,6 +228,7 @@ mod tests {
             broadcast: false,
             pinned: false,
             client_msg_id: None,
+            subscribed: None,
         }
     }
 
