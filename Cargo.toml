@@ -187,6 +187,9 @@ audio = ["dep:rodio"]
 bundled-emoji = []
 # Sample data and the screenshot flag; never part of a release build.
 demo = []
+# Listening to huddles (src/huddle_audio.rs): a spike, off until it is
+# proven against Slack. Adds `noslacking --huddle-probe`.
+huddle-audio = ["audio"]
 # Colours code blocks that name their language (```` ```rust ````). Our own
 # small lexer, a few kilobytes; turn it off for plain code blocks.
 highlight = []

@@ -1,0 +1,36 @@
+{
+  "ok": true,
+  "call": {
+    "call_id": "R0123ABCDEF",
+    "free_willy": {
+      "meeting": {
+        "MeetingId": "11111111-2222-3333-4444-555555555555",
+        "ExternalMeetingId": "R0123ABCDEF",
+        "MediaRegion": "us-east-1",
+        "MediaPlacement": {
+          "AudioHostUrl": "abcdef0123456789.k.m1.ue1.app.chime.aws:3478",
+          "AudioFallbackUrl": "wss://haxrp.m1.ue1.app.chime.aws:443/calls/11111111-2222-3333-4444-555555555555",
+          "SignalingUrl": "wss://signal.m1.ue1.app.chime.aws/control/11111111-2222-3333-4444-555555555555",
+          "TurnControlUrl": "https://2713.cell.us-east-1.meetings.chime.aws/v2/turn_sessions",
+          "ScreenDataUrl": "wss://bitpw.m1.ue1.app.chime.aws:443/v2/screen/11111111-2222-3333-4444-555555555555",
+          "EventIngestionUrl": "https://data.svc.ue1.ingest.chime.aws/v1/client-events"
+        },
+        "MeetingFeatures": null
+      },
+      "attendee": {
+        "ExternalUserId": "U0123ABCDEF",
+        "AttendeeId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "JoinToken": "ZmFrZS1qb2luLXRva2Vu"
+      }
+    }
+  },
+  "huddle": {
+    "id": "R0123ABCDEF",
+    "created_by": "U0999ZZZZZZ",
+    "participants": ["U0999ZZZZZZ", "U0123ABCDEF"]
+  },
+  "canvas": {
+    "thread_channel_id": "C0123ABCDEF",
+    "root_thread_ts": "1700000000.000100"
+  }
+}
