@@ -634,6 +634,31 @@ impl DemoSetup {
                 self.image = Some(Ts::new(format!("{}.000100", 1_790_172_000 - 2400)));
             }
             Some("dm") => app.actions.push(Action::OpenConversation("D01".into())),
+            // A message with every kind of formatting sent to the DM, as
+            // its rich text comes back from the pretend Slack.
+            Some("rich-send") => {
+                app.actions.push(Action::OpenConversation("D01".into()));
+                let key = noslacking::app::App::draft_key(noslacking::demo::TEAM, "D01", None);
+                app.drafts.insert(
+                    key,
+                    noslacking::app::Draft {
+                        mentions: vec![("@Ana Lima".into(), "<@U01>".into())],
+                        ..Default::default()
+                    },
+                );
+                app.actions.push(Action::Send {
+                    text: "*Release plan* for @Ana Lima :rocket:\n\
+                           1. Freeze _Thursday_\n\
+                           2. Run `cargo test`\n    \
+                           • on ~Windows~ every OS\n\
+                           > Ship it when it's green\n\
+                           ```\ncargo build --release\n```\n\
+                           Thanks! 2*3 < 7, snake_case"
+                        .into(),
+                    thread: None,
+                    broadcast: false,
+                });
+            }
             // #design, with a huddle going on.
             Some("huddle") => app.actions.push(Action::OpenConversation("C03".into())),
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
