@@ -583,7 +583,7 @@ impl WorkspaceState {
             })),
             bots: self.unknown_bots(messages.iter()),
         };
-        let newest = messages.iter().map(|m| m.ts.clone()).max();
+        let newest = messages.iter().map(|m| &m.ts).max().cloned();
         let timeline = self.timelines.entry(channel.to_owned()).or_default();
         if !older && timeline.cached {
             // Slack's own newest page replaces the cached copy whole: the
@@ -807,7 +807,7 @@ impl WorkspaceState {
         {
             return None;
         }
-        let newest = messages.iter().map(|m| m.ts.clone()).max();
+        let newest = messages.iter().map(|m| &m.ts).max().cloned();
         let (arrived, _) = self.history_arrived(channel, messages, has_more, cursor, false);
         if let Some(timeline) = self.timelines.get_mut(channel) {
             timeline.cached = true;
@@ -829,7 +829,7 @@ impl WorkspaceState {
         has_newer: bool,
     ) -> Arrived {
         let arrived = self.arrived_in(&messages);
-        let newest = messages.iter().map(|m| m.ts.clone()).max();
+        let newest = messages.iter().map(|m| &m.ts).max().cloned();
         let timeline = self.timelines.entry(channel.to_owned()).or_default();
         // Messages still being sent stay; they go after everything real.
         // So do ones that came live past the page when it reaches the
@@ -872,7 +872,7 @@ impl WorkspaceState {
         has_newer: bool,
     ) -> Arrived {
         let arrived = self.arrived_in(&messages);
-        let newest = messages.iter().map(|m| m.ts.clone()).max();
+        let newest = messages.iter().map(|m| &m.ts).max().cloned();
         let timeline = self.timelines.entry(channel.to_owned()).or_default();
         timeline.merge(messages);
         timeline.has_newer = has_newer;
@@ -924,7 +924,7 @@ impl WorkspaceState {
             bots: self.unknown_bots(messages.iter()),
         };
         let key = (channel.to_owned(), ts.clone());
-        let newest = messages.iter().map(|m| m.ts.clone()).max();
+        let newest = messages.iter().map(|m| &m.ts).max().cloned();
         let kept: Vec<Message> = self
             .threads
             .get(&key)

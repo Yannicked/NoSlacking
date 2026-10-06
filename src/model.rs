@@ -100,10 +100,38 @@ impl PartialOrd for Ts {
 
 impl Ord for Ts {
     fn cmp(&self, other: &Self) -> Ordering {
+        // Two of Slack's own, written alike (as nearly all are), order as
+        // their text does, without taking either apart.
+        if self.0.len() == other.0.len()
+            && let Some(dot) = plain_dot(&self.0)
+            && plain_dot(&other.0) == Some(dot)
+        {
+            return self.0.cmp(&other.0);
+        }
         self.key()
             .cmp(&other.key())
             .then_with(|| self.0.cmp(&other.0))
     }
+}
+
+/// Where the dot of a plainly written real timestamp is (its length when
+/// it has none): one to 19 digits, which always fit [`Ts::key`]'s seconds,
+/// then perhaps a dot and more digits. Two of the same length with the dot
+/// in the same place order by their text exactly as by [`Ts::key`] and
+/// then their text: digit by digit is number by number at equal widths,
+/// and the microseconds the key reads are the fraction's first digits.
+fn plain_dot(ts: &str) -> Option<usize> {
+    let bytes = ts.as_bytes();
+    let dot = bytes
+        .iter()
+        .position(|&b| !b.is_ascii_digit())
+        .unwrap_or(bytes.len());
+    let fraction = match bytes.get(dot) {
+        None => &[][..],
+        Some(b'.') => &bytes[dot + 1..],
+        Some(_) => return None,
+    };
+    ((1..=19).contains(&dot) && fraction.iter().all(u8::is_ascii_digit)).then_some(dot)
 }
 
 /// A signed-in workspace.
@@ -1756,6 +1784,68 @@ mod tests {
             press_step(Some(&confirm), true, None),
             PressStep::Go { open: None }
         );
+    }
+
+    #[test]
+    fn the_quick_order_of_timestamps_is_the_parsed_one() {
+        let parsed = |a: &Ts, b: &Ts| a.key().cmp(&b.key()).then_with(|| a.0.cmp(&b.0));
+        let tricky = [
+            "1700000000.000100",
+            "1700000000.000200",
+            "1700000000.000099",
+            "1700000001.000000",
+            "0999999999.999999",
+            "999999999.999999",
+            "1700000000.1",
+            "1700000000.5",
+            "1700000000.10",
+            "1700000000.100000",
+            "1700000000.0000001",
+            "1700000000.0000002",
+            "1700000000.1234567",
+            "1700000000.1234568",
+            "1700000000.",
+            "1700000000",
+            "1800000000",
+            "0001.000000",
+            "0002.000000",
+            "1000.000000",
+            "1.5",
+            "2.5",
+            "01.5",
+            "1.05",
+            "0.000000",
+            "9999999999999999999.000000",
+            "1844674407370955161.5",
+            "18446744073709551615.000000",
+            "18446744073709551616.000000",
+            "99999999999999999999.000000",
+            "99999999999999999998.000000",
+            ".500000",
+            ".400000",
+            "+170000000.000100",
+            "-170000000.000100",
+            "1700000000.00010x",
+            "170000000x.000100",
+            "1700000000.000.10",
+            "1700000000..00010",
+            "17000000 0.000100",
+            "1700000000.00 100",
+            "local-1",
+            "local-9",
+            "local-10",
+            "local-x",
+            "local-",
+            "garbage",
+            "",
+            "١٧٠٠.٠٠٠١",
+        ];
+        for a in tricky {
+            for b in tricky {
+                let (a, b) = (Ts::new(a), Ts::new(b));
+                assert_eq!(a.cmp(&b), parsed(&a, &b), "{a:?} against {b:?}");
+            }
+        }
     }
 
     #[test]
