@@ -97,6 +97,10 @@ pub struct Channel {
     /// Shared with another organization (Slack Connect), or invited to be.
     pub is_ext_shared: bool,
     pub is_pending_ext_shared: bool,
+    /// Whether a direct message or group DM is open in your sidebar.
+    /// Slack's docs show it on `users.conversations`' group DMs and on
+    /// `conversations.info`'s direct messages; absent elsewhere.
+    pub is_open: Option<bool>,
 }
 
 impl Channel {
@@ -145,6 +149,9 @@ impl Channel {
             unread: self.unread_count_display.or(self.unread_count).unwrap_or(0),
             mentions: 0,
             external: self.is_ext_shared || self.is_pending_ext_shared,
+            // Only direct messages and group DMs open and close.
+            is_open: self.is_open.filter(|_| kind.is_dm()),
+            empty: false,
         }
     }
 }
@@ -1132,7 +1139,14 @@ impl ClientCounts {
 
 /// A timestamp Slack sent, unless it is empty or Slack's all-zero "never".
 pub fn real_ts(ts: &str) -> Option<Ts> {
-    (!ts.is_empty() && ts != "0000000000.000000").then(|| Ts::new(ts))
+    (!ts.is_empty() && !is_never(ts)).then(|| Ts::new(ts))
+}
+
+/// Whether Slack sent its all-zero "never" rather than a timestamp or
+/// nothing. As a conversation's newest message, it says there is none,
+/// where an empty one says nothing at all.
+pub fn is_never(ts: &str) -> bool {
+    ts == "0000000000.000000"
 }
 
 /// `stars.list`: what you starred. Only conversations matter here.
@@ -1889,5 +1903,39 @@ mod tests {
         assert_eq!(conversation.kind, ConversationKind::Direct);
         assert_eq!(conversation.latest, Some(Ts::new("2.0")));
         assert_eq!(conversation.unread, 3);
+    }
+
+    #[test]
+    fn direct_messages_say_whether_they_are_open() {
+        let open = |json: &str| {
+            serde_json::from_str::<Channel>(json)
+                .expect("parses")
+                .into_model()
+                .is_open
+        };
+        assert_eq!(
+            open(r#"{"id":"G1","is_mpim":true,"is_group":true,"is_open":true}"#),
+            Some(true)
+        );
+        assert_eq!(
+            open(r#"{"id":"D1","is_im":true,"user":"U2","is_open":false}"#),
+            Some(false)
+        );
+        // Not said, or said as null: not known, which never hides it.
+        assert_eq!(open(r#"{"id":"D2","is_im":true,"user":"U2"}"#), None);
+        assert_eq!(open(r#"{"id":"D3","is_im":true,"is_open":null}"#), None);
+        // Channels do not open and close.
+        assert_eq!(
+            open(r#"{"id":"C1","is_channel":true,"is_open":false}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn the_all_zero_timestamp_means_never() {
+        assert!(is_never("0000000000.000000"));
+        assert!(!is_never(""));
+        assert!(!is_never("1700000000.000100"));
+        assert_eq!(real_ts("0000000000.000000"), None);
     }
 }

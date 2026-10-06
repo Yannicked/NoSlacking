@@ -606,6 +606,9 @@ fn apply_count(conversation: &mut Conversation, count: &types::CountEntry) {
     if let Some(latest) = types::real_ts(&count.latest) {
         conversation.latest = Some(latest);
     }
+    // Slack's "never" as the newest message: known to have none, which
+    // the sidebar may tidy away, unlike a conversation not known at all.
+    conversation.empty = conversation.latest.is_none() && types::is_never(&count.latest);
     conversation.mentions = count.mention_count;
 }
 
@@ -649,6 +652,8 @@ async fn fetch_conversation(
                     .await
             {
                 conversation.latest = page.messages.first().map(|m| Ts::new(m.ts.clone()));
+                // Slack answered with no message at all: known empty.
+                conversation.empty = conversation.latest.is_none();
             }
             sink.send(Event::Conversation {
                 team: team.to_owned(),
@@ -848,5 +853,36 @@ mod tests {
         group.latest = None;
         apply_count(&mut group, &counts["G1"]);
         assert_eq!((group.last_read, group.latest), (None, None));
+        assert!(!group.empty, "an empty newest message says nothing");
+    }
+
+    #[test]
+    fn counts_tell_a_conversation_without_messages_from_an_unknown_one() {
+        let counts: types::ClientCounts = serde_json::from_str(
+            r#"{"ok":true,
+                "mpims":[{"id":"G1","last_read":"0000000000.000000","latest":"0000000000.000000"}],
+                "ims":[{"id":"D1","last_read":"5.0","latest":"6.0"}]}"#,
+        )
+        .expect("parses");
+        let counts = counts.by_id();
+        let blank = |id: &str| {
+            serde_json::from_str::<types::Channel>(&format!(r#"{{"id":"{id}","is_mpim":true}}"#))
+                .expect("parses")
+                .into_model()
+        };
+        // Slack's "never" as the newest message: known to have none.
+        let mut never_used = blank("G1");
+        apply_count(&mut never_used, &counts["G1"]);
+        assert_eq!(never_used.latest, None);
+        assert!(never_used.empty);
+        // With messages: not empty.
+        let mut used = blank("D1");
+        apply_count(&mut used, &counts["D1"]);
+        assert_eq!(used.latest, Some(Ts::new("6.0")));
+        assert!(!used.empty);
+        // No entry at all: nothing applied, so still unknown.
+        assert!(!counts.contains_key("G2"));
+        let unknown = blank("G2");
+        assert!(unknown.latest.is_none() && !unknown.empty);
     }
 }

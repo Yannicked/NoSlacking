@@ -89,7 +89,9 @@ impl Tidy<'_> {
 }
 
 /// Whether the sidebar hides `conversation`, in a section of `kind`, for
-/// having gone quiet: its newest message is older than the cutoff.
+/// having gone quiet: its newest message is older than the cutoff, or
+/// Slack said it has none at all (`Conversation::empty`), as a group DM
+/// someone made and nobody wrote in.
 ///
 /// Never hidden, whatever their age: one whose newest message is not
 /// known (an OAuth sign-in may not know it), one that shows as unread
@@ -115,11 +117,10 @@ pub fn is_inactive(
             .drafts
             .is_some_and(|drafts| drafts.contains(&conversation.id));
     !kept
-        && conversation
-            .latest
-            .as_ref()
-            .and_then(crate::model::Ts::seconds)
-            .is_some_and(|latest| latest < cutoff)
+        && match conversation.latest.as_ref() {
+            Some(latest) => latest.seconds().is_some_and(|latest| latest < cutoff),
+            None => conversation.empty,
+        }
 }
 
 /// How much a conversation asks for you, for putting unread ones first.
@@ -451,6 +452,20 @@ pub fn is_closed(
         })
 }
 
+/// Whether Slack says a direct message or group DM is closed (see
+/// `Conversation::is_open`) and nothing brings it back: it is not unread
+/// (`unread`), does not mention you, and has no draft (`draft`). Slack's
+/// own client leaves such conversations out of the sidebar. One whose
+/// state Slack did not give is never shut, and neither is a channel.
+/// The sidebar also shows a shut one while it is the open conversation.
+pub fn is_shut(conversation: &Conversation, unread: bool, draft: bool) -> bool {
+    conversation.kind.is_dm()
+        && conversation.is_open == Some(false)
+        && !unread
+        && conversation.mentions == 0
+        && !draft
+}
+
 /// The sections to draw, each with its conversations in order. `rank`
 /// says how much each conversation asks for you; it matters only when
 /// `arrange` puts unread ones first.
@@ -659,6 +674,8 @@ pub fn fingerprint(
         conversation.name.hash(&mut hasher);
         conversation.kind.hash(&mut hasher);
         conversation.latest.hash(&mut hasher);
+        conversation.empty.hash(&mut hasher);
+        conversation.is_open.hash(&mut hasher);
         conversation.user.hash(&mut hasher);
         // Hashed even with unread-first off, so the ranks the memo keeps
         // for holding are never stale when it is turned on.
@@ -956,6 +973,8 @@ mod tests {
             unread: 0,
             mentions: 0,
             external: false,
+            is_open: None,
+            empty: false,
         }
     }
 
@@ -2045,6 +2064,159 @@ mod tests {
         ] {
             assert!(quiet(&old, kind, Rank::Read, None), "{kind:?}");
         }
+    }
+
+    #[test]
+    fn known_empty_conversations_hide_like_quiet_ones() {
+        let drafts = HashSet::from(["G5".to_owned()]);
+        let month = Tidy {
+            drafts: Some(&drafts),
+            ..tidy(HideInactive::Month)
+        };
+        let blank = |id: &str, kind| Conversation {
+            latest: None,
+            last_read: None,
+            empty: true,
+            ..conversation(id, id, kind, "1.0")
+        };
+        let quiet = |c: &Conversation, kind, rank, hold| is_inactive(c, kind, rank, hold, &month);
+        let group = blank("G1", ConversationKind::Group);
+        // Group DMs, direct messages and channels alike.
+        assert!(quiet(&group, SectionKind::DirectMessages, Rank::Read, None));
+        assert!(quiet(
+            &blank("D1", ConversationKind::Direct),
+            SectionKind::DirectMessages,
+            Rank::Read,
+            None
+        ));
+        assert!(quiet(
+            &blank("C1", ConversationKind::Channel),
+            SectionKind::Channels,
+            Rank::Read,
+            None
+        ));
+        assert!(quiet(&group, SectionKind::Custom, Rank::Read, None));
+        // Not known to be empty, only not known: never hidden.
+        let unknown = Conversation {
+            empty: false,
+            ..group.clone()
+        };
+        assert!(!quiet(
+            &unknown,
+            SectionKind::DirectMessages,
+            Rank::Read,
+            None
+        ));
+        // The same exceptions as for quiet ones.
+        assert!(!quiet(
+            &group,
+            SectionKind::DirectMessages,
+            Rank::Unread,
+            None
+        ));
+        assert!(!quiet(
+            &group,
+            SectionKind::DirectMessages,
+            Rank::Urgent,
+            None
+        ));
+        let mentioned = Conversation {
+            mentions: 1,
+            ..group.clone()
+        };
+        assert!(!quiet(
+            &mentioned,
+            SectionKind::DirectMessages,
+            Rank::Read,
+            None
+        ));
+        let held = Hold {
+            id: "G1".into(),
+            rank: Rank::Read,
+        };
+        assert!(!quiet(
+            &group,
+            SectionKind::DirectMessages,
+            Rank::Read,
+            Some(&held)
+        ));
+        assert!(!quiet(
+            &blank("G5", ConversationKind::Group),
+            SectionKind::DirectMessages,
+            Rank::Read,
+            None
+        ));
+        assert!(!quiet(&group, SectionKind::Starred, Rank::Read, None));
+        assert!(!quiet(&group, SectionKind::Apps, Rank::Read, None));
+        // With hiding off, nothing hides.
+        let off = tidy(HideInactive::Off);
+        assert!(!is_inactive(
+            &group,
+            SectionKind::DirectMessages,
+            Rank::Read,
+            None,
+            &off
+        ));
+    }
+
+    #[test]
+    fn direct_messages_slack_closed_stay_out_until_something_brings_them_back() {
+        let closed = |kind, is_open| Conversation {
+            is_open,
+            ..conversation("G1", "ana, bob", kind, "1.0")
+        };
+        let group = closed(ConversationKind::Group, Some(false));
+        assert!(is_shut(&group, false, false));
+        assert!(is_shut(
+            &closed(ConversationKind::Direct, Some(false)),
+            false,
+            false
+        ));
+        // Open, or not said: shown.
+        assert!(!is_shut(
+            &closed(ConversationKind::Group, Some(true)),
+            false,
+            false
+        ));
+        assert!(!is_shut(
+            &closed(ConversationKind::Group, None),
+            false,
+            false
+        ));
+        // Channels have no such state.
+        assert!(!is_shut(
+            &closed(ConversationKind::Channel, Some(false)),
+            false,
+            false
+        ));
+        // Something unread, a mention or a draft brings it back.
+        assert!(!is_shut(&group, true, false));
+        assert!(!is_shut(&group, false, true));
+        let mentioned = Conversation {
+            mentions: 1,
+            ..group.clone()
+        };
+        assert!(!is_shut(&mentioned, false, false));
+    }
+
+    #[test]
+    fn the_fingerprint_sees_open_and_empty() {
+        let (sections, mut conversations, users) = sample();
+        let key = |conversations: &[Conversation]| {
+            fingerprint(
+                Some(&sections),
+                conversations,
+                &users,
+                live,
+                &Arrange::plain(Sort::Name),
+            )
+        };
+        let before = key(&conversations);
+        conversations[0].empty = true;
+        let emptied = key(&conversations);
+        assert_ne!(before, emptied);
+        conversations[0].is_open = Some(false);
+        assert_ne!(emptied, key(&conversations));
     }
 
     #[test]

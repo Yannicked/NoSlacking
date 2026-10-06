@@ -574,6 +574,8 @@ mod tests {
             unread: 0,
             mentions: 0,
             external: false,
+            is_open: None,
+            empty: false,
         };
         one.conversations.push(crate::model::Conversation {
             mentions: 2,
@@ -618,6 +620,8 @@ mod tests {
             unread: 3,
             mentions: 0,
             external: false,
+            is_open: None,
+            empty: false,
         };
         assert!(w.is_unread(&c));
         w.desktop.local_muted.insert("C1".into());

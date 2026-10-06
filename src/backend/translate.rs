@@ -145,6 +145,21 @@ pub(super) fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> 
                 out.push(Translated::Refresh(id));
             }
         }
+        // A direct message or group DM opened or closed in your sidebar,
+        // perhaps in another client. Slack documents `im_open`/`im_close`
+        // and, for group DMs, `group_open`; `group_close` is documented
+        // for private channels, which have no open state, so the app
+        // ignores it for them. `mpim_open`/`mpim_close` are not
+        // documented and are read the same way, by their `channel`.
+        "im_open" | "im_close" | "mpim_open" | "mpim_close" | "group_open" | "group_close" => {
+            if let Some(channel) = channel {
+                out.push(Translated::Event(Event::Opened {
+                    team,
+                    channel,
+                    open: kind.ends_with("_open"),
+                }));
+            }
+        }
         "user_change" | "team_join" => {
             if let Some(user) = event
                 .get("user")
@@ -228,6 +243,28 @@ mod tests {
             );
         }
         assert!(events(r#"{"type":"channel_marked","channel":"C1"}"#).is_empty());
+    }
+
+    #[test]
+    fn direct_messages_open_and_close_elsewhere() {
+        for (kind, opened) in [
+            ("im_open", true),
+            ("im_close", false),
+            ("mpim_open", true),
+            ("mpim_close", false),
+            ("group_open", true),
+            ("group_close", false),
+        ] {
+            let got = events(&format!(
+                r#"{{"type":"{kind}","user":"U1","channel":"D024BE91L"}}"#
+            ));
+            assert!(
+                matches!(&got[..], [Translated::Event(Event::Opened { team, channel, open })]
+                    if team == "T1" && channel == "D024BE91L" && *open == opened),
+                "{kind}: {got:?}"
+            );
+        }
+        assert!(events(r#"{"type":"im_close","user":"U1"}"#).is_empty());
     }
 
     #[test]

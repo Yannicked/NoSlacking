@@ -163,6 +163,17 @@ pub struct Conversation {
     /// to be).
     #[serde(default)]
     pub external: bool,
+    /// Whether Slack has this direct message or group DM open in your
+    /// sidebar; `None` when Slack did not say. A closed one stays out of
+    /// the sidebar until something brings it back (see
+    /// [`crate::sidebar::is_shut`]).
+    #[serde(default)]
+    pub is_open: Option<bool>,
+    /// Slack said the conversation has no messages at all, which is not
+    /// the same as not knowing its newest message (`latest` is `None` for
+    /// both). Only meaningful while `latest` is `None`.
+    #[serde(default)]
+    pub empty: bool,
 }
 
 impl Conversation {
@@ -1352,6 +1363,8 @@ mod tests {
             unread: 0,
             mentions: 0,
             external: false,
+            is_open: None,
+            empty: false,
         };
         assert!(!c.has_unread());
         c.latest = Some(Ts::new("6.0"));

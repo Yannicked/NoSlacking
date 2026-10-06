@@ -631,6 +631,13 @@ pub enum Event {
         team: String,
         channel: String,
     },
+    /// A direct message or group DM was opened or closed in your sidebar,
+    /// perhaps in another Slack client.
+    Opened {
+        team: String,
+        channel: String,
+        open: bool,
+    },
     Users {
         team: String,
         users: Vec<User>,
