@@ -732,7 +732,10 @@ engineering, as for the rest of the session sign-in.
         `str0m` with the relay as its only candidate; Opus through a
         jitter buffer (60 ms, concealment, trimming past 300 ms) to the
         default device at the system's volume. Muted: SUBSCRIBE says so
-        and only Opus silence goes out. No UI yet.
+        and only Opus silence goes out. In the app: "Listen"
+        beside a browser sign-in's "Huddle · N people", then "Joining…" and
+        "Leave"; one huddle at a time, left on sign-out and on quit (the
+        app waits up to 4 s for LEAVE_ACK).
       - Checked offline: frame round trips, the join as data, RFC 5769's
         STUN vectors, the SDP both ways through a second `str0m`, ICE,
         DTLS and Opus through the relay against a pretend TURN server,
@@ -759,6 +762,7 @@ engineering, as for the rest of the session sign-in.
         several duplicates of older RustCrypto versions (digest 0.10,
         sha1/sha2 0.10, hmac 0.12, aes 0.8, rand 0.9, itertools 0.14);
         `cargo deny` passes as is. The default build pulls none of it.
+        The release binary grows from 46.3 to 52.7 MB (Linux, x86-64).
       - Try it: `cargo run --release --features huddle-audio --
         --huddle-probe TEAM CHANNEL [--seconds 30]
         [--huddle-region us-east-1]`, with the browser sign-in saved for
