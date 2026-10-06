@@ -1185,7 +1185,7 @@ fn scheduled(
             }
             // Back in its composer, unless something new was typed there.
             if let Some((key, draft)) = pending.and_then(|p| p.draft) {
-                let current = app.drafts.entry(key).or_default();
+                let current = app.drafts.edit(key);
                 if current.text.trim().is_empty() {
                     *current = draft;
                 }
@@ -1659,7 +1659,7 @@ mod tests {
     #[test]
     fn unreads_list_what_is_new_newest_first() {
         let mut workspace = workspace();
-        workspace.conversations = vec![
+        *workspace.conversations = vec![
             conversation("C1", "5.0", "4.0"),
             conversation("C2", "3.0", "3.0"),
             conversation("C3", "9.0", "1.0"),

@@ -23,6 +23,7 @@ use crate::theme::{self, Catalog, Palette};
 mod audio;
 mod compose;
 mod desktop;
+mod drafts;
 mod emoji;
 mod events;
 mod hooks;
@@ -30,6 +31,7 @@ mod popout;
 mod wire;
 mod workspace;
 
+pub use drafts::{Drafts, Taken};
 pub use popout::Popout;
 pub use wire::{edit_source, to_editable, to_mrkdwn, to_wire};
 use workspace::first_unread;
@@ -224,7 +226,7 @@ pub struct App {
     pub setup: SetupForm,
     pub socket: Socket,
     pub thread: Option<(String, Ts)>,
-    pub drafts: HashMap<String, Draft>,
+    pub drafts: Drafts,
     pub editing: Option<Editing>,
     pub selected: Option<Selected>,
     pub toasts: Vec<Toast>,
@@ -387,7 +389,7 @@ impl App {
                 scopes: meta.scopes.clone(),
             });
             state.active = settings.last_conversation.get(&meta.team_id).cloned();
-            state.desktop = settings.desktop.team_state(&meta.team_id);
+            *state.desktop = settings.desktop.team_state(&meta.team_id);
             workspaces.push(state);
         }
         let page = if workspaces.is_empty() && !options.demo {
@@ -399,23 +401,19 @@ impl App {
             // Pasted images left by a run that ended mid-upload.
             let _ = std::fs::remove_dir_all(dirs.pasted());
         }
-        let drafts: HashMap<String, Draft> = if options.demo {
-            HashMap::new()
-        } else {
-            crate::drafts::load(&dirs.drafts_file())
-                .into_iter()
-                .map(|(key, saved)| {
-                    let draft = Draft {
-                        text: saved.text,
-                        mentions: saved.mentions,
-                        broadcast: saved.broadcast,
-                        ..Draft::default()
-                    };
-                    (key, draft)
-                })
-                .collect()
-        };
-        let drafts_seen = crate::drafts::fingerprint(draft_views(&drafts));
+        let mut drafts = Drafts::default();
+        if !options.demo {
+            for (key, saved) in crate::drafts::load(&dirs.drafts_file()) {
+                let draft = Draft {
+                    text: saved.text,
+                    mentions: saved.mentions,
+                    broadcast: saved.broadcast,
+                    ..Draft::default()
+                };
+                drafts.insert(key, draft);
+            }
+        }
+        let drafts_seen = drafts.revision();
         let mut app = Self {
             dirs,
             settings,
@@ -614,13 +612,13 @@ impl App {
     }
 
     /// Notices drafts that changed since the last frame and writes them
-    /// once typing pauses. The composers change drafts in place, so a
-    /// fingerprint is how the app hears of it.
+    /// once typing pauses. Every change moves the drafts' revision, so an
+    /// idle frame costs one comparison.
     fn watch_drafts(&mut self, now: Instant) {
         if !self.keep_drafts {
             return;
         }
-        let seen = crate::drafts::fingerprint(draft_views(&self.drafts));
+        let seen = self.drafts.revision();
         if seen != self.drafts_seen {
             self.drafts_seen = seen;
             self.drafts_due.poke(now);
@@ -1889,7 +1887,7 @@ impl App {
 }
 
 /// The drafts as [`crate::drafts`] reads them.
-fn draft_views(drafts: &HashMap<String, Draft>) -> impl Iterator<Item = crate::drafts::View<'_>> {
+fn draft_views(drafts: &Drafts) -> impl Iterator<Item = crate::drafts::View<'_>> {
     drafts.iter().map(|(key, draft)| {
         (
             key.as_str(),

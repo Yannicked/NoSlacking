@@ -15,17 +15,21 @@ use crate::model::{
     Bot, Conversation, ConversationKind, Delivery, KitBlock, Message, SidebarSection, Timeline, Ts,
     User, UserGroup, Workspace,
 };
+use crate::revision::Revised;
 use crate::settings::Settings;
 
 /// One signed-in workspace and everything loaded for it.
 pub struct WorkspaceState {
     pub info: Workspace,
-    pub conversations: Vec<Conversation>,
-    pub users: HashMap<String, User>,
+    /// Revised, like `users`, `sections` and `desktop`, so the sidebar and
+    /// the pickers rebuild only when what they show may have changed
+    /// (see [`WorkspaceState::revision`]).
+    pub conversations: Revised<Vec<Conversation>>,
+    pub users: Revised<HashMap<String, User>>,
     /// Apps and integrations, by `bot_id`.
     pub bots: HashMap<String, Bot>,
     /// Your Slack sidebar sections, when Slack shares them (sessions).
-    pub sections: Option<Vec<SidebarSection>>,
+    pub sections: Revised<Option<Vec<SidebarSection>>>,
     pub emoji: EmojiSet,
     /// Whether this sign-in can add custom emoji (browser sessions).
     pub can_add_emoji: bool,
@@ -44,11 +48,8 @@ pub struct WorkspaceState {
     pub(super) requested_users: HashSet<String>,
     pub(super) requested_bots: HashSet<String>,
     requested_conversations: HashSet<String>,
-    /// Raised whenever people arrive, so lookups built from `users` know
-    /// when to rebuild.
-    users_version: u64,
     /// Notification choices and the like for this workspace.
-    pub desktop: crate::desktop::TeamState,
+    pub desktop: Revised<crate::desktop::TeamState>,
     /// Who is around, and the like (see [`crate::people`]).
     pub people: crate::people::TeamPeople,
     /// The newest messages already treated as new (notified, hooks run),
@@ -128,10 +129,10 @@ impl WorkspaceState {
     pub(crate) fn new(info: Workspace) -> Self {
         Self {
             info,
-            conversations: Vec::new(),
-            users: HashMap::new(),
+            conversations: Revised::default(),
+            users: Revised::default(),
             bots: HashMap::new(),
-            sections: None,
+            sections: Revised::default(),
             emoji: EmojiSet::default(),
             can_add_emoji: false,
             added_emoji: HashMap::new(),
@@ -144,8 +145,7 @@ impl WorkspaceState {
             requested_users: HashSet::new(),
             requested_bots: HashSet::new(),
             requested_conversations: HashSet::new(),
-            users_version: 0,
-            desktop: crate::desktop::TeamState::default(),
+            desktop: Revised::default(),
             people: crate::people::TeamPeople::default(),
             seen: VecDeque::new(),
             held_unread: HashSet::new(),
@@ -204,10 +204,21 @@ impl WorkspaceState {
         self.held_unread.remove(channel);
     }
 
-    /// Changes whenever `users` gains or updates someone through the
-    /// worker; pair it with `users.len()` for edits made directly.
+    /// Changes whenever `users` may have, so lookups built from it know
+    /// when to rebuild.
     pub fn users_version(&self) -> u64 {
-        self.users_version
+        self.users.revision()
+    }
+
+    /// Changes whenever anything the sidebar is laid out from may have:
+    /// the conversations, the people their titles name, the sections and
+    /// the mutes that rank them.
+    pub fn revision(&self) -> u64 {
+        self.conversations
+            .revision()
+            .max(self.users.revision())
+            .max(self.sections.revision())
+            .max(self.desktop.revision())
     }
 
     pub fn conversation(&self, id: &str) -> Option<&Conversation> {
@@ -461,7 +472,7 @@ impl WorkspaceState {
                 merged.push(existing.clone());
             }
         }
-        self.conversations = merged;
+        *self.conversations = merged;
         self.loaded = self.loaded || complete;
         let users = self.unknown_users(self.conversations.iter().filter_map(|c| c.user.as_deref()));
         let needs_open = match &self.active {
@@ -521,7 +532,6 @@ impl WorkspaceState {
     }
 
     pub(super) fn users_arrived(&mut self, users: Vec<User>) {
-        self.users_version += 1;
         for user in users {
             self.requested_users.remove(&user.id);
             self.users.insert(user.id.clone(), user);
@@ -3381,5 +3391,44 @@ mod tests {
                 delete: Some(Ts::new("5.0"))
             }
         );
+    }
+
+    #[test]
+    fn the_revision_moves_with_what_the_sidebar_reads_and_only_then() {
+        let mut w = workspace();
+        let mut seen = vec![w.revision()];
+        let mut moved = |w: &WorkspaceState, what: &str| {
+            assert!(!seen.contains(&w.revision()), "{what} kept the revision");
+            seen.push(w.revision());
+        };
+        w.conversations_arrived(vec![conversation("1.0", "1.0", 0, 0)], true);
+        moved(&w, "the list");
+        // Reading, as a frame does, changes nothing.
+        let revision = w.revision();
+        let c1 = w.conversation("C1").cloned().expect("C1");
+        let _ = (w.title(&c1), w.rank(&c1), w.is_unread(&c1));
+        let _ = (w.users_version(), w.conversations.len(), w.users.get("U1"));
+        let _ = (w.sections.as_deref(), w.desktop.is_muted("C1"));
+        for c in &w.conversations {
+            let _ = &c.id;
+        }
+        assert_eq!(w.revision(), revision);
+        w.conversation_arrived(conversation("1.0", "2.0", 1, 0));
+        moved(&w, "fresh details");
+        if let Some(c) = w.conversation_mut("C1") {
+            c.mentions = 3;
+        }
+        moved(&w, "a change in place");
+        w.users_arrived(vec![User {
+            id: "U2".into(),
+            ..User::default()
+        }]);
+        moved(&w, "people");
+        *w.sections = Some(Vec::new());
+        moved(&w, "sections");
+        w.desktop.local_muted.insert("C1".into());
+        moved(&w, "a mute");
+        w.conversation_gone("C1");
+        moved(&w, "leaving");
     }
 }

@@ -155,7 +155,7 @@ impl App {
             }
             Event::Sections { team, sections } => {
                 if let Some(workspace) = self.workspace_mut(&team) {
-                    workspace.sections = Some(sections);
+                    *workspace.sections = Some(sections);
                 }
             }
             Event::Emoji {
@@ -459,7 +459,7 @@ impl App {
             None => {
                 let mut state = WorkspaceState::new(info);
                 state.active = self.settings.last_conversation.get(&team).cloned();
-                state.desktop = self.settings.desktop.team_state(&team);
+                *state.desktop = self.settings.desktop.team_state(&team);
                 self.workspaces.push(state);
             }
         }

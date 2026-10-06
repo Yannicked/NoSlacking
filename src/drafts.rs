@@ -7,7 +7,6 @@
 //! Writes wait until typing pauses and happen off the interface thread.
 
 use std::collections::BTreeMap;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -75,16 +74,6 @@ fn kept<'a>(drafts: impl Iterator<Item = View<'a>>) -> Vec<View<'a>> {
     let mut kept: Vec<View<'a>> = drafts.filter(|d| !d.1.trim().is_empty()).collect();
     kept.sort_by(|a, b| a.0.cmp(b.0));
     kept
-}
-
-/// A number that changes when any kept draft does, to notice typing
-/// without copying every draft on every frame.
-pub fn fingerprint<'a>(drafts: impl Iterator<Item = View<'a>>) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for draft in kept(drafts) {
-        draft.hash(&mut hasher);
-    }
-    hasher.finish()
 }
 
 /// The kept drafts, for saving.
@@ -269,19 +258,6 @@ mod tests {
         let path = dir.0.join("drafts.json");
         std::fs::write(&path, "{\"T1/C1\": {\"text\": 5").expect("write");
         assert!(load(&path).is_empty());
-    }
-
-    #[test]
-    fn the_fingerprint_follows_what_is_kept() {
-        let one = vec![("T1/C1".to_owned(), draft("a"))];
-        let two = vec![("T1/C1".to_owned(), draft("ab"))];
-        let with_empty = vec![
-            ("T1/C1".to_owned(), draft("a")),
-            ("T1/C9".to_owned(), draft("")),
-        ];
-        let print = |list: &[(String, Saved)]| fingerprint(views(list).into_iter());
-        assert_ne!(print(&one), print(&two));
-        assert_eq!(print(&one), print(&with_empty), "empty drafts do not count");
     }
 
     #[test]

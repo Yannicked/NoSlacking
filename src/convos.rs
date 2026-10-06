@@ -766,6 +766,16 @@ pub fn candidates(workspace: &WorkspaceState) -> Vec<Candidate> {
         .collect()
 }
 
+/// Changes whenever anything [`candidates`] reads may have: the
+/// conversations or the people. Cheaper again than
+/// [`candidates_fingerprint`], which is needed only once this moves.
+pub fn candidates_revision(workspace: &WorkspaceState) -> u64 {
+    workspace
+        .conversations
+        .revision()
+        .max(workspace.users.revision())
+}
+
 /// Changes whenever what [`candidates`] gives for `workspace` may have:
 /// a conversation's name, unread state, newest message or archiving, or
 /// the people DMs are titled by. Far cheaper than the candidates
@@ -1962,10 +1972,24 @@ mod tests {
             empty: false,
         });
         let first = candidates_fingerprint(&workspace);
+        let revision = candidates_revision(&workspace);
         assert_eq!(candidates_fingerprint(&workspace), first);
-        // A topic is not listed: no reason to search again.
+        let _ = candidates(&workspace);
+        assert_eq!(candidates_revision(&workspace), revision, "reading");
+        // A topic is not listed: no reason to search again, though the
+        // revision cannot tell that apart.
         workspace.conversations[0].topic = "news".into();
         assert_eq!(candidates_fingerprint(&workspace), first);
+        assert_ne!(candidates_revision(&workspace), revision);
+        let revision = candidates_revision(&workspace);
+        workspace.users.insert(
+            "U1".into(),
+            User {
+                id: "U1".into(),
+                ..User::default()
+            },
+        );
+        assert_ne!(candidates_revision(&workspace), revision, "people");
         // A new message makes it unread and moves it up.
         workspace.conversations[0].latest = Some(Ts::new("2.0"));
         let unread = candidates_fingerprint(&workspace);

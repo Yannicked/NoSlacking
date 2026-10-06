@@ -234,7 +234,33 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
 struct Matched {
     /// The query and [`crate::convos::candidates_fingerprint`] it was for.
     key: Option<(String, u64)>,
+    /// The [`crate::convos::candidates_revision`] the fingerprint was last
+    /// taken at: while it holds, the fingerprint cannot have moved.
+    revision: Option<u64>,
     found: Vec<crate::convos::Candidate>,
+}
+
+impl Matched {
+    /// The matches kept for `query`, if the conversations they came from
+    /// are unchanged. Takes the fingerprint only when the revision moved.
+    fn kept(
+        &mut self,
+        query: &str,
+        workspace: &crate::app::WorkspaceState,
+    ) -> Option<Vec<crate::convos::Candidate>> {
+        let (kept_query, print) = self.key.as_ref()?;
+        if kept_query != query {
+            return None;
+        }
+        let revision = crate::convos::candidates_revision(workspace);
+        if self.revision != Some(revision) {
+            if *print != crate::convos::candidates_fingerprint(workspace) {
+                return None;
+            }
+            self.revision = Some(revision);
+        }
+        Some(self.found.clone())
+    }
 }
 
 /// The first `limit` conversations that `keep` lets through and whose
@@ -251,17 +277,17 @@ pub(super) fn matching(
     limit: usize,
 ) -> Vec<crate::convos::Candidate> {
     let id = egui::Id::new(("conversation-matches", picker));
+    if let Some(found) = ctx.data_mut(|d| {
+        d.get_temp_mut_or_default::<Matched>(id)
+            .kept(query, workspace)
+    }) {
+        return found;
+    }
+    let revision = crate::convos::candidates_revision(workspace);
     let key = (
         query.to_owned(),
         crate::convos::candidates_fingerprint(workspace),
     );
-    if let Some(found) = ctx.data(|d| {
-        d.get_temp::<Matched>(id)
-            .filter(|m| m.key.as_ref() == Some(&key))
-            .map(|m| m.found)
-    }) {
-        return found;
-    }
     let candidates = crate::convos::candidates(workspace)
         .into_iter()
         .filter(keep)
@@ -273,6 +299,7 @@ pub(super) fn matching(
             id,
             Matched {
                 key: Some(key),
+                revision: Some(revision),
                 found: found.clone(),
             },
         );
@@ -738,7 +765,7 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                 app.actions.push(Action::React { channel, ts, name });
             }
             PickerTarget::Draft(key) => {
-                let draft = app.drafts.entry(key).or_default();
+                let draft = app.drafts.edit(key);
                 if !draft.text.is_empty() && !draft.text.ends_with(' ') {
                     draft.text.push(' ');
                 }

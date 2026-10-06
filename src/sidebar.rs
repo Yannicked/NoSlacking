@@ -189,6 +189,12 @@ pub struct Arrange<'a> {
     /// Which conversations to mark as gone quiet (see [`is_inactive`]);
     /// `None` marks none.
     pub tidy: Option<Tidy<'a>>,
+    /// A number that changes whenever the sections, the conversations,
+    /// the people or the ranks [`Memo::layout`] is given may have (the
+    /// workspace's [`revision`](crate::app::WorkspaceState::revision)).
+    /// While it and the rest of this stay the same, the memo answers
+    /// without walking the conversations; `None` walks them every time.
+    pub revision: Option<u64>,
 }
 
 impl Arrange<'_> {
@@ -199,6 +205,7 @@ impl Arrange<'_> {
             unread_first: false,
             hold: None,
             tidy: None,
+            revision: None,
         }
     }
 }
@@ -717,13 +724,64 @@ struct Placed {
     inactive: Vec<bool>,
 }
 
+/// What a layout was made for, apart from the data the revision stands
+/// for: all cheap to compare, so an unchanged frame costs no walk over
+/// the conversations.
+#[derive(Clone, Debug, PartialEq)]
+struct Stamp {
+    revision: u64,
+    sort: Sort,
+    unread_first: bool,
+    hold: Option<Hold>,
+    cutoff: Option<i64>,
+    locale: crate::i18n::Locale,
+    /// Who has a draft, which counts only while quiet ones are hidden.
+    drafts: Option<HashSet<String>>,
+}
+
+impl Stamp {
+    /// The drafts `arrange` hides by, when it hides any.
+    fn drafts<'a>(arrange: &Arrange<'a>, cutoff: Option<i64>) -> Option<&'a HashSet<String>> {
+        cutoff.and(arrange.tidy.and_then(|tidy| tidy.drafts))
+    }
+
+    fn of(revision: u64, arrange: &Arrange<'_>) -> Self {
+        let cutoff = arrange.tidy.and_then(|tidy| tidy.cutoff());
+        Self {
+            revision,
+            sort: arrange.sort,
+            unread_first: arrange.unread_first,
+            hold: arrange.hold.cloned(),
+            cutoff,
+            locale: crate::i18n::locale(),
+            drafts: Self::drafts(arrange, cutoff).cloned(),
+        }
+    }
+
+    /// Whether this is the stamp of `arrange` at `revision`, without
+    /// building one.
+    fn is(&self, revision: u64, arrange: &Arrange<'_>) -> bool {
+        let cutoff = arrange.tidy.and_then(|tidy| tidy.cutoff());
+        self.revision == revision
+            && self.sort == arrange.sort
+            && self.unread_first == arrange.unread_first
+            && self.hold.as_ref() == arrange.hold
+            && self.cutoff == cutoff
+            && self.locale == crate::i18n::locale()
+            && self.drafts.as_ref() == Self::drafts(arrange, cutoff)
+    }
+}
+
 /// [`layout`], remembered until its [`fingerprint`] changes: the sidebar
 /// is drawn every frame, but its shape changes only when a conversation,
-/// a section or a name does. It also keeps the open conversation's
-/// [`Hold`].
+/// a section or a name does. Given a [`Arrange::revision`], the
+/// fingerprint itself is taken only once that or the arrangement moves.
+/// It also keeps the open conversation's [`Hold`].
 #[derive(Clone, Debug, Default)]
 pub struct Memo {
     key: Option<u64>,
+    /// What the fingerprint was last taken for, when given a revision.
+    stamp: Option<Stamp>,
     placed: std::sync::Arc<[Placed]>,
     /// What the open conversation holds (see [`Memo::hold`]).
     held: Option<Hold>,
@@ -780,6 +838,47 @@ impl Memo {
         rank: impl Fn(&Conversation) -> Rank,
         arrange: &Arrange<'_>,
     ) -> Vec<Shown<'a>> {
+        let unchanged = arrange.revision.is_some_and(|revision| {
+            self.stamp
+                .as_ref()
+                .is_some_and(|stamp| stamp.is(revision, arrange))
+        });
+        if !unchanged {
+            self.relayout(sections, conversations, users, titled, rank, arrange);
+            self.stamp = arrange
+                .revision
+                .map(|revision| Stamp::of(revision, arrange));
+        }
+        self.placed
+            .iter()
+            .map(|placed| {
+                let (conversations, inactive) = placed
+                    .rows
+                    .iter()
+                    .zip(&placed.inactive)
+                    .filter_map(|(&i, &quiet)| conversations.get(i).map(|c| (c, quiet)))
+                    .unzip();
+                Shown {
+                    id: placed.id.clone(),
+                    kind: placed.kind,
+                    title: placed.title.clone(),
+                    conversations,
+                    inactive,
+                }
+            })
+            .collect()
+    }
+
+    /// Lays the sidebar out again if its [`fingerprint`] moved.
+    fn relayout(
+        &mut self,
+        sections: Option<&[SidebarSection]>,
+        conversations: &[Conversation],
+        users: &HashMap<String, User>,
+        titled: impl Fn(&Conversation) -> String,
+        rank: impl Fn(&Conversation) -> Rank,
+        arrange: &Arrange<'_>,
+    ) {
         let key = fingerprint(sections, conversations, users, &rank, arrange);
         if self.key != Some(key) {
             self.seen = std::sync::Arc::new(
@@ -815,24 +914,6 @@ impl Memo {
                 .collect();
             self.key = Some(key);
         }
-        self.placed
-            .iter()
-            .map(|placed| {
-                let (conversations, inactive) = placed
-                    .rows
-                    .iter()
-                    .zip(&placed.inactive)
-                    .filter_map(|(&i, &quiet)| conversations.get(i).map(|c| (c, quiet)))
-                    .unzip();
-                Shown {
-                    id: placed.id.clone(),
-                    kind: placed.kind,
-                    title: placed.title.clone(),
-                    conversations,
-                    inactive,
-                }
-            })
-            .collect()
     }
 }
 
@@ -1136,6 +1217,7 @@ mod tests {
             unread_first: true,
             hold: None,
             tidy: None,
+            revision: None,
         }
     }
 
@@ -1205,6 +1287,7 @@ mod tests {
                 unread_first: false,
                 hold: Some(&held),
                 tidy: None,
+                revision: None,
             };
             assert_eq!(
                 arranged(&sections, &conversations, &off),
@@ -1257,6 +1340,7 @@ mod tests {
                     unread_first: true,
                     hold: held.as_ref(),
                     tidy: None,
+                    revision: None,
                 },
             );
             shown
@@ -1355,6 +1439,95 @@ mod tests {
     }
 
     #[test]
+    fn a_revision_spares_the_walk_until_it_or_the_arrangement_moves() {
+        let (sections, conversations, users) = sample();
+        let mut conversations = crate::revision::Revised::new(conversations);
+        let mut memo = Memo::default();
+        let walked = std::cell::Cell::new(0);
+        let rank = |c: &Conversation| {
+            walked.set(walked.get() + 1);
+            live(c)
+        };
+        let titled = |c: &Conversation| c.name.clone();
+        let arrange = |revision, sort| Arrange {
+            revision: Some(revision),
+            ..Arrange::plain(sort)
+        };
+        let mut frame = |conversations: &[Conversation], arrange: &Arrange<'_>| {
+            walked.set(0);
+            let shown = memo.layout(
+                Some(&sections),
+                conversations,
+                &users,
+                titled,
+                rank,
+                arrange,
+            );
+            let owned: Vec<Vec<String>> = all_ids(&shown)
+                .into_iter()
+                .map(|ids| ids.into_iter().map(str::to_owned).collect())
+                .collect();
+            (owned, walked.get())
+        };
+        let (first, walks) = frame(
+            &conversations,
+            &arrange(conversations.revision(), Sort::Name),
+        );
+        assert!(walks > 0);
+        for _ in 0..3 {
+            let (idle, walks) = frame(
+                &conversations,
+                &arrange(conversations.revision(), Sort::Name),
+            );
+            assert_eq!((&idle, walks), (&first, 0), "an idle frame walks nothing");
+        }
+        // Another arrangement walks again, at the same revision.
+        let (_, walks) = frame(
+            &conversations,
+            &arrange(conversations.revision(), Sort::Recent),
+        );
+        assert!(walks > 0);
+        // A change moves the revision, and the layout follows it.
+        conversations[0].name = "aardvark".into();
+        let (renamed, walks) = frame(
+            &conversations,
+            &arrange(conversations.revision(), Sort::Name),
+        );
+        assert!(walks > 0);
+        assert_ne!(renamed, first);
+        let fresh = layout(
+            Some(&sections),
+            &conversations,
+            &users,
+            titled,
+            live,
+            &Arrange::plain(Sort::Name),
+        );
+        assert_eq!(renamed, all_ids(&fresh));
+        // While quiet ones are hidden, who has a draft counts too.
+        let none = HashSet::new();
+        let one = HashSet::from(["C1".to_owned()]);
+        let revision = conversations.revision();
+        let tidy = |drafts| Arrange {
+            tidy: Some(Tidy {
+                after: HideInactive::Month,
+                now: 1_000_000_000,
+                drafts: Some(drafts),
+            }),
+            ..arrange(revision, Sort::Name)
+        };
+        frame(&conversations, &tidy(&none));
+        let (_, idle) = frame(&conversations, &tidy(&none));
+        assert_eq!(idle, 0);
+        let (_, walks) = frame(&conversations, &tidy(&one));
+        assert!(walks > 0);
+        // Without a revision, every frame walks, as before.
+        let (_, walks) = frame(&conversations, &Arrange::plain(Sort::Name));
+        let (_, again) = frame(&conversations, &Arrange::plain(Sort::Name));
+        assert!(walks > 0 && again > 0);
+    }
+
+    #[test]
     fn the_fingerprint_sees_what_layout_reads() {
         let (mut sections, conversations, mut users) = sample();
         let key = |sections: &[SidebarSection], users: &HashMap<String, User>, sort| {
@@ -1397,6 +1570,7 @@ mod tests {
             unread_first: true,
             hold: None,
             tidy: None,
+            revision: None,
         };
         assert_ne!(plain, arranged(&first));
         let held = Hold {

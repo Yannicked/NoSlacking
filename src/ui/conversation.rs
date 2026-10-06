@@ -6,7 +6,7 @@ use egui::{Align, CornerRadius, Margin, RichText, Stroke, Vec2};
 use super::composer::{self, Composer};
 use super::message::{self, Lead, Row};
 use super::rows;
-use crate::app::{App, Draft};
+use crate::app::App;
 use crate::backend::Socket;
 use crate::i18n::{t, tf};
 use crate::model::{Action, ConversationKind, Ts};
@@ -225,7 +225,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
 fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     let palette = app.palette;
     let key = App::draft_key(team, channel, None);
-    let mut draft: Draft = app.drafts.remove(&key).unwrap_or_default();
+    let mut taken = app.drafts.take(&key);
     let focus =
         std::mem::take(&mut app.focus_composer) && app.picker.is_none() && app.switcher.is_none();
     let App {
@@ -237,11 +237,11 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     } = app;
     let Some(workspace) = crate::app::active_in(workspaces, settings) else {
         // Put the draft back: it was taken out to be edited.
-        app.drafts.insert(key, draft);
+        app.drafts.put_back(key, taken);
         return;
     };
     let Some(conversation) = workspace.conversation(channel) else {
-        app.drafts.insert(key, draft);
+        app.drafts.put_back(key, taken);
         return;
     };
     let title = workspace.title(conversation);
@@ -280,9 +280,9 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
                 channel_name: None,
                 uploads: transfers,
             };
-            let before = draft.text.clone();
-            composer::show(ui, &composer, &mut draft, actions);
-            if crate::people::is_typing(&before, &draft.text) {
+            let before = taken.draft.text.clone();
+            composer::show(ui, &composer, &mut taken.draft, actions);
+            if crate::people::is_typing(&before, &taken.draft.text) {
                 actions.push(Action::People(crate::people::Action::Typing {
                     channel: channel.to_owned(),
                     thread: None,
@@ -290,7 +290,7 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
             }
             super::people::typing(ui, &palette, workspace, channel, None);
         });
-    app.drafts.insert(key, draft);
+    app.drafts.put_back(key, taken);
 }
 
 fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
