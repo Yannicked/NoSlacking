@@ -9,7 +9,6 @@ use super::workspace::{Arrived, SendOutcome};
 use super::{App, Page, WorkspaceState};
 use crate::backend::{Change, Command, Event, SignIn, Socket};
 use crate::credentials::AppCredentials;
-use crate::emoji::EmojiSet;
 use crate::failure::Failure;
 use crate::i18n::{t, tf};
 use crate::model::{Conversation, Message, Ts, Workspace};
@@ -116,11 +115,16 @@ impl App {
                     workspace.sections = Some(sections);
                 }
             }
-            Event::Emoji { team, emoji } => {
+            Event::Emoji {
+                team,
+                emoji,
+                can_add,
+            } => {
                 if let Some(workspace) = self.workspace_mut(&team) {
-                    workspace.emoji = EmojiSet::new(emoji);
+                    workspace.emoji_arrived(emoji, can_add);
                 }
             }
+            Event::EmojiAdded { team, name, result } => self.emoji_added(&team, name, result),
             Event::UserGroups { team, groups } => {
                 if let Some(workspace) = self.workspace_mut(&team) {
                     workspace.groups = groups;
@@ -262,6 +266,17 @@ impl App {
                 changed,
             } => self.message(&team, &channel, message, changed),
             Event::Deleted { team, channel, ts } => self.remove_message(&team, &channel, &ts),
+            Event::FileDeleteSettled {
+                team,
+                file,
+                name,
+                result,
+            } => self.file_delete_settled(&team, &file, &name, result),
+            Event::FileGone { team, file } => {
+                if let Some(workspace) = self.workspace_mut(&team) {
+                    workspace.file_gone(&file);
+                }
+            }
             Event::Reaction {
                 team,
                 channel,
@@ -325,6 +340,29 @@ impl App {
             workspace.undo(channel, change);
         }
         self.toast(format!("{what}: {}", error.message()), true);
+    }
+
+    /// Slack answered the deletion of your file; a refused one shows
+    /// again, and you are told.
+    fn file_delete_settled(
+        &mut self,
+        team: &str,
+        file: &str,
+        name: &str,
+        result: Result<(), Failure>,
+    ) {
+        if let Some(workspace) = self.workspace_mut(team) {
+            workspace.file_delete_settled(file, result.is_ok());
+        }
+        if let Err(error) = result {
+            self.toast(
+                tf(
+                    "Could not delete {name}: {error}",
+                    &[("name", name), ("error", &error.message())],
+                ),
+                true,
+            );
+        }
     }
 
     fn app_loaded(&mut self, app: Option<AppCredentials>) {
@@ -423,6 +461,8 @@ impl App {
             self.selected = None;
             self.confirm_delete = None;
             self.confirm_press = None;
+            self.confirm_delete_file = None;
+            self.add_emoji = None;
             self.picker = None;
             self.share = None;
             self.views.open = None;

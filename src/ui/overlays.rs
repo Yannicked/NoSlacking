@@ -16,6 +16,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     super::lightbox::show(app, ctx);
     confirm_delete(app, ctx);
     confirm_press(app, ctx);
+    confirm_delete_file(app, ctx);
+    super::add_emoji::dialog(app, ctx);
     section_dialog(app, ctx);
     super::share::dialog(app, ctx);
     super::people::status_dialog(app, ctx);
@@ -457,6 +459,8 @@ fn picker(app: &mut App, ctx: &egui::Context) {
     };
     let mut chosen: Option<String> = None;
     let mut close = false;
+    let mut add = false;
+    let can_add = workspace.can_add_emoji;
     let needle = query.trim().to_lowercase();
     // What matches the query, kept until the query or the custom emoji
     // change: filtering and sorting about 1,900 emoji on every frame was
@@ -489,6 +493,14 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if theme::icon_button(ui, &palette, Icon::X, 16.0, &t("Close")).clicked() {
                         close = true;
+                    }
+                    // Only browser sessions can; Slack offers no call for
+                    // apps.
+                    if can_add
+                        && theme::icon_button(ui, &palette, Icon::Plus, 16.0, &t("Add emoji…"))
+                            .clicked()
+                    {
+                        add = true;
                     }
                 });
             });
@@ -605,6 +617,9 @@ fn picker(app: &mut App, ctx: &egui::Context) {
     }
     if close || response.should_close() {
         app.picker = None;
+    }
+    if add {
+        app.actions.push(Action::AddEmoji);
     }
     // What Enter picks gets your tone like a click would.
     let chosen = chosen.map(|name| crate::emoji::toned(&name, tone));
@@ -806,19 +821,62 @@ fn confirm_delete(app: &mut App, ctx: &egui::Context) {
     let Some((channel, ts)) = app.confirm_delete.clone() else {
         return;
     };
+    let answer = confirm(
+        app,
+        ctx,
+        "confirm-delete",
+        &t("Delete message?"),
+        &t("This cannot be undone."),
+    );
+    match answer {
+        Some(true) => {
+            app.actions.push(Action::Delete { channel, ts });
+            app.confirm_delete = None;
+        }
+        Some(false) => app.confirm_delete = None,
+        None => {}
+    }
+}
+
+/// "Delete sidebar-v2.png?" for your own file.
+fn confirm_delete_file(app: &mut App, ctx: &egui::Context) {
+    let Some((file, name)) = app.confirm_delete_file.clone() else {
+        return;
+    };
+    let answer = confirm(
+        app,
+        ctx,
+        "confirm-delete-file",
+        &crate::i18n::tf("Delete {name}?", &[("name", &name)]),
+        &t("This removes it for everyone."),
+    );
+    match answer {
+        Some(true) => {
+            app.actions.push(Action::DeleteFile { file, name });
+            app.confirm_delete_file = None;
+        }
+        Some(false) => app.confirm_delete_file = None,
+        None => {}
+    }
+}
+
+/// A dialog asking whether to delete something: `title`, `body`, Cancel
+/// and a red Delete. Answers once a choice is made; Enter deletes and
+/// Escape or a click outside cancels.
+fn confirm(app: &App, ctx: &egui::Context, id: &str, title: &str, body: &str) -> Option<bool> {
     let palette = app.palette;
     let mut answer = None;
-    let response = egui::Modal::new(egui::Id::new("confirm-delete"))
+    let response = egui::Modal::new(egui::Id::new(id))
         .frame(modal_frame(app))
         .show(ctx, |ui| {
             ui.set_width(360.0);
             ui.label(
-                RichText::new(t("Delete message?"))
+                RichText::new(title)
                     .font(theme::bold(17.0))
                     .color(palette.text),
             );
             ui.label(
-                RichText::new(t("This cannot be undone."))
+                RichText::new(body)
                     .font(theme::regular(14.0))
                     .color(palette.secondary),
             );
@@ -845,14 +903,7 @@ fn confirm_delete(app: &mut App, ctx: &egui::Context) {
     if response.should_close() {
         answer = Some(false);
     }
-    match answer {
-        Some(true) => {
-            app.actions.push(Action::Delete { channel, ts });
-            app.confirm_delete = None;
-        }
-        Some(false) => app.confirm_delete = None,
-        None => {}
-    }
+    answer
 }
 
 /// The question an app asked to have put before its button is pressed,

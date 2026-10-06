@@ -1,4 +1,5 @@
-//! The right-click menu on messages.
+//! The right-click menu on messages, and what it shares with other
+//! menus.
 //!
 //! Widgets inside a message (a picture, a link) say they are under the
 //! pointer with [`hover`]; when the message is right-clicked, whatever was
@@ -23,9 +24,37 @@ pub enum Target {
         /// The image loader's URIs to copy it from, best first: the full
         /// picture, then the thumbnail on screen.
         copy: Vec<String>,
+        /// Whether it is yours, so you may delete it.
+        deletable: bool,
+    },
+    /// Any other file a message shares: a card, a video, a sound.
+    File {
+        file: String,
+        name: String,
+        /// Where it downloads from.
+        download: Option<String>,
+        /// Whether it is yours, so you may delete it.
+        deletable: bool,
     },
     /// A link in the text.
     Link(String),
+}
+
+/// The menu item "Delete file…", for your own file `file` called
+/// `name`: it asks before anything is deleted.
+pub fn delete_file_item(
+    ui: &mut egui::Ui,
+    file: &str,
+    name: &str,
+    actions: &mut Vec<crate::model::Action>,
+) {
+    if ui.button(crate::i18n::t("Delete file…")).clicked() {
+        actions.push(crate::model::Action::AskDeleteFile {
+            file: file.to_owned(),
+            name: name.to_owned(),
+        });
+        ui.close();
+    }
 }
 
 fn hover_id() -> egui::Id {

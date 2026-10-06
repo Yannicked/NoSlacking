@@ -32,6 +32,14 @@ pub enum Failure {
     /// The message is not yours, or its edit window has closed.
     CantEdit,
     CantDelete,
+    /// The file is not yours to delete.
+    CantDeleteFile,
+    /// A custom emoji by that name exists already.
+    EmojiNameTaken,
+    /// The emoji's picture is too large, even after Slack shrank it.
+    EmojiTooBig,
+    /// Slack could not read the emoji's picture.
+    BadEmojiImage,
     /// The sign-in code was used already or has expired.
     LinkExpired,
     /// The OAuth redirect URL does not match the Slack app's.
@@ -179,6 +187,10 @@ impl Failure {
             Self::TooLong => t("the message is too long"),
             Self::CantEdit => t("that message can no longer be edited"),
             Self::CantDelete => t("you cannot delete that message"),
+            Self::CantDeleteFile => t("you cannot delete that file"),
+            Self::EmojiNameTaken => t("an emoji by that name exists already"),
+            Self::EmojiTooBig => t("the picture is too large for an emoji"),
+            Self::BadEmojiImage => t("Slack could not read the picture"),
             Self::LinkExpired => t("the sign-in link expired; try again"),
             Self::BadRedirect => {
                 t("the redirect URL does not match the Slack app; check its OAuth settings")
@@ -455,6 +467,10 @@ mod tests {
             Failure::TooLong,
             Failure::CantEdit,
             Failure::CantDelete,
+            Failure::CantDeleteFile,
+            Failure::EmojiNameTaken,
+            Failure::EmojiTooBig,
+            Failure::BadEmojiImage,
             Failure::LinkExpired,
             Failure::BadRedirect,
             Failure::BadClient,

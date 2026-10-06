@@ -107,7 +107,7 @@ pub(super) fn plain_text(workspace: &WorkspaceState, message: &Message) -> Strin
         return text;
     }
     // A file with no comment, or an app's message that is all layout.
-    match message.files.first() {
+    match message.files.iter().find(|file| !file.deleted) {
         Some(file) => crate::i18n::tf("Shared {name}", &[("name", &file.name)]),
         None => message
             .attachments

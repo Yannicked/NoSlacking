@@ -155,6 +155,8 @@ pub fn guess_height(message: &Message, lead: Lead, look: Look) -> f32 {
     };
     for file in &message.files {
         height += match file.thumb_size {
+            // "This file was deleted."
+            _ if file.deleted => 20.0,
             Some([w, h]) if file.is_image() && w > 0.0 && h > 0.0 => {
                 let scale = (420.0 / w).min(320.0 / h).min(1.0);
                 picture((h * scale).max(24.0) + 4.0)

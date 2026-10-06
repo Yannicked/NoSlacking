@@ -878,6 +878,14 @@ fn thread() -> Vec<Message> {
     ]
 }
 
+/// The pretend workspace's custom emoji.
+fn demo_emoji() -> HashMap<String, String> {
+    HashMap::from([
+        ("partyparrot".to_owned(), PARROT.to_owned()),
+        ("parrot".to_owned(), "alias:partyparrot".to_owned()),
+    ])
+}
+
 pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
     sink.send(Event::AppLoaded(Some(AppCredentials {
         client_id: "1234567890.0987654321".into(),
@@ -913,10 +921,8 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
         });
         sink.send(Event::Emoji {
             team: id.into(),
-            emoji: HashMap::from([
-                ("partyparrot".to_owned(), PARROT.to_owned()),
-                ("parrot".to_owned(), "alias:partyparrot".to_owned()),
-            ]),
+            emoji: demo_emoji(),
+            can_add: true,
         });
         // Groups to mention: type `@des` or `@eng` in the composer.
         let group = |id: &str, handle: &str, name: &str, members| UserGroup {
@@ -1174,6 +1180,34 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
             }
             Command::Download { name, .. } => {
                 sink.send(Event::Notice(Notice::DemoSave { name }));
+            }
+            // Taken after a moment, as Slack would; the list fetched after
+            // it does not have it yet, as Slack's may not.
+            Command::AddEmoji { team, name, .. } => {
+                let sink = sink.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                    sink.send(Event::EmojiAdded {
+                        team,
+                        name,
+                        result: Ok(()),
+                    });
+                });
+            }
+            Command::FetchEmoji { team } => sink.send(Event::Emoji {
+                team,
+                emoji: demo_emoji(),
+                can_add: true,
+            }),
+            // Slack takes it, then says so to every client.
+            Command::DeleteFile { team, file, name } => {
+                sink.send(Event::FileDeleteSettled {
+                    team: team.clone(),
+                    file: file.clone(),
+                    name,
+                    result: Ok(()),
+                });
+                sink.send(Event::FileGone { team, file });
             }
             Command::OpenFile { name, .. } => {
                 sink.send(Event::Notice(Notice::DemoOpen { name }));

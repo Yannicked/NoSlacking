@@ -302,6 +302,11 @@ pub struct File {
     /// first frame, a PDF's first page.
     pub poster: Option<String>,
     pub poster_size: Option<[f32; 2]>,
+    /// Who uploaded it: only they may delete it here.
+    pub user: Option<String>,
+    /// Deleted: Slack keeps the message and says "This file was deleted"
+    /// in its place, and only the id is left.
+    pub deleted: bool,
 }
 
 /// A file to play rather than look at.
@@ -331,6 +336,13 @@ impl File {
 
     pub fn is_pdf(&self) -> bool {
         self.mimetype.eq_ignore_ascii_case("application/pdf")
+    }
+
+    /// Whether `me` may delete it from here: its uploader, while it is
+    /// still there. Admins may delete other people's files too, but this
+    /// client does not offer that.
+    pub fn deletable_by(&self, me: &str) -> bool {
+        !self.deleted && !me.is_empty() && self.user.as_deref() == Some(me)
     }
 }
 
@@ -957,6 +969,23 @@ pub enum Action {
         channel: String,
         ts: Ts,
     },
+    /// Opens the "Add emoji" dialog (browser-session sign-ins).
+    AddEmoji,
+    /// Shows a file picker for the new emoji's picture.
+    PickEmojiImage,
+    /// Adds the emoji the dialog holds to the workspace.
+    SendEmoji,
+    /// Asks before deleting your file `file`, called `name`.
+    AskDeleteFile {
+        file: String,
+        name: String,
+    },
+    /// Deletes your file `file` for everyone (`files.delete`): it goes
+    /// from the screen at once, and comes back if Slack refuses.
+    DeleteFile {
+        file: String,
+        name: String,
+    },
     /// Shows an image large.
     Preview {
         uri: String,
@@ -1324,5 +1353,27 @@ mod tests {
         assert!(!c.has_unread());
         c.latest = Some(Ts::new("6.0"));
         assert!(c.has_unread());
+    }
+
+    #[test]
+    fn only_the_uploader_may_delete_a_file() {
+        let file = File {
+            id: "F1".into(),
+            user: Some("U1".into()),
+            ..File::default()
+        };
+        assert!(file.deletable_by("U1"));
+        assert!(!file.deletable_by("U2"), "someone else's file");
+        assert!(!file.deletable_by(""));
+        let unknown = File {
+            user: None,
+            ..file.clone()
+        };
+        assert!(!unknown.deletable_by("U1"), "an uploader not known");
+        let gone = File {
+            deleted: true,
+            ..file
+        };
+        assert!(!gone.deletable_by("U1"), "deleted already");
     }
 }

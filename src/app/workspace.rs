@@ -27,6 +27,11 @@ pub struct WorkspaceState {
     /// Your Slack sidebar sections, when Slack shares them (sessions).
     pub sections: Option<Vec<SidebarSection>>,
     pub emoji: EmojiSet,
+    /// Whether this sign-in can add custom emoji (browser sessions).
+    pub can_add_emoji: bool,
+    /// Custom emoji added here, kept until Slack's own list has them: a
+    /// list fetched right after may not yet.
+    added_emoji: HashMap<String, String>,
     /// User groups you can mention. Empty when the sign-in may
     /// not list them, which leaves group mentions out of the suggestions.
     pub groups: Vec<UserGroup>,
@@ -84,6 +89,13 @@ pub struct WorkspaceState {
     /// Button presses sent and not yet answered, which show as busy and
     /// cannot be pressed again meanwhile.
     pub pressing: HashSet<crate::model::Press>,
+    /// Files you deleted that Slack has not answered for yet: hidden
+    /// everywhere, and shown again if Slack refuses.
+    deleting_files: HashSet<String>,
+    /// Files Slack says are deleted, by you here or anyone anywhere. A
+    /// copy of a message fetched before the deletion still carries the
+    /// file, and must not bring it back.
+    gone_files: HashSet<String>,
 }
 
 /// What became of a send Slack answered (see [`WorkspaceState::sent`]).
@@ -118,6 +130,8 @@ impl WorkspaceState {
             bots: HashMap::new(),
             sections: None,
             emoji: EmojiSet::default(),
+            can_add_emoji: false,
+            added_emoji: HashMap::new(),
             groups: Vec::new(),
             timelines: HashMap::new(),
             threads: HashMap::new(),
@@ -140,7 +154,16 @@ impl WorkspaceState {
             suppressed: HashSet::new(),
             quotes: crate::quotes::Cache::default(),
             pressing: HashSet::new(),
+            deleting_files: HashSet::new(),
+            gone_files: HashSet::new(),
         }
+    }
+
+    /// Whether file `id` still shows: not deleted, here or in Slack. A
+    /// deleted file stands as "This file was deleted", as Slack's own
+    /// copy of the message will say once it comes.
+    pub fn shows_file(&self, id: &str) -> bool {
+        !self.deleting_files.contains(id) && !self.gone_files.contains(id)
     }
 
     /// Whether you marked `channel` unread and it is to stay so while it
@@ -1341,6 +1364,51 @@ impl WorkspaceState {
         before
     }
 
+    /// The workspace's custom emoji arrived; those added here that the
+    /// list does not have yet stay.
+    pub(super) fn emoji_arrived(&mut self, mut emoji: HashMap<String, String>, can_add: bool) {
+        self.added_emoji.retain(|name, _| !emoji.contains_key(name));
+        for (name, url) in &self.added_emoji {
+            emoji.insert(name.clone(), url.clone());
+        }
+        self.emoji = EmojiSet::new(emoji);
+        self.can_add_emoji = can_add;
+    }
+
+    /// You added custom emoji `name`: it shows at once, from `url` (the
+    /// picture you picked) until Slack's list brings its own.
+    pub(super) fn emoji_added(&mut self, name: String, url: String) {
+        self.emoji.insert(name.clone(), url.clone());
+        self.added_emoji.insert(name, url);
+    }
+
+    /// You deleted file `id`: it is hidden at once, wherever it shows,
+    /// until Slack answers ([`Self::file_delete_settled`]).
+    pub(super) fn hide_file(&mut self, id: &str) {
+        if !self.gone_files.contains(id) {
+            self.deleting_files.insert(id.to_owned());
+        }
+    }
+
+    /// Slack answered your deletion of file `id`. Taken, it stays hidden
+    /// for good; refused, it shows again, unless Slack itself said
+    /// meanwhile that it is gone. Returns whether it shows again.
+    pub(super) fn file_delete_settled(&mut self, id: &str, deleted: bool) -> bool {
+        let was_hidden = self.deleting_files.remove(id);
+        if deleted {
+            self.gone_files.insert(id.to_owned());
+            return false;
+        }
+        was_hidden && self.shows_file(id)
+    }
+
+    /// Slack says file `id` was deleted (`file_deleted`), here or
+    /// anywhere: it stays hidden, and nothing brings it back.
+    pub(super) fn file_gone(&mut self, id: &str) {
+        self.deleting_files.remove(id);
+        self.gone_files.insert(id.to_owned());
+    }
+
     /// Takes back a change Slack refused: the text before your edit, the
     /// message you deleted, or your reaction toggle.
     pub(super) fn undo(&mut self, channel: &str, change: Change) {
@@ -1740,6 +1808,114 @@ mod tests {
             user_id: "U1".into(),
             sign_in: Default::default(),
         })
+    }
+
+    /// A message of yours in C1 at `ts` sharing file F1.
+    fn with_file(ts: &str) -> Message {
+        Message {
+            files: vec![crate::model::File {
+                id: "F1".into(),
+                name: "sidebar-v2.png".into(),
+                user: Some("U1".into()),
+                ..crate::model::File::default()
+            }],
+            ..message(ts, None)
+        }
+    }
+
+    #[test]
+    fn a_deleted_file_hides_at_once_and_comes_back_if_refused() {
+        let mut w = workspace();
+        w.timelines
+            .entry("C1".into())
+            .or_default()
+            .upsert(with_file("1.0"));
+        assert!(w.shows_file("F1"));
+        w.hide_file("F1");
+        assert!(!w.shows_file("F1"), "hidden before Slack answers");
+        // A copy of the message from before the deletion (a reaction, say)
+        // must not bring it back.
+        w.message_changed("C1", with_file("1.0"));
+        assert!(!w.shows_file("F1"));
+        assert!(
+            w.file_delete_settled("F1", false),
+            "refused: it shows again"
+        );
+        assert!(w.shows_file("F1"));
+        assert_eq!(w.timelines["C1"].messages[0].files.len(), 1);
+        assert!(!w.timelines["C1"].messages[0].files[0].deleted);
+        // Taken: it stays hidden, whatever copy comes later.
+        w.hide_file("F1");
+        assert!(!w.file_delete_settled("F1", true));
+        w.message_changed("C1", with_file("1.0"));
+        assert!(!w.shows_file("F1"));
+    }
+
+    #[test]
+    fn file_deleted_and_the_tombstone_agree_with_your_deletion() {
+        let mut w = workspace();
+        w.timelines
+            .entry("C1".into())
+            .or_default()
+            .upsert(with_file("1.0"));
+        w.hide_file("F1");
+        // Slack's events come before its answer: the file is gone for
+        // good, and the message stays once, with the file in its place.
+        w.file_gone("F1");
+        let mut tombstone = with_file("1.0");
+        tombstone.files = vec![crate::model::File {
+            id: "F1".into(),
+            deleted: true,
+            ..crate::model::File::default()
+        }];
+        w.message_changed("C1", tombstone);
+        let messages = &w.timelines["C1"].messages;
+        assert_eq!(messages.len(), 1, "no duplicate");
+        assert!(messages[0].files[0].deleted);
+        // A late refusal (a retry that found nothing to delete) does not
+        // bring back what Slack itself says is gone.
+        assert!(!w.file_delete_settled("F1", false));
+        assert!(!w.shows_file("F1"));
+        // Someone else's deletion, seen only through the event.
+        w.file_gone("F9");
+        assert!(!w.shows_file("F9"));
+        assert!(!w.file_delete_settled("F9", false), "never hidden here");
+    }
+
+    #[test]
+    fn a_new_emoji_shows_at_once_and_survives_a_list_without_it() {
+        let mut w = workspace();
+        w.emoji_arrived(
+            HashMap::from([("a".to_owned(), "https://x/a.png".to_owned())]),
+            true,
+        );
+        assert!(w.can_add_emoji);
+        w.emoji_added("shipit".into(), "bytes://new/shipit.png".into());
+        assert!(w.emoji.contains("shipit"));
+        // Slack's list from just after may not have it yet.
+        w.emoji_arrived(
+            HashMap::from([("a".to_owned(), "https://x/a.png".to_owned())]),
+            true,
+        );
+        assert_eq!(
+            w.emoji.resolve("shipit"),
+            crate::emoji::Resolved::Image("bytes://new/shipit.png".into())
+        );
+        // Once it does, Slack's address wins.
+        w.emoji_arrived(
+            HashMap::from([("shipit".to_owned(), "https://x/shipit.png".to_owned())]),
+            true,
+        );
+        assert_eq!(
+            w.emoji.resolve("shipit"),
+            crate::emoji::Resolved::Image("https://x/shipit.png".into())
+        );
+        w.emoji_arrived(HashMap::new(), false);
+        assert!(
+            !w.emoji.contains("shipit"),
+            "Slack's word is final after that"
+        );
+        assert!(!w.can_add_emoji);
     }
 
     /// A workspace with a parent in C1 and two replies loaded in its thread.

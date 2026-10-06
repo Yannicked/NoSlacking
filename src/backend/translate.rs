@@ -101,6 +101,16 @@ pub(super) fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> 
                 }));
             }
         }
+        // Slack also sends the message with the file as a tombstone
+        // (`message_changed`); this says so for every copy at once.
+        "file_deleted" => {
+            if let Some(file) = str_of(event, "file_id").filter(|f| !f.is_empty()) {
+                out.push(Translated::Event(Event::FileGone {
+                    team,
+                    file: file.to_owned(),
+                }));
+            }
+        }
         "member_joined_channel" | "member_left_channel" => {
             let user = str_of(event, "user");
             if user == Some(me)
@@ -278,6 +288,27 @@ mod tests {
         )[..]
         {
             [Translated::Event(Event::Deleted { ts, .. })] => assert_eq!(ts.as_str(), "1.0"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_deleted_file_and_its_tombstone_agree() {
+        match &events(r#"{"type":"file_deleted","file_id":"F1","event_ts":"3.0"}"#)[..] {
+            [Translated::Event(Event::FileGone { file, .. })] => assert_eq!(file, "F1"),
+            other => panic!("{other:?}"),
+        }
+        assert!(events(r#"{"type":"file_deleted"}"#).is_empty());
+        // The message that shared it stays, with the file in its place.
+        match &events(
+            r#"{"type":"message","subtype":"message_changed","channel":"C1","message":{"user":"U2","text":"","ts":"1.0","files":[{"id":"F1","mode":"tombstone"}]}}"#,
+        )[..]
+        {
+            [Translated::Event(Event::Message { message, .. })] => {
+                assert_eq!(message.files.len(), 1);
+                assert!(message.files[0].deleted);
+                assert_eq!(message.files[0].id, "F1");
+            }
             other => panic!("{other:?}"),
         }
     }

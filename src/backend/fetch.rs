@@ -31,6 +31,18 @@ const SECTION_PAGES: usize = 10;
 /// `stars.list`, 200 stars a page.
 const STAR_PAGES: usize = 20;
 
+/// The workspace's custom emoji, and whether this sign-in may add more.
+pub(super) async fn emoji(client: &Client, team: &str, sink: &Sink) {
+    match client.call::<types::EmojiList>("emoji.list", &[]).await {
+        Ok(list) => sink.send(Event::Emoji {
+            team: team.to_owned(),
+            emoji: list.emoji,
+            can_add: client.token().is_session(),
+        }),
+        Err(error) => log::info!("emoji.list: {error}"),
+    }
+}
+
 /// A workspace's name, domain and icon.
 pub(super) async fn workspace_details(client: &Client, team: &str, user: &str) -> Workspace {
     let mut workspace = Workspace {
@@ -133,13 +145,7 @@ pub(super) async fn boot(
         sink.send(Event::WorkspaceReady(details));
     }
     let list = conversations(client.clone(), team.clone(), cache.clone(), sink.clone()).await;
-    match client.call::<types::EmojiList>("emoji.list", &[]).await {
-        Ok(list) => sink.send(Event::Emoji {
-            team: team.clone(),
-            emoji: list.emoji,
-        }),
-        Err(error) => log::info!("emoji.list: {error}"),
-    }
+    emoji(&client, &team, &sink).await;
     user_groups(&client, &team, &sink).await;
     // Side by side, but inside this task, so stopping the boot on sign-out
     // stops them too.

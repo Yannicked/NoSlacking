@@ -2143,6 +2143,44 @@ msgstr "Meer voor {name}"
 msgid "Link"
 msgstr "Link"
 
+# Deleting your own files.
+msgid "Delete file…"
+msgstr "Bestand verwijderen…"
+
+msgid "This file was deleted."
+msgstr "Dit bestand is verwijderd."
+
+msgid "Delete {name}?"
+msgstr "{name} verwijderen?"
+
+msgid "This removes it for everyone."
+msgstr "Het verdwijnt dan voor iedereen."
+
+msgid "Could not delete {name}: {error}"
+msgstr "Kon {name} niet verwijderen: {error}"
+
+msgid "you cannot delete that file"
+msgstr "je kunt dat bestand niet verwijderen"
+
+# Adding a custom emoji.
+msgid "Add emoji…"
+msgstr "Emoji toevoegen…"
+
+msgid "Add emoji"
+msgstr "Emoji toevoegen"
+
+msgid "Choose a picture…"
+msgstr "Kies een afbeelding…"
+
+msgid "Choose another picture…"
+msgstr "Kies een andere afbeelding…"
+
+msgid "Not square: Slack will fit it into a square."
+msgstr "Niet vierkant: Slack past hem in een vierkant."
+
+msgid "PNG, JPEG or GIF, up to 128 KB. Square pictures look best."
+msgstr "PNG, JPEG of GIF, tot 128 KB. Vierkante afbeeldingen zien er het best uit."
+
 msgid "Name"
 msgstr "Naam"
 
@@ -2208,3 +2246,45 @@ msgstr "Weet je het zeker?"
 
 msgid "Yes"
 msgstr "Ja"
+
+msgid "for example shipit"
+msgstr "bijvoorbeeld shipit"
+
+msgid "Type :{name}: to use it."
+msgstr "Typ :{name}: om hem te gebruiken."
+
+msgid "Add"
+msgstr "Toevoegen"
+
+msgid "Give the emoji a name."
+msgstr "Geef de emoji een naam."
+
+msgid "That name is too long."
+msgstr "Die naam is te lang."
+
+msgid "Use lowercase letters, numbers, dashes and underscores only."
+msgstr "Gebruik alleen kleine letters, cijfers, streepjes en underscores."
+
+msgid "An emoji by that name exists already."
+msgstr "Er bestaat al een emoji met die naam."
+
+msgid "The picture is over 128 KB, which Slack does not take."
+msgstr "De afbeelding is groter dan 128 KB, en dat neemt Slack niet aan."
+
+msgid "Pick a PNG, JPEG or GIF picture."
+msgstr "Kies een PNG-, JPEG- of GIF-afbeelding."
+
+msgid "Added :{name}:"
+msgstr ":{name}: toegevoegd"
+
+msgid "Could not add :{name}:: {error}"
+msgstr "Kon :{name}: niet toevoegen: {error}"
+
+msgid "an emoji by that name exists already"
+msgstr "er bestaat al een emoji met die naam"
+
+msgid "the picture is too large for an emoji"
+msgstr "de afbeelding is te groot voor een emoji"
+
+msgid "Slack could not read the picture"
+msgstr "Slack kon de afbeelding niet lezen"

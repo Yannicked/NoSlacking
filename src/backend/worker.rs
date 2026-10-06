@@ -772,6 +772,7 @@ impl Worker {
                 ts,
                 removed,
             } => self.change(team, channel, Change::Delete { ts, removed }),
+            Command::DeleteFile { team, file, name } => self.delete_file(team, file, name),
             Command::React {
                 team,
                 channel,
@@ -850,6 +851,18 @@ impl Worker {
                     tokio::spawn(super::desktop::mute(
                         client, team, channel, muted, all, sink,
                     ));
+                }
+            }
+            Command::AddEmoji {
+                team,
+                name,
+                image,
+                file_name,
+                mime,
+            } => self.add_emoji(team, name, image, file_name, mime),
+            Command::FetchEmoji { team } => {
+                if let Some((client, sink)) = self.team(&team) {
+                    tokio::spawn(async move { super::fetch::emoji(&client, &team, &sink).await });
                 }
             }
             Command::FetchDnd { team } => {
@@ -980,6 +993,65 @@ impl Worker {
                 change,
                 result,
             });
+        });
+    }
+
+    /// `files.delete`, answered with [`Event::FileDeleteSettled`] either
+    /// way, so a file hidden on screen never stays hidden after a refusal.
+    fn delete_file(&self, team: String, file: String, name: String) {
+        let Some((client, sink)) = self.team(&team) else {
+            self.sink.send(Event::FileDeleteSettled {
+                team,
+                file,
+                name,
+                result: Err(Failure::NotSignedIn),
+            });
+            return;
+        };
+        tokio::spawn(async move {
+            let (method, params, ignore) = delete_file_request(&file);
+            let result = match client.act::<Value>(method, &params).await {
+                Ok(_) => Ok(()),
+                // Gone already, which is what was asked.
+                Err(SlackError::Api(code)) if ignore.contains(&code.as_str()) => Ok(()),
+                Err(error) => Err(failure(&error)),
+            };
+            sink.send(Event::FileDeleteSettled {
+                team,
+                file,
+                name,
+                result,
+            });
+        });
+    }
+
+    /// `emoji.add` as the web client sends it; only a browser session
+    /// may, so any other sign-in is told so without asking Slack.
+    fn add_emoji(
+        &self,
+        team: String,
+        name: String,
+        image: Vec<u8>,
+        file_name: String,
+        mime: String,
+    ) {
+        let answer = |sink: &Sink, team, name, result| {
+            sink.send(Event::EmojiAdded { team, name, result });
+        };
+        let Some((client, sink)) = self.team(&team) else {
+            answer(&self.sink, team, name, Err(Failure::NotSignedIn));
+            return;
+        };
+        if !client.token().is_session() {
+            answer(&sink, team, name, Err(Failure::NeedsSession));
+            return;
+        }
+        tokio::spawn(async move {
+            let result = client
+                .add_emoji(&name, image, &file_name, &mime)
+                .await
+                .map_err(|e| failure(&e));
+            answer(&sink, team, name, result);
         });
     }
 
@@ -1646,6 +1718,22 @@ fn request(
     }
 }
 
+/// The call that deletes file `file`, and the refusals that mean it is
+/// gone already.
+fn delete_file_request(
+    file: &str,
+) -> (
+    &'static str,
+    Vec<(&'static str, String)>,
+    &'static [&'static str],
+) {
+    (
+        "files.delete",
+        vec![("file", file.to_owned())],
+        &["file_not_found", "file_deleted"],
+    )
+}
+
 /// What [`Worker::slash`] runs: the command's own method, or
 /// `chat.command`. `Ok` carries Slack's reply text, when it has one.
 async fn run_slash(
@@ -1723,6 +1811,16 @@ async fn run_slash(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleting_a_file_names_only_the_file_and_takes_gone_as_done() {
+        let (method, params, ignore) = delete_file_request("F1");
+        assert_eq!(method, "files.delete");
+        assert_eq!(params, vec![("file", "F1".to_owned())]);
+        assert!(ignore.contains(&"file_not_found"));
+        assert!(ignore.contains(&"file_deleted"));
+        assert!(!ignore.contains(&"cant_delete_file"), "a refusal is undone");
+    }
 
     /// A worker with no network behind it: an in-memory keyring, a
     /// throwaway folder, and the events it sends.

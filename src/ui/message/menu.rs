@@ -200,6 +200,7 @@ pub(super) fn context_menu(
                 download,
                 permalink,
                 copy,
+                deletable,
             }) => {
                 if ui.button(t("Open image")).clicked() {
                     actions.push(Action::ViewImage {
@@ -228,6 +229,29 @@ pub(super) fn context_menu(
                 {
                     actions.push(Action::OpenUrl(page.clone()));
                     ui.close();
+                }
+                if *deletable {
+                    crate::ui::context::delete_file_item(ui, file, name, actions);
+                }
+                ui.separator();
+            }
+            Some(Target::File {
+                file,
+                name,
+                download,
+                deletable,
+            }) => {
+                if let Some(url) = download
+                    && ui.button(t("Download")).clicked()
+                {
+                    actions.push(Action::Download {
+                        url: url.clone(),
+                        name: name.clone(),
+                    });
+                    ui.close();
+                }
+                if *deletable {
+                    crate::ui::context::delete_file_item(ui, file, name, actions);
                 }
                 ui.separator();
             }

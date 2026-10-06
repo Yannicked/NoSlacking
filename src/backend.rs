@@ -136,6 +136,26 @@ pub enum Command {
         /// Slack refuses.
         removed: Option<Box<Message>>,
     },
+    /// Deletes your file `file` (`files.delete`), already hidden on
+    /// screen; `name` is for telling you if Slack refuses.
+    DeleteFile {
+        team: String,
+        file: String,
+        name: String,
+    },
+    /// Adds custom emoji `name` with picture `image` (browser sessions
+    /// only), answered with [`Event::EmojiAdded`].
+    AddEmoji {
+        team: String,
+        name: String,
+        image: Vec<u8>,
+        file_name: String,
+        mime: String,
+    },
+    /// Fetches the workspace's custom emoji again (`emoji.list`).
+    FetchEmoji {
+        team: String,
+    },
     /// Adds or takes back your reaction, already toggled on screen.
     React {
         team: String,
@@ -483,6 +503,27 @@ impl std::fmt::Debug for Command {
                 .field("team", team)
                 .field("channel", channel)
                 .finish(),
+            Self::DeleteFile { team, file, name } => f
+                .debug_struct("DeleteFile")
+                .field("team", team)
+                .field("file", file)
+                .field("name", name)
+                .finish(),
+            Self::AddEmoji {
+                team,
+                name,
+                image,
+                file_name,
+                mime,
+            } => f
+                .debug_struct("AddEmoji")
+                .field("team", team)
+                .field("name", name)
+                .field("image", &image.len())
+                .field("file_name", file_name)
+                .field("mime", mime)
+                .finish(),
+            Self::FetchEmoji { team } => f.debug_struct("FetchEmoji").field("team", team).finish(),
             Self::Reconnect => f.write_str("Reconnect"),
             Self::SetProxy(proxy) => f.debug_tuple("SetProxy").field(&proxy.mode).finish(),
             Self::Snooze { team, minutes } => f
@@ -604,9 +645,18 @@ pub enum Event {
         team: String,
         sections: Vec<SidebarSection>,
     },
+    /// The workspace's custom emoji; `can_add` says whether this sign-in
+    /// can add more (browser sessions, through the web client's call).
     Emoji {
         team: String,
         emoji: HashMap<String, String>,
+        can_add: bool,
+    },
+    /// Slack answered [`Command::AddEmoji`].
+    EmojiAdded {
+        team: String,
+        name: String,
+        result: Result<(), Failure>,
     },
     /// The workspace's user groups, for mentioning them. Never sent when
     /// the sign-in may not list them.
@@ -694,6 +744,19 @@ pub enum Event {
         team: String,
         channel: String,
         ts: Ts,
+    },
+    /// Slack answered [`Command::DeleteFile`]: `Ok` once the file is gone
+    /// (or was already).
+    FileDeleteSettled {
+        team: String,
+        file: String,
+        name: String,
+        result: Result<(), Failure>,
+    },
+    /// A file was deleted, here or anywhere (`file_deleted`).
+    FileGone {
+        team: String,
+        file: String,
     },
     Reaction {
         team: String,
