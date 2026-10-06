@@ -376,6 +376,37 @@ pub struct Attachment {
     pub footer: Option<String>,
     /// Block Kit layout some apps put inside an attachment.
     pub blocks: Vec<KitBlock>,
+    /// Set when Slack unfurled a link to a Slack message: the card is then
+    /// drawn as a quote of that message rather than as a link preview.
+    pub quote: Option<Quote>,
+}
+
+/// A Slack message quoted under the one that links to it, the way Slack
+/// shows a permalink: who wrote it, where and when, and how it starts.
+///
+/// Built from Slack's own unfurl of the link when it sent one, or else
+/// from the message itself, loaded or fetched (see [`crate::quotes`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Quote {
+    /// The link it quotes, which opens the message.
+    pub url: String,
+    /// The conversation it is in, when known.
+    pub channel: Option<String>,
+    /// What to call that conversation ("general"), when known.
+    pub channel_name: Option<String>,
+    /// When it was posted, when known.
+    pub ts: Option<Ts>,
+    /// Who wrote it, by user id, when known.
+    pub user: Option<String>,
+    /// The name to show for its author.
+    pub author: Option<String>,
+    /// The author's picture.
+    pub author_icon: Option<String>,
+    /// The quoted text, in mrkdwn.
+    pub text: String,
+    /// Set when the message is deleted or cannot be read: the card then
+    /// says so instead of quoting it.
+    pub unavailable: bool,
 }
 
 /// A Block Kit button. Only links can be followed here; interactive buttons
@@ -731,6 +762,15 @@ pub enum Action {
     /// messages around it, and highlights it. `thread` is its thread's
     /// parent when it is a reply, which then opens beside it.
     JumpTo {
+        channel: String,
+        ts: Ts,
+        thread: Option<Ts>,
+    },
+    /// Fetches message `ts` of `channel` in workspace `team` to quote
+    /// under a link to it; `thread` is its parent for a reply. Asked once
+    /// per message, however often its link is drawn.
+    FetchQuote {
+        team: String,
         channel: String,
         ts: Ts,
         thread: Option<Ts>,

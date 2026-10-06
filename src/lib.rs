@@ -34,6 +34,7 @@ pub mod offline;
 pub mod paste;
 pub mod paths;
 pub mod people;
+pub mod quotes;
 pub mod redact;
 pub mod search;
 pub mod settings;

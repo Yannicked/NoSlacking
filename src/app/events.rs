@@ -188,6 +188,20 @@ impl App {
                 // An anchor kept for the list as it was is stale now.
                 self.prepended = None;
             }
+            Event::Quoted {
+                team,
+                channel,
+                ts,
+                result,
+            } => {
+                if let Err(error) = &result {
+                    log::debug!("could not quote {} in {channel}: {error:?}", ts.as_str());
+                }
+                if let Some(workspace) = self.workspace_mut(&team) {
+                    let arrived = workspace.quote_arrived(&channel, &ts, result);
+                    self.fetch_arrived(&team, arrived);
+                }
+            }
             Event::Search {
                 team,
                 request,

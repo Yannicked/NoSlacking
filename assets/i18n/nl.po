@@ -2098,3 +2098,9 @@ msgstr "NoSlacking toont je nu als actief zolang het verbonden is"
 
 msgid "You are shown as active only while you use NoSlacking"
 msgstr "Je wordt alleen als actief getoond terwijl je NoSlacking gebruikt"
+
+msgid "Message not available"
+msgstr "Bericht niet beschikbaar"
+
+msgid "View message"
+msgstr "Bericht bekijken"

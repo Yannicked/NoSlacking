@@ -532,9 +532,10 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
 - [x] **Keyboard shortcut sheet** on `Ctrl+/` (⌘/) listing what
       `ui/keys.rs` and the message focus handle. *Many shortcuts, and
       nowhere they are listed.*
-- [ ] **Quote Slack permalinks inline.** A link to a message in a known
+- [x] **Quote Slack permalinks inline.** A link to a message in a known
       conversation shows that message from local data (or one
-      `conversations.history` call) instead of a bare link.
+      `conversations.history` call) instead of a bare link. Slack's own
+      `is_msg_unfurl` attachment is drawn as the same quote, never both.
 
 ### P3: Worth having
 

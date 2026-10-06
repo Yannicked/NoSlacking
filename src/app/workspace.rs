@@ -78,6 +78,9 @@ pub struct WorkspaceState {
     /// Messages so deleted, by conversation and real ts, whose echo is not
     /// to bring them back.
     suppressed: HashSet<(String, Ts)>,
+    /// Messages fetched to quote under links to them, which are not
+    /// loaded in any list here.
+    pub quotes: crate::quotes::Cache,
 }
 
 /// What became of a send Slack answered (see [`WorkspaceState::sent`]).
@@ -132,6 +135,7 @@ impl WorkspaceState {
             echoed: HashMap::new(),
             cancelled: HashSet::new(),
             suppressed: HashSet::new(),
+            quotes: crate::quotes::Cache::default(),
         }
     }
 
@@ -451,6 +455,25 @@ impl WorkspaceState {
             self.requested_users.remove(&user.id);
             self.users.insert(user.id.clone(), user);
         }
+    }
+
+    /// A message fetched to quote, or why it could not be. Returns the
+    /// people and apps to fetch, so its author shows by name.
+    pub(super) fn quote_arrived(
+        &mut self,
+        channel: &str,
+        ts: &Ts,
+        result: Result<Option<Message>, Failure>,
+    ) -> Arrived {
+        let arrived = match &result {
+            Ok(Some(message)) => Arrived {
+                users: self.unknown_users(message.user.as_deref().into_iter()),
+                bots: self.unknown_bots(std::iter::once(message)),
+            },
+            _ => Arrived::default(),
+        };
+        self.quotes.arrived(channel, ts, result);
+        arrived
     }
 
     pub(super) fn bots_arrived(&mut self, bots: Vec<Bot>) {

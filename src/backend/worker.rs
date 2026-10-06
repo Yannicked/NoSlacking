@@ -721,6 +721,24 @@ impl Worker {
                 }
                 None => self.history_unavailable(team, channel),
             },
+            Command::FetchQuote {
+                team,
+                channel,
+                ts,
+                thread,
+            } => match self.team(&team) {
+                Some((client, sink)) => {
+                    tokio::spawn(super::around::quote(
+                        client, team, channel, ts, thread, sink,
+                    ));
+                }
+                None => self.sink.send(Event::Quoted {
+                    team,
+                    channel,
+                    ts,
+                    result: Err(Failure::NotSignedIn),
+                }),
+            },
             Command::Send {
                 team,
                 channel,

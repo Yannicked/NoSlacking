@@ -368,6 +368,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         let row = Row {
             palette: &palette,
             workspace,
+            workspaces,
             channel,
             in_thread: false,
             enter_sends: settings.enter_sends,

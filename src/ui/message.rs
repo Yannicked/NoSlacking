@@ -13,6 +13,7 @@ use crate::theme::{self, Icon, Palette};
 mod cards;
 mod files;
 mod menu;
+mod quote;
 
 use cards::{attachment_media, attachment_view, blocks_view};
 use files::{file_view, poster_size};
@@ -21,6 +22,8 @@ use menu::{context_id, context_menu, toolbar};
 pub struct Row<'a> {
     pub palette: &'a Palette,
     pub workspace: &'a WorkspaceState,
+    /// Every workspace signed in here, for quoting a link into another.
+    pub workspaces: &'a [WorkspaceState],
     pub channel: &'a str,
     pub in_thread: bool,
     /// Whether Enter saves an edit (else Ctrl+Enter), as in the composer.
@@ -522,6 +525,7 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
     for attachment in &message.attachments {
         attachment_view(ui, row, attachment, actions);
     }
+    quote::own_quotes(ui, row, message, actions);
     if !message.reactions.is_empty() {
         reactions(ui, row, message, actions);
     }
