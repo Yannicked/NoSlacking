@@ -84,6 +84,15 @@ pub enum Failure {
     Io(String),
     /// A file that could run code if opened, so only downloading is offered.
     NotOpenable,
+    /// A file too large for the viewer, or declaring more than it holds.
+    ViewTooLarge,
+    /// A file the viewer could not read (damaged, or not what its name
+    /// says); the detail is the reader's own and technical.
+    Unreadable(String),
+    /// A compressed file that would unpack to far more than its size.
+    Bomb,
+    /// A file the viewer was to show as text that is not text.
+    NotText,
     /// The sign-in by cookie needs the workspace's address.
     NoWorkspaceAddress,
     /// The browser could not be opened for the sign-in.
@@ -229,6 +238,15 @@ impl Failure {
                 );
             }
             Self::NotOpenable => t("it cannot be opened here; download it instead"),
+            Self::ViewTooLarge => t("it is too large to show here; download it instead"),
+            Self::Unreadable(detail) => {
+                return fill(
+                    &t("the file could not be read ({detail})"),
+                    &[("detail", detail)],
+                );
+            }
+            Self::Bomb => t("it would unpack to far more than its size, so it is not opened"),
+            Self::NotText => t("it is not a text file"),
             Self::NoWorkspaceAddress => {
                 t("Enter your workspace's Slack address, such as acme.slack.com.")
             }
@@ -493,6 +511,10 @@ mod tests {
             Failure::DiskFull,
             Failure::Io("broken pipe".into()),
             Failure::NotOpenable,
+            Failure::ViewTooLarge,
+            Failure::Unreadable("invalid zip".into()),
+            Failure::Bomb,
+            Failure::NotText,
             Failure::NoWorkspaceAddress,
             Failure::NoBrowser,
             Failure::NotASignInLink,

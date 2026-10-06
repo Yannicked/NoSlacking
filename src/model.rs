@@ -1200,6 +1200,17 @@ pub enum Action {
         url: String,
         name: String,
     },
+    /// Opens a spreadsheet, CSV file, archive or text file in the app's
+    /// own viewer. `size` is the file's, as Slack gives it.
+    ViewFile {
+        url: String,
+        name: String,
+        filetype: String,
+        kind: crate::viewer::Kind,
+        size: u64,
+    },
+    /// Closes the file viewer.
+    CloseViewer,
     OpenUrl(String),
     /// Presses an app's interactive button. When the app asked for a
     /// `confirm` dialog, this asks first, unless `confirmed`.

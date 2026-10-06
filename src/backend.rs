@@ -209,6 +209,16 @@ pub enum Command {
         url: String,
         name: String,
     },
+    /// Downloads a file into memory and reads it for the file viewer,
+    /// answered by [`Event::FileView`] with the same `id`. `size` is what
+    /// Slack says it is, so a file too large is refused before fetching.
+    ViewFile {
+        id: u64,
+        team: String,
+        url: String,
+        kind: crate::viewer::Kind,
+        size: u64,
+    },
     Mark {
         team: String,
         channel: String,
@@ -471,6 +481,20 @@ impl std::fmt::Debug for Command {
                 .field("team", team)
                 .field("url", url)
                 .field("name", name)
+                .finish(),
+            Self::ViewFile {
+                id,
+                team,
+                url,
+                kind,
+                size,
+            } => f
+                .debug_struct("ViewFile")
+                .field("id", id)
+                .field("team", team)
+                .field("url", url)
+                .field("kind", kind)
+                .field("size", size)
                 .finish(),
             Self::Mark { team, channel, ts } => f
                 .debug_struct("Mark")
@@ -842,6 +866,11 @@ pub enum Event {
         team: String,
         press: crate::model::Press,
         result: Result<(), Failure>,
+    },
+    /// The file asked for by [`Command::ViewFile`] `id`, read, or why not.
+    FileView {
+        id: u64,
+        result: Result<crate::viewer::Document, Failure>,
     },
     /// Upload `id` has all its bytes up and Slack is being told to share
     /// it. That can't be taken back, so it can no longer be cancelled.

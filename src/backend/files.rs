@@ -175,6 +175,55 @@ pub(super) async fn download(
     save(client, url, name, &dir, false).await
 }
 
+/// Downloads a file into memory for the viewer, at most
+/// [`MAX_DOWNLOAD`](crate::viewer::MAX_DOWNLOAD) of it, and reads it on a
+/// blocking thread. A file that must be read whole and is larger than
+/// that is refused before anything is fetched, by the `size` Slack gave.
+pub(super) async fn view(
+    client: &Client,
+    url: &str,
+    kind: crate::viewer::Kind,
+    size: u64,
+) -> Result<crate::viewer::Document, Failure> {
+    use crate::viewer::MAX_DOWNLOAD;
+    if kind.needs_whole_file() && size > MAX_DOWNLOAD {
+        return Err(Failure::ViewTooLarge);
+    }
+    let mut response = client.download(url).await.map_err(|e| failure(&e))?;
+    let cap = usize::try_from(MAX_DOWNLOAD).unwrap_or(usize::MAX);
+    let mut bytes = Vec::new();
+    let mut cut = false;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| failure(&SlackError::from(e)))?
+    {
+        let room = cap - bytes.len();
+        if chunk.len() > room {
+            bytes.extend_from_slice(&chunk[..room]);
+            cut = true;
+            break;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if cut && kind.needs_whole_file() {
+        return Err(Failure::ViewTooLarge);
+    }
+    read_for_view(kind, bytes, cut).await
+}
+
+/// Reads downloaded bytes for the viewer on a blocking thread: parsing a
+/// workbook can take a while, and the runtime's threads must stay free.
+async fn read_for_view(
+    kind: crate::viewer::Kind,
+    bytes: Vec<u8>,
+    cut: bool,
+) -> Result<crate::viewer::Document, Failure> {
+    tokio::task::spawn_blocking(move || crate::viewer::read(kind, &bytes, cut))
+        .await
+        .unwrap_or_else(|error| Err(Failure::Unreadable(error.to_string())))
+}
+
 /// Downloads a file into the private cache (see
 /// [`ImageLoader::open_dir`](crate::images::ImageLoader::open_dir)) and
 /// opens it in the system's app for it. A file fetched before is opened

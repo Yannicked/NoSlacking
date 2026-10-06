@@ -28,6 +28,16 @@ impl App {
                 self.keyring_error = Some(error);
             }
             Event::SignIn(state) => self.sign_in_changed(state),
+            // A closed viewer, or one since opened on another file, drops
+            // the answer.
+            Event::FileView { id, result } => {
+                if let Some(viewer) = self.viewer.as_mut().filter(|v| v.id == id) {
+                    viewer.state = match result {
+                        Ok(document) => crate::viewer::State::Ready(Box::new(document)),
+                        Err(failure) => crate::viewer::State::Failed(failure),
+                    };
+                }
+            }
             Event::WorkspaceReady(info) => self.workspace_ready(info),
             Event::SignedOut { team, reason } => self.signed_out(&team, reason),
             Event::Socket(socket) => self.socket_changed(socket),

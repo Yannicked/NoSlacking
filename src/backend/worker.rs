@@ -18,7 +18,7 @@ use super::fetch::{
     Boot, boot, conversation_info, conversations, edit_sidebar, history, sections, thread,
     workspace_details,
 };
-use super::files::{UploadGate, download, file_name, open_file, upload};
+use super::files::{UploadGate, download, file_name, open_file, upload, view};
 use super::translate::{Translated, str_of, translate};
 use super::{Change, Command, Event, Gate, SignIn, Sink, Socket};
 use crate::auth::{Flow, SignedIn};
@@ -807,6 +807,13 @@ impl Worker {
             Command::CancelUpload { id } => self.cancel_upload(id),
             Command::Download { team, url, name } => self.download(&team, url, name),
             Command::OpenFile { team, url, name } => self.open_file(&team, url, name),
+            Command::ViewFile {
+                id,
+                team,
+                url,
+                kind,
+                size,
+            } => self.view_file(id, &team, url, kind, size),
             Command::Mark { team, channel, ts } => self.mark(&team, channel, ts),
             Command::FetchUsers { team, ids } => self.fetch_users(team, ids),
             Command::FetchBots { team, ids } => self.fetch_bots(team, ids),
@@ -1185,6 +1192,22 @@ impl Worker {
             if let Err(error) = open_file(&client, dir, &url, &name).await {
                 sink.send(Event::Error(error));
             }
+        });
+    }
+
+    /// Fetches a file for the viewer and reads it off the runtime's
+    /// threads.
+    fn view_file(&self, id: u64, team: &str, url: String, kind: crate::viewer::Kind, size: u64) {
+        let Some((client, sink)) = self.team(team) else {
+            self.sink.send(Event::FileView {
+                id,
+                result: Err(Failure::NotSignedIn),
+            });
+            return;
+        };
+        tokio::spawn(async move {
+            let result = view(&client, &url, kind, size).await;
+            sink.send(Event::FileView { id, result });
         });
     }
 

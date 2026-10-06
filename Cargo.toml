@@ -86,6 +86,15 @@ chacha20poly1305 = { version = "0.11", default-features = false, features = ["al
 # Spell checking in the composer with the system's Hunspell dictionaries:
 # pure Rust (Helix's), MPL-2.0, two small dependencies.
 spellbook = "0.4.2"
+# The file viewer (src/viewer.rs): spreadsheets (MIT, pure Rust; only its
+# XML readers are used), CSV and TSV (Unlicense/MIT), and zip listings.
+# zip and quick-xml are calamine's own, at its versions and features, named
+# here because the viewer measures a workbook's parts before calamine reads
+# them; they add no crate.
+calamine = { version = "0.36", default-features = false }
+csv = { version = "1.4", default-features = false }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+quick-xml = { version = "0.41", default-features = false }
 
 # Desktop notifications: D-Bus on Linux and the BSDs, the notification
 # center on macOS, toasts on Windows. Elsewhere there are none.
