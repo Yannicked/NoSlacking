@@ -29,7 +29,7 @@ pub fn pasted_files(text: &str) -> Option<Vec<PathBuf>> {
         if !rest.starts_with('/') {
             return None;
         }
-        let decoded = urlencoding::decode(rest).ok()?;
+        let decoded = crate::percent::decode(rest).ok()?;
         let path = PathBuf::from(windows_drive(&decoded).unwrap_or(&decoded));
         if !path.is_absolute() || !path.is_file() {
             return None;

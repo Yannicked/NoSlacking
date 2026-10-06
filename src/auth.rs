@@ -137,11 +137,11 @@ impl Flow {
         };
         let url = format!(
             "https://slack.com/oauth/v2/authorize?client_id={}&user_scope={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256",
-            urlencoding::encode(app.client_id.trim()),
-            urlencoding::encode(&request.scopes().join(",")),
-            urlencoding::encode(&redirect_uri),
-            urlencoding::encode(&state),
-            urlencoding::encode(&challenge),
+            crate::percent::encode(app.client_id.trim()),
+            crate::percent::encode(&request.scopes().join(",")),
+            crate::percent::encode(&redirect_uri),
+            crate::percent::encode(&state),
+            crate::percent::encode(&challenge),
         );
         Self {
             state,
@@ -173,7 +173,7 @@ fn callback_params(url: &str) -> Option<[Option<String>; 3]> {
             return None;
         }
         let value =
-            urlencoding::decode(value).map_or_else(|_| value.to_owned(), |v| v.into_owned());
+            crate::percent::decode(value).map_or_else(|_| value.to_owned(), |v| v.into_owned());
         params[slot] = Some(value);
     }
     Some(params)

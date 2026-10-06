@@ -21,7 +21,6 @@ name = "noslacking"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
 thiserror = "2"
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -33,7 +32,7 @@ directories = "6"
 keyring-core = "1"
 # The whole UI. glow keeps the binary and the dependency tree small; a chat
 # client draws nothing wgpu would help with.
-eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "links", "wayland", "x11", "persistence"] }
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "wayland", "x11", "persistence"] }
 egui = "0.36"
 egui_extras = { version = "0.36", features = ["image", "svg", "gif", "webp"] }
 # Slack serves avatars as JPEG and PNG, custom emoji as PNG and GIF, and
@@ -71,7 +70,7 @@ sha1 = "0.11"
 sha2 = "0.11"
 base64 = "0.22"
 rand = "0.10"
-urlencoding = "2"
+percent-encoding = "2"
 open = "5"
 jiff = "0.2"
 # The native file picker for uploads.
