@@ -1046,6 +1046,13 @@ impl App {
             }
             Action::ShowSettings => self.page = Page::Settings,
             Action::ShowShortcuts => self.shortcuts = true,
+            Action::SetAppearance(appearance) => self.set_appearance(appearance),
+            Action::HideInactive(after) => {
+                if after != self.settings.hide_inactive {
+                    self.settings.hide_inactive = after;
+                    self.settings_changed();
+                }
+            }
             Action::HideSettings => {
                 self.page = if self.workspaces.is_empty() {
                     Page::SignIn

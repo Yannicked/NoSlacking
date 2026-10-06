@@ -160,6 +160,16 @@ pub const GROUPS: &[Group] = &[
     },
 ];
 
+/// The first chord of the line labelled `label`, for showing beside what
+/// else does the same, such as a command of the palette.
+pub fn keys_of(label: &str) -> Option<&'static str> {
+    GROUPS
+        .iter()
+        .flat_map(|g| g.shortcuts)
+        .find(|s| s.label == label)
+        .and_then(|s| s.keys.first().copied())
+}
+
 /// The lines of `group` that apply with this "Enter sends".
 pub fn shown(group: &Group, enter_sends: bool) -> impl Iterator<Item = &Shortcut> {
     group.shortcuts.iter().filter(move |s| match s.when {
@@ -667,6 +677,16 @@ mod tests {
             })
             .collect();
         assert!(missing.is_empty(), "not in nl.po: {missing:#?}");
+    }
+
+    #[test]
+    fn every_palette_shortcut_names_a_line_of_the_sheet() {
+        for command in crate::palette::Command::ALL {
+            if let Some(label) = command.shortcut() {
+                assert!(keys_of(label).is_some(), "{command:?}: {label}");
+            }
+        }
+        assert_eq!(keys_of("New message"), Some("Cmd+N"));
     }
 
     #[test]

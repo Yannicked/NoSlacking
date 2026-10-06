@@ -596,6 +596,14 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       `unread_replies`, and is read when a session's workspace is ready so
       the sidebar counts unread threads at once. OAuth sign-ins don't show
       the toggle. Not yet tried against a real workspace.*
+- [x] **Command palette.** *Type `>` first in the quick switcher
+      (Ctrl+K), as in VS Code, rather than learning another chord: mark all
+      as read, set a status, away or active, always show as active, the
+      theme, settings, the shortcut sheet, new message, browse channels,
+      search, pause notifications for an hour, and the next "hide inactive
+      conversations" choice. Each sends the action its menu sends; names
+      match by start, word, substring or letters in order, and show the
+      shortcut sheet's keys when there are any.*
 
 ### Blocked or needs a real workspace
 

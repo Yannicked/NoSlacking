@@ -311,12 +311,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             app.settings_changed();
         }
         let mut hide = app.settings.hide_inactive;
-        let label = |choice: crate::sidebar::HideInactive| match choice {
-            crate::sidebar::HideInactive::Off => t("Off"),
-            crate::sidebar::HideInactive::Week => t("After 1 week"),
-            crate::sidebar::HideInactive::Month => t("After 1 month"),
-            crate::sidebar::HideInactive::ThreeMonths => t("After 3 months"),
-        };
+        let label = crate::sidebar::HideInactive::label;
         row(
             ui,
             palette,

@@ -351,8 +351,8 @@ msgstr "Hernoemen"
 msgid "Create"
 msgstr "Maken"
 
-msgid "Jump to a channel or person…"
-msgstr "Ga naar een kanaal of persoon…"
+msgid "Jump to a channel or person, or type > for commands"
+msgstr "Ga naar een kanaal of persoon, of typ > voor opdrachten"
 
 msgid "Nothing matches."
 msgstr "Niets gevonden."
@@ -2336,3 +2336,21 @@ msgstr "Kon de thread niet volgen: {error}"
 
 msgid "Could not stop following the thread: {error}"
 msgstr "Kon de thread niet ontvolgen: {error}"
+
+msgid "Stop always showing as active"
+msgstr "Niet meer altijd als actief tonen"
+
+msgid "Switch to the light theme"
+msgstr "Overschakelen naar het lichte thema"
+
+msgid "Switch to the dark theme"
+msgstr "Overschakelen naar het donkere thema"
+
+msgid "Open settings"
+msgstr "Instellingen openen"
+
+msgid "Pause notifications for 1 hour"
+msgstr "Meldingen 1 uur pauzeren"
+
+msgid "Hide inactive conversations: {choice}"
+msgstr "Inactieve gesprekken verbergen: {choice}"

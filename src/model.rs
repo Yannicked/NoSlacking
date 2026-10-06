@@ -1096,6 +1096,11 @@ pub enum Action {
     HideSettings,
     /// Opens the sheet that lists the keyboard shortcuts.
     ShowShortcuts,
+    /// Changes the theme, as the settings' Theme choice does.
+    SetAppearance(crate::settings::Appearance),
+    /// Changes after how long quiet conversations are hidden, as the
+    /// settings' choice does.
+    HideInactive(crate::sidebar::HideInactive),
     AddWorkspace,
     SignOut(String),
     Reconnect,

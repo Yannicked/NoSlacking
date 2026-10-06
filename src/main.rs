@@ -48,7 +48,7 @@ struct Cli {
     demo_hover: Option<String>,
 
     /// Open a view before the screenshot: thread, settings, sign-in,
-    /// switcher, picker, profile, share, upload, drafts, lightbox, media,
+    /// switcher, palette, picker, profile, share, upload, drafts, lightbox, media,
     /// compact, held-media, shortcuts, delete-file or add-emoji.
     #[cfg(feature = "demo")]
     #[arg(long, value_name = "VIEW")]
@@ -616,6 +616,11 @@ impl DemoSetup {
             Some("shortcuts") => app.actions.push(Action::ShowShortcuts),
             Some("sign-in") => app.actions.push(Action::AddWorkspace),
             Some("switcher") => app.actions.push(Action::OpenSwitcher),
+            // The switcher as the command palette, `>` typed.
+            Some("palette") => {
+                app.switcher = Some((">".into(), 0));
+                app.focus_overlay = true;
+            }
             Some("picker") => app.actions.push(Action::PickReaction {
                 channel: "C02".into(),
                 ts: parent,
