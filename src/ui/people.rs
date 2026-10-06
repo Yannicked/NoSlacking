@@ -387,3 +387,106 @@ pub fn word(presence: Presence) -> std::borrow::Cow<'static, str> {
         Presence::Away => t("Away"),
     }
 }
+
+/// The huddle invitations ringing, each a card in the top right corner
+/// with Join and Decline (see [`crate::huddles`]).
+pub fn invites(app: &mut App, ctx: &egui::Context) {
+    if app.huddles.invites.list().is_empty() {
+        return;
+    }
+    let palette = app.palette;
+    let several = app.workspaces.len() > 1;
+    let cards: Vec<(String, String, String, String)> = app
+        .huddles
+        .invites
+        .list()
+        .iter()
+        .rev()
+        .take(3)
+        .filter_map(|invite| {
+            let workspace = app
+                .workspaces
+                .iter()
+                .find(|w| w.info.team_id == invite.team)?;
+            let place = workspace
+                .conversation(&invite.channel)
+                .filter(|c| !c.kind.is_dm())
+                .map(|c| format!("#{}", workspace.title(c)));
+            let (title, mut body) =
+                crate::huddles::invite_text(&workspace.user_label(&invite.from), place.as_deref());
+            if several {
+                body = format!("{body} · {}", workspace.info.name);
+            }
+            Some((invite.team.clone(), invite.room.clone(), title, body))
+        })
+        .collect();
+    let mut answers = Vec::new();
+    egui::Area::new(egui::Id::new("huddle-invites"))
+        .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-16.0, 64.0))
+        .order(egui::Order::Foreground)
+        .interactable(true)
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            for (team, room, title, body) in cards {
+                egui::Frame::new()
+                    .fill(palette.overlay)
+                    .stroke(Stroke::new(1.5, ACTIVE))
+                    .corner_radius(egui::CornerRadius::same(theme::RADIUS + 4))
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 8],
+                        blur: 24,
+                        spread: 0,
+                        color: palette.shadow,
+                    })
+                    .inner_margin(Margin::same(14))
+                    .show(ui, |ui| {
+                        ui.set_width(300.0);
+                        ui.horizontal(|ui| {
+                            ui.add(theme::Icon::Headphones.image(ACTIVE, 20.0));
+                            ui.add_space(4.0);
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(&title)
+                                        .font(theme::semibold(14.5))
+                                        .color(palette.text),
+                                );
+                                ui.label(
+                                    RichText::new(&body)
+                                        .font(theme::regular(13.0))
+                                        .color(palette.secondary),
+                                );
+                            });
+                        });
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            let join = egui::Button::new(
+                                RichText::new(t("Join"))
+                                    .font(theme::medium(14.0))
+                                    .color(Color32::WHITE),
+                            )
+                            .fill(ACTIVE)
+                            .corner_radius(egui::CornerRadius::same(theme::RADIUS_SMALL + 2))
+                            .min_size(Vec2::new(0.0, 32.0));
+                            if ui
+                                .add(join)
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text(t("Join the huddle in Slack"))
+                                .clicked()
+                            {
+                                answers.push(crate::huddles::Action::Join {
+                                    team: team.clone(),
+                                    room: room.clone(),
+                                });
+                            }
+                            if theme::secondary_button(ui, &palette, &t("Decline")).clicked() {
+                                answers.push(crate::huddles::Action::Decline {
+                                    team: team.clone(),
+                                    room: room.clone(),
+                                });
+                            }
+                        });
+                    });
+            }
+        });
+    app.actions.extend(answers.into_iter().map(Action::Huddle));
+}

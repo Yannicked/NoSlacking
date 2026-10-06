@@ -427,6 +427,8 @@ impl App {
 
     /// A workspace needs signing in again (`reason`), or was signed out.
     fn signed_out(&mut self, team: &str, reason: Option<Failure>) {
+        // Nothing can be joined or declined there any more.
+        self.huddles.invites.forget(team);
         match reason {
             Some(reason) => {
                 if let Some(workspace) = self.workspace_mut(team) {

@@ -1483,6 +1483,11 @@ impl Worker {
             RtmEvent::Connected => {
                 self.retry_boots(std::time::Instant::now(), true);
                 self.people.rtm_live(team, true);
+                // Huddles may have changed unheard while it was down.
+                self.sink.send(Event::People {
+                    team: team.to_owned(),
+                    event: crate::people::Event::Reconnected,
+                });
                 Socket::Connected
             }
             RtmEvent::Disconnected(error) => {

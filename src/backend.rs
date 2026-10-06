@@ -12,6 +12,7 @@ pub mod convos;
 pub mod desktop;
 mod fetch;
 mod files;
+pub mod huddles;
 pub mod people;
 mod poll;
 mod search;

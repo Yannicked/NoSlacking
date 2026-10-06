@@ -230,6 +230,12 @@ pub enum Command {
     /// so does this, so your automatic presence stays active. Only a
     /// browser session's RTM socket can; otherwise nothing happens.
     Active,
+    /// Declines the invitation to the huddle `room` in `channel`
+    /// (`rooms.inviteResponse`, browser sessions only).
+    DeclineHuddle { channel: String, room: String },
+    /// Asks Slack who is in the huddle `room` shown in `channel`
+    /// (`screenhero.rooms.info`, browser sessions only).
+    CheckHuddle { channel: String, room: String },
 }
 
 /// How often, at most, Slack hears that you are active: Slack's desktop
@@ -292,6 +298,30 @@ pub enum Event {
     Huddles {
         changes: Vec<(String, Option<Huddle>)>,
     },
+    /// Someone rings you into the huddle `room` in `channel` (browser
+    /// sessions; see [`crate::huddles`]).
+    HuddleInvite {
+        channel: String,
+        room: String,
+        from: String,
+    },
+    /// A huddle changed, known only by its room.
+    HuddleRoom {
+        room: String,
+        change: crate::huddles::RoomChange,
+    },
+    /// Slack said who is in the huddle `room` shown in `channel`, or that
+    /// it ended (`None`).
+    HuddleChecked {
+        channel: String,
+        room: String,
+        result: Result<Option<Huddle>, Failure>,
+    },
+    /// Slack answered [`Command::DeclineHuddle`].
+    InviteDeclined { result: Result<(), Failure> },
+    /// The real-time socket connected again: what changed while it was
+    /// down never came.
+    Reconnected,
 }
 
 /// A huddle going on in a conversation.
@@ -640,6 +670,9 @@ pub fn is_typing(before: &str, after: &str) -> bool {
 
 /// Takes in one of the worker's answers for `team`.
 pub fn handle(app: &mut App, team: &str, event: Event) {
+    let Some(event) = crate::huddles::handle(app, team, event) else {
+        return;
+    };
     let before = match &event {
         Event::StatusSet { .. } => app.people.status_before.remove(team),
         _ => None,
@@ -711,6 +744,12 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                 ));
             }
         }
+        // Taken by `huddles::handle` above.
+        Event::HuddleInvite { .. }
+        | Event::HuddleRoom { .. }
+        | Event::HuddleChecked { .. }
+        | Event::InviteDeclined { .. }
+        | Event::Reconnected => {}
     }
     if let Some((text, error)) = toast {
         app.toast(text, error);

@@ -659,13 +659,32 @@ HuddleFM (AGPL, read, don't copy) does this without a browser. Slack's
 terms call undocumented methods unreliable and forbid reverse
 engineering, as for the rest of the session sign-in.
 
-- [ ] **Invitations and live state (days).** A `huddle_invite` becomes a
+- [x] **Invitations and live state (days).** A `huddle_invite` becomes a
       notification with Join (opens `app.slack.com/huddle/T/C`) and
       Decline (`rooms.inviteResponse`); reconcile participants with
       `screenhero.rooms.info` after reconnects and now and then, as join
       and leave events go missing; "Open in Slack app" by the huddle
       indicator. First check these events reach the RTM socket at all
       (HuddleFM hears them on the desktop "flannel" gateway).
+      - Done, for browser sign-ins (`src/huddles.rs`,
+        `src/backend/huddles.rs`): an invitation card with Join and
+        Decline, a desktop notification whose click joins (off during Do
+        Not Disturb, for muted conversations and while the window is in
+        front), gone when answered, when the huddle ends or you join it
+        elsewhere, or after 45 s (the event names no ring time). Room-only
+        `sh_room_join` / `_leave` / `_update` change the participants;
+        `screenhero.rooms.info` checks the huddle in the open conversation
+        every 3 minutes (doubling after failures, at most 30) and every
+        known huddle after an RTM reconnect. Socket Mode carries none of
+        this.
+      - Unverified: `sh_room_*` reach `rtm.connect` sockets (slack-go's
+        RTM maps them), but no open-source `rtm.connect` client handles
+        `huddle_invite`; HuddleFM hears it on the flannel gateway
+        (`wss-primary.slack.com`, `flannel=3`). If RTM never carries it,
+        the next step is that gateway.
+      - Skipped "Open in Slack app": after a browser sign-in NoSlacking
+        stays the `slack://` handler, so `slack://channel?…` would come
+        straight back here. It needs the claim given back first.
 - [ ] **Listen-only spike (1–2 weeks), behind a `huddle-audio` feature:**
       join, receive Chime's mixed audio and play it (`str0m` or
       `webrtc-rs`, `opus`, `cpal`), to prove the path and judge echo
