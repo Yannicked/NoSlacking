@@ -1381,6 +1381,25 @@ msgstr[1] "Huddle · {count} personen"
 msgid "Join the huddle in Slack: {names}"
 msgstr "Neem deel aan de huddle in Slack: {names}"
 
+# A huddle invitation: who rings, and where.
+msgid "{name} invites you to a huddle"
+msgstr "{name} nodigt je uit voor een huddle"
+
+msgid "In {place}"
+msgstr "In {place}"
+
+msgid "In a direct message"
+msgstr "In een privébericht"
+
+msgid "Decline"
+msgstr "Weigeren"
+
+msgid "Join the huddle in Slack"
+msgstr "Neem deel aan de huddle in Slack"
+
+msgid "Could not decline the huddle: {error}"
+msgstr "Kon de huddle niet weigeren: {error}"
+
 msgid "From another organization"
 msgstr "Van een andere organisatie"
 

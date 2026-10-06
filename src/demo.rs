@@ -1193,6 +1193,12 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
     });
     sink.send(Event::Socket(Socket::Connected));
     sink.send(crate::backend::people::demo_huddle(TEAM));
+    // A few seconds in, Bob rings you into a huddle in #general.
+    let ringing = sink.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        ringing.send(crate::backend::huddles::demo_invite(TEAM));
+    });
     // Ana keeps typing in her direct message, as Slack repeats it.
     let typing = sink.clone();
     tokio::spawn(async move {

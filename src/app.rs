@@ -261,6 +261,8 @@ pub struct App {
     pub convos: crate::convos::State,
     /// Watching the people on screen (see [`crate::people`]).
     pub people: crate::people::State,
+    /// Huddle invitations, and when huddles were last checked.
+    pub huddles: crate::huddles::State,
     /// The views at the top of the sidebar and what they list.
     pub views: crate::views::State,
     /// Where the "New" line goes: the read marker when the open
@@ -446,6 +448,7 @@ impl App {
             share: None,
             convos: crate::convos::State::default(),
             people: crate::people::State::default(),
+            huddles: crate::huddles::State::default(),
             views: crate::views::State::default(),
             read_line: None,
             sidebar_filter: String::new(),
@@ -649,6 +652,7 @@ impl App {
         self.desktop_frame();
         let now = Instant::now();
         crate::people::frame(self, now);
+        crate::huddles::frame(self, now);
         self.toasts.retain(|t| t.until > now);
         self.watch_drafts(now);
         if self.settings_due.take_due(now) {
@@ -1275,6 +1279,7 @@ impl App {
             }
             Action::Convos(action) => crate::convos::apply(self, action),
             Action::People(action) => crate::people::apply(self, action),
+            Action::Huddle(action) => crate::huddles::apply(self, action),
             Action::Views(action) => crate::views::apply(self, action),
         }
     }
@@ -1546,7 +1551,7 @@ impl App {
         });
     }
 
-    fn open_url(&mut self, url: &str) {
+    pub(crate) fn open_url(&mut self, url: &str) {
         if crate::links::parse_web(url).is_some_and(|link| self.follow(&link)) {
             // A link into a signed-in workspace opens here.
         } else if !mrkdwn::is_openable(url) {

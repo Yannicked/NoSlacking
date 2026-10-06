@@ -174,12 +174,42 @@ impl App {
             title,
             body,
             sound: settings.sound,
+            link: None,
+        })
+    }
+
+    /// The notification a huddle invitation deserves, if any: as for
+    /// messages, none with notifications off, during Do Not Disturb or
+    /// from a muted conversation, and none while the window is in front,
+    /// where the invitation shows anyway. A click joins.
+    pub(crate) fn invite_note(&self, team: &str, channel: &str, from: &str) -> Option<Note> {
+        let settings = &self.settings.desktop;
+        if self.window_focused || !settings.notifications || self.notifier.is_none() {
+            return None;
+        }
+        let workspace = self.workspaces.iter().find(|w| w.info.team_id == team)?;
+        if workspace.desktop.dnd.quiet(now_seconds()) || workspace.desktop.is_muted(channel) {
+            return None;
+        }
+        let place = workspace
+            .conversation(channel)
+            .filter(|c| !c.kind.is_dm())
+            .map(|c| format!("#{}", workspace.title(c)));
+        let (title, body) =
+            crate::huddles::invite_text(&workspace.user_label(from), place.as_deref());
+        Some(Note {
+            team: team.to_owned(),
+            channel: channel.to_owned(),
+            title,
+            body,
+            sound: settings.sound,
+            link: Some(crate::people::huddle_url(team, channel)),
         })
     }
 
     /// Shows a notification, and asks for attention if the window is in
     /// the background.
-    pub(super) fn notify(&mut self, note: Note) {
+    pub(crate) fn notify(&mut self, note: Note) {
         if let Some(notifier) = &self.notifier {
             notifier.show(note);
             if !self.window_focused {
@@ -199,6 +229,25 @@ impl App {
             .unwrap_or_default();
         for click in clicks {
             if !self.workspaces.iter().any(|w| w.info.team_id == click.team) {
+                continue;
+            }
+            // A huddle invitation: joining answers it.
+            if let Some(link) = &click.link {
+                if let Some(invite) = self
+                    .huddles
+                    .invites
+                    .list()
+                    .iter()
+                    .find(|i| i.team == click.team && i.channel == click.channel)
+                {
+                    let action = crate::huddles::Action::Join {
+                        team: invite.team.clone(),
+                        room: invite.room.clone(),
+                    };
+                    crate::huddles::apply(self, action);
+                } else {
+                    self.open_url(link);
+                }
                 continue;
             }
             if self.active_team().as_deref() != Some(click.team.as_str()) {

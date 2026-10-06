@@ -183,13 +183,17 @@ pub struct Note {
     pub title: String,
     pub body: String,
     pub sound: bool,
+    /// Where a click leads instead, outside NoSlacking: a huddle to join.
+    pub link: Option<String>,
 }
 
-/// A notification that was clicked: the workspace and conversation to open.
+/// A notification that was clicked: the workspace and conversation to
+/// open, or the link it carried.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Clicked {
     pub team: String,
     pub channel: String,
+    pub link: Option<String>,
 }
 
 /// Shows notifications on a thread of its own and reports clicks.
@@ -366,7 +370,14 @@ mod platform {
                 .hint(Hint::Category("im.received".to_owned()))
                 // "default" is the click on the notification itself; the
                 // label shows only where a desktop draws it as a button.
-                .action("default", &crate::i18n::t("Open"));
+                .action(
+                    "default",
+                    &if note.link.is_some() {
+                        crate::i18n::t("Join")
+                    } else {
+                        crate::i18n::t("Open")
+                    },
+                );
             if note.sound {
                 notification.hint(Hint::SoundName("message-new-instant".to_owned()));
             } else {
@@ -393,6 +404,7 @@ mod platform {
         let target = Clicked {
             team: note.team.clone(),
             channel: note.channel.clone(),
+            link: note.link.clone(),
         };
         let clicked = clicked.clone();
         let wake = wake.clone();

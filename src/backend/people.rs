@@ -113,7 +113,10 @@ impl Hub {
     /// Runs one command for `team`.
     pub fn command(&mut self, team: &str, command: Command) {
         match command {
-            Command::SetStatus { .. } | Command::SetAway(_) => {
+            Command::SetStatus { .. }
+            | Command::SetAway(_)
+            | Command::DeclineHuddle { .. }
+            | Command::CheckHuddle { .. } => {
                 log::debug!("{command:?} needs the workspace's client");
             }
             Command::Active => {
@@ -269,7 +272,7 @@ pub fn call(client: Client, team: String, command: Command, sink: Sink) -> Optio
             });
             None
         }
-        other => Some(other),
+        other => super::huddles::call(client, team, other, sink),
     }
 }
 
@@ -306,7 +309,7 @@ pub async fn set_away(client: &Client, away: bool) -> Result<(), SlackError> {
 /// Reads a huddle's room, as Slack sends it on `huddle_thread` messages
 /// and `sh_room_*` events: the conversations it is in, and the huddle,
 /// or `None` once it has ended or emptied.
-fn room(room: &Value) -> Option<(Vec<String>, Option<people::Huddle>)> {
+pub(super) fn room(room: &Value) -> Option<(Vec<String>, Option<people::Huddle>)> {
     let id = room.get("id").and_then(Value::as_str)?.to_owned();
     let strings = |key: &str| -> Vec<String> {
         room.get(key)
@@ -319,7 +322,17 @@ fn room(room: &Value) -> Option<(Vec<String>, Option<people::Huddle>)> {
             })
             .unwrap_or_default()
     };
-    let participants = strings("participants");
+    // Slack lists participants by id, or as objects with a `user_id`.
+    let participants: Vec<String> = room
+        .get("participants")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|p| p.as_str().or_else(|| p.get("user_id")?.as_str()))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
     let ended = room.get("has_ended").and_then(Value::as_bool) == Some(true)
         || room
             .get("date_end")
@@ -398,13 +411,23 @@ pub fn translate(event: &Value) -> Option<people::Event> {
             })
         }
         // A huddle started, someone joined or left, or it ended (browser
-        // sessions, over RTM).
+        // sessions, over RTM). Without the conversations, only the room
+        // is known.
         kind if kind.starts_with("sh_room_") => {
-            let (channels, huddle) = room(event.get("huddle").or_else(|| event.get("room"))?)?;
-            (!channels.is_empty()).then(|| people::Event::Huddles {
-                changes: channels.into_iter().map(|c| (c, huddle.clone())).collect(),
-            })
+            let whole = event
+                .get("huddle")
+                .or_else(|| event.get("room"))
+                .and_then(room)
+                .filter(|(channels, _)| !channels.is_empty());
+            match whole {
+                Some((channels, huddle)) => Some(people::Event::Huddles {
+                    changes: channels.into_iter().map(|c| (c, huddle.clone())).collect(),
+                }),
+                None => super::huddles::room_change(kind, event),
+            }
         }
+        // Someone rings you into a huddle (browser sessions).
+        "huddle_invite" => super::huddles::invite(event),
         // You set yourself away or active, here or in another client.
         "manual_presence_change" => Some(people::Event::ManualPresence {
             away: event.get("presence")?.as_str()? == "away",
@@ -444,7 +467,11 @@ pub fn demo_huddle(team: &str) -> Event {
 #[cfg(feature = "demo")]
 pub fn demo(team: &str, command: Command) -> Vec<Event> {
     match command {
-        Command::Typing { .. } | Command::Active => Vec::new(),
+        Command::Typing { .. } | Command::Active | Command::CheckHuddle { .. } => Vec::new(),
+        Command::DeclineHuddle { .. } => vec![Event::People {
+            team: team.to_owned(),
+            event: people::Event::InviteDeclined { result: Ok(()) },
+        }],
         Command::SetStatus { .. } => vec![Event::People {
             team: team.to_owned(),
             event: people::Event::StatusSet { result: Ok(()) },

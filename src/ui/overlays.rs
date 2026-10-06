@@ -22,6 +22,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     super::share::dialog(app, ctx);
     super::people::status_dialog(app, ctx);
     super::shortcuts::show(app, ctx);
+    super::people::invites(app, ctx);
     toasts(app, ctx);
 }
 
