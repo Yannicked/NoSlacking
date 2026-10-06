@@ -1,6 +1,6 @@
-//! `noslacking --huddle-probe TEAM CHANNEL [--seconds N]`: the whole
-//! listening path from the command line, for trying it against a real
-//! huddle and sending the log back.
+//! `noslacking --huddle-probe TEAM CHANNEL [--seconds N] [--send-tone]`:
+//! the whole listening path from the command line, for trying it against
+//! a real huddle and sending the log back.
 //!
 //! It signs in as the app does at start (the saved browser sign-in, from
 //! the keyring), joins the huddle in the channel (starting one if none is
@@ -8,6 +8,12 @@
 //! also on Ctrl+C, and ends with a summary and a line that names the step
 //! that failed, if one did. Every step logs at info level; secrets never
 //! do.
+//!
+//! With `--send-tone` it joins unmuted and sends a quiet 440 Hz tone the
+//! whole time, through the same encoder as the microphone but never the
+//! microphone itself, so whether Chime takes our audio can be heard in
+//! Slack without anyone talking. Every five seconds the log says what was
+//! sent and what Chime's RTCP receiver reports say of it.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -30,6 +36,8 @@ pub struct Options {
     pub region: Option<String>,
     /// The app's settings file, for its proxy setting.
     pub settings: PathBuf,
+    /// Join unmuted and send a quiet tone (never the microphone).
+    pub send_tone: bool,
 }
 
 /// The steps, by the name the last line gives a failure.
@@ -79,14 +87,19 @@ pub fn verdict(outcome: &Result<(), (Step, String)>, audio_frames: u64) -> (Stri
 /// Runs the probe; returns the process's exit code.
 pub fn run(options: &Options) -> i32 {
     log::info!(
-        "probe: NoSlacking {} on {}/{}; team {}, channel {}, {} s, region asked: {}",
+        "probe: NoSlacking {} on {}/{}; team {}, channel {}, {} s, region asked: {}, {}",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
         options.team,
         options.channel,
         options.seconds,
-        options.region.as_deref().unwrap_or("none")
+        options.region.as_deref().unwrap_or("none"),
+        if options.send_tone {
+            "sending a 440 Hz tone"
+        } else {
+            "muted"
+        }
     );
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -208,7 +221,29 @@ async fn probe(
         let _ = stop.send(true);
     });
     let feed = speaker.as_ref().map(|(_, feed)| feed.clone());
-    let (report, result) = media::listen(&joined, feed, None, stopped, None).await;
+    // The tone, unmuted from the start; its sender lives as long as the
+    // session, or the session would take its end for a mute.
+    let (_unmuted, muted) = tokio::sync::watch::channel(false);
+    let (uplink, tone) = if options.send_tone {
+        let (frames, frames_in) = tokio::sync::mpsc::channel(25);
+        match super::microphone::ToneSource::start(frames) {
+            Ok(tone) => (
+                Some(media::Uplink {
+                    frames: frames_in,
+                    muted,
+                }),
+                Some(tone),
+            ),
+            Err(why) => {
+                log::warn!("probe: no tone ({why}); joining muted");
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
+    let (report, result) = media::listen(&joined, feed, uplink, stopped, None).await;
+    drop(tone);
     timer.abort();
 
     // Slack learns of the leave from Chime; this asks it as well and logs
@@ -240,6 +275,12 @@ async fn probe(
         report.audio_frames,
         report.audio_bytes,
         report.most_attendees
+    );
+    log::info!(
+        "summary: sent {} frames ({} bytes) of tone, {} of silence",
+        report.sent_frames,
+        report.sent_bytes,
+        report.silent_frames
     );
     if let Some((speaker, feed)) = speaker {
         log::info!("summary: played {:?}", feed.played());

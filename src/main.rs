@@ -52,6 +52,13 @@ struct Cli {
     #[arg(long, value_name = "REGION")]
     huddle_region: Option<String>,
 
+    /// Have the huddle probe join unmuted and send a quiet 440 Hz tone the
+    /// whole time (never the microphone), to hear in Slack that our audio
+    /// gets through.
+    #[cfg(feature = "huddle-audio")]
+    #[arg(long, requires = "huddle_probe")]
+    send_tone: bool,
+
     /// Run against a pretend Slack, offline, with sample data.
     #[cfg(feature = "demo")]
     #[arg(long)]
@@ -194,6 +201,7 @@ fn main() -> eframe::Result<()> {
                 seconds: cli.seconds,
                 region: cli.huddle_region.clone(),
                 settings: dirs.settings_file(),
+                send_tone: cli.send_tone,
             });
         std::process::exit(code);
     }
