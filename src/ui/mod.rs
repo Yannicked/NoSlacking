@@ -26,6 +26,7 @@ mod share;
 mod shortcuts;
 mod sidebar;
 mod thread;
+mod viewer;
 mod views;
 
 use egui::{Color32, CornerRadius, Rect, Sense, Vec2};
