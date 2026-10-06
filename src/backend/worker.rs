@@ -258,6 +258,9 @@ pub struct Worker {
     uploads: HashMap<u64, (tokio::task::AbortHandle, UploadGate)>,
     /// Presence and the like for the people on screen.
     people: super::people::Hub,
+    /// The huddle being listened to (`huddle-audio`).
+    #[cfg(feature = "huddle-audio")]
+    huddle_audio: super::listen::Listener,
 }
 
 impl Worker {
@@ -288,6 +291,8 @@ impl Worker {
             waiting: Some(Vec::new()),
             uploads: HashMap::new(),
             people: super::people::Hub::default(),
+            #[cfg(feature = "huddle-audio")]
+            huddle_audio: super::listen::Listener::default(),
         }
     }
 
@@ -1638,6 +1643,18 @@ impl Worker {
         let Some((client, sink)) = self.team(&team) else {
             log::debug!("not acting on people in {team}: signed out");
             return;
+        };
+        #[cfg(feature = "huddle-audio")]
+        let command = match command {
+            crate::people::Command::ListenHuddle { channel } => {
+                self.huddle_audio.start(client, team, channel, sink);
+                return;
+            }
+            crate::people::Command::LeaveHuddle => {
+                self.huddle_audio.stop();
+                return;
+            }
+            other => other,
         };
         if let Some(command) = super::people::call(client, team.clone(), command, sink) {
             self.people.command(&team, command);

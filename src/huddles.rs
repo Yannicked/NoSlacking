@@ -160,12 +160,40 @@ pub fn check_due(last: Option<&Check>, now: Instant) -> Instant {
     last.map_or(now, |last| last.at + check_wait(last.failures))
 }
 
+/// Where listening to a huddle got to, as the worker tells it (the
+/// `huddle-audio` feature).
+#[cfg(feature = "huddle-audio")]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Listen {
+    /// Joining: Slack, then Chime, then the audio connection.
+    Joining,
+    /// The audio is connected and playing.
+    Live,
+    /// Left, or failed.
+    Ended(Result<(), crate::failure::Failure>),
+}
+
+/// The huddle being listened to: one at a time.
+#[cfg(feature = "huddle-audio")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listening {
+    /// The workspace.
+    pub team: String,
+    /// The conversation the huddle is in.
+    pub channel: String,
+    /// Whether the audio plays yet.
+    pub live: bool,
+}
+
 /// The app's side of huddles.
 #[derive(Debug, Default)]
 pub struct State {
     pub invites: Invites,
     /// The checks made, by workspace and room.
     checks: HashMap<(String, String), Check>,
+    /// The huddle being listened to, if any.
+    #[cfg(feature = "huddle-audio")]
+    pub listening: Option<Listening>,
 }
 
 impl State {
@@ -197,6 +225,12 @@ pub enum Action {
     Join { team: String, room: String },
     /// Declines it.
     Decline { team: String, room: String },
+    /// Listens to the huddle in `channel` here, muted, leaving any other.
+    #[cfg(feature = "huddle-audio")]
+    Listen { team: String, channel: String },
+    /// Leaves the huddle being listened to.
+    #[cfg(feature = "huddle-audio")]
+    Leave,
 }
 
 /// Applies a view's request.
@@ -218,7 +252,70 @@ pub fn apply(app: &mut App, action: Action) {
                 });
             }
         }
+        #[cfg(feature = "huddle-audio")]
+        Action::Listen { team, channel } => {
+            if !is_session(app, &team) {
+                return;
+            }
+            // The worker listens to one huddle at a time and leaves the
+            // last itself; a different workspace's is told to stop.
+            if let Some(last) = app.huddles.listening.take()
+                && last.team != team
+            {
+                app.backend.send(backend::Command::People {
+                    team: last.team,
+                    command: people::Command::LeaveHuddle,
+                });
+            }
+            app.huddles.listening = Some(Listening {
+                team: team.clone(),
+                channel: channel.clone(),
+                live: false,
+            });
+            app.backend.send(backend::Command::People {
+                team,
+                command: people::Command::ListenHuddle { channel },
+            });
+        }
+        #[cfg(feature = "huddle-audio")]
+        Action::Leave => {
+            if let Some(last) = app.huddles.listening.take() {
+                app.backend.send(backend::Command::People {
+                    team: last.team,
+                    command: people::Command::LeaveHuddle,
+                });
+            }
+        }
     }
+}
+
+/// Leaves the huddle being listened to before the app quits, waiting a
+/// little for Chime to hear it: the worker's thread goes with the app.
+#[cfg(feature = "huddle-audio")]
+pub fn quit(app: &mut App) {
+    let Some(last) = app.huddles.listening.take() else {
+        return;
+    };
+    app.backend.send(backend::Command::People {
+        team: last.team,
+        command: people::Command::LeaveHuddle,
+    });
+    let until = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < until {
+        match app.backend.try_recv() {
+            Some(backend::Event::People {
+                event:
+                    people::Event::Listening {
+                        state: Listen::Ended(_),
+                        ..
+                    },
+                ..
+            }) => return,
+            Some(_) => {}
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    log::warn!("left the huddle without hearing back");
 }
 
 /// Whether `team` is a browser session, which alone can check huddles.
@@ -245,6 +342,14 @@ fn check(app: &mut App, team: &str, channel: &str, room: &str, now: Instant) {
 /// Runs every frame: drops invitations that rang long enough, and checks
 /// the huddle in the open conversation when due.
 pub fn frame(app: &mut App, now: Instant) {
+    // Signed out while listening: the worker stopped it, and its news
+    // went with the workspace.
+    #[cfg(feature = "huddle-audio")]
+    if let Some(last) = &app.huddles.listening
+        && !is_session(app, &last.team)
+    {
+        app.huddles.listening = None;
+    }
     if let Some(next) = app.huddles.invites.expire(now) {
         app.waker.wake_after(next.saturating_duration_since(now));
     }
@@ -340,6 +445,37 @@ pub fn handle(app: &mut App, team: &str, event: people::Event) -> Option<people:
                     .unwrap_or_default();
                 for (channel, room) in known {
                     check(app, team, &channel, &room, now);
+                }
+            }
+            None
+        }
+        #[cfg(feature = "huddle-audio")]
+        people::Event::Listening { channel, state } => {
+            let ours = app
+                .huddles
+                .listening
+                .as_ref()
+                .is_some_and(|l| l.team == team && l.channel == channel);
+            match state {
+                Listen::Joining => {}
+                Listen::Live => {
+                    if let Some(listening) = app.huddles.listening.as_mut().filter(|_| ours) {
+                        listening.live = true;
+                    }
+                }
+                Listen::Ended(result) => {
+                    if ours {
+                        app.huddles.listening = None;
+                    }
+                    if let Err(error) = result {
+                        app.toast(
+                            tf(
+                                "Could not listen to the huddle: {error}",
+                                &[("error", &error.message())],
+                            ),
+                            true,
+                        );
+                    }
                 }
             }
             None

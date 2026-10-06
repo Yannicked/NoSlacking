@@ -358,6 +358,56 @@ pub fn huddle_button(
     }
 }
 
+/// "Listen" beside the huddle button, in a browser sign-in's workspace,
+/// or "Leave" while listening to this huddle (the `huddle-audio`
+/// feature): the huddle plays here with the microphone off.
+#[cfg(feature = "huddle-audio")]
+pub fn listen_button(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    workspace: &crate::app::WorkspaceState,
+    channel: &str,
+    listening: Option<&crate::huddles::Listening>,
+    actions: &mut Vec<Action>,
+) {
+    if !workspace.people.huddles.contains_key(channel)
+        || workspace.info.sign_in != crate::model::SignInKind::Session
+    {
+        return;
+    }
+    let team = &workspace.info.team_id;
+    let here = listening.filter(|l| &l.team == team && l.channel == channel);
+    let (label, tip) = match here {
+        Some(listening) if !listening.live => (t("Joining…"), t("Leave the huddle")),
+        Some(_) => (t("Leave"), t("Leave the huddle")),
+        None => (
+            t("Listen"),
+            t("Listen to the huddle here, with your microphone off"),
+        ),
+    };
+    let button = egui::Button::image_and_text(
+        theme::Icon::Headphones.image(palette.secondary, 14.0),
+        RichText::new(label)
+            .font(theme::regular(12.5))
+            .color(palette.text),
+    )
+    .corner_radius(egui::CornerRadius::same(theme::RADIUS_SMALL + 2));
+    let response = ui
+        .add(button)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tip);
+    if response.clicked() {
+        actions.push(Action::Huddle(if here.is_some() {
+            crate::huddles::Action::Leave
+        } else {
+            crate::huddles::Action::Listen {
+                team: team.clone(),
+                channel: channel.to_owned(),
+            }
+        }));
+    }
+}
+
 /// What the globe beside an external conversation or person says.
 pub fn external_tip(direct: bool) -> std::borrow::Cow<'static, str> {
     if direct {

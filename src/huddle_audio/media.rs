@@ -339,6 +339,8 @@ struct Session<'a> {
     next_audio: Option<Instant>,
     audio_time: u64,
     feed: Option<Feed>,
+    /// Told once the audio connection is up.
+    live: Option<tokio::sync::oneshot::Sender<()>>,
     report: Report,
     /// How it ended, once it has.
     over: Option<Result<(), Failure>>,
@@ -687,6 +689,9 @@ impl Session<'_> {
                 log::info!("connect: DTLS and SRTP are up");
                 self.report.dtls_up = Some(self.since());
                 self.connect_deadline = None;
+                if let Some(live) = self.live.take() {
+                    let _ = live.send(());
+                }
                 self.next_audio = Some(Instant::now());
             }
             RtcEvent::MediaAdded(added) => log::info!(
@@ -904,11 +909,13 @@ async fn stopped(
 }
 
 /// Listens to the huddle `join` describes until `stop` turns true or the
-/// session ends, feeding the audio to `feed`. Leaves cleanly either way.
+/// session ends, feeding the audio to `feed` and telling `live` once the
+/// audio connection is up. Leaves cleanly either way.
 pub async fn listen(
     join: &ChimeJoin,
     feed: Option<Feed>,
     mut stop: tokio::sync::watch::Receiver<bool>,
+    live: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> (Report, Result<(), Failure>) {
     log::info!(
         "signaling: opening {} for attendee {}",
@@ -962,6 +969,7 @@ pub async fn listen(
         next_audio: None,
         audio_time: 0,
         feed,
+        live,
         report: Report::default(),
         over: None,
     };
@@ -1470,7 +1478,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(3)).await;
             let _ = stop.send(true);
         });
-        let (report, result) = listen(&join, None, stopped).await;
+        let (report, result) = listen(&join, None, stopped, None).await;
         assert_eq!(result, Ok(()), "{report:?}");
         assert_eq!(report.ending.as_deref(), Some("left"));
         assert!(report.relay.is_some(), "{report:?}");
