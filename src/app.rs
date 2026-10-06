@@ -30,7 +30,7 @@ mod wire;
 mod workspace;
 
 pub use popout::Popout;
-pub use wire::{to_editable, to_wire};
+pub use wire::{edit_source, to_editable, to_mrkdwn, to_wire};
 use workspace::first_unread;
 pub use workspace::{WorkspaceState, active_in};
 
@@ -1657,9 +1657,10 @@ impl App {
     }
 
     fn start_edit(&mut self, channel: String, ts: Ts, in_thread: bool) {
-        let found = self
-            .active_workspace()
-            .and_then(|w| w.find_message(&channel, &ts).map(|m| w.editable(&m.text)));
+        let found = self.active_workspace().and_then(|w| {
+            w.find_message(&channel, &ts)
+                .map(|m| w.editable(&edit_source(m)))
+        });
         if let Some((text, mentions)) = found {
             self.editing = Some(Editing {
                 channel,
