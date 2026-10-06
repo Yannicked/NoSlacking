@@ -80,10 +80,13 @@ pub fn signaling_url(base: &str) -> String {
 /// Why bytes off the socket are not a frame.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum FrameError {
+    /// Nothing at all.
     #[error("an empty message")]
     Empty,
+    /// The first byte is not a frame type this client reads.
     #[error("frame type byte {0:#04x}, not RTC")]
     Kind(u8),
+    /// The protobuf does not decode.
     #[error("protobuf: {0}")]
     Decode(String),
 }
@@ -119,7 +122,9 @@ pub fn frame(kind: FrameType, now_ms: u64) -> Frame {
 /// Who this client says it is in its JOIN.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientDetails {
+    /// The application's name.
     pub app_name: String,
+    /// Its version.
     pub app_version: String,
 }
 
@@ -167,6 +172,7 @@ pub struct Subscribe {
     pub sdp_offer: String,
     /// `MediaPlacement.AudioHostUrl`.
     pub audio_host: String,
+    /// `Attendee.AttendeeId`, named in the audio send stream.
     pub attendee_id: String,
     /// Whether to say the microphone is muted. A listener is.
     pub muted: bool,
@@ -336,6 +342,7 @@ pub fn describe(frame: &Frame) -> String {
 /// `MeetingSessionStatus.fromAudioStatus` reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioStatus {
+    /// 2xx: all is well.
     Ok,
     /// The same attendee joined from another device (301).
     JoinedFromAnotherDevice,

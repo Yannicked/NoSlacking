@@ -38,7 +38,9 @@ pub const MEETING_ENDED_CLOSE: u16 = 4410;
 /// nowhere; the username, which names the attendee, neither.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TurnCredentials {
+    /// The TURN username.
     pub username: String,
+    /// The TURN password.
     pub password: String,
     /// How long they last, in seconds.
     pub ttl: Option<u32>,
@@ -81,9 +83,11 @@ pub enum Phase {
 /// An attendee Chime says is here, by audio stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Attendee {
+    /// Chime's id for them.
     pub attendee_id: String,
     /// Slack's user id, as Chime knows it.
     pub external_user_id: Option<String>,
+    /// Whether their microphone is muted.
     pub muted: bool,
 }
 
@@ -94,9 +98,13 @@ pub enum Ending {
     Left,
     /// A frame carried an error while the join was under way.
     Refused {
+        /// Where the join was.
         phase: Phase,
+        /// The frame's type.
         frame: String,
+        /// Its error status.
         status: u32,
+        /// Its error description.
         description: String,
     },
     /// AUDIO_STATUS ended it.
@@ -107,7 +115,12 @@ pub enum Ending {
     /// was not asked for).
     NoAnswer,
     /// The socket closed; 4410 means the meeting had ended.
-    Closed { code: u16, reason: String },
+    Closed {
+        /// The WebSocket close code.
+        code: u16,
+        /// The close reason.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for Ending {
@@ -148,7 +161,12 @@ pub enum Step {
     /// SUBSCRIBE_ACK's SDP answer.
     Answer(String),
     /// Someone came or went (`present`), or was muted or unmuted.
-    Presence { attendee: Attendee, present: bool },
+    Presence {
+        /// Who.
+        attendee: Attendee,
+        /// Whether they are here now.
+        present: bool,
+    },
     /// Something worth a line in the log that ends nothing.
     Note(String),
     /// The session is over.
@@ -176,6 +194,7 @@ impl Handshake {
         }
     }
 
+    /// Where the session is.
     pub fn phase(&self) -> Phase {
         self.phase
     }
@@ -417,8 +436,10 @@ impl Handshake {
 /// Why the signaling socket did not open.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
+    /// The URL or the token cannot make a request.
     #[error("the signaling URL is not usable: {0}")]
     Url(String),
+    /// The connection or the WebSocket handshake failed.
     #[error("{0}")]
     Socket(#[from] tokio_tungstenite::tungstenite::Error),
 }
@@ -426,16 +447,21 @@ pub enum OpenError {
 /// One thing off the socket.
 #[derive(Debug)]
 pub enum Incoming {
+    /// A frame.
     Frame(Box<Frame>),
     /// A message that is not a frame this protocol reads; skipped, as the
     /// JS SDK skips them.
     Undecodable {
+        /// Its length.
         bytes: usize,
+        /// Why it does not read.
         error: chime::FrameError,
     },
     /// The socket closed (or failed: code 1006).
     Closed {
+        /// The WebSocket close code.
         code: u16,
+        /// The close reason.
         reason: String,
     },
 }

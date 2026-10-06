@@ -20,9 +20,13 @@
 //! types holding them print `<redacted>`. Chime's URLs are logged by host
 //! only.
 
+#![warn(missing_docs)]
+
 pub mod chime;
 pub mod join;
+pub mod sdp;
 pub mod signaling;
+pub mod turn;
 
 /// The host of `url`, for the log: what a protocol mismatch needs to
 /// know, without the path or query a URL could carry a secret in.
