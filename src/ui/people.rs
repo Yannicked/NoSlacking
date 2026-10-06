@@ -376,9 +376,10 @@ pub fn listen_button(
         return;
     }
     let team = &workspace.info.team_id;
-    let here = listening.filter(|l| &l.team == team && l.channel == channel);
-    let (label, tip) = match here {
-        Some(listening) if !listening.live => (t("Joining…"), t("Leave the huddle")),
+    // The same state as the call bar: a failure there offers Listen again.
+    let here = listening.filter(|l| l.is(team, channel));
+    let (label, tip) = match here.map(|l| &l.phase) {
+        Some(crate::huddles::Phase::Joining) => (t("Joining…"), t("Leave the huddle")),
         Some(_) => (t("Leave"), t("Leave the huddle")),
         None => (
             t("Listen"),

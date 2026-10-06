@@ -36,6 +36,8 @@ const CHECK_AT_MOST: Duration = Duration::from_secs(30 * 60);
 pub enum RoomChange {
     Joined(String),
     Left(String),
+    /// Who is in it now, all of them.
+    Participants(Vec<String>),
     Ended,
 }
 
@@ -113,11 +115,32 @@ impl Invites {
         let gone = match change {
             RoomChange::Ended => true,
             RoomChange::Joined(user) => user == me,
+            RoomChange::Participants(who) => who.iter().any(|p| p == me),
             RoomChange::Left(_) => false,
         };
         if gone {
             self.answered(team, room);
         }
+    }
+
+    /// Takes away what stopped ringing: the invitation to `room`, or, when
+    /// only the conversation is known, those in `channel`. Returns them.
+    pub fn cancelled(
+        &mut self,
+        team: &str,
+        channel: Option<&str>,
+        room: Option<&str>,
+    ) -> Vec<Invite> {
+        let (gone, kept) = std::mem::take(&mut self.list).into_iter().partition(|i| {
+            i.team == team
+                && match (room, channel) {
+                    (Some(room), _) => i.room == room,
+                    (None, Some(channel)) => i.channel == channel,
+                    (None, None) => false,
+                }
+        });
+        self.list = kept;
+        gone
     }
 
     /// Drops what has rung long enough at `now`, and says when the next
@@ -160,30 +183,13 @@ pub fn check_due(last: Option<&Check>, now: Instant) -> Instant {
     last.map_or(now, |last| last.at + check_wait(last.failures))
 }
 
-/// Where listening to a huddle got to, as the worker tells it (the
-/// `huddle-audio` feature).
 #[cfg(feature = "huddle-audio")]
-#[derive(Clone, Debug, PartialEq)]
-pub enum Listen {
-    /// Joining: Slack, then Chime, then the audio connection.
-    Joining,
-    /// The audio is connected and playing.
-    Live,
-    /// Left, or failed.
-    Ended(Result<(), crate::failure::Failure>),
-}
-
-/// The huddle being listened to: one at a time.
+mod listen;
 #[cfg(feature = "huddle-audio")]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Listening {
-    /// The workspace.
-    pub team: String,
-    /// The conversation the huddle is in.
-    pub channel: String,
-    /// Whether the audio plays yet.
-    pub live: bool,
-}
+pub use listen::{
+    ALONE_FOR, FAILED_FOR, Left, Listen, Listening, Person, Phase, Place, Roster, alone_since,
+    clock, faces, leave_alone, quit, status_text, title_text,
+};
 
 /// The app's side of huddles.
 #[derive(Debug, Default)]
@@ -274,69 +280,10 @@ pub fn apply(app: &mut App, action: Action) {
             }
         }
         #[cfg(feature = "huddle-audio")]
-        Action::Listen { team, channel } => {
-            if !is_session(app, &team) {
-                return;
-            }
-            // The worker listens to one huddle at a time and leaves the
-            // last itself; a different workspace's is told to stop.
-            if let Some(last) = app.huddles.listening.take()
-                && last.team != team
-            {
-                app.backend.send(backend::Command::People {
-                    team: last.team,
-                    command: people::Command::LeaveHuddle,
-                });
-            }
-            app.huddles.listening = Some(Listening {
-                team: team.clone(),
-                channel: channel.clone(),
-                live: false,
-            });
-            app.backend.send(backend::Command::People {
-                team,
-                command: people::Command::ListenHuddle { channel },
-            });
-        }
+        Action::Listen { team, channel } => listen::listen(app, team, channel),
         #[cfg(feature = "huddle-audio")]
-        Action::Leave => {
-            if let Some(last) = app.huddles.listening.take() {
-                app.backend.send(backend::Command::People {
-                    team: last.team,
-                    command: people::Command::LeaveHuddle,
-                });
-            }
-        }
+        Action::Leave => listen::leave(app),
     }
-}
-
-/// Leaves the huddle being listened to before the app quits, waiting a
-/// little for Chime to hear it: the worker's thread goes with the app.
-#[cfg(feature = "huddle-audio")]
-pub fn quit(app: &mut App) {
-    let Some(last) = app.huddles.listening.take() else {
-        return;
-    };
-    app.backend.send(backend::Command::People {
-        team: last.team,
-        command: people::Command::LeaveHuddle,
-    });
-    let until = Instant::now() + Duration::from_secs(4);
-    while Instant::now() < until {
-        match app.backend.try_recv() {
-            Some(backend::Event::People {
-                event:
-                    people::Event::Listening {
-                        state: Listen::Ended(_),
-                        ..
-                    },
-                ..
-            }) => return,
-            Some(_) => {}
-            None => std::thread::sleep(Duration::from_millis(20)),
-        }
-    }
-    log::warn!("left the huddle without hearing back");
 }
 
 /// Whether `team` is a browser session, which alone can check huddles.
@@ -363,14 +310,8 @@ fn check(app: &mut App, team: &str, channel: &str, room: &str, now: Instant) {
 /// Runs every frame: drops invitations that rang long enough, and checks
 /// the huddle in the open conversation when due.
 pub fn frame(app: &mut App, now: Instant) {
-    // Signed out while listening: the worker stopped it, and its news
-    // went with the workspace.
     #[cfg(feature = "huddle-audio")]
-    if let Some(last) = &app.huddles.listening
-        && !is_session(app, &last.team)
-    {
-        app.huddles.listening = None;
-    }
+    listen::frame(app, now);
     if let Some(next) = app.huddles.invites.expire(now) {
         app.waker.wake_after(next.saturating_duration_since(now));
     }
@@ -425,6 +366,16 @@ pub fn handle(app: &mut App, team: &str, event: people::Event) -> Option<people:
             invited(app, team, &channel, &room, &from, now);
             None
         }
+        people::Event::HuddleInviteCancelled { channel, room } => {
+            let gone = app
+                .huddles
+                .invites
+                .cancelled(team, channel.as_deref(), room.as_deref());
+            for invite in gone {
+                app.withdraw_invite_note(team, &invite.channel);
+            }
+            None
+        }
         people::Event::HuddleRoom { room, change } => {
             app.huddles.invites.room_changed(team, &room, &change, &me);
             if let Some(workspace) = app.workspaces.iter_mut().find(|w| w.info.team_id == team) {
@@ -472,33 +423,7 @@ pub fn handle(app: &mut App, team: &str, event: people::Event) -> Option<people:
         }
         #[cfg(feature = "huddle-audio")]
         people::Event::Listening { channel, state } => {
-            let ours = app
-                .huddles
-                .listening
-                .as_ref()
-                .is_some_and(|l| l.team == team && l.channel == channel);
-            match state {
-                Listen::Joining => {}
-                Listen::Live => {
-                    if let Some(listening) = app.huddles.listening.as_mut().filter(|_| ours) {
-                        listening.live = true;
-                    }
-                }
-                Listen::Ended(result) => {
-                    if ours {
-                        app.huddles.listening = None;
-                    }
-                    if let Err(error) = result {
-                        app.toast(
-                            tf(
-                                "Could not listen to the huddle: {error}",
-                                &[("error", &error.message())],
-                            ),
-                            true,
-                        );
-                    }
-                }
-            }
+            listen::heard(app, team, &channel, state);
             None
         }
         people::Event::InviteDeclined { result } => {
@@ -535,6 +460,7 @@ pub fn apply_room(huddles: &mut HashMap<String, Huddle>, room: &str, change: &Ro
                 }
             }
             RoomChange::Left(user) => huddle.participants.retain(|p| p != user),
+            RoomChange::Participants(who) => huddle.participants.clone_from(who),
             RoomChange::Ended => huddle.participants.clear(),
         }
         if huddle.participants.is_empty() {
@@ -682,6 +608,41 @@ mod tests {
     }
 
     #[test]
+    fn a_call_that_stops_ringing_takes_its_invitation_away() {
+        let now = Instant::now();
+        let mut invites = Invites::default();
+        invites.add("T1", "C1", "R1", "U2", now);
+        invites.add("T1", "C2", "R2", "U2", now);
+        invites.add("T1", "D1", "R3", "U2", now);
+        invites.add("T2", "C1", "R4", "U2", now);
+        // By room, whatever the conversation said.
+        let gone = invites.cancelled("T1", Some("C9"), Some("R1"));
+        assert_eq!(
+            gone.iter().map(|i| i.room.as_str()).collect::<Vec<_>>(),
+            ["R1"]
+        );
+        // By conversation, when the room is not named.
+        let gone = invites.cancelled("T1", Some("D1"), None);
+        assert_eq!(
+            gone.iter().map(|i| i.channel.as_str()).collect::<Vec<_>>(),
+            ["D1"]
+        );
+        // Nothing named, nothing taken; another workspace's stays.
+        assert!(invites.cancelled("T1", None, None).is_empty());
+        assert!(invites.cancelled("T1", Some("C1"), None).is_empty());
+        let left: Vec<&str> = invites.list().iter().map(|i| i.room.as_str()).collect();
+        assert_eq!(left, ["R2", "R4"]);
+        // Everyone in it, you among them, from another device.
+        invites.room_changed(
+            "T1",
+            "R2",
+            &RoomChange::Participants(vec!["U2".into(), "U0".into()]),
+            "U0",
+        );
+        assert_eq!(invites.list().len(), 1);
+    }
+
+    #[test]
     fn room_changes_reach_the_huddle_they_name() {
         let mut huddles = HashMap::from([
             ("C1".to_owned(), huddle("R1", &["U1"])),
@@ -692,6 +653,13 @@ mod tests {
         assert_eq!(huddles["C1"].participants, ["U1", "U3"]);
         apply_room(&mut huddles, "R2", &RoomChange::Left("U2".into()));
         assert_eq!(huddles["C2"].participants, ["U1"]);
+        apply_room(
+            &mut huddles,
+            "R2",
+            &RoomChange::Participants(vec!["U1".into(), "U4".into()]),
+        );
+        assert_eq!(huddles["C2"].participants, ["U1", "U4"]);
+        apply_room(&mut huddles, "R2", &RoomChange::Left("U4".into()));
         apply_room(&mut huddles, "R2", &RoomChange::Left("U1".into()));
         assert!(!huddles.contains_key("C2"), "the last one left");
         apply_room(&mut huddles, "R1", &RoomChange::Ended);

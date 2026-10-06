@@ -1184,6 +1184,35 @@ pub fn long_history_ts(index: usize) -> Ts {
         .unwrap_or_default()
 }
 
+/// Listening to the huddle in #design for 2 min 14 s: Ana speaking,
+/// Carla muted, and you, for the call bar's screenshot
+/// (`--demo-view listening`).
+#[cfg(feature = "huddle-audio")]
+pub fn listening() -> crate::huddles::Listening {
+    use crate::huddles::{Person, Phase, Roster};
+    let person = |user: &str, me, muted, speaking| Person {
+        user: Some(user.to_owned()),
+        me,
+        muted,
+        speaking,
+    };
+    let since = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(134))
+        .unwrap_or_else(std::time::Instant::now);
+    crate::huddles::Listening {
+        phase: Phase::Live { since },
+        roster: Roster {
+            people: vec![
+                person("U01", false, false, true),
+                person("U03", false, true, false),
+                person(ME, true, true, false),
+            ],
+            count: Some(3),
+        },
+        ..crate::huddles::Listening::new(TEAM, "C03")
+    }
+}
+
 fn thread() -> Vec<Message> {
     let mut parent = history("C02")
         .into_iter()

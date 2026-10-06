@@ -205,6 +205,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         sidebar_filter,
         socket,
         views,
+        #[cfg(feature = "huddle-audio")]
+        huddles,
         ..
     } = app;
     let Some(workspace) = crate::app::active_in(workspaces, settings) else {
@@ -309,6 +311,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         }
                     });
             }
+            // The huddle being listened to, at the foot, as in Slack.
+            #[cfg(feature = "huddle-audio")]
+            super::call_bar::panel(
+                ui,
+                "sidebar-call-bar",
+                &palette,
+                huddles.listening.as_ref(),
+                workspaces,
+                false,
+                actions,
+            );
             egui::Frame::new()
                 .inner_margin(Margin {
                     left: 10,

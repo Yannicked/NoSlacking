@@ -30,23 +30,82 @@ pub fn invite(event: &Value) -> Option<people::Event> {
     })
 }
 
-/// Reads an `sh_room_*` event that names its huddle only by its room: a
-/// join or leave with `user`, or an update saying it ended. The room's
-/// id is in `call_id`, or in the `room` or `huddle` object.
-pub fn room_change(kind: &str, event: &Value) -> Option<people::Event> {
+/// Reads `huddle_invite_cancel`: the call stopped ringing, as the caller
+/// hung up or someone else answered. Slack documents none of this, so
+/// the huddle is taken from whichever of the usual fields are there: the
+/// room as in `huddle_invite` (`call_id`) or the `sh_room_*` events, the
+/// conversation as `channel_id` or `channel`.
+pub fn invite_cancel(event: &Value) -> Option<people::Event> {
+    let text = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let room = room_id(event);
+    let channel = text(event.get("channel_id")).or_else(|| text(event.get("channel")));
+    if room.is_none() && channel.is_none() {
+        log::debug!(
+            "huddle_invite_cancel names no huddle; it has {:?}",
+            keys(event)
+        );
+        return None;
+    }
+    Some(people::Event::HuddleInviteCancelled { channel, room })
+}
+
+/// The room an event names: `call_id` or `room_id`, or the id in its
+/// `room` or `huddle` object.
+fn room_id(event: &Value) -> Option<String> {
     let room = event.get("room");
     let huddle = event.get("huddle");
-    let id = [
+    [
         event.get("call_id"),
+        event.get("room_id"),
         room.and_then(|r| r.get("call_id")),
         room.and_then(|r| r.get("id")),
+        // A bare room id.
+        room,
         huddle.and_then(|h| h.get("id")),
     ]
     .into_iter()
     .flatten()
     .find_map(Value::as_str)
-    .filter(|id| !id.is_empty())?
-    .to_owned();
+    .filter(|id| !id.is_empty())
+    .map(str::to_owned)
+}
+
+/// The keys of an event and of the objects in it, for the log when its
+/// shape is not understood: names only, no values.
+fn keys(event: &Value) -> Vec<String> {
+    let Some(object) = event.as_object() else {
+        return Vec::new();
+    };
+    let mut keys: Vec<String> = object
+        .iter()
+        .flat_map(|(key, value)| {
+            let inner: Vec<String> = value
+                .as_object()
+                .map(|o| o.keys().map(|k| format!("{key}.{k}")).collect())
+                .unwrap_or_default();
+            std::iter::once(key.clone()).chain(inner)
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// Reads an `sh_room_*` event that names its huddle only by its room: a
+/// join or leave with `user`, or an update saying who is in it now or
+/// that it ended. The room's id is in `call_id`, or in the `room` or
+/// `huddle` object.
+pub fn room_change(kind: &str, event: &Value) -> Option<people::Event> {
+    let room = event.get("room");
+    let huddle = event.get("huddle");
+    let Some(id) = room_id(event) else {
+        log::debug!("{kind} names no room; it has {:?}", keys(event));
+        return None;
+    };
     let user = || {
         event
             .get("user")
@@ -58,16 +117,28 @@ pub fn room_change(kind: &str, event: &Value) -> Option<people::Event> {
         "sh_room_join" => RoomChange::Joined(user()?),
         "sh_room_leave" => RoomChange::Left(user()?),
         "sh_room_update" => {
-            let ended = [room, huddle].into_iter().flatten().any(|r| {
+            let objects = || [room, huddle].into_iter().flatten();
+            let ended = objects().any(|r| {
                 r.get("has_ended").and_then(Value::as_bool) == Some(true)
                     || r.get("date_end")
                         .and_then(Value::as_i64)
                         .is_some_and(|end| end > 0)
             });
-            if !ended {
+            if ended {
+                RoomChange::Ended
+            } else if let Some(who) = objects().find_map(|r| r.get("participants")?.as_array()) {
+                // Slack lists participants by id, or as objects with a
+                // `user_id`.
+                RoomChange::Participants(
+                    who.iter()
+                        .filter_map(|p| p.as_str().or_else(|| p.get("user_id")?.as_str()))
+                        .map(str::to_owned)
+                        .collect(),
+                )
+            } else {
+                log::debug!("sh_room_update not understood; it has {:?}", keys(event));
                 return None;
             }
-            RoomChange::Ended
         }
         _ => return None,
     };
@@ -232,6 +303,85 @@ mod tests {
         assert_eq!(
             translate(&json!({"type": "sh_room_join", "call_id": "R1"})),
             None
+        );
+    }
+
+    #[test]
+    fn a_room_update_with_a_short_huddle_beside_the_room_updates_the_huddle() {
+        // A whole room, and a `huddle` without the conversations, as
+        // `rooms.join` answers it: the room's conversations count.
+        let event: Value = serde_json::from_str(include_str!("fixtures/sh_room_update.json"))
+            .expect("the fixture is JSON");
+        assert_eq!(
+            super::super::people::translate(&event),
+            Some(people::Event::Huddles {
+                changes: vec![(
+                    "C0123ABCDEF".into(),
+                    Some(people::Huddle {
+                        room: "R0123ABCDEF".into(),
+                        participants: vec!["U0999ZZZZZZ".into(), "U0123ABCDEF".into()],
+                    })
+                )],
+            })
+        );
+        // Without the conversations anywhere: still who is in it, by room.
+        let mut short = event.clone();
+        if let Some(room) = short.get_mut("room").and_then(Value::as_object_mut) {
+            room.remove("channels");
+        }
+        assert_eq!(
+            super::super::people::translate(&short),
+            Some(people::Event::HuddleRoom {
+                room: "R0123ABCDEF".into(),
+                change: RoomChange::Participants(vec!["U0999ZZZZZZ".into(), "U0123ABCDEF".into()]),
+            })
+        );
+        // A room with its conversations but no participants is partial,
+        // and must not end the huddle.
+        let partial = json!({
+            "type": "sh_room_update",
+            "room": {"id": "R1", "channels": ["C1"], "name": "standup"}
+        });
+        assert_eq!(super::super::people::translate(&partial), None);
+    }
+
+    #[test]
+    fn a_cancelled_invitation_names_its_huddle_however_it_can() {
+        let translate = super::super::people::translate;
+        assert_eq!(
+            translate(
+                &json!({"type": "huddle_invite_cancel", "channel_id": "C1", "call_id": "R1"})
+            ),
+            Some(people::Event::HuddleInviteCancelled {
+                channel: Some("C1".into()),
+                room: Some("R1".into()),
+            })
+        );
+        assert_eq!(
+            translate(&json!({"type": "huddle_invite_cancel", "room": {"id": "R2"}})),
+            Some(people::Event::HuddleInviteCancelled {
+                channel: None,
+                room: Some("R2".into()),
+            })
+        );
+        assert_eq!(
+            translate(&json!({"type": "huddle_invite_cancel", "room_id": "R3", "channel": "D1"})),
+            Some(people::Event::HuddleInviteCancelled {
+                channel: Some("D1".into()),
+                room: Some("R3".into()),
+            })
+        );
+        assert_eq!(
+            translate(&json!({"type": "huddle_invite_cancel", "room": "R4"})),
+            Some(people::Event::HuddleInviteCancelled {
+                channel: None,
+                room: Some("R4".into()),
+            })
+        );
+        assert_eq!(translate(&json!({"type": "huddle_invite_cancel"})), None);
+        assert_eq!(
+            keys(&json!({"room": {"id": "R1"}, "call_id": "R1"})),
+            ["call_id", "room", "room.id"]
         );
     }
 

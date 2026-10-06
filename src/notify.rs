@@ -196,9 +196,51 @@ pub struct Clicked {
     pub link: Option<String>,
 }
 
+/// What the notification thread is asked to do.
+enum Job {
+    Show(Note),
+    /// Take away the huddle invitations shown for a conversation.
+    Withdraw {
+        team: String,
+        channel: String,
+    },
+}
+
+/// The most invitations remembered for taking away later; older ones
+/// have long stopped ringing.
+const WITHDRAWABLE: usize = 16;
+
+/// The huddle invitations shown that the desktop could take away again,
+/// by workspace, conversation and the desktop's id for them.
+#[derive(Debug, Default)]
+struct Shown(Vec<(String, String, u32)>);
+
+impl Shown {
+    /// Remembers an invitation shown as `id`.
+    fn add(&mut self, team: &str, channel: &str, id: u32) {
+        if self.0.len() >= WITHDRAWABLE {
+            self.0.remove(0);
+        }
+        self.0.push((team.to_owned(), channel.to_owned(), id));
+    }
+
+    /// Forgets the invitations for `channel` and returns their ids.
+    fn take(&mut self, team: &str, channel: &str) -> Vec<u32> {
+        let mut ids = Vec::new();
+        self.0.retain(|(t, c, id)| {
+            let this = t == team && c == channel;
+            if this {
+                ids.push(*id);
+            }
+            !this
+        });
+        ids
+    }
+}
+
 /// Shows notifications on a thread of its own and reports clicks.
 pub struct Notifier {
-    notes: mpsc::Sender<Note>,
+    notes: mpsc::Sender<Job>,
     clicks: mpsc::Receiver<Clicked>,
 }
 
@@ -216,7 +258,7 @@ impl Notifier {
         if !platform::AVAILABLE {
             return None;
         }
-        let (notes, queue) = mpsc::channel::<Note>();
+        let (notes, queue) = mpsc::channel::<Job>();
         let (clicked, clicks) = mpsc::channel();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let spawned = std::thread::Builder::new()
@@ -224,8 +266,21 @@ impl Notifier {
             .spawn(move || {
                 platform::prepare();
                 let waiting = Arc::new(AtomicUsize::new(0));
-                for note in queue {
-                    platform::show(&note, &clicked, &wake, &waiting);
+                let mut shown = Shown::default();
+                for job in queue {
+                    match job {
+                        Job::Show(note) => {
+                            let id = platform::show(&note, &clicked, &wake, &waiting);
+                            if let (Some(id), Some(_)) = (id, &note.link) {
+                                shown.add(&note.team, &note.channel, id);
+                            }
+                        }
+                        Job::Withdraw { team, channel } => {
+                            for id in shown.take(&team, &channel) {
+                                platform::close(id);
+                            }
+                        }
+                    }
                 }
             });
         match spawned {
@@ -239,7 +294,21 @@ impl Notifier {
 
     /// Shows `note` soon.
     pub fn show(&self, note: Note) {
-        if self.notes.send(note).is_err() {
+        if self.notes.send(Job::Show(note)).is_err() {
+            log::warn!("the notification thread has stopped");
+        }
+    }
+
+    /// Takes away the huddle invitations shown for `channel` of `team`,
+    /// once the call stopped ringing: the caller hung up, or someone else
+    /// answered. Only the freedesktop service (Linux) can be asked; on
+    /// other desktops they stay until dismissed.
+    pub fn withdraw(&self, team: &str, channel: &str) {
+        let job = Job::Withdraw {
+            team: team.to_owned(),
+            channel: channel.to_owned(),
+        };
+        if self.notes.send(job).is_err() {
             log::warn!("the notification thread has stopped");
         }
     }
@@ -338,12 +407,14 @@ mod platform {
         })
     }
 
+    /// Shows `note`, and returns the desktop's id for it where it can be
+    /// taken away again ([`close`]).
     pub fn show(
         note: &Note,
         clicked: &mpsc::Sender<Clicked>,
         wake: &Arc<dyn Fn() + Send + Sync>,
         waiting: &Arc<AtomicUsize>,
-    ) {
+    ) -> Option<u32> {
         // Freedesktop servers that announce `body-markup` read the body as
         // markup, so plain text has to be escaped: `a < b && c` would break,
         // and a message could pass off a disguised link. The summary is
@@ -393,13 +464,17 @@ mod platform {
             Ok(handle) => handle,
             Err(error) => {
                 log::warn!("could not show a notification: {error}");
-                return;
+                return None;
             }
         };
+        #[cfg(target_os = "linux")]
+        let id = Some(handle.id());
+        #[cfg(not(target_os = "linux"))]
+        let id = None;
         // Without a free place the handle is dropped: the notification
         // still shows (macOS sends it on drop), but its click is not heard.
         let Some(place) = Waiting::take(waiting) else {
-            return;
+            return id;
         };
         let target = Clicked {
             team: note.team.clone(),
@@ -429,7 +504,32 @@ mod platform {
         if let Err(error) = spawned {
             log::debug!("a notification's click will not be heard: {error}");
         }
+        id
     }
+
+    /// Takes away the notification the desktop knows as `id`
+    /// (freedesktop's CloseNotification). One already gone is no harm.
+    #[cfg(target_os = "linux")]
+    pub fn close(id: u32) {
+        let closed = zbus::blocking::Connection::session().and_then(|bus| {
+            bus.call_method(
+                Some("org.freedesktop.Notifications"),
+                "/org/freedesktop/Notifications",
+                Some("org.freedesktop.Notifications"),
+                "CloseNotification",
+                &(id,),
+            )
+            .map(|_| ())
+        });
+        if let Err(error) = closed {
+            log::debug!("could not take a notification away: {error}");
+        }
+    }
+
+    /// Other desktops are not asked: notify-rust takes nothing away there
+    /// by id, and no id is kept for them.
+    #[cfg(not(target_os = "linux"))]
+    pub fn close(_id: u32) {}
 }
 
 #[cfg(not(any(
@@ -456,13 +556,32 @@ mod platform {
         _clicked: &mpsc::Sender<Clicked>,
         _wake: &Arc<dyn Fn() + Send + Sync>,
         _waiting: &Arc<AtomicUsize>,
-    ) {
+    ) -> Option<u32> {
+        None
     }
+
+    pub fn close(_id: u32) {}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invitations_shown_are_taken_away_by_conversation() {
+        let mut shown = Shown::default();
+        shown.add("T1", "C1", 7);
+        shown.add("T1", "C2", 8);
+        shown.add("T2", "C1", 9);
+        shown.add("T1", "C1", 10);
+        assert_eq!(shown.take("T1", "C1"), [7, 10]);
+        assert!(shown.take("T1", "C1").is_empty());
+        for id in 0..40 {
+            shown.add("T3", "C3", id);
+        }
+        assert_eq!(shown.0.len(), WITHDRAWABLE);
+        assert_eq!(shown.take("T3", "C3").first(), Some(&24));
+    }
     use crate::model::{Delivery, Ts};
 
     fn message(user: &str, text: &str) -> Message {

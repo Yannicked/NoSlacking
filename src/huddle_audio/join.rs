@@ -7,10 +7,10 @@
 //! `CreateAttendee` answers (`MeetingId`, `MediaPlacement.SignalingUrl`,
 //! `Attendee.JoinToken`, …), which [`ChimeJoin`] reads.
 //!
-//! Leaving is Chime's: a LEAVE frame on the signaling socket (in
+//! Leaving is Chime's alone: a LEAVE frame on the signaling socket (in
 //! the signaling module), as HuddleFM does; Slack hears of it from Chime.
-//! `rooms.leave` is asked as well, on a guess at its parameters, so a
-//! probe run shows whether Slack has such a method.
+//! There is no Slack call for it: a guessed `rooms.leave` was answered
+//! `invalid_arguments`.
 
 use serde_json::Value;
 
@@ -27,15 +27,6 @@ pub fn join_params(channel: &str, region: &str) -> Vec<(&'static str, String)> {
         ("channel_id", channel.to_owned()),
         ("regions", region.to_owned()),
         ("multidevice", "true".to_owned()),
-    ]
-}
-
-/// What `rooms.leave` is asked with: a guess, named after
-/// `rooms.inviteResponse`'s parameters. No source shows this method.
-pub fn leave_params(channel: &str, call: &str) -> Vec<(&'static str, String)> {
-    vec![
-        ("channel_id", channel.to_owned()),
-        ("room_id", call.to_owned()),
     ]
 }
 
@@ -124,19 +115,6 @@ pub async fn join(
         .act("rooms.join", &join_params(channel, region))
         .await?;
     Ok(parse(&answer)?)
-}
-
-/// Tells Slack this person left the call, after Chime was told. Its
-/// answer only matters to a probe's log, so it is returned as is.
-pub async fn leave(
-    client: &crate::slack::Client,
-    channel: &str,
-    call: &str,
-) -> Result<(), crate::slack::SlackError> {
-    client
-        .act::<Value>("rooms.leave", &leave_params(channel, call))
-        .await
-        .map(|_| ())
 }
 
 /// Reads a successful `rooms.join` answer.
@@ -285,13 +263,6 @@ mod tests {
                 ("channel_id", "C1".to_owned()),
                 ("regions", "us-east-1".to_owned()),
                 ("multidevice", "true".to_owned()),
-            ]
-        );
-        assert_eq!(
-            leave_params("C1", "R1"),
-            vec![
-                ("channel_id", "C1".to_owned()),
-                ("room_id", "R1".to_owned()),
             ]
         );
     }

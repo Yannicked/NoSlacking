@@ -374,6 +374,7 @@ fastframe_icons::icons! {
         Lock => lucide "lock",
         LogOut => lucide "log-out",
         MessageCircle => "message-circle",
+        MicOff => "mic-off",
         Messages => "messages-square",
         Paperclip => "paperclip",
         Pencil => lucide "pencil",
