@@ -49,8 +49,8 @@ struct Cli {
 
     /// Open a view before the screenshot: thread, settings, sign-in,
     /// switcher, palette, picker, profile, share, upload, drafts, lightbox,
-    /// media, previews, compact, held-media, shortcuts, delete-file or
-    /// add-emoji.
+    /// media, previews, viewer-sheet, viewer-csv, viewer-zip, viewer-text,
+    /// compact, held-media, shortcuts, delete-file or add-emoji.
     #[cfg(feature = "demo")]
     #[arg(long, value_name = "VIEW")]
     demo_view: Option<String>,
@@ -692,6 +692,24 @@ impl DemoSetup {
             // #random's files: Slack's previews of a snippet, a text file,
             // a PDF, a spreadsheet, a voice clip and a video.
             Some("previews") => app.actions.push(Action::OpenConversation("C04".into())),
+            // The file viewer over #random, on one of its files.
+            Some(view @ ("viewer-sheet" | "viewer-csv" | "viewer-zip" | "viewer-text")) => {
+                use noslacking::viewer::Kind;
+                let (id, name, filetype, kind, size) = match view {
+                    "viewer-sheet" => ("F23", "Q4 budget.xlsx", "xlsx", Kind::Sheet, 75_813),
+                    "viewer-csv" => ("F26", "deploys.csv", "csv", Kind::Csv, 7_412),
+                    "viewer-zip" => ("F27", "logs.zip", "zip", Kind::Zip, 98_220),
+                    _ => ("F20", "backoff.rs", "rust", Kind::Text, 742),
+                };
+                app.actions.push(Action::OpenConversation("C04".into()));
+                app.actions.push(Action::ViewFile {
+                    url: format!("https://files.slack.com/files-pri/TDEMO-{id}/{name}"),
+                    name: name.into(),
+                    filetype: filetype.into(),
+                    kind,
+                    size,
+                });
+            }
             // Search results, with a second page to scroll to.
             Some("search") => {
                 app.search.text = "standup in:#general".into();
