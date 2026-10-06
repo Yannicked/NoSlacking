@@ -1,6 +1,7 @@
 //! Dialogs for starting and finding conversations: "New message", which
 //! picks people for a direct message, the channel browser, "Create a
-//! channel" and the question before leaving one.
+//! channel", the question before leaving one, and adding, editing and
+//! removing a channel's bookmarks.
 //!
 //! Shortcuts: Ctrl+N (⌘N) starts a new message, Ctrl+Shift+L (⌘⇧L) browses
 //! channels.
@@ -8,7 +9,7 @@
 use egui::{CornerRadius, Key, Margin, Modifiers, RichText, Sense, Vec2};
 
 use crate::app::{App, Page};
-use crate::convos::{Action as Convos, MAX_NAME, MAX_PEOPLE, NameProblem};
+use crate::convos::{Action as Convos, BookmarkProblem, MAX_NAME, MAX_PEOPLE, NameProblem};
 use crate::i18n::{t, tf};
 use crate::model::{Action, Conversation, ConversationKind};
 use crate::theme::{self, Icon};
@@ -134,6 +135,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     browse(app, ctx);
     new_channel(app, ctx);
     confirm_leave(app, ctx);
+    bookmark_dialog(app, ctx);
+    confirm_remove_bookmark(app, ctx);
 }
 
 /// The frame every dialog here sits in, like the other overlays'.
@@ -750,6 +753,223 @@ fn confirm_leave(app: &mut App, ctx: &egui::Context) {
     match answer {
         Some(true) => app.actions.push(Action::Convos(Convos::Leave { channel })),
         Some(false) => app.convos.leave = None,
+        None => {}
+    }
+}
+
+/// What is wrong with the bookmark dialog's fields, in words.
+fn bookmark_problem(problem: BookmarkProblem) -> String {
+    match problem {
+        BookmarkProblem::NoLink => t("Enter a link.").into_owned(),
+        BookmarkProblem::NotALink => {
+            t("Only web links (http:// or https://) can be bookmarked.").into_owned()
+        }
+        BookmarkProblem::NotAnEmoji => {
+            t("Enter an emoji name, such as rocket or :rocket:.").into_owned()
+        }
+    }
+}
+
+/// A field of the bookmark dialog with its label above it; returns the
+/// field.
+fn bookmark_field(
+    ui: &mut egui::Ui,
+    app: &App,
+    label: &str,
+    text: &mut String,
+    id: &str,
+    hint: &str,
+) -> egui::Response {
+    let label = ui.label(
+        RichText::new(label)
+            .font(theme::medium(13.0))
+            .color(app.palette.secondary),
+    );
+    ui.add(
+        egui::TextEdit::singleline(text)
+            .id(egui::Id::new(id))
+            .hint_text(hint)
+            .desired_width(f32::INFINITY)
+            .margin(Margin::symmetric(8, 6)),
+    )
+    .labelled_by(label.id)
+}
+
+/// Adds a bookmark to a channel, or edits one: its link, its title and
+/// an optional emoji.
+fn bookmark_dialog(app: &mut App, ctx: &egui::Context) {
+    let Some(mut dialog) = app.convos.bookmark.take() else {
+        return;
+    };
+    let focus = std::mem::take(&mut app.focus_overlay);
+    let palette = app.palette;
+    let checked = crate::convos::bookmark_form(&dialog.title, &dialog.link, &dialog.emoji);
+    let mut close = false;
+    let mut save = false;
+    let response = egui::Modal::new(egui::Id::new("bookmark-dialog"))
+        .frame(frame(app))
+        .show(ctx, |ui| {
+            ui.set_width(420.0);
+            heading(
+                ui,
+                app,
+                &if dialog.editing.is_some() {
+                    t("Edit bookmark")
+                } else {
+                    t("Add a bookmark")
+                },
+            );
+            ui.add_space(6.0);
+            let link = bookmark_field(
+                ui,
+                app,
+                &t("Link"),
+                &mut dialog.link,
+                "bookmark-link",
+                "https://",
+            );
+            if focus {
+                link.request_focus();
+            }
+            match crate::convos::bookmark_link(&dialog.link) {
+                Ok(full) if full != dialog.link.trim() => {
+                    ui.label(
+                        RichText::new(tf("It will link to {link}.", &[("link", &full)]))
+                            .font(theme::regular(12.5))
+                            .color(palette.dim),
+                    );
+                }
+                Err(problem) if !dialog.link.trim().is_empty() => {
+                    ui.label(
+                        RichText::new(bookmark_problem(problem))
+                            .font(theme::regular(12.5))
+                            .color(palette.danger),
+                    );
+                }
+                _ => {}
+            }
+            ui.add_space(4.0);
+            let title = bookmark_field(
+                ui,
+                app,
+                &t("Name"),
+                &mut dialog.title,
+                "bookmark-title",
+                &t("The link, if left empty"),
+            );
+            ui.add_space(4.0);
+            let emoji = bookmark_field(
+                ui,
+                app,
+                &t("Emoji (optional)"),
+                &mut dialog.emoji,
+                "bookmark-emoji",
+                &t("e.g. rocket"),
+            );
+            match crate::convos::bookmark_emoji(&dialog.emoji) {
+                Ok(Some(name)) => {
+                    if let Some(shown) = crate::emoji::unicode(&name, None) {
+                        ui.label(RichText::new(shown).font(theme::regular(16.0)));
+                    }
+                }
+                Ok(None) => {}
+                Err(problem) => {
+                    ui.label(
+                        RichText::new(bookmark_problem(problem))
+                            .font(theme::regular(12.5))
+                            .color(palette.danger),
+                    );
+                }
+            }
+            let typing = link.has_focus() || title.has_focus() || emoji.has_focus();
+            if typing && ui.input(|i| i.key_pressed(Key::Enter)) {
+                save = true;
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if theme::secondary_button(ui, &palette, &t("Cancel")).clicked() {
+                    close = true;
+                }
+                let label = if dialog.editing.is_some() {
+                    t("Save")
+                } else {
+                    t("Add")
+                };
+                if ui
+                    .add_enabled_ui(checked.is_ok(), |ui| {
+                        theme::primary_button(ui, &palette, &label)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    save = true;
+                }
+            });
+        });
+    if response.should_close() || close {
+        return;
+    }
+    if save && let Ok(form) = checked {
+        app.actions.push(Action::Convos(Convos::SaveBookmark {
+            channel: dialog.channel,
+            id: dialog.editing.map(|b| b.id),
+            form,
+        }));
+        return;
+    }
+    app.convos.bookmark = Some(dialog);
+}
+
+/// "Remove the bookmark?", before removing it.
+fn confirm_remove_bookmark(app: &mut App, ctx: &egui::Context) {
+    let Some((channel, bookmark)) = app.convos.remove_bookmark.clone() else {
+        return;
+    };
+    let palette = app.palette;
+    let mut answer = None;
+    let response = egui::Modal::new(egui::Id::new("confirm-remove-bookmark"))
+        .frame(frame(app))
+        .show(ctx, |ui| {
+            ui.set_width(360.0);
+            heading(
+                ui,
+                app,
+                &tf("Remove “{name}”?", &[("name", &bookmark.title)]),
+            );
+            ui.label(
+                RichText::new(t("It is removed for everyone in the channel."))
+                    .font(theme::regular(14.0))
+                    .color(palette.secondary),
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if theme::secondary_button(ui, &palette, &t("Cancel")).clicked() {
+                    answer = Some(false);
+                }
+                let remove = egui::Button::new(
+                    RichText::new(t("Remove"))
+                        .font(theme::medium(14.0))
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(palette.danger)
+                .min_size(Vec2::new(0.0, 32.0));
+                if ui.add(remove).clicked() {
+                    answer = Some(true);
+                }
+            });
+            if ui.input(|i| i.key_pressed(Key::Enter)) {
+                answer = Some(true);
+            }
+        });
+    if response.should_close() {
+        answer = Some(false);
+    }
+    match answer {
+        Some(true) => app.actions.push(Action::Convos(Convos::RemoveBookmark {
+            channel,
+            id: bookmark.id,
+        })),
+        Some(false) => app.convos.remove_bookmark = None,
         None => {}
     }
 }

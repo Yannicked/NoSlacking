@@ -171,6 +171,12 @@ pub(super) fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> 
                 out.push(Translated::Event(Event::Convos { team, event }));
             }
         }
+        // Someone (maybe you, elsewhere) changed a channel's bookmarks.
+        "bookmark_added" | "bookmark_changed" | "bookmark_removed" => {
+            if let Some(event) = super::convos::bookmark_event(kind, event) {
+                out.push(Translated::Event(Event::Convos { team, event }));
+            }
+        }
         // Read on another device (or in another window): the read marker
         // moves, so unread counts here follow. The interface only ever moves
         // a marker forward, so an older mark arriving late changes nothing.
@@ -212,6 +218,31 @@ mod tests {
             );
         }
         assert!(events(r#"{"type":"channel_marked","channel":"C1"}"#).is_empty());
+    }
+
+    #[test]
+    fn bookmark_events_reach_the_details_panel() {
+        let removed =
+            events(r#"{"type":"bookmark_removed","channel_id":"C1","bookmark":{"id":"Bk1"}}"#);
+        assert!(
+            matches!(&removed[..], [Translated::Event(Event::Convos {
+                team,
+                event: crate::convos::Event::BookmarkRemoved { channel, id },
+            })] if team == "T1" && channel == "C1" && id == "Bk1"),
+            "{removed:?}"
+        );
+        let added = events(
+            r#"{"type":"bookmark_added","channel_id":"C1",
+                "bookmark":{"id":"Bk2","title":"Docs","link":"https://a.example"}}"#,
+        );
+        assert!(matches!(
+            &added[..],
+            [Translated::Event(Event::Convos {
+                event: crate::convos::Event::BookmarkChanged { .. },
+                ..
+            })]
+        ));
+        assert!(events(r#"{"type":"bookmark_changed"}"#).is_empty());
     }
 
     #[test]

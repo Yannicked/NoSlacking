@@ -99,6 +99,8 @@ struct BookmarksPage {
     bookmarks: Vec<BookmarkItem>,
 }
 
+/// One bookmark, as Slack lists it, answers `bookmarks.add` and
+/// `bookmarks.edit`, and sends it in its events.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct BookmarkItem {
@@ -106,6 +108,14 @@ struct BookmarkItem {
     title: String,
     link: String,
     emoji: Option<String>,
+    channel_id: Option<String>,
+}
+
+/// `bookmarks.add`'s and `bookmarks.edit`'s answer.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct SavedBookmark {
+    bookmark: BookmarkItem,
 }
 
 /// Runs one command and reports back. Every failure is answered, so a
@@ -169,6 +179,9 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
                 other => other.map(|_| ()),
             }
         }
+        Command::Bookmark { channel, change } => {
+            save_bookmark(&client, &team, channel, &change, &sink).await
+        }
     };
     if let Err(error) = result {
         fail(&sink, team, what, &error);
@@ -194,23 +207,146 @@ fn pins(page: PinsPage) -> Vec<convos::Pin> {
 
 /// The links of a `bookmarks.list` answer, with their emoji as shortcodes.
 fn bookmarks(page: BookmarksPage) -> Vec<convos::Bookmark> {
-    page.bookmarks
-        .into_iter()
-        .filter(|b| !b.link.is_empty())
-        .map(|b| convos::Bookmark {
-            title: if b.title.is_empty() {
-                b.link.clone()
-            } else {
-                b.title
-            },
-            id: b.id,
-            link: b.link,
-            emoji: b
-                .emoji
-                .map(|e| e.trim_matches(':').to_owned())
-                .filter(|e| !e.is_empty()),
-        })
-        .collect()
+    page.bookmarks.into_iter().filter_map(bookmark).collect()
+}
+
+/// A bookmark as the interface shows it; none for a folder or anything
+/// else without a link.
+fn bookmark(b: BookmarkItem) -> Option<convos::Bookmark> {
+    if b.link.is_empty() || b.id.is_empty() {
+        return None;
+    }
+    Some(convos::Bookmark {
+        title: if b.title.is_empty() {
+            b.link.clone()
+        } else {
+            b.title
+        },
+        id: b.id,
+        link: b.link,
+        emoji: b
+            .emoji
+            .map(|e| e.trim_matches(':').to_owned())
+            .filter(|e| !e.is_empty()),
+    })
+}
+
+/// The method and parameters that ask Slack for a bookmark change.
+fn bookmark_request(
+    channel: &str,
+    change: &convos::BookmarkChange,
+) -> (&'static str, Vec<(&'static str, String)>) {
+    let emoji = |e: &str| format!(":{e}:");
+    match change {
+        convos::BookmarkChange::Add(new) => {
+            let mut params = vec![
+                ("channel_id", channel.to_owned()),
+                ("title", new.title.clone()),
+                ("type", "link".to_owned()),
+                ("link", new.link.clone()),
+            ];
+            if let Some(e) = &new.emoji {
+                params.push(("emoji", emoji(e)));
+            }
+            ("bookmarks.add", params)
+        }
+        convos::BookmarkChange::Edit { before, after } => {
+            let mut params = vec![
+                ("bookmark_id", after.id.clone()),
+                ("channel_id", channel.to_owned()),
+                ("title", after.title.clone()),
+                ("link", after.link.clone()),
+            ];
+            match (&after.emoji, &before.emoji) {
+                (Some(e), _) => params.push(("emoji", emoji(e))),
+                // Sent empty to take the emoji off; left out, it stays.
+                (None, Some(_)) => params.push(("emoji", String::new())),
+                (None, None) => {}
+            }
+            ("bookmarks.edit", params)
+        }
+        convos::BookmarkChange::Remove { bookmark, .. } => (
+            "bookmarks.remove",
+            vec![
+                ("bookmark_id", bookmark.id.clone()),
+                ("channel_id", channel.to_owned()),
+            ],
+        ),
+    }
+}
+
+/// Asks Slack for a bookmark change the interface already shows. Slack's
+/// answer to an addition names the new bookmark, which then takes the
+/// place of the one shown until now.
+async fn save_bookmark(
+    client: &Client,
+    team: &str,
+    channel: String,
+    change: &convos::BookmarkChange,
+    sink: &Sink,
+) -> Result<(), SlackError> {
+    let (method, params) = bookmark_request(&channel, change);
+    match change {
+        convos::BookmarkChange::Add(local) => {
+            let saved: SavedBookmark = client.act(method, &params).await?;
+            if let Some(bookmark) = bookmark(saved.bookmark) {
+                reply(
+                    sink,
+                    team,
+                    convos::Event::BookmarkSaved {
+                        channel,
+                        local: local.id.clone(),
+                        bookmark,
+                    },
+                );
+            }
+            Ok(())
+        }
+        convos::BookmarkChange::Edit { .. } => {
+            let saved: SavedBookmark = client.act(method, &params).await?;
+            // What Slack kept, which may differ from what was typed.
+            if let Some(bookmark) = bookmark(saved.bookmark) {
+                reply(
+                    sink,
+                    team,
+                    convos::Event::BookmarkChanged { channel, bookmark },
+                );
+            }
+            Ok(())
+        }
+        convos::BookmarkChange::Remove { .. } => {
+            match client.act::<serde_json::Value>(method, &params).await {
+                // Gone already, maybe removed by someone else.
+                Err(SlackError::Api(code)) if code == "not_found" => Ok(()),
+                other => other.map(|_| ()),
+            }
+        }
+    }
+}
+
+/// A `bookmark_added`, `bookmark_changed` or `bookmark_removed` event, as
+/// the interface takes it. Slack does not document their shape; they carry
+/// the bookmark as `bookmarks.list` lists it, and the channel beside it or
+/// in it.
+pub fn bookmark_event(kind: &str, event: &serde_json::Value) -> Option<convos::Event> {
+    let item: BookmarkItem = serde_json::from_value(event.get("bookmark")?.clone()).ok()?;
+    let channel = event
+        .get("channel_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| item.channel_id.clone())
+        .filter(|c| !c.is_empty())?;
+    match kind {
+        "bookmark_removed" => {
+            let id = item.id;
+            (!id.is_empty()).then_some(convos::Event::BookmarkRemoved { channel, id })
+        }
+        "bookmark_added" | "bookmark_changed" => Some(convos::Event::BookmarkChanged {
+            channel,
+            bookmark: bookmark(item)?,
+        }),
+        _ => None,
+    }
 }
 
 /// A `pin_added` or `pin_removed` event, as the interface takes it.
@@ -620,6 +756,22 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
         }
         // The interface already shows the new text, and the pin.
         Command::Describe { .. } | Command::Pin { .. } => Vec::new(),
+        // A new bookmark gets its id; edits and removals are shown already.
+        Command::Bookmark {
+            channel,
+            change: convos::BookmarkChange::Add(local),
+        } => vec![Event::Convos {
+            team: team.to_owned(),
+            event: convos::Event::BookmarkSaved {
+                channel,
+                bookmark: convos::Bookmark {
+                    id: format!("Bk-{}", local.id),
+                    ..local.clone()
+                },
+                local: local.id,
+            },
+        }],
+        Command::Bookmark { .. } => Vec::new(),
         Command::Pins { channel } => {
             let mut message = crate::model::Message {
                 ts: crate::model::Ts::new("1790168400.000100"),
@@ -812,6 +964,154 @@ mod tests {
         assert_eq!(marks.len(), 1);
         assert_eq!(marks[0].title, "https://a.example");
         assert_eq!(marks[0].emoji.as_deref(), Some("rocket"));
+    }
+
+    fn mark(id: &str, title: &str, emoji: Option<&str>) -> convos::Bookmark {
+        convos::Bookmark {
+            id: id.into(),
+            title: title.into(),
+            link: "https://example.com".into(),
+            emoji: emoji.map(str::to_owned),
+        }
+    }
+
+    fn params(list: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
+        list.iter().map(|(k, v)| (*k, (*v).to_owned())).collect()
+    }
+
+    #[test]
+    fn bookmark_requests_follow_slacks_methods() {
+        let add = convos::BookmarkChange::Add(mark("local-1", "Docs", Some("books")));
+        assert_eq!(
+            bookmark_request("C1", &add),
+            (
+                "bookmarks.add",
+                params(&[
+                    ("channel_id", "C1"),
+                    ("title", "Docs"),
+                    ("type", "link"),
+                    ("link", "https://example.com"),
+                    ("emoji", ":books:"),
+                ])
+            )
+        );
+        let plain = convos::BookmarkChange::Add(mark("local-2", "Docs", None));
+        assert!(
+            !bookmark_request("C1", &plain)
+                .1
+                .iter()
+                .any(|(k, _)| *k == "emoji"),
+            "no emoji, none sent"
+        );
+        let edit = convos::BookmarkChange::Edit {
+            before: mark("Bk1", "Docs", Some("books")),
+            after: mark("Bk1", "Handbook", None),
+        };
+        assert_eq!(
+            bookmark_request("C1", &edit),
+            (
+                "bookmarks.edit",
+                params(&[
+                    ("bookmark_id", "Bk1"),
+                    ("channel_id", "C1"),
+                    ("title", "Handbook"),
+                    ("link", "https://example.com"),
+                    ("emoji", ""),
+                ])
+            ),
+            "an emoji taken off is sent empty"
+        );
+        let unchanged = convos::BookmarkChange::Edit {
+            before: mark("Bk1", "Docs", None),
+            after: mark("Bk1", "Handbook", None),
+        };
+        assert!(
+            !bookmark_request("C1", &unchanged)
+                .1
+                .iter()
+                .any(|(k, _)| *k == "emoji")
+        );
+        let remove = convos::BookmarkChange::Remove {
+            bookmark: mark("Bk1", "Docs", None),
+            at: 0,
+        };
+        assert_eq!(
+            bookmark_request("C1", &remove),
+            (
+                "bookmarks.remove",
+                params(&[("bookmark_id", "Bk1"), ("channel_id", "C1")])
+            )
+        );
+    }
+
+    #[test]
+    fn a_saved_bookmark_is_read_from_slacks_answer() {
+        // Slack's documented example answer.
+        let saved: SavedBookmark = serde_json::from_str(
+            r#"{"ok":true,"bookmark":{"id":"Bk033XFJ9BTJ","channel_id":"C1RQ000",
+                "title":"bookmark-1","link":"https://google.com","emoji":":clap:",
+                "icon_url":"https://www.google.com/favicon.ico","type":"link",
+                "entity_id":null,"date_created":1644956055,"date_updated":0,"rank":"g",
+                "last_updated_by_user_id":"U0334B6G6G5","shortcut_id":null,"app_id":null}}"#,
+        )
+        .expect("json");
+        assert_eq!(
+            bookmark(saved.bookmark),
+            Some(convos::Bookmark {
+                id: "Bk033XFJ9BTJ".into(),
+                title: "bookmark-1".into(),
+                link: "https://google.com".into(),
+                emoji: Some("clap".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn bookmark_events_name_the_channel_and_the_bookmark() {
+        let event = |json: &str| -> serde_json::Value { serde_json::from_str(json).expect("json") };
+        let added = event(
+            r#"{"type":"bookmark_added","channel_id":"C1","bookmark":{"id":"Bk1",
+                "channel_id":"C1","title":"Docs","link":"https://a.example","emoji":":books:",
+                "type":"link"}}"#,
+        );
+        assert_eq!(
+            bookmark_event("bookmark_added", &added),
+            Some(convos::Event::BookmarkChanged {
+                channel: "C1".into(),
+                bookmark: convos::Bookmark {
+                    id: "Bk1".into(),
+                    title: "Docs".into(),
+                    link: "https://a.example".into(),
+                    emoji: Some("books".into()),
+                },
+            })
+        );
+        // The channel only inside the bookmark.
+        let changed = event(
+            r#"{"type":"bookmark_changed","bookmark":{"id":"Bk1","channel_id":"C2",
+                "title":"","link":"https://b.example"}}"#,
+        );
+        assert!(matches!(
+            bookmark_event("bookmark_changed", &changed),
+            Some(convos::Event::BookmarkChanged { channel, bookmark })
+                if channel == "C2" && bookmark.title == "https://b.example"
+        ));
+        let removed =
+            event(r#"{"type":"bookmark_removed","channel_id":"C1","bookmark":{"id":"Bk1"}}"#);
+        assert_eq!(
+            bookmark_event("bookmark_removed", &removed),
+            Some(convos::Event::BookmarkRemoved {
+                channel: "C1".into(),
+                id: "Bk1".into(),
+            })
+        );
+        // A folder has no link to show; without a channel nothing is known.
+        let folder = event(
+            r#"{"type":"bookmark_added","channel_id":"C1","bookmark":{"id":"Bk2","type":"folder"}}"#,
+        );
+        assert_eq!(bookmark_event("bookmark_added", &folder), None);
+        let nowhere = event(r#"{"type":"bookmark_removed","bookmark":{"id":"Bk1"}}"#);
+        assert_eq!(bookmark_event("bookmark_removed", &nowhere), None);
     }
 
     #[test]

@@ -671,6 +671,21 @@ impl DemoSetup {
                 };
                 app.actions.push(Action::Views(Views::Open(view)));
             }
+            // The bookmarks tab with the "Add a bookmark" dialog over it,
+            // half filled in.
+            Some("bookmark-add") => {
+                use noslacking::convos::{Action as Convos, BookmarkDialog, Tab};
+                app.actions.push(Action::Convos(Convos::Details {
+                    channel: "C02".into(),
+                    tab: Tab::Bookmarks,
+                }));
+                app.convos.bookmark = Some(BookmarkDialog {
+                    link: "docs.example.com/release".into(),
+                    title: "Release guide".into(),
+                    emoji: "books".into(),
+                    ..BookmarkDialog::new("C02".into(), None)
+                });
+            }
             Some("browse") => app
                 .actions
                 .push(Action::Convos(noslacking::convos::Action::Browse)),

@@ -656,7 +656,8 @@ fn pins(
         });
 }
 
-/// The links saved at the top of the conversation; a click opens one.
+/// The links saved at the top of the conversation; a click opens one, and
+/// each has a menu to edit or remove it. "Add a bookmark" adds one.
 fn bookmarks(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -674,6 +675,23 @@ fn bookmarks(
     ) else {
         return;
     };
+    if !conversation.archived {
+        let add = egui::Button::image_and_text(
+            Icon::Plus.image(palette.text, 14.0),
+            RichText::new(t("Add a bookmark"))
+                .font(theme::medium(14.0))
+                .color(palette.text),
+        )
+        .fill(palette.surface)
+        .min_size(Vec2::new(0.0, 32.0));
+        if ui.add(add).clicked() {
+            actions.push(Action::Convos(Convos::AskBookmark {
+                channel: conversation.id.clone(),
+                bookmark: None,
+            }));
+        }
+        ui.add_space(6.0);
+    }
     if bookmarks.is_empty() {
         ui.label(RichText::new(t("No bookmarks here yet.")).color(palette.dim));
         return;
@@ -684,6 +702,8 @@ fn bookmarks(
             for bookmark in &bookmarks[range] {
                 let (rect, row) =
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW), Sense::click());
+                // Not saved yet, it has no id Slack would know to change.
+                let menu = !bookmark.is_local() && !conversation.archived;
                 if row.hovered() {
                     ui.painter().rect_filled(
                         rect,
@@ -715,7 +735,8 @@ fn bookmarks(
                     theme::semibold(14.0),
                     palette.text,
                 );
-                job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 48.0);
+                let room = if menu { 80.0 } else { 48.0 };
+                job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - room);
                 let galley = ui.painter().layout_job(job);
                 ui.painter().galley(
                     egui::pos2(rect.left() + 40.0, rect.center().y - galley.size().y / 2.0),
@@ -723,15 +744,64 @@ fn bookmarks(
                     palette.text,
                 );
                 theme::describe(&row, egui::WidgetType::Link, &bookmark.title);
-                if row
+                let row = row
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text(&bookmark.link)
-                    .clicked()
-                {
+                    .on_hover_text(&bookmark.link);
+                if row.clicked() {
                     actions.push(Action::OpenUrl(bookmark.link.clone()));
                 }
+                if !menu {
+                    continue;
+                }
+                row.context_menu(|ui| bookmark_menu(ui, conversation, bookmark, actions));
+                // Drawn after the row, so it takes the clicks over it.
+                let at = egui::Rect::from_center_size(
+                    egui::pos2(rect.right() - 18.0, rect.center().y),
+                    Vec2::splat(28.0),
+                );
+                let more = ui
+                    .scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
+                        theme::icon_button(
+                            ui,
+                            palette,
+                            Icon::Ellipsis,
+                            16.0,
+                            &tf("More for {name}", &[("name", &bookmark.title)]),
+                        )
+                    })
+                    .inner;
+                egui::Popup::menu(&more)
+                    .id(egui::Id::new((
+                        "bookmark-menu",
+                        &conversation.id,
+                        &bookmark.id,
+                    )))
+                    .show(|ui| bookmark_menu(ui, conversation, bookmark, actions));
             }
         });
+}
+
+/// What a bookmark's menu offers: editing it and removing it.
+fn bookmark_menu(
+    ui: &mut egui::Ui,
+    conversation: &Conversation,
+    bookmark: &crate::convos::Bookmark,
+    actions: &mut Vec<Action>,
+) {
+    if ui.button(t("Edit bookmark")).clicked() {
+        actions.push(Action::Convos(Convos::AskBookmark {
+            channel: conversation.id.clone(),
+            bookmark: Some(bookmark.clone()),
+        }));
+        ui.close();
+    }
+    if ui.button(t("Remove bookmark")).clicked() {
+        actions.push(Action::Convos(Convos::AskRemoveBookmark {
+            channel: conversation.id.clone(),
+            bookmark: bookmark.clone(),
+        }));
+        ui.close();
+    }
 }
 
 /// A day, written out: "Monday, March 3, 2025".
