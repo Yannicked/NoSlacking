@@ -78,6 +78,9 @@ pub struct WorkspaceState {
     /// Messages so deleted, by conversation and real ts, whose echo is not
     /// to bring them back.
     suppressed: HashSet<(String, Ts)>,
+    /// Button presses sent and not yet answered, which show as busy and
+    /// cannot be pressed again meanwhile.
+    pub pressing: HashSet<crate::model::Press>,
 }
 
 /// What became of a send Slack answered (see [`WorkspaceState::sent`]).
@@ -132,6 +135,7 @@ impl WorkspaceState {
             echoed: HashMap::new(),
             cancelled: HashSet::new(),
             suppressed: HashSet::new(),
+            pressing: HashSet::new(),
         }
     }
 
@@ -1711,6 +1715,7 @@ mod tests {
             domain: "acme".into(),
             icon: None,
             user_id: "U1".into(),
+            sign_in: Default::default(),
         })
     }
 

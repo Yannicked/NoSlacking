@@ -7,6 +7,7 @@
 
 mod api;
 mod around;
+mod blocks;
 pub mod convos;
 pub mod desktop;
 mod fetch;
@@ -154,6 +155,13 @@ pub enum Command {
         channel: String,
         command: String,
         text: String,
+    },
+    /// Presses an app's interactive button, as Slack's web client does
+    /// (browser sessions only). Answered by [`Event::Pressed`]; the app
+    /// usually answers by changing the message, which arrives as an edit.
+    PressButton {
+        team: String,
+        press: crate::model::Press,
     },
     /// Stops the upload `id` if Slack has not yet been told to share the
     /// file, answered by [`Event::UploadCancelled`]. Later it is ignored
@@ -405,6 +413,11 @@ impl std::fmt::Debug for Command {
                 .field("channel", channel)
                 .field("command", command)
                 .field("text", text)
+                .finish(),
+            Self::PressButton { team, press } => f
+                .debug_struct("PressButton")
+                .field("team", team)
+                .field("press", press)
                 .finish(),
             Self::CancelUpload { id } => f.debug_struct("CancelUpload").field("id", id).finish(),
             Self::Download { team, url, name } => f
@@ -724,6 +737,13 @@ pub enum Event {
         id: u64,
         command: String,
         result: Result<Option<String>, Failure>,
+    },
+    /// Slack took a button press (`Ok`) or refused it. Taking it only
+    /// means the app was told; what the app does comes as message edits.
+    Pressed {
+        team: String,
+        press: crate::model::Press,
+        result: Result<(), Failure>,
     },
     /// Upload `id` has all its bytes up and Slack is being told to share
     /// it. That can't be taken back, so it can no longer be cancelled.

@@ -408,10 +408,33 @@ fn kit_text(value: &Value) -> Option<String> {
     })
 }
 
-fn kit_button(value: &Value) -> Option<model::Button> {
+/// A string field, left out when missing or blank.
+fn kit_str(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_owned)
+}
+
+/// A button in block `block` (whose `block_id` a press names), with what
+/// pressing it needs: the app's `action_id` and `value`, and the `confirm`
+/// dialog the app wants shown first.
+fn kit_button(block: &Value, value: &Value) -> Option<model::Button> {
     if value.get("type").and_then(Value::as_str) != Some("button") {
         return None;
     }
+    let label = |object: Option<&Value>| object.and_then(|o| kit_str(o, "text"));
+    let confirm = value
+        .get("confirm")
+        .filter(|c| c.is_object())
+        .map(|c| model::Confirm {
+            title: label(c.get("title")),
+            text: c.get("text").and_then(kit_text),
+            confirm: label(c.get("confirm")),
+            deny: label(c.get("deny")),
+            style: kit_str(c, "style"),
+        });
     Some(model::Button {
         text: value
             .get("text")
@@ -419,16 +442,21 @@ fn kit_button(value: &Value) -> Option<model::Button> {
             .and_then(Value::as_str)
             .unwrap_or("Button")
             .to_owned(),
-        url: value.get("url").and_then(Value::as_str).map(str::to_owned),
-        style: value
-            .get("style")
+        url: kit_str(value, "url"),
+        style: kit_str(value, "style"),
+        action_id: kit_str(value, "action_id"),
+        block_id: kit_str(block, "block_id"),
+        value: value
+            .get("value")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        confirm,
     })
 }
 
 /// Block Kit blocks, as far as a reader needs them. Inputs and other
-/// interactive elements are left out: they need the app's own server.
+/// interactive elements other than buttons (selects, menus, pickers) are
+/// left out: pressing a button is the one interaction drawn here.
 pub fn kit_blocks(blocks: &[Value]) -> Vec<model::KitBlock> {
     use model::{Accessory, ContextItem, KitBlock};
     let mut out = Vec::new();
@@ -455,7 +483,9 @@ pub fn kit_blocks(blocks: &[Value]) -> Vec<model::KitBlock> {
                                 .unwrap_or("")
                                 .to_owned(),
                         }),
-                        Some("button") => kit_button(a).map(Accessory::Button),
+                        Some("button") => {
+                            kit_button(block, a).map(|b| Accessory::Button(Box::new(b)))
+                        }
                         _ => None,
                     }
                 });
@@ -506,7 +536,7 @@ pub fn kit_blocks(blocks: &[Value]) -> Vec<model::KitBlock> {
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
-                    .filter_map(kit_button)
+                    .filter_map(|element| kit_button(block, element))
                     .collect();
                 (!buttons.is_empty()).then_some(KitBlock::Actions(buttons))
             }
@@ -1590,6 +1620,63 @@ mod tests {
             !kit_blocks(&typed).iter().any(KitBlock::is_layout),
             "people's own messages keep their text"
         );
+    }
+
+    #[test]
+    fn interactive_buttons_keep_what_a_press_needs() {
+        use model::{Accessory, Button, Confirm, KitBlock};
+        let message: Message = serde_json::from_str(
+            r#"{"type":"message","subtype":"bot_message","ts":"1790171950.000100","bot_id":"B09",
+                "text":"Deploy?",
+                "blocks":[
+                  {"type":"section","block_id":"ask","text":{"type":"mrkdwn","text":"Deploy?"},
+                   "accessory":{"type":"button","action_id":"details","text":{"type":"plain_text","text":"Details"}}},
+                  {"type":"actions","block_id":"deploy-1288","elements":[
+                    {"type":"button","action_id":"approve","value":"1288","style":"primary",
+                     "text":{"type":"plain_text","text":"Approve"},
+                     "confirm":{"title":{"type":"plain_text","text":"Deploy?"},
+                       "text":{"type":"mrkdwn","text":"Goes to *everyone*."},
+                       "confirm":{"type":"plain_text","text":"Deploy"},
+                       "deny":{"type":"plain_text","text":"Not yet"},
+                       "style":"danger"}},
+                    {"type":"button","action_id":"reject","text":{"type":"plain_text","text":"Reject"}}]}]}"#,
+        )
+        .expect("parses");
+        let message = message.into_model().expect("a message");
+        assert_eq!(message.bot_id.as_deref(), Some("B09"));
+        let KitBlock::Section {
+            accessory: Some(Accessory::Button(details)),
+            ..
+        } = &message.blocks[0]
+        else {
+            panic!("a section with a button: {:?}", message.blocks[0]);
+        };
+        assert_eq!(details.block_id.as_deref(), Some("ask"), "the section's id");
+        assert_eq!(details.action_id.as_deref(), Some("details"));
+        let KitBlock::Actions(buttons) = &message.blocks[1] else {
+            panic!("an actions block: {:?}", message.blocks[1]);
+        };
+        assert_eq!(
+            buttons[0],
+            Button {
+                text: "Approve".into(),
+                url: None,
+                style: Some("primary".into()),
+                action_id: Some("approve".into()),
+                block_id: Some("deploy-1288".into()),
+                value: Some("1288".into()),
+                confirm: Some(Confirm {
+                    title: Some("Deploy?".into()),
+                    text: Some("Goes to *everyone*.".into()),
+                    confirm: Some("Deploy".into()),
+                    deny: Some("Not yet".into()),
+                    style: Some("danger".into()),
+                }),
+            }
+        );
+        assert_eq!(buttons[1].confirm, None, "no confirm, no question");
+        assert_eq!(buttons[1].value, None);
+        assert_eq!(buttons[1].block_id.as_deref(), Some("deploy-1288"));
     }
 
     #[test]

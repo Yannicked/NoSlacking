@@ -538,10 +538,13 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
 
 ### P3: Worth having
 
-- [ ] **Interactive Block Kit buttons.** Only link buttons work now
-      (`model.rs` `Button`). Check whether session sign-ins can use the web
-      client's block-action call; otherwise offer "Open in Slack" on
-      messages with interactive blocks.
+- [x] **Interactive Block Kit buttons.** Browser sessions press an app's
+      buttons through `blocks.actions`, as Slack's web client does
+      (`backend/blocks.rs`), asking the app's `confirm` question first;
+      OAuth sign-ins show them as not pressable with "Open in Slack".
+      Still open: test against a real workspace and keep the answer as a
+      fixture; static selects and overflow menus; forms an app opens in
+      answer (`views.open`), which only Slack itself shows.
 - [ ] **Add and edit bookmarks** (`bookmarks.add`, `bookmarks.edit`,
       `bookmarks.remove`); today they can only be listed.
 - [ ] **Delete your own files** (`files.delete`) from file cards and the

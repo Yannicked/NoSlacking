@@ -460,6 +460,7 @@ mod tests {
             domain: "acme".into(),
             icon: None,
             user_id: "U0".into(),
+            sign_in: Default::default(),
         });
         assert_eq!(w.group_label("S1", None), "@S1");
         assert_eq!(w.group_label("S1", Some("@design")), "@design");

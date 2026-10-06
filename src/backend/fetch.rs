@@ -39,6 +39,7 @@ pub(super) async fn workspace_details(client: &Client, team: &str, user: &str) -
         domain: String::new(),
         icon: None,
         user_id: user.to_owned(),
+        sign_in: crate::model::SignInKind::of(client.token().is_session()),
     };
     match client.call::<types::TeamInfo>("team.info", &[]).await {
         Ok(info) => {

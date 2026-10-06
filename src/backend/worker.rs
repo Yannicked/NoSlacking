@@ -387,6 +387,7 @@ impl Worker {
                         domain: meta.domain,
                         icon: meta.icon,
                         user_id: meta.user_id,
+                        sign_in: Default::default(),
                     };
                     self.add_team(workspace, token);
                     continue;
@@ -459,11 +460,13 @@ impl Worker {
     }
 
     /// Starts using a signed-in workspace.
-    fn add_team(&mut self, workspace: Workspace, token: Token) {
+    fn add_team(&mut self, mut workspace: Workspace, token: Token) {
         let (sink, gate) = self.sink.gated();
         let client = self.make_client(&workspace.team_id, token, sink.clone());
         self.images.set_client(&workspace.team_id, client.clone());
         let session = client.token().is_session();
+        // The token decides it, whatever the saved details said.
+        workspace.sign_in = crate::model::SignInKind::of(session);
         self.sink.send(Event::WorkspaceReady(workspace.clone()));
         let boot = self.spawn_boot(&client, &workspace, &sink, false);
         let replaced = self.teams.insert(
@@ -781,6 +784,7 @@ impl Worker {
                 command,
                 text,
             } => self.slash(id, team, channel, command, text),
+            Command::PressButton { team, press } => self.press_button(team, press),
             Command::CancelUpload { id } => self.cancel_upload(id),
             Command::Download { team, url, name } => self.download(&team, url, name),
             Command::OpenFile { team, url, name } => self.open_file(&team, url, name),
@@ -1031,6 +1035,37 @@ impl Worker {
             sink.send(Event::Slash {
                 id,
                 command,
+                result,
+            });
+        });
+    }
+
+    /// Presses an app's button through `blocks.actions` (see
+    /// [`super::blocks`]), which only a browser session may call.
+    fn press_button(&self, team: String, press: crate::model::Press) {
+        let Some((client, sink)) = self.team(&team) else {
+            self.sink.send(Event::Pressed {
+                team,
+                press,
+                result: Err(Failure::NotSignedIn),
+            });
+            return;
+        };
+        // The press is dated like Slack's own; a clock before 1970 only
+        // makes the date wrong, which Slack does not check.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            });
+        tokio::spawn(async move {
+            let result = super::blocks::press(&client, &press, now_ms).await;
+            if let Err(error) = &result {
+                log::warn!("blocks.actions: {error:?}");
+            }
+            sink.send(Event::Pressed {
+                team,
+                press,
                 result,
             });
         });
@@ -1699,6 +1734,7 @@ mod tests {
             domain: String::new(),
             icon: None,
             user_id: "U1".into(),
+            sign_in: Default::default(),
         };
         worker.teams.insert(
             id.to_owned(),
@@ -2010,6 +2046,7 @@ mod tests {
             domain: String::new(),
             icon: None,
             user_id: "U1".into(),
+            sign_in: Default::default(),
         }));
         let events: Vec<Event> = events.try_iter().collect();
         assert!(

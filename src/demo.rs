@@ -11,7 +11,7 @@ use crate::backend::{Command, Event, Sink, Socket, UploadGate};
 use crate::credentials::AppCredentials;
 use crate::model::{
     Attachment, Bot, Conversation, ConversationKind, Delivery, File, Message, Reaction,
-    SectionKind, SidebarSection, Ts, User, UserGroup, Workspace,
+    SectionKind, SidebarSection, SignInKind, Ts, User, UserGroup, Workspace,
 };
 use crate::notice::Notice;
 
@@ -291,11 +291,43 @@ fn block_kit_release() -> Message {
             "accessory":{{"type":"image","image_url":"{PICTURE}","alt_text":"build preview"}}}},
           {{"type":"context","elements":[{{"type":"mrkdwn","text":"Triggered by a push to `main` · <https://ci.example.com/1288|build #1288>"}}]}},
           {{"type":"divider"}},
-          {{"type":"actions","elements":[
+          {{"type":"actions","block_id":"release","elements":[
             {{"type":"button","text":{{"type":"plain_text","text":"View release"}},"style":"primary","url":"https://github.com/example/noslacking/releases"}},
             {{"type":"button","text":{{"type":"plain_text","text":"Approve"}},"action_id":"approve"}}]}}
         ]}}"##,
         NOW - 100
+    ))
+}
+
+/// When the deploy bot asks for an approval.
+pub const APPROVAL: u64 = NOW - 50;
+
+/// A deploy waiting for approval, with interactive buttons: Approve asks
+/// first, as the app wants. Once `answer` is given, the app has replaced
+/// the buttons with who answered, as such apps do.
+fn deploy_approval(answer: Option<&str>) -> Message {
+    let last = match answer {
+        None => r##"{"type":"actions","block_id":"deploy-1288","elements":[
+            {"type":"button","action_id":"approve","value":"1288","style":"primary",
+             "text":{"type":"plain_text","text":"Approve"},
+             "confirm":{"title":{"type":"plain_text","text":"Deploy to production?"},
+               "text":{"type":"mrkdwn","text":"Release *2026.10.1* goes to every customer at once."},
+               "confirm":{"type":"plain_text","text":"Deploy"},
+               "deny":{"type":"plain_text","text":"Not yet"}}},
+            {"type":"button","action_id":"reject","value":"1288","style":"danger",
+             "text":{"type":"plain_text","text":"Reject"}}]}"##
+            .to_owned(),
+        Some(answer) => format!(
+            r##"{{"type":"context","elements":[{{"type":"mrkdwn","text":":white_check_mark: {answer} by you"}}]}}"##
+        ),
+    };
+    from_json(&format!(
+        r##"{{"type":"message","subtype":"bot_message","ts":"{APPROVAL}.000100","bot_id":"B09","username":"Deploy Bot",
+        "text":"Deploy 2026.10.1 to production?",
+        "blocks":[
+          {{"type":"section","block_id":"ask","text":{{"type":"mrkdwn","text":"*Deploy 2026.10.1 to production?*\nRequested by <@U02> · build #1288 passed"}}}},
+          {last}
+        ]}}"##
     ))
 }
 
@@ -506,6 +538,7 @@ fn history(channel: &str) -> Vec<Message> {
             },
             glitchtip_alert(),
             block_kit_release(),
+            deploy_approval(None),
         ],
         "D01" => vec![
             message(NOW - 1000, ME, "Can you look at the new reaction picker?"),
@@ -767,13 +800,19 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
         client_secret: "demo".into(),
         app_token: "xapp-demo".into(),
     })));
-    for (id, name) in [(TEAM, "Acme Inc"), ("TDEMO2", "Open Source")] {
+    // Acme is signed in as a browser session, so its app buttons press;
+    // Open Source by OAuth, where they only work in Slack.
+    for (id, name, sign_in) in [
+        (TEAM, "Acme Inc", SignInKind::Session),
+        ("TDEMO2", "Open Source", SignInKind::App),
+    ] {
         sink.send(Event::WorkspaceReady(Workspace {
             team_id: id.into(),
             name: name.into(),
             domain: name.to_lowercase().replace(' ', "-"),
             icon: None,
             user_id: ME.into(),
+            sign_in,
         }));
         sink.send(Event::Users {
             team: id.into(),
@@ -1012,6 +1051,33 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                 command,
                 result: Ok(None),
             }),
+            // The deploy bot takes a moment, then answers the press as such
+            // apps do: by changing its message.
+            Command::PressButton { team, press } => {
+                let sink = sink.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(LATENCY * 3).await;
+                    let answer = match press.action_id.as_str() {
+                        "approve" => Some("Approved"),
+                        "reject" => Some("Rejected"),
+                        _ => None,
+                    };
+                    let channel = press.channel.clone();
+                    sink.send(Event::Pressed {
+                        team: team.clone(),
+                        press,
+                        result: Ok(()),
+                    });
+                    if answer.is_some() {
+                        sink.send(Event::Message {
+                            team,
+                            channel,
+                            message: deploy_approval(answer),
+                            changed: true,
+                        });
+                    }
+                });
+            }
             // Like the worker: too late once the last step began.
             Command::CancelUpload { id } => {
                 if let Some((task, gate)) = uploads.remove(&id)

@@ -553,6 +553,7 @@ mod tests {
             domain: String::new(),
             icon: None,
             user_id: "U1".into(),
+            sign_in: Default::default(),
         });
         let mut two = WorkspaceState::new(crate::model::Workspace {
             team_id: "T2".into(),
@@ -601,6 +602,7 @@ mod tests {
             domain: String::new(),
             icon: None,
             user_id: "U1".into(),
+            sign_in: Default::default(),
         });
         let mut c = crate::model::Conversation {
             id: "C1".into(),
@@ -633,6 +635,7 @@ mod tests {
             domain: String::new(),
             icon: None,
             user_id: "U1".into(),
+            sign_in: Default::default(),
         });
         w.groups.push(crate::model::UserGroup {
             id: "S1".into(),
