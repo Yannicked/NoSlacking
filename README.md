@@ -111,10 +111,11 @@ Then start NoSlacking and sign in.
 - **Sign in with your browser.** NoSlacking opens Slack's sign-in page in
   your browser. Sign in as usual (password, emailed code or SSO); when Slack
   hands the sign-in back, the browser passes it to NoSlacking, which
-  registers itself for `slack://` links when you start this sign-in (and
-  only then, as it takes them over from the Slack app). If your browser does
-  not pass it on, paste the `slack://` link from the page instead. Nothing
-  needs to be registered with Slack.
+  registers itself for `slack://` links when you start this sign-in, and
+  only for it: once the link has come, you cancel, 15 minutes pass or you
+  quit, it gives them back to whatever had them before, such as the Slack
+  app. If your browser does not pass it on, paste the `slack://` link from
+  the page instead. Nothing needs to be registered with Slack.
 - **Your own Slack app (advanced).** Tucked away at the bottom of the
   sign-in screen: create a free Slack app from the bundled manifest, paste
   its credentials, and sign in. This is the route Slack documents and

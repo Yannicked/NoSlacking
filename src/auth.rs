@@ -32,12 +32,13 @@ pub const SCHEME: &str = "noslacking";
 /// Slack's own scheme: its browser sign-in finishes with a `slack://`
 /// link, and "Open in Slack" links use it too.
 pub const SLACK_SCHEME: &str = "slack";
-/// Every scheme NoSlacking can handle, as its desktop file lists them.
-/// Being able to is not being the default: `slack://` is only claimed
-/// when a sign-in needs it (see [`claim_slack_links`]). macOS takes them
-/// from the bundle's Info.plist instead.
-#[cfg(target_os = "linux")]
-const SCHEMES: [&str; 2] = [SCHEME, SLACK_SCHEME];
+/// Windows: where `slack://` links are registered for this user.
+#[cfg(any(windows, test))]
+pub(crate) const SLACK_KEY: &str = r"HKCU\Software\Classes\slack";
+/// Windows: the name NoSlacking gives the URL protocol keys it writes, by
+/// which it knows its own.
+#[cfg(any(windows, test))]
+pub(crate) const REGISTRY_NAME: &str = "URL:NoSlacking";
 pub const SCHEME_REDIRECT: &str = "noslacking://oauth/callback";
 
 /// Everything NoSlacking reads and does, as you. Keep in step with
@@ -372,28 +373,27 @@ async fn accept_either(
 /// Registers `noslacking://` with the desktop so the browser can hand
 /// sign-in links back. Linux writes a desktop file for this executable;
 /// Windows writes the per-user URL protocol keys. On macOS the app
-/// bundle's Info.plist declares the schemes, but the links arrive as an
+/// bundle's Info.plist declares the scheme, but the links arrive as an
 /// Apple event the app cannot receive without `unsafe` AppKit code, so this
 /// fails there (see CONTRIBUTING.md).
 ///
-/// Safe to run at every start: the scheme is NoSlacking's own.
+/// Safe to run at every start: the scheme is NoSlacking's own. `slack://`
+/// links are only borrowed for a browser sign-in, and kept while one is
+/// (see [`crate::slack_links`]).
 pub fn register_scheme() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    register_scheme_for(&exe, &[SCHEME])
+    if crate::slack_links::claimed() {
+        register_scheme_for(&exe, &[SCHEME, SLACK_SCHEME])
+    } else {
+        register_scheme_for(&exe, &[SCHEME])
+    }
 }
 
-/// Like [`register_scheme`], and makes NoSlacking the handler of
-/// `slack://` links too, taking them over from the official Slack app if
-/// it is installed. Only for a browser sign-in the user started, which
-/// finishes with such a link; never at start-up.
-pub fn claim_slack_links() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    register_scheme_for(&exe, &[SCHEME, SLACK_SCHEME])
-}
-
-/// Writes the desktop file and makes it the default for `schemes`.
+/// Writes the desktop file, listing `schemes` alone, and makes it the
+/// default for them. Listing `slack` only while it is claimed keeps
+/// desktops from offering NoSlacking for those links the rest of the time.
 #[cfg(target_os = "linux")]
-fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Result<(), String> {
+pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Result<(), String> {
     use crate::paths::APP_ID;
     // A Flatpak or distro package installs its own desktop file.
     if std::env::var_os("FLATPAK_ID").is_some() {
@@ -416,7 +416,7 @@ fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Result<(), St
         "[Desktop Entry]\nType=Application\nName=NoSlacking\nComment=A native Slack client\n\
          Exec={exec} %u\nIcon={APP_ID}\nTerminal=false\nCategories=Network;InstantMessaging;Chat;\n\
          MimeType={mime}\nStartupWMClass={APP_ID}\n",
-        mime = SCHEMES
+        mime = schemes
             .iter()
             .map(|scheme| format!("x-scheme-handler/{scheme};"))
             .collect::<String>(),
@@ -475,18 +475,8 @@ fn quietly(command: &mut std::process::Command) -> std::io::Result<std::process:
 /// `mime`: the first application named under `[Default Applications]`.
 #[cfg(target_os = "linux")]
 fn defaults_to(list: &str, mime: &str, desktop: &str) -> bool {
-    let mut defaults = false;
-    for line in list.lines().map(str::trim) {
-        if line.starts_with('[') {
-            defaults = line == "[Default Applications]";
-        } else if defaults
-            && let Some((key, apps)) = line.split_once('=')
-            && key.trim() == mime
-        {
-            return apps.split(';').next().map(str::trim) == Some(desktop);
-        }
-    }
-    false
+    crate::slack_links::default_for(list, mime)
+        .is_some_and(|apps| crate::slack_links::first_app(&apps) == desktop)
 }
 
 /// The app's icons as the icon theme wants them, under the user's data
@@ -537,12 +527,12 @@ fn install_icons(data: &std::path::Path) -> Result<(), String> {
 
 /// Writes the per-user URL protocol keys for `schemes`.
 #[cfg(windows)]
-fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Result<(), String> {
+pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Result<(), String> {
     let command = format!("\"{}\" \"%1\"", exe.display());
     for scheme in schemes {
         let key = format!(r"HKCU\Software\Classes\{scheme}");
         for args in [
-            vec!["add", &key, "/ve", "/d", "URL:NoSlacking", "/f"],
+            vec!["add", &key, "/ve", "/d", REGISTRY_NAME, "/f"],
             vec!["add", &key, "/v", "URL Protocol", "/d", "", "/f"],
         ] {
             run_reg(&args)?;
@@ -553,8 +543,9 @@ fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Result<(), St
     Ok(())
 }
 
+/// Runs `reg.exe` with `args`, failing when it does.
 #[cfg(windows)]
-fn run_reg(args: &[&str]) -> Result<(), String> {
+pub(crate) fn run_reg(args: &[&str]) -> Result<(), String> {
     let status = std::process::Command::new("reg")
         .args(args)
         .status()
@@ -566,8 +557,9 @@ fn run_reg(args: &[&str]) -> Result<(), String> {
     }
 }
 
+/// Nowhere to register: the bundle declares the scheme.
 #[cfg(not(any(target_os = "linux", windows)))]
-fn register_scheme_for(_exe: &std::path::Path, _schemes: &[&str]) -> Result<(), String> {
+pub(crate) fn register_scheme_for(_exe: &std::path::Path, _schemes: &[&str]) -> Result<(), String> {
     Err(
         "this platform does not hand noslacking:// links to the app yet; use the loopback redirect"
             .into(),
