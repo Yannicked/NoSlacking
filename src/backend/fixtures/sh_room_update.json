@@ -1,0 +1,43 @@
+{
+  "type": "sh_room_update",
+  "user": "U0999ZZZZZZ",
+  "room": {
+    "id": "R0123ABCDEF",
+    "name": "",
+    "media_server": "",
+    "created_by": "U0999ZZZZZZ",
+    "date_start": 1700000000,
+    "date_end": 0,
+    "participants": ["U0999ZZZZZZ", "U0123ABCDEF"],
+    "participant_history": ["U0999ZZZZZZ", "U0123ABCDEF"],
+    "participants_camera_on": [],
+    "participants_camera_off": [],
+    "participants_screenshare_on": [],
+    "participants_screenshare_off": [],
+    "channels": ["C0123ABCDEF"],
+    "is_dm_call": false,
+    "was_rejected": false,
+    "was_missed": false,
+    "was_accepted": false,
+    "has_ended": false,
+    "background_id": "GRADIENT_03",
+    "canvas_background": "GRADIENT_03",
+    "is_prewarmed": false,
+    "is_scheduled": false,
+    "attached_file_ids": [],
+    "media_backend_type": "free_willy",
+    "display_id": "",
+    "external_unique_id": "11111111-2222-3333-4444-555555555555",
+    "app_id": "A00",
+    "call_family": "huddle",
+    "pending_invitees": {},
+    "last_invite_status_by_user": {},
+    "thread_root_ts": "1700000000.000100"
+  },
+  "huddle": {
+    "id": "R0123ABCDEF",
+    "created_by": "U0999ZZZZZZ",
+    "participants": ["U0999ZZZZZZ", "U0123ABCDEF"]
+  },
+  "event_ts": "1700000060.000200"
+}

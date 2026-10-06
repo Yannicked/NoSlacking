@@ -219,6 +219,14 @@ impl App {
         }
     }
 
+    /// Takes away the desktop's notification of a huddle invitation in
+    /// `channel` that stopped ringing, where the desktop allows it.
+    pub(crate) fn withdraw_invite_note(&self, team: &str, channel: &str) {
+        if let Some(notifier) = &self.notifier {
+            notifier.withdraw(team, channel);
+        }
+    }
+
     /// Opens the conversations of clicked notifications. Runs with or
     /// without a window.
     pub(super) fn desktop_frame(&mut self) {

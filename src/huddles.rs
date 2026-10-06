@@ -36,6 +36,8 @@ const CHECK_AT_MOST: Duration = Duration::from_secs(30 * 60);
 pub enum RoomChange {
     Joined(String),
     Left(String),
+    /// Who is in it now, all of them.
+    Participants(Vec<String>),
     Ended,
 }
 
@@ -113,11 +115,32 @@ impl Invites {
         let gone = match change {
             RoomChange::Ended => true,
             RoomChange::Joined(user) => user == me,
+            RoomChange::Participants(who) => who.iter().any(|p| p == me),
             RoomChange::Left(_) => false,
         };
         if gone {
             self.answered(team, room);
         }
+    }
+
+    /// Takes away what stopped ringing: the invitation to `room`, or, when
+    /// only the conversation is known, those in `channel`. Returns them.
+    pub fn cancelled(
+        &mut self,
+        team: &str,
+        channel: Option<&str>,
+        room: Option<&str>,
+    ) -> Vec<Invite> {
+        let (gone, kept) = std::mem::take(&mut self.list).into_iter().partition(|i| {
+            i.team == team
+                && match (room, channel) {
+                    (Some(room), _) => i.room == room,
+                    (None, Some(channel)) => i.channel == channel,
+                    (None, None) => false,
+                }
+        });
+        self.list = kept;
+        gone
     }
 
     /// Drops what has rung long enough at `now`, and says when the next
@@ -425,6 +448,16 @@ pub fn handle(app: &mut App, team: &str, event: people::Event) -> Option<people:
             invited(app, team, &channel, &room, &from, now);
             None
         }
+        people::Event::HuddleInviteCancelled { channel, room } => {
+            let gone = app
+                .huddles
+                .invites
+                .cancelled(team, channel.as_deref(), room.as_deref());
+            for invite in gone {
+                app.withdraw_invite_note(team, &invite.channel);
+            }
+            None
+        }
         people::Event::HuddleRoom { room, change } => {
             app.huddles.invites.room_changed(team, &room, &change, &me);
             if let Some(workspace) = app.workspaces.iter_mut().find(|w| w.info.team_id == team) {
@@ -535,6 +568,7 @@ pub fn apply_room(huddles: &mut HashMap<String, Huddle>, room: &str, change: &Ro
                 }
             }
             RoomChange::Left(user) => huddle.participants.retain(|p| p != user),
+            RoomChange::Participants(who) => huddle.participants.clone_from(who),
             RoomChange::Ended => huddle.participants.clear(),
         }
         if huddle.participants.is_empty() {
@@ -682,6 +716,41 @@ mod tests {
     }
 
     #[test]
+    fn a_call_that_stops_ringing_takes_its_invitation_away() {
+        let now = Instant::now();
+        let mut invites = Invites::default();
+        invites.add("T1", "C1", "R1", "U2", now);
+        invites.add("T1", "C2", "R2", "U2", now);
+        invites.add("T1", "D1", "R3", "U2", now);
+        invites.add("T2", "C1", "R4", "U2", now);
+        // By room, whatever the conversation said.
+        let gone = invites.cancelled("T1", Some("C9"), Some("R1"));
+        assert_eq!(
+            gone.iter().map(|i| i.room.as_str()).collect::<Vec<_>>(),
+            ["R1"]
+        );
+        // By conversation, when the room is not named.
+        let gone = invites.cancelled("T1", Some("D1"), None);
+        assert_eq!(
+            gone.iter().map(|i| i.channel.as_str()).collect::<Vec<_>>(),
+            ["D1"]
+        );
+        // Nothing named, nothing taken; another workspace's stays.
+        assert!(invites.cancelled("T1", None, None).is_empty());
+        assert!(invites.cancelled("T1", Some("C1"), None).is_empty());
+        let left: Vec<&str> = invites.list().iter().map(|i| i.room.as_str()).collect();
+        assert_eq!(left, ["R2", "R4"]);
+        // Everyone in it, you among them, from another device.
+        invites.room_changed(
+            "T1",
+            "R2",
+            &RoomChange::Participants(vec!["U2".into(), "U0".into()]),
+            "U0",
+        );
+        assert_eq!(invites.list().len(), 1);
+    }
+
+    #[test]
     fn room_changes_reach_the_huddle_they_name() {
         let mut huddles = HashMap::from([
             ("C1".to_owned(), huddle("R1", &["U1"])),
@@ -692,6 +761,13 @@ mod tests {
         assert_eq!(huddles["C1"].participants, ["U1", "U3"]);
         apply_room(&mut huddles, "R2", &RoomChange::Left("U2".into()));
         assert_eq!(huddles["C2"].participants, ["U1"]);
+        apply_room(
+            &mut huddles,
+            "R2",
+            &RoomChange::Participants(vec!["U1".into(), "U4".into()]),
+        );
+        assert_eq!(huddles["C2"].participants, ["U1", "U4"]);
+        apply_room(&mut huddles, "R2", &RoomChange::Left("U4".into()));
         apply_room(&mut huddles, "R2", &RoomChange::Left("U1".into()));
         assert!(!huddles.contains_key("C2"), "the last one left");
         apply_room(&mut huddles, "R1", &RoomChange::Ended);
