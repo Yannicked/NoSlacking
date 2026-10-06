@@ -29,7 +29,7 @@ const MAX_INDENT: usize = 8;
 /// Why a message goes without a `rich_text` block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Skip {
-    /// Sending rich text is switched off ([`SEND_RICH_TEXT`]).
+    /// Sending rich text is switched off (`SEND_RICH_TEXT`).
     Off,
     /// Nothing but white space: there is nothing to lay out.
     Empty,
