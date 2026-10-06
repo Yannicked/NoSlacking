@@ -378,6 +378,7 @@ impl App {
                 // Known once the worker has the token; until then, buttons
                 // take the cautious way.
                 sign_in: Default::default(),
+                scopes: meta.scopes.clone(),
             });
             state.active = settings.last_conversation.get(&meta.team_id).cloned();
             state.desktop = settings.desktop.team_state(&meta.team_id);
@@ -1266,12 +1267,20 @@ impl App {
                 self.backend.send(Command::PasteToken(token));
             }
             Action::SaveApp => self.save_app(),
-            Action::StartSignIn => {
-                self.sign_in = None;
-                self.backend.send(Command::StartSignIn {
-                    redirect: self.settings.redirect,
-                    port: self.settings.loopback_port,
-                });
+            Action::StartSignIn => self.start_sign_in(),
+            Action::SignInOlder => {
+                self.settings.older_app = true;
+                self.settings_changed();
+                self.start_sign_in();
+            }
+            Action::SignInUpdated => {
+                // The app was updated from the new manifest: ask for
+                // everything again, on the sign-in page that shows how it
+                // goes.
+                self.settings.older_app = false;
+                self.settings_changed();
+                self.page = Page::SignIn;
+                self.start_sign_in();
             }
             Action::CancelSignIn => {
                 self.backend.send(Command::CancelSignIn);
@@ -1669,6 +1678,17 @@ impl App {
         }
     }
 
+    /// Starts the OAuth sign-in with your Slack app, asking for the scopes
+    /// it is known to have.
+    fn start_sign_in(&mut self) {
+        self.sign_in = None;
+        self.backend.send(Command::StartSignIn {
+            redirect: self.settings.redirect,
+            port: self.settings.loopback_port,
+            request: crate::scopes::Request::for_app(self.settings.older_app),
+        });
+    }
+
     fn save_app(&mut self) {
         let form = AppCredentials {
             client_id: self.setup.client_id.trim().to_owned(),
@@ -1676,6 +1696,15 @@ impl App {
             app_token: self.setup.app_token.trim().to_owned(),
         };
         if form.can_sign_in() {
+            // Another app may well be made from the current manifest.
+            let other = self
+                .app_credentials
+                .as_ref()
+                .is_some_and(|saved| saved.client_id != form.client_id);
+            if other && self.settings.older_app {
+                self.settings.older_app = false;
+                self.settings_changed();
+            }
             self.backend.send(Command::SaveApp(form.clone()));
             self.app_credentials = Some(form);
         }

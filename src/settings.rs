@@ -62,6 +62,10 @@ pub struct WorkspaceMeta {
     #[serde(default)]
     pub icon: Option<String>,
     pub user_id: String,
+    /// The user scopes Slack granted an app sign-in, so a workspace whose
+    /// app lacks newer ones says so before Slack answers. Not secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<crate::scopes::Scopes>,
 }
 
 /// The settings file format this build writes. Raise it when a field
@@ -125,6 +129,10 @@ pub struct Settings {
     /// Direct messages closed in the sidebar, by workspace: each one's
     /// newest message when it was closed. Anything newer brings it back.
     pub closed: BTreeMap<String, BTreeMap<String, String>>,
+    /// Whether your Slack app is known to be made from an older manifest,
+    /// which Slack would not authorize with the newer scopes: sign-ins
+    /// then ask for the older set only (see [`crate::scopes::Request`]).
+    pub older_app: bool,
 }
 
 impl Default for Settings {
@@ -155,6 +163,7 @@ impl Default for Settings {
             proxy: crate::slack::net::ProxySettings::default(),
             spelling: crate::spell::SpellSettings::default(),
             closed: BTreeMap::new(),
+            older_app: false,
         }
     }
 }
@@ -255,6 +264,7 @@ impl Settings {
             proxy,
             spelling,
             closed,
+            older_app,
         );
         // One damaged workspace must not sign you out of the others, so
         // these are read entry by entry.
@@ -712,6 +722,38 @@ mod tests {
     }
 
     #[test]
+    fn granted_scopes_and_an_older_app_are_remembered() {
+        let mut settings = Settings {
+            older_app: true,
+            ..Settings::default()
+        };
+        settings.upsert_workspace(WorkspaceMeta {
+            team_id: "T1".into(),
+            name: "Acme".into(),
+            domain: String::new(),
+            icon: None,
+            user_id: "U1".into(),
+            scopes: Some(crate::scopes::Scopes::parse("chat:write,dnd:read")),
+        });
+        let encoded = serde_json::to_value(&settings).expect("encodes");
+        assert_eq!(
+            encoded["workspaces"][0]["scopes"],
+            serde_json::json!(["chat:write", "dnd:read"])
+        );
+        let (again, problems) = Settings::from_json(encoded);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(again.older_app);
+        assert_eq!(again.workspaces, settings.workspaces);
+        // A file from before has neither, and reads as not known.
+        let (old, problems) = Settings::from_json(serde_json::json!({
+            "workspaces": [{"team_id": "T1", "name": "Acme", "user_id": "U1"}],
+        }));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(!old.older_app);
+        assert_eq!(old.workspaces[0].scopes, None);
+    }
+
+    #[test]
     fn removing_the_active_workspace_picks_another() {
         let mut settings = Settings::default();
         for id in ["T1", "T2"] {
@@ -721,6 +763,7 @@ mod tests {
                 domain: String::new(),
                 icon: None,
                 user_id: "U1".into(),
+                scopes: None,
             });
         }
         settings.active_workspace = Some("T1".into());

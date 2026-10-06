@@ -1106,7 +1106,8 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
         app_token: "xapp-demo".into(),
     })));
     // Acme is signed in as a browser session, so its app buttons press;
-    // Open Source by OAuth, where they only work in Slack.
+    // Open Source by OAuth, where they only work in Slack, through an app
+    // made from the first manifest, so Settings shows how to update it.
     for (id, name, sign_in) in [
         (TEAM, "Acme Inc", SignInKind::Session),
         ("TDEMO2", "Open Source", SignInKind::App),
@@ -1118,6 +1119,9 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
             icon: None,
             user_id: ME.into(),
             sign_in,
+            scopes: (sign_in == SignInKind::App).then(|| {
+                crate::scopes::Scopes::parse(&crate::scopes::Request::Older.scopes().join(","))
+            }),
         }));
         sink.send(Event::Users {
             team: id.into(),

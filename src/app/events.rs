@@ -27,6 +27,11 @@ impl App {
                 self.toast(tf("Keyring: {error}", &[("error", &error.message())]), true);
                 self.keyring_error = Some(error);
             }
+            Event::OlderApp => {
+                self.settings.older_app = true;
+                self.settings_changed();
+                self.toast(t("Your Slack app was made from an older manifest, so it is asked only for the permissions it has. Update it to unlock Do Not Disturb, @group mentions and bookmark editing.").into_owned(), false);
+            }
             Event::SignIn(state) => self.sign_in_changed(state),
             Event::WorkspaceReady(info) => self.workspace_ready(info),
             Event::SignedOut { team, reason } => self.signed_out(&team, reason),
@@ -405,7 +410,17 @@ impl App {
             domain: info.domain.clone(),
             icon: info.icon.clone(),
             user_id: info.user_id.clone(),
+            scopes: info.scopes.clone(),
         });
+        // An app sign-in that got every scope shows the app is up to date,
+        // whatever an earlier refusal said.
+        if info.sign_in == crate::model::SignInKind::App
+            && info.scopes.as_ref().is_some_and(|s| s.lacking().is_empty())
+            && self.settings.older_app
+        {
+            self.settings.older_app = false;
+            self.settings_changed();
+        }
         match self.workspace_mut(&team) {
             Some(workspace) => {
                 workspace.info = info;

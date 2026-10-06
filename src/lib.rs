@@ -39,6 +39,7 @@ pub mod paths;
 pub mod people;
 pub mod quotes;
 pub mod redact;
+pub mod scopes;
 pub mod search;
 pub mod settings;
 pub mod share;

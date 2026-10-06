@@ -117,6 +117,32 @@ pub struct Workspace {
     pub user_id: String,
     /// How you signed in to it.
     pub sign_in: SignInKind,
+    /// The user scopes Slack granted an app sign-in; `None` for a session,
+    /// or for an app sign-in from before they were recorded.
+    pub scopes: Option<crate::scopes::Scopes>,
+}
+
+impl Workspace {
+    /// Whether this sign-in may use `feature`: always for a session, and
+    /// for an app sign-in when Slack granted its scope (or when what it
+    /// granted is not known yet, so the call is tried).
+    pub fn can(&self, feature: crate::scopes::Feature) -> bool {
+        crate::scopes::allows(
+            self.scopes.as_ref(),
+            self.sign_in == SignInKind::Session,
+            feature.scope(),
+        )
+    }
+
+    /// The features an app sign-in lacks the scopes for, which an app
+    /// made from an older manifest does; empty when all are there or it
+    /// is not known.
+    pub fn lacking(&self) -> Vec<crate::scopes::Feature> {
+        match (&self.scopes, self.sign_in) {
+            (Some(scopes), SignInKind::App) => scopes.lacking(),
+            _ => Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -1272,6 +1298,12 @@ pub enum Action {
     SaveApp,
     /// Starts OAuth in the browser with the saved app.
     StartSignIn,
+    /// Starts OAuth asking only for the scopes an app made from an older
+    /// manifest has, and remembers that the app is one.
+    SignInOlder,
+    /// Starts OAuth asking for every scope again, after you updated your
+    /// app from the current manifest.
+    SignInUpdated,
     CancelSignIn,
     /// Opens a folder in the system's file manager.
     OpenFolder(PathBuf),

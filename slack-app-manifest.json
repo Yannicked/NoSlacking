@@ -5,7 +5,7 @@
   },
   "display_information": {
     "name": "NoSlacking",
-    "description": "A native Slack client",
+    "description": "A native Slack client (manifest v2)",
     "background_color": "#1a1d21"
   },
   "oauth_config": {
@@ -43,7 +43,11 @@
         "users.profile:write",
         "users:write",
         "reminders:read",
-        "reminders:write"
+        "reminders:write",
+        "dnd:read",
+        "dnd:write",
+        "usergroups:read",
+        "bookmarks:write"
       ]
     }
   },
@@ -68,7 +72,8 @@
         "team_join",
         "emoji_changed",
         "pin_added",
-        "pin_removed"
+        "pin_removed",
+        "dnd_updated"
       ]
     },
     "interactivity": {

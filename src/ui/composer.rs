@@ -1184,6 +1184,7 @@ mod tests {
             icon: None,
             user_id: "U0".into(),
             sign_in: Default::default(),
+            scopes: None,
         });
         let user =
             |id: &str, name: &str, real: &str, display: &str, bot: bool| crate::model::User {

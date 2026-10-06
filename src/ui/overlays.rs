@@ -1158,6 +1158,7 @@ mod tests {
             icon: None,
             user_id: "U0".into(),
             sign_in: Default::default(),
+            scopes: None,
         });
         w.emoji = crate::emoji::EmojiSet::new(
             [

@@ -4,10 +4,9 @@
 //! call.
 //!
 //! Browser sessions may call them. A sign-in through your own Slack app
-//! needs the `dnd:read` and `dnd:write` permissions, which the bundled
-//! manifest does not ask for (adding them would break sign-in through apps
-//! made from the older manifest); without them these calls fail and the
-//! interface keeps your snooze to itself.
+//! needs the `dnd:read` and `dnd:write` permissions, which manifest
+//! version 2 asks for; an app made from the first one lacks them, so these
+//! calls are not made and the interface keeps your snooze to itself.
 
 use serde_json::Value;
 
@@ -60,6 +59,10 @@ pub fn dnd_event(event: &Value) -> Option<Dnd> {
 /// Asks Slack for your Do Not Disturb state. A failure is only logged: the
 /// interface keeps what it has.
 pub async fn dnd_info(client: Client, team: String, sink: Sink) {
+    if !client.may(crate::scopes::Feature::ReadDnd.scope()) {
+        log::debug!("dnd.info: no dnd:read permission, so Do Not Disturb stays local");
+        return;
+    }
     match client.call::<DndInfo>("dnd.info", &[]).await {
         Ok(info) => sink.send(Event::Dnd {
             team,
@@ -72,6 +75,10 @@ pub async fn dnd_info(client: Client, team: String, sink: Sink) {
 /// Snoozes notifications for `minutes`, or with `None` ends the snooze,
 /// then reads the state back.
 pub async fn snooze(client: Client, team: String, minutes: Option<u32>, sink: Sink) {
+    if !client.may(crate::scopes::Feature::SetDnd.scope()) {
+        log::info!("no dnd:write permission: the snooze holds here only");
+        return;
+    }
     let result = match minutes {
         Some(minutes) => {
             client

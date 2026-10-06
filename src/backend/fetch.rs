@@ -52,6 +52,9 @@ pub(super) async fn workspace_details(client: &Client, team: &str, user: &str) -
         icon: None,
         user_id: user.to_owned(),
         sign_in: crate::model::SignInKind::of(client.token().is_session()),
+        // Slack names them with every answer, so they are known once
+        // team.info (or auth.test) is back; set below.
+        scopes: None,
     };
     match client.call::<types::TeamInfo>("team.info", &[]).await {
         Ok(info) => {
@@ -73,6 +76,7 @@ pub(super) async fn workspace_details(client: &Client, team: &str, user: &str) -
             }
         }
     }
+    workspace.scopes = client.scopes();
     workspace
 }
 
@@ -165,10 +169,14 @@ pub(super) async fn boot(
 /// The workspace's user groups, so `@design` can be typed and drawn.
 ///
 /// A sign-in through your own Slack app needs the `usergroups:read`
-/// permission, which the bundled manifest does not ask for (as with DND,
-/// adding it would break apps made from the older manifest). Without it
-/// the call is refused, and groups simply stay out of the suggestions.
+/// permission, which an app made from the first manifest lacks. Without
+/// it the call is not made (or, when the grant is not known, refused), and
+/// groups simply stay out of the suggestions.
 async fn user_groups(client: &Client, team: &str, sink: &Sink) {
+    if !client.may(crate::scopes::Feature::GroupMentions.scope()) {
+        log::info!("no usergroups:read permission, so no group mentions");
+        return;
+    }
     let params = [("include_disabled", "false".to_owned())];
     match client
         .call::<types::UserGroupList>("usergroups.list", &params)

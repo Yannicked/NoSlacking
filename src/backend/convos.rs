@@ -285,6 +285,12 @@ async fn save_bookmark(
     change: &convos::BookmarkChange,
     sink: &Sink,
 ) -> Result<(), SlackError> {
+    // Not asked when the sign-in lacks the permission (an app made from
+    // an older manifest): the change is taken back as Slack's refusal
+    // would have it.
+    if !client.may(crate::scopes::Feature::EditBookmarks.scope()) {
+        return Err(SlackError::Api("missing_scope".into()));
+    }
     let (method, params) = bookmark_request(&channel, change);
     match change {
         convos::BookmarkChange::Add(local) => {

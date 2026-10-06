@@ -12,6 +12,7 @@ use crate::backend::SignIn;
 use crate::credentials::AppCredentials;
 use crate::i18n::{t, tf};
 use crate::model::Action;
+use crate::scopes::Feature;
 use crate::theme::{self, Palette};
 
 /// The app NoSlacking asks Slack to create for you (advanced path).
@@ -24,6 +25,60 @@ pub fn manifest_url() -> String {
         "https://api.slack.com/apps?new_app=1&manifest_json={}",
         urlencoding::encode(&compact.to_string())
     )
+}
+
+/// Where you manage the Slack apps you made.
+const APPS_PAGE: &str = "https://api.slack.com/apps";
+
+/// A feature an older app's sign-in lacks, in words.
+fn feature_name(feature: Feature) -> String {
+    match feature {
+        Feature::ReadDnd => t("Do Not Disturb from Slack"),
+        Feature::SetDnd => t("snoozing in Slack"),
+        Feature::GroupMentions => t("@group mentions"),
+        Feature::EditBookmarks => t("bookmark editing"),
+    }
+    .into_owned()
+}
+
+/// Says that your Slack app was made from an older manifest, what that
+/// leaves out (`lacking`), and how to update it: copy the new manifest,
+/// paste it on the app's App Manifest page, reinstall, sign in again.
+pub fn older_app_note(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    lacking: &[Feature],
+    actions: &mut Vec<Action>,
+) {
+    let features = lacking
+        .iter()
+        .map(|feature| feature_name(*feature))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ui.label(
+        RichText::new(tf(
+            "Your Slack app was made from an older manifest, so it lacks the permissions for: {features}.",
+            &[("features", &features)],
+        ))
+        .font(theme::regular(13.0))
+        .color(palette.warning),
+    );
+    ui.label(
+        RichText::new(t("To unlock them, open your app on api.slack.com/apps, go to App Manifest, paste the new manifest and save, reinstall the app when Slack asks, then sign in again here."))
+            .font(theme::regular(12.5))
+            .color(palette.dim),
+    );
+    ui.horizontal(|ui| {
+        if theme::secondary_button(ui, palette, &t("Copy manifest")).clicked() {
+            actions.push(Action::Copy(MANIFEST.to_owned()));
+        }
+        if theme::secondary_button(ui, palette, &t("Open your Slack apps")).clicked() {
+            actions.push(Action::OpenUrl(APPS_PAGE.to_owned()));
+        }
+        if theme::secondary_button(ui, palette, &t("Sign in again")).clicked() {
+            actions.push(Action::SignInUpdated);
+        }
+    });
 }
 
 fn step(ui: &mut egui::Ui, palette: &Palette, number: u8, title: &str, done: bool) {
@@ -334,6 +389,9 @@ fn app_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             });
             ui.separator();
             step(ui, palette, 3, &t("Sign in"), matches!(app.sign_in, Some(SignIn::Done(_))));
+            if app.settings.older_app && saved {
+                older_app_note(ui, palette, &Feature::ALL, &mut app.actions);
+            }
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(saved && !busy(app), |ui| {
                     if theme::primary_button(ui, palette, &t("Sign in with Slack")).clicked() {
@@ -349,6 +407,15 @@ fn app_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 && ui.link(t("Copy the sign-in link")).clicked()
             {
                 app.actions.push(Action::Copy(url.clone()));
+            }
+            // Slack may answer an app made from an older manifest with an
+            // error page rather than a redirect; this asks again without
+            // the newer scopes.
+            if matches!(app.sign_in, Some(SignIn::Waiting(_)))
+                && !app.settings.older_app
+                && ui.link(t("Slack says the permissions are invalid? Sign in with those of the older manifest")).clicked()
+            {
+                app.actions.push(Action::SignInOlder);
             }
             egui::CollapsingHeader::new(
                 RichText::new(t("Or paste a user token")).font(theme::medium(13.0)).color(palette.secondary),
@@ -426,6 +493,44 @@ mod tests {
         );
         assert!(
             manifest_url().starts_with("https://api.slack.com/apps?new_app=1&manifest_json=%7B")
+        );
+    }
+
+    #[test]
+    fn the_manifest_file_grants_every_requested_scope_and_names_its_version() {
+        // The file as shipped, not the copy built in.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("slack-app-manifest.json");
+        let text = std::fs::read_to_string(path).expect("readable");
+        let manifest: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        let granted: Vec<&str> = manifest["oauth_config"]["scopes"]["user"]
+            .as_array()
+            .expect("user scopes")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        for request in [crate::scopes::Request::Full, crate::scopes::Request::Older] {
+            for scope in request.scopes() {
+                assert!(granted.contains(&scope), "{scope} is not in the manifest");
+            }
+        }
+        for scope in crate::scopes::NEWER {
+            assert!(granted.contains(&scope), "{scope}");
+        }
+        // Slack's description field is at most 140 characters, and says
+        // which version an app was made from.
+        let description = manifest["display_information"]["description"]
+            .as_str()
+            .expect("a description");
+        assert!(description.len() <= 140);
+        assert!(
+            description.contains(&format!("manifest v{}", crate::scopes::MANIFEST_VERSION)),
+            "{description}"
+        );
+        assert!(
+            manifest["settings"]["event_subscriptions"]["user_events"]
+                .as_array()
+                .expect("user events")
+                .contains(&serde_json::json!("dnd_updated"))
         );
     }
 }
