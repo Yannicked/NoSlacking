@@ -98,12 +98,20 @@ rodio = { version = "0.22.2", default-features = false, features = ["playback", 
 # ahead of time and checked in (src/huddle_audio/chime/), so the build
 # needs no protoc, only prost's derive.
 prost = { version = "0.14", default-features = false, features = ["derive", "std"], optional = true }
+# WebRTC, sans-IO, with its default crypto, aws-lc-rs (its DTLS, dimpl,
+# makes certificates with rcgen on aws-lc-rs whichever backend is chosen,
+# so the "pure Rust" one would build aws-lc too). aws-lc-sys builds with
+# the C compiler ring already needs, no CMake; NASM on Windows, below.
+str0m = { version = "0.24.1", default-features = false, features = ["aws-lc-rs"], optional = true }
 # Opus in pure Rust, without unsafe code or a C library to find.
 opus-decoder = { version = "0.1.1", optional = true }
 # The TURN client's long-term credential: HMAC-SHA1 (sha1 is above) keyed
 # with MD5.
 hmac = { version = "0.13", optional = true }
 md-5 = { version = "0.11", default-features = false, optional = true }
+# TURN over TLS: the same rustls (with ring) and system roots reqwest uses.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
 
 # The file viewer (src/viewer.rs): spreadsheets (MIT, pure Rust; only its
 # XML readers are used), CSV and TSV (Unlicense/MIT), and zip listings.
@@ -125,6 +133,9 @@ apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store = { version = "1.1", default-features = false }
+# For huddle-audio: aws-lc's x86-64 assembly comes prebuilt, so a Windows
+# build needs no NASM. Only switches a feature on str0m's own aws-lc-sys.
+aws-lc-sys = { version = "0.45", default-features = false, features = ["prebuilt-nasm"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The unread count on the launcher icon (the LauncherEntry signal). Already
@@ -201,7 +212,7 @@ bundled-emoji = []
 demo = []
 # Listening to huddles (src/huddle_audio.rs): a spike, off until it is
 # proven against Slack. Adds `noslacking --huddle-probe`.
-huddle-audio = ["audio", "dep:prost", "dep:opus-decoder", "dep:hmac", "dep:md-5"]
+huddle-audio = ["audio", "dep:prost", "dep:str0m", "dep:aws-lc-sys", "dep:opus-decoder", "dep:hmac", "dep:md-5", "dep:tokio-rustls", "dep:rustls-native-certs", "tokio/signal"]
 # Colours code blocks that name their language (```` ```rust ````). Our own
 # small lexer, a few kilobytes; turn it off for plain code blocks.
 highlight = []
