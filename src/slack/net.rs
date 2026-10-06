@@ -332,7 +332,7 @@ type Opened = Result<
 >;
 
 /// Opens a `wss://` WebSocket through the current proxy, giving up after
-/// [`HANDSHAKE_TIMEOUT`].
+/// thirty seconds (`HANDSHAKE_TIMEOUT`).
 pub async fn websocket(
     request: tokio_tungstenite::tungstenite::handshake::client::Request,
 ) -> Opened {
