@@ -236,6 +236,13 @@ pub enum Command {
     /// Asks Slack who is in the huddle `room` shown in `channel`
     /// (`screenhero.rooms.info`, browser sessions only).
     CheckHuddle { channel: String, room: String },
+    /// Joins the huddle in `channel` and plays it, muted, leaving any
+    /// other first (see [`crate::huddle_audio`]).
+    #[cfg(feature = "huddle-audio")]
+    ListenHuddle { channel: String },
+    /// Leaves the huddle being listened to.
+    #[cfg(feature = "huddle-audio")]
+    LeaveHuddle,
 }
 
 /// How often, at most, Slack hears that you are active: Slack's desktop
@@ -322,6 +329,12 @@ pub enum Event {
     /// The real-time socket connected again: what changed while it was
     /// down never came.
     Reconnected,
+    /// Where listening to the huddle in `channel` got to.
+    #[cfg(feature = "huddle-audio")]
+    Listening {
+        channel: String,
+        state: crate::huddles::Listen,
+    },
 }
 
 /// A huddle going on in a conversation.
@@ -750,6 +763,8 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
         | Event::HuddleChecked { .. }
         | Event::InviteDeclined { .. }
         | Event::Reconnected => {}
+        #[cfg(feature = "huddle-audio")]
+        Event::Listening { .. } => {}
     }
     if let Some((text, error)) = toast {
         app.toast(text, error);

@@ -1927,5 +1927,7 @@ impl fastframe_shell::Resident for App {
 
     fn shutdown(&mut self) {
         self.save_state();
+        #[cfg(feature = "huddle-audio")]
+        crate::huddles::quit(self);
     }
 }

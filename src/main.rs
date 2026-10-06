@@ -33,6 +33,25 @@ struct Cli {
     #[arg(long)]
     release_slack_links: bool,
 
+    /// Join the huddle in a conversation, listen and leave, logging each
+    /// step, and quit: a test of huddle audio against real Slack. Takes
+    /// the workspace's team id and the channel id, and the browser
+    /// sign-in saved for that workspace.
+    #[cfg(feature = "huddle-audio")]
+    #[arg(long, num_args = 2, value_names = ["TEAM", "CHANNEL"])]
+    huddle_probe: Option<Vec<String>>,
+
+    /// How long the huddle probe listens, in seconds.
+    #[cfg(feature = "huddle-audio")]
+    #[arg(long, value_name = "N", default_value_t = 30)]
+    seconds: u64,
+
+    /// The media region the huddle probe asks Slack for. Without it, the
+    /// nearest is asked of AWS, falling back to us-east-1.
+    #[cfg(feature = "huddle-audio")]
+    #[arg(long, value_name = "REGION")]
+    huddle_region: Option<String>,
+
     /// Run against a pretend Slack, offline, with sample data.
     #[cfg(feature = "demo")]
     #[arg(long)]
@@ -165,6 +184,18 @@ fn main() -> eframe::Result<()> {
     if cli.release_slack_links {
         release_slack_links(&dirs.state);
         return Ok(());
+    }
+    #[cfg(feature = "huddle-audio")]
+    if let Some([team, channel]) = cli.huddle_probe.as_deref() {
+        let code =
+            noslacking::huddle_audio::probe::run(&noslacking::huddle_audio::probe::Options {
+                team: team.clone(),
+                channel: channel.clone(),
+                seconds: cli.seconds,
+                region: cli.huddle_region.clone(),
+                settings: dirs.settings_file(),
+            });
+        std::process::exit(code);
     }
 
     let waker = Waker::default();

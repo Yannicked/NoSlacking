@@ -136,6 +136,10 @@ pub enum Failure {
     NoInvitee,
     /// The manual proxy's URL cannot be used.
     BadProxy,
+    /// Listening to a huddle failed at this step; the technical detail
+    /// went to the log.
+    #[cfg(feature = "huddle-audio")]
+    Huddle(HuddleTrouble),
     /// Slack's error code, for codes not worded here: shown with its
     /// underscores as spaces, which mostly reads.
     Slack(String),
@@ -286,11 +290,41 @@ impl Failure {
             Self::NeedsSession => t("it only works when you sign in with your browser"),
             Self::NoInvitee => t("name someone to invite with @"),
             Self::BadProxy => t("the proxy URL cannot be used; check it in Settings"),
+            #[cfg(feature = "huddle-audio")]
+            Self::Huddle(trouble) => match trouble {
+                HuddleTrouble::NoSound => t("the sound device could not be opened"),
+                HuddleTrouble::Signaling => t("the huddle's server could not be reached"),
+                HuddleTrouble::Join => t("the huddle's server did not let you in"),
+                HuddleTrouble::Relay => t("no relay for the huddle's audio could be reached"),
+                HuddleTrouble::Offer => t("the huddle's server did not take the audio setup"),
+                HuddleTrouble::Connect => t("the audio connection could not be made"),
+                HuddleTrouble::Lost => t("the audio connection was lost"),
+            },
             Self::Slack(code) => return code.replace('_', " "),
             Self::Other(text) => return text.clone(),
         };
         text.into_owned()
     }
+}
+
+/// Where listening to a huddle failed, for [`Failure::Huddle`].
+#[cfg(feature = "huddle-audio")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HuddleTrouble {
+    /// No sound device would open.
+    NoSound,
+    /// Chime's signaling socket did not open.
+    Signaling,
+    /// Chime refused the join, or it went wrong.
+    Join,
+    /// No TURN relay answered.
+    Relay,
+    /// The SDP offer or answer did not work out.
+    Offer,
+    /// ICE or DTLS through the relay did not connect.
+    Connect,
+    /// The session broke while listening.
+    Lost,
 }
 
 /// Why the system keyring did not do what was asked. The worker hands this
@@ -530,6 +564,20 @@ mod tests {
             Failure::NeedsSession,
             Failure::NoInvitee,
             Failure::BadProxy,
+            #[cfg(feature = "huddle-audio")]
+            Failure::Huddle(HuddleTrouble::NoSound),
+            #[cfg(feature = "huddle-audio")]
+            Failure::Huddle(HuddleTrouble::Signaling),
+            #[cfg(feature = "huddle-audio")]
+            Failure::Huddle(HuddleTrouble::Join),
+            #[cfg(feature = "huddle-audio")]
+            Failure::Huddle(HuddleTrouble::Relay),
+            #[cfg(feature = "huddle-audio")]
+            Failure::Huddle(HuddleTrouble::Offer),
+            #[cfg(feature = "huddle-audio")]
+            Failure::Huddle(HuddleTrouble::Connect),
+            #[cfg(feature = "huddle-audio")]
+            Failure::Huddle(HuddleTrouble::Lost),
             Failure::Slack("some_new_code".into()),
             Failure::Other("disk full".into()),
         ]

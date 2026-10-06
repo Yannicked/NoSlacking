@@ -119,6 +119,10 @@ impl Hub {
             | Command::CheckHuddle { .. } => {
                 log::debug!("{command:?} needs the workspace's client");
             }
+            #[cfg(feature = "huddle-audio")]
+            Command::ListenHuddle { .. } | Command::LeaveHuddle => {
+                log::debug!("{command:?} is the worker's");
+            }
             Command::Active => {
                 if let Some(rtm) = self
                     .teams
@@ -468,6 +472,8 @@ pub fn demo_huddle(team: &str) -> Event {
 pub fn demo(team: &str, command: Command) -> Vec<Event> {
     match command {
         Command::Typing { .. } | Command::Active | Command::CheckHuddle { .. } => Vec::new(),
+        #[cfg(feature = "huddle-audio")]
+        Command::ListenHuddle { .. } | Command::LeaveHuddle => Vec::new(),
         Command::DeclineHuddle { .. } => vec![Event::People {
             team: team.to_owned(),
             event: people::Event::InviteDeclined { result: Ok(()) },

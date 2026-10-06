@@ -2578,3 +2578,40 @@ msgstr "Vorig resultaat"
 
 msgid "Next match"
 msgstr "Volgend resultaat"
+
+# Listening to a huddle in the app, with the microphone off.
+msgid "Listen"
+msgstr "Luisteren"
+
+msgid "Listen to the huddle here, with your microphone off"
+msgstr "Luister hier naar de huddle, met je microfoon uit"
+
+msgid "Joining…"
+msgstr "Deelnemen…"
+
+msgid "Leave the huddle"
+msgstr "De huddle verlaten"
+
+msgid "Could not listen to the huddle: {error}"
+msgstr "Kon niet naar de huddle luisteren: {error}"
+
+msgid "the sound device could not be opened"
+msgstr "het geluidsapparaat kon niet worden geopend"
+
+msgid "the huddle's server could not be reached"
+msgstr "de server van de huddle was niet bereikbaar"
+
+msgid "the huddle's server did not let you in"
+msgstr "de server van de huddle liet je niet binnen"
+
+msgid "no relay for the huddle's audio could be reached"
+msgstr "geen relay voor het geluid van de huddle was bereikbaar"
+
+msgid "the huddle's server did not take the audio setup"
+msgstr "de server van de huddle nam de geluidsinstellingen niet aan"
+
+msgid "the audio connection could not be made"
+msgstr "de geluidsverbinding kon niet worden gemaakt"
+
+msgid "the audio connection was lost"
+msgstr "de geluidsverbinding is verbroken"

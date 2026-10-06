@@ -23,6 +23,8 @@ pub mod failure;
 #[cfg(feature = "highlight")]
 pub mod highlight;
 pub mod hooks;
+#[cfg(feature = "huddle-audio")]
+pub mod huddle_audio;
 pub mod huddles;
 pub mod i18n;
 pub mod images;

@@ -56,6 +56,8 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
         actions,
         socket,
         popouts,
+        #[cfg(feature = "huddle-audio")]
+        huddles,
         ..
     } = app;
     let Some(workspace) = crate::app::active_in(workspaces, settings) else {
@@ -217,6 +219,15 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                         }
                     }
                     super::people::huddle_button(ui, &palette, workspace, &conversation.id, actions);
+                    #[cfg(feature = "huddle-audio")]
+                    super::people::listen_button(
+                        ui,
+                        &palette,
+                        workspace,
+                        &conversation.id,
+                        huddles.listening.as_ref(),
+                        actions,
+                    );
                 });
             });
         });
