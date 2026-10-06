@@ -577,6 +577,18 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       once and `emoji.list` is fetched again. OAuth sign-ins don't see the
       +. Untested against a real workspace: the request shape and Slack's
       error codes come from those tools and `admin.emoji.add`'s docs.*
+- [x] **Send rich text as Slack's composer does.** *`chat.postMessage`,
+      `chat.update` and `chat.scheduleMessage` send a `rich_text` block in
+      `blocks` beside the mrkdwn `text` (`slack/rich_out.rs`): sections,
+      bullet and ordered lists (nested, numbered on with `offset`, quoted
+      with `border: 1`), quotes, code blocks, styled text, links, people,
+      groups, channels, broadcasts and emoji. The block is read back
+      before it goes; if it does not read as the text, or the text holds a
+      date, the text goes alone, and if Slack refuses the blocks the call
+      is made again without them. The sending copy and an edit show the
+      same rich text, and editing starts from a message's rich text.
+      `SEND_RICH_TEXT` switches it all off. Not yet tried against a real
+      workspace.*
 
 ### Blocked or needs a real workspace
 

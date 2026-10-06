@@ -1375,11 +1375,12 @@ impl WorkspaceState {
             if let Some(message) = timeline.find_mut(ts) {
                 before.get_or_insert_with(|| message.clone());
                 message.text = wire.to_owned();
-                // Slack's layout is of the old text; until its copy of the
-                // edit comes, the new text is drawn from its mrkdwn.
+                // Slack's layout is of the old text; the new one is the
+                // block the edit is sent with, as Slack will show it.
                 message
                     .blocks
                     .retain(|block| !matches!(block, KitBlock::RichText(_)));
+                message.blocks.extend(sent_layout(wire));
                 message.edited = true;
             }
         }
@@ -1652,6 +1653,15 @@ fn max_ts(a: Option<Ts>, b: Option<Ts>) -> Option<Ts> {
     }
 }
 
+/// The layout of a message being sent or edited: the rich text it goes
+/// with, as Slack's copy will bring it back, so the message looks the same
+/// before and after Slack answers. None when it goes as text alone.
+fn sent_layout(wire: &str) -> Vec<KitBlock> {
+    crate::slack::rich_out::layout(wire)
+        .map(|blocks| vec![KitBlock::RichText(blocks.into())])
+        .unwrap_or_default()
+}
+
 /// The copy of a message you are sending that shows until Slack answers.
 pub(super) fn local_message(
     me: &str,
@@ -1675,7 +1685,7 @@ pub(super) fn local_message(
         reactions: Vec::new(),
         files: Vec::new(),
         attachments: Vec::new(),
-        blocks: Vec::new(),
+        blocks: sent_layout(wire),
         edited: false,
         subtype: None,
         delivery: Delivery::Sending,
@@ -2574,7 +2584,7 @@ mod tests {
     }
 
     #[test]
-    fn an_edit_draws_its_new_text_until_slack_lays_it_out() {
+    fn an_edit_draws_the_layout_it_is_sent_with() {
         let mut w = workspace_with_thread();
         let ts = Ts::new("1.0");
         let laid_out: std::sync::Arc<[crate::mrkdwn::Block]> =
@@ -2584,23 +2594,32 @@ mod tests {
                 message.blocks = vec![KitBlock::RichText(laid_out.clone())];
             }
         }
-        let before = w.edit_locally("C1", &ts, "new").map(Box::new);
-        assert!(
+        let before = w.edit_locally("C1", &ts, "*new*").map(Box::new);
+        let sent = crate::slack::rich_out::layout("*new*").expect("a layout");
+        assert_eq!(
             w.find_message("C1", &ts)
-                .is_some_and(|m| m.rich_text().is_none()),
+                .and_then(Message::rich_text)
+                .map(|blocks| blocks.to_vec()),
+            Some(sent),
             "the old layout would show the old words"
         );
         w.undo(
             "C1",
             Change::Edit {
                 ts: ts.clone(),
-                text: "new".into(),
+                text: "*new*".into(),
                 before,
             },
         );
         assert_eq!(
             w.find_message("C1", &ts).and_then(Message::rich_text),
             Some(&laid_out)
+        );
+        // Text that goes alone is drawn from its mrkdwn.
+        w.edit_locally("C1", &ts, "<!date^1^{date}|then>");
+        assert!(
+            w.find_message("C1", &ts)
+                .is_some_and(|m| m.rich_text().is_none())
         );
     }
 
@@ -2707,6 +2726,28 @@ mod tests {
         // Nor in a conversation that is not loaded at all.
         w.message_changed("C2", old);
         assert!(!w.timelines.contains_key("C2"));
+    }
+
+    #[test]
+    fn a_sent_message_looks_the_same_before_and_after_its_echo() {
+        let wire = "*Plan* for <@U2>:\n1. ship `it`\n2. :tada:\n&gt; quoted\n```\ncode\n```";
+        let local = local_message("U1", &Ts::new("local-1"), wire, &None, false);
+        // Slack's copy carries the block the message was sent with.
+        let blocks = crate::slack::rich_out::blocks_param(wire).expect("blocks");
+        let echo = serde_json::json!({
+            "type": "message",
+            "ts": "5.0",
+            "user": "U1",
+            "text": wire,
+            "blocks": serde_json::from_str::<serde_json::Value>(&blocks).expect("json"),
+        });
+        let echo = serde_json::from_value::<crate::slack::types::Message>(echo)
+            .ok()
+            .and_then(crate::slack::types::Message::into_model)
+            .expect("a message");
+        assert!(local.rich_text().is_some());
+        assert_eq!(local.rich_text(), echo.rich_text());
+        assert_eq!(local.blocks, echo.blocks);
     }
 
     #[test]

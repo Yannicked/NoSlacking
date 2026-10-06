@@ -298,6 +298,30 @@ fn message(seconds: u64, user: &str, text: &str) -> Message {
     }
 }
 
+/// Slack's copy of a message you sent: its text, the rich text block it
+/// went with (the very `blocks` parameter sent to Slack) and its client
+/// id, read through the real parser.
+fn echo(seconds: u64, text: &str, client_msg_id: Option<String>) -> Message {
+    let mut json = serde_json::json!({
+        "type": "message",
+        "ts": ts(seconds).as_str(),
+        "user": ME,
+        "text": text,
+    });
+    if let Some(blocks) = crate::slack::rich_out::blocks_param(text)
+        .and_then(|blocks| serde_json::from_str::<serde_json::Value>(&blocks).ok())
+    {
+        json["blocks"] = blocks;
+    }
+    if let Some(id) = client_msg_id {
+        json["client_msg_id"] = serde_json::Value::String(id);
+    }
+    serde_json::from_value::<crate::slack::types::Message>(json)
+        .ok()
+        .and_then(crate::slack::types::Message::into_model)
+        .unwrap_or_else(|| message(seconds, ME, text))
+}
+
 /// A message as Slack's JSON has it, through the real parser.
 fn from_json(json: &str) -> Message {
     serde_json::from_str::<crate::slack::types::Message>(json)
@@ -1134,10 +1158,11 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                 text,
                 thread,
                 local,
+                client_msg_id,
                 ..
             } => {
                 sent += 1;
-                let mut message = message(NOW + sent, ME, &text);
+                let mut message = echo(NOW + sent, &text, client_msg_id);
                 message.thread_ts = thread;
                 sink.send(Event::Sent {
                     team,

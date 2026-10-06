@@ -943,8 +943,7 @@ impl Worker {
                 client_msg_id,
             } = outgoing;
             let params = post_params(&channel, text, thread.as_ref(), broadcast, client_msg_id);
-            let result = client
-                .act::<types::Posted>("chat.postMessage", &params)
+            let result = act_with_blocks::<types::Posted>(&client, "chat.postMessage", &params)
                 .await
                 .map_err(|e| failure(&e))
                 .and_then(|posted| {
@@ -981,7 +980,7 @@ impl Worker {
         };
         tokio::spawn(async move {
             let (method, params, ignore) = request(&channel, &change);
-            let result = match client.act::<Value>(method, &params).await {
+            let result = match act_with_blocks::<Value>(&client, method, &params).await {
                 Ok(_) => Ok(()),
                 // Already as asked: nothing to undo.
                 Err(SlackError::Api(code)) if ignore.contains(&code.as_str()) => Ok(()),
@@ -1654,6 +1653,54 @@ impl Worker {
     }
 }
 
+/// Adds a message's text as Slack's own composer sends it: the mrkdwn
+/// `text`, which notifications and older clients show, and the same
+/// message as a `rich_text` block, which Slack draws. When no block can be
+/// made (see [`crate::slack::rich_out`]), the text goes alone.
+pub(crate) fn with_text(params: &mut Vec<(&'static str, String)>, text: String) {
+    let blocks = crate::slack::rich_out::blocks_param(&text);
+    params.push(("text", text));
+    if let Some(blocks) = blocks {
+        params.push(("blocks", blocks));
+    }
+}
+
+/// Slack's answers when it will not take a message's `blocks`.
+const BLOCKS_REFUSED: [&str; 3] = [
+    "invalid_blocks",
+    "invalid_blocks_format",
+    "msg_blocks_too_long",
+];
+
+/// Makes a call that may carry `blocks`; should Slack refuse them, the
+/// same call goes again with the text alone, so a message is never lost
+/// to its layout.
+pub(crate) async fn act_with_blocks<T: serde::de::DeserializeOwned>(
+    client: &Client,
+    method: &str,
+    params: &[(&'static str, String)],
+) -> Result<T, SlackError> {
+    match client.act::<T>(method, params).await {
+        Err(SlackError::Api(code))
+            if BLOCKS_REFUSED.contains(&code.as_str())
+                && params.iter().any(|(name, _)| *name == "blocks") =>
+        {
+            log::warn!("Slack refused a message's blocks ({code}); sending its text alone");
+            client.act(method, &without_blocks(params)).await
+        }
+        other => other,
+    }
+}
+
+/// The same parameters without `blocks`.
+fn without_blocks(params: &[(&'static str, String)]) -> Vec<(&'static str, String)> {
+    params
+        .iter()
+        .filter(|(name, _)| *name != "blocks")
+        .cloned()
+        .collect()
+}
+
 /// What `chat.postMessage` is given for a message.
 ///
 /// Without `unfurl_links`, whether Slack unfurls a text-based link in a
@@ -1668,7 +1715,8 @@ fn post_params(
     client_msg_id: Option<String>,
 ) -> Vec<(&'static str, String)> {
     let unfurl = crate::links::has_message_link(&text);
-    let mut params = vec![("channel", channel.to_owned()), ("text", text)];
+    let mut params = vec![("channel", channel.to_owned())];
+    with_text(&mut params, text);
     if let Some(id) = client_msg_id {
         params.push(("client_msg_id", id));
     }
@@ -1696,11 +1744,11 @@ fn request(
 ) {
     let channel = ("channel", channel.to_owned());
     match change {
-        Change::Edit { ts, text, .. } => (
-            "chat.update",
-            vec![channel, ("ts", ts.0.clone()), ("text", text.clone())],
-            &[],
-        ),
+        Change::Edit { ts, text, .. } => {
+            let mut params = vec![channel, ("ts", ts.0.clone())];
+            with_text(&mut params, text.clone());
+            ("chat.update", params, &[])
+        }
         Change::Delete { ts, .. } => (
             "chat.delete",
             vec![channel, ("ts", ts.0.clone())],
@@ -2074,11 +2122,13 @@ mod tests {
     #[test]
     fn a_shared_message_asks_slack_to_unfurl_its_link() {
         let shared = "Look\n<https://acme.slack.com/archives/C1/p1700000000000100>";
+        let blocks = crate::slack::rich_out::blocks_param(shared).expect("blocks");
         assert_eq!(
             post_params("C2", shared.into(), None, false, None),
             [
                 ("channel", "C2".to_owned()),
                 ("text", shared.to_owned()),
+                ("blocks", blocks),
                 ("unfurl_links", "true".to_owned()),
             ]
         );
@@ -2095,6 +2145,11 @@ mod tests {
                 ("channel", "C2".to_owned()),
                 ("text", "hi".to_owned()),
                 (
+                    "blocks",
+                    r#"[{"elements":[{"elements":[{"text":"hi","type":"text"}],"type":"rich_text_section"}],"type":"rich_text"}]"#
+                        .to_owned()
+                ),
+                (
                     "client_msg_id",
                     "4f1e6b2a-0c3d-4e5f-8a9b-1c2d3e4f5a6b".to_owned()
                 ),
@@ -2103,6 +2158,58 @@ mod tests {
             ],
             "other messages are sent as before"
         );
+    }
+
+    /// The `blocks` parameter of `params`, read as JSON.
+    fn blocks_of(params: &[(&'static str, String)]) -> Option<Value> {
+        params
+            .iter()
+            .find(|(name, _)| *name == "blocks")
+            .map(|(_, json)| serde_json::from_str(json).expect("blocks are JSON"))
+    }
+
+    #[test]
+    fn messages_go_with_their_rich_text_beside_the_text() {
+        let wire = "*hi* <@U1>\n• one";
+        let block = crate::slack::rich_out::rich_text(wire).expect("a block");
+        let post = post_params("C1", wire.into(), None, false, None);
+        assert!(post.contains(&("text", wire.to_owned())));
+        assert_eq!(blocks_of(&post), Some(serde_json::json!([block])));
+        let edit = Change::Edit {
+            ts: Ts::new("1.0"),
+            text: wire.into(),
+            before: None,
+        };
+        let (method, params, _) = request("C1", &edit);
+        assert_eq!(method, "chat.update");
+        assert_eq!(
+            params[..3],
+            [
+                ("channel", "C1".to_owned()),
+                ("ts", "1.0".to_owned()),
+                ("text", wire.to_owned())
+            ]
+        );
+        assert_eq!(blocks_of(&params), Some(serde_json::json!([block])));
+    }
+
+    #[test]
+    fn text_that_makes_no_block_goes_alone() {
+        // A date has no element to keep it; blank text has nothing to lay
+        // out.
+        for wire in ["due <!date^1700000000^{date}|Nov 14>", "  "] {
+            let post = post_params("C1", wire.into(), None, false, None);
+            assert_eq!(
+                post,
+                [("channel", "C1".to_owned()), ("text", wire.to_owned())]
+            );
+        }
+        let params = vec![
+            ("channel", "C1".to_owned()),
+            ("text", "hi".to_owned()),
+            ("blocks", "[]".to_owned()),
+        ];
+        assert_eq!(without_blocks(&params), params[..2]);
     }
 
     #[tokio::test]

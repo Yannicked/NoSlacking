@@ -146,7 +146,7 @@ fn list(list: &Value, paragraph: &mut Vec<Inline>) {
 
 /// An ordered list item's number as Slack writes it at an indent: `1.`,
 /// then `a.` one level in, then `i.`, and round again.
-fn ordinal(number: u64, indent: u64) -> String {
+pub(super) fn ordinal(number: u64, indent: u64) -> String {
     match indent % 3 {
         1 => letters(number),
         2 => roman(number).unwrap_or_else(|| number.to_string()),

@@ -4,6 +4,7 @@ pub mod client;
 pub mod magic;
 pub mod net;
 pub mod rich;
+pub mod rich_out;
 pub mod rtm;
 pub mod search;
 pub mod session;

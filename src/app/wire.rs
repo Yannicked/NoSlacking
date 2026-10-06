@@ -1,7 +1,8 @@
 //! Turning what you type into what Slack receives, and a sent message
 //! back into text you can edit.
 
-use crate::mrkdwn;
+use crate::model::Message;
+use crate::mrkdwn::{self, Block, Inline, Style};
 
 /// What `@here`, `@channel` and `@everyone` become for Slack.
 const BROADCASTS: [(&str, &str); 3] = [
@@ -185,6 +186,148 @@ pub fn to_editable(
     (text, mentions)
 }
 
+/// The markup to edit a message from: written from its rich text when it
+/// has some, which says what was meant (a list, a typed `*`) better than
+/// its `text`, and its `text` otherwise. A message with a date, or with a
+/// layout of more than rich text, keeps its `text`, which holds what the
+/// rich text as read here would lose.
+pub fn edit_source(message: &Message) -> String {
+    match message.rich_text() {
+        Some(blocks) if !message.uses_blocks() && !mrkdwn::has_commands(&message.text) => {
+            to_mrkdwn(blocks)
+        }
+        _ => message.text.clone(),
+    }
+}
+
+/// Blocks written back as mrkdwn, escaped as Slack's `text` is, so that
+/// [`to_editable`] reads it as it reads a sent message: mentions, groups
+/// and channels by id, styles as markers around the words, quotes as
+/// `>` lines and lists as the lines the blocks already hold.
+///
+/// A style that starts inside a word (`un*seen*`) has no mrkdwn: Slack
+/// reads markers only at a word's edge, so it comes back unstyled.
+pub fn to_mrkdwn(blocks: &[Block]) -> String {
+    let mut out = String::new();
+    for (index, block) in blocks.iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+            // Quote lines next to each other are one quote.
+            if matches!(
+                (&blocks[index - 1], block),
+                (Block::Quote(_), Block::Quote(_))
+            ) {
+                out.push('\n');
+            }
+        }
+        match block {
+            Block::Paragraph(inlines) => write_runs(inlines, Style::default(), &mut out),
+            Block::Quote(inlines) => {
+                let mut quoted = String::new();
+                write_runs(inlines, Style::default(), &mut quoted);
+                for (line, text) in quoted.split('\n').enumerate() {
+                    if line > 0 {
+                        out.push('\n');
+                    }
+                    out.push_str("&gt; ");
+                    out.push_str(text);
+                }
+            }
+            Block::Preformatted(code) => {
+                out.push_str("```\n");
+                out.push_str(&mrkdwn::escape(code));
+                out.push_str("\n```");
+            }
+        }
+    }
+    out
+}
+
+/// The styles an inline carries; only text and links have any.
+fn style_of(inline: &Inline) -> Style {
+    match inline {
+        Inline::Text(_, style) | Inline::Link { style, .. } => *style,
+        _ => Style::default(),
+    }
+}
+
+/// Writes inlines with their styles as markers. `open` holds the styles
+/// already marked around them; each further style takes the longest run
+/// that has it, so `*bold _both_*` comes back as it was written.
+fn write_runs(inlines: &[Inline], open: Style, out: &mut String) {
+    let mut at = 0;
+    while at < inlines.len() {
+        let style = style_of(&inlines[at]);
+        let flags = [
+            (style.bold && !open.bold, '*'),
+            (style.italic && !open.italic, '_'),
+            (style.strike && !open.strike, '~'),
+        ];
+        let Some(&(_, marker)) = flags.iter().find(|(new, _)| *new) else {
+            write_one(&inlines[at], out);
+            at += 1;
+            continue;
+        };
+        let has = |inline: &Inline| {
+            let style = style_of(inline);
+            match marker {
+                '*' => style.bold,
+                '_' => style.italic,
+                _ => style.strike,
+            }
+        };
+        let end = at + inlines[at..].iter().take_while(|i| has(i)).count();
+        let mut inner = open;
+        match marker {
+            '*' => inner.bold = true,
+            '_' => inner.italic = true,
+            _ => inner.strike = true,
+        }
+        let mut body = String::new();
+        write_runs(&inlines[at..end], inner, &mut body);
+        // Markers hug the words: spaces at the run's edges go outside.
+        let core = body.trim();
+        if core.is_empty() {
+            out.push_str(&body);
+        } else {
+            let lead = body.len() - body.trim_start().len();
+            out.push_str(&body[..lead]);
+            out.push(marker);
+            out.push_str(core);
+            out.push(marker);
+            out.push_str(&body[lead + core.len()..]);
+        }
+        at = end;
+    }
+}
+
+/// One inline as mrkdwn, without its styles.
+fn write_one(inline: &Inline, out: &mut String) {
+    match inline {
+        Inline::Text(text, _) => out.push_str(&mrkdwn::escape(text)),
+        Inline::Code(code) => {
+            out.push('`');
+            out.push_str(&mrkdwn::escape(code));
+            out.push('`');
+        }
+        Inline::Link { url, label, .. } => {
+            out.push('<');
+            out.push_str(&mrkdwn::escape(url));
+            if let Some(label) = label {
+                out.push('|');
+                out.push_str(&mrkdwn::escape(label));
+            }
+            out.push('>');
+        }
+        Inline::User { id, .. } => out.push_str(&format!("<@{id}>")),
+        Inline::Channel { id, .. } => out.push_str(&format!("<#{id}>")),
+        Inline::Group { id, .. } => out.push_str(&format!("<!subteam^{id}>")),
+        Inline::Broadcast(range) => out.push_str(&format!("<!{range}>")),
+        Inline::Emoji(name) => out.push_str(&format!(":{name}:")),
+        Inline::Newline => out.push('\n'),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +436,101 @@ mod tests {
         let (text, mentions) = to_editable(wire, names);
         assert_eq!(text, "docs: https://x.y");
         assert_eq!(to_wire(&text, &mentions), "docs: <https://x.y>");
+    }
+
+    /// Rich text as Slack sends it, read as the interface reads it.
+    fn rich(json: &str) -> Vec<Block> {
+        let block: serde_json::Value = serde_json::from_str(json).expect("parses");
+        crate::slack::rich::blocks(&block)
+    }
+
+    /// Rich text → editable text → what is sent → rich text again.
+    fn edited_unchanged(blocks: &[Block]) -> String {
+        let (text, mentions) = to_editable(&to_mrkdwn(blocks), names);
+        let wire = to_wire(&text, &mentions);
+        let block = crate::slack::rich_out::rich_text(&wire)
+            .unwrap_or_else(|skip| panic!("{wire:?}: {skip:?}"));
+        assert_eq!(crate::slack::rich::blocks(&block), blocks, "{wire:?}");
+        text
+    }
+
+    #[test]
+    fn rich_text_edits_and_saves_unchanged() {
+        let blocks = rich(
+            r#"{"type":"rich_text","elements":[
+                {"type":"rich_text_section","elements":[
+                    {"type":"text","text":"Hi "},
+                    {"type":"user","user_id":"U1"},
+                    {"type":"text","text":", "},
+                    {"type":"text","text":"bold ","style":{"bold":true}},
+                    {"type":"text","text":"both","style":{"bold":true,"italic":true}},
+                    {"type":"text","text":" in "},
+                    {"type":"channel","channel_id":"C1"},
+                    {"type":"text","text":" for "},
+                    {"type":"usergroup","usergroup_id":"S2"},
+                    {"type":"text","text":" "},
+                    {"type":"broadcast","range":"here"},
+                    {"type":"text","text":" & 2*3 < 7 "},
+                    {"type":"emoji","name":"+1","unicode":"1f44d-1f3fc","skin_tone":3},
+                    {"type":"text","text":"\nsee "},
+                    {"type":"link","url":"https://x.y/?a=1&b=2","text":"the docs"},
+                    {"type":"text","text":" or "},
+                    {"type":"text","text":"cargo test","style":{"code":true}},
+                    {"type":"text","text":"\n"}]},
+                {"type":"rich_text_list","style":"ordered","indent":0,"border":0,"elements":[
+                    {"type":"rich_text_section","elements":[{"type":"text","text":"one"}]},
+                    {"type":"rich_text_section","elements":[
+                        {"type":"text","text":"two","style":{"strike":true}}]}]},
+                {"type":"rich_text_list","style":"bullet","indent":1,"border":0,"elements":[
+                    {"type":"rich_text_section","elements":[{"type":"text","text":"inner"}]}]},
+                {"type":"rich_text_quote","elements":[{"type":"text","text":"quoted\nlines"}]},
+                {"type":"rich_text_preformatted","border":0,"elements":[
+                    {"type":"text","text":"let x = a < b && c;"}]},
+                {"type":"rich_text_section","elements":[{"type":"text","text":"bye"}]}
+            ]}"#,
+        );
+        let text = edited_unchanged(&blocks);
+        assert_eq!(
+            text,
+            "Hi @Ann Lee, *bold _both_* in #general for @ops @here & 2*3 < 7 \
+             :+1::skin-tone-3:\nsee the docs or `cargo test`\n1. one\n2. ~two~\n    • inner\n\
+             > quoted\n> lines\n```\nlet x = a < b && c;\n```\nbye"
+        );
+    }
+
+    #[test]
+    fn quotes_and_quoted_lists_edit_unchanged() {
+        let blocks = rich(
+            r#"{"type":"rich_text","elements":[
+                {"type":"rich_text_quote","elements":[{"type":"text","text":"said"}]},
+                {"type":"rich_text_list","style":"bullet","indent":0,"border":1,"elements":[
+                    {"type":"rich_text_section","elements":[{"type":"text","text":"point"}]}]},
+                {"type":"rich_text_section","elements":[{"type":"text","text":"after"}]},
+                {"type":"rich_text_quote","elements":[{"type":"text","text":"one"}]},
+                {"type":"rich_text_quote","elements":[{"type":"text","text":"two"}]}
+            ]}"#,
+        );
+        let text = edited_unchanged(&blocks);
+        assert_eq!(text, "> said\n> • point\nafter\n> one\n\n> two");
+    }
+
+    #[test]
+    fn edits_start_from_rich_text_unless_it_would_lose_something() {
+        let local = crate::model::Ts::new("local-1");
+        let mut message =
+            super::super::workspace::local_message("U1", &local, "*1.* fallback", &None, false);
+        message.blocks.clear();
+        assert_eq!(edit_source(&message), "*1.* fallback");
+        message.blocks = vec![crate::model::KitBlock::RichText(
+            rich(
+                r#"{"type":"rich_text","elements":[{"type":"rich_text_list","style":"ordered",
+                    "elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"a"}]}]}]}"#,
+            )
+            .into(),
+        )];
+        assert_eq!(edit_source(&message), "1. a");
+        message.text = "on <!date^1700000000^{date}|Nov 14>".into();
+        assert_eq!(edit_source(&message), message.text);
     }
 
     #[test]
