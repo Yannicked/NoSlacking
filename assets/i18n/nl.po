@@ -2288,3 +2288,7 @@ msgstr "de afbeelding is te groot voor een emoji"
 
 msgid "Slack could not read the picture"
 msgstr "Slack kon de afbeelding niet lezen"
+
+# The "+" on the Direct messages line.
+msgid "Message someone"
+msgstr "Iemand een bericht sturen"

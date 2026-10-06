@@ -625,7 +625,13 @@ fn section_view(
         theme::semibold(13.0),
         palette.secondary,
     );
-    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 40.0);
+    let room = if section.kind == SectionKind::DirectMessages {
+        // Leave the "+" its own room.
+        68.0
+    } else {
+        40.0
+    };
+    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - room);
     let galley = ui.painter().layout_job(job);
     ui.painter().galley(
         egui::pos2(rect.left() + 32.0, rect.center().y - galley.size().y / 2.0),
@@ -645,6 +651,25 @@ fn section_view(
     }
     if let (Some(id), Some(sections)) = (&section.id, workspace.sections.as_deref()) {
         section_menu(&response, id, section.kind, sections, actions);
+    }
+    // A "+" at the end of the Direct messages line, as in Slack's client:
+    // the quickest way to a new conversation with someone is where your
+    // conversations with people are. It opens the New message dialog.
+    if section.kind == SectionKind::DirectMessages {
+        let plus = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - 18.0, rect.center().y),
+            Vec2::splat(24.0),
+        );
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(plus)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        if theme::icon_button(&mut child, palette, Icon::Plus, 15.0, &t("Message someone"))
+            .clicked()
+        {
+            actions.push(Action::Convos(crate::convos::Action::NewMessage));
+        }
     }
     for conversation in rows {
         row(ui, palette, workspace, conversation, section, actions);
