@@ -470,7 +470,14 @@ pub struct State {
     pub status: Option<StatusDialog>,
     /// Your status before the last change, by workspace, to put back if
     /// Slack refuses it.
-    status_before: HashMap<String, (String, String)>,
+    status_before: HashMap<String, PriorStatus>,
+}
+
+/// Your status as it was before a change.
+#[derive(Debug)]
+struct PriorStatus {
+    emoji: String,
+    text: String,
 }
 
 impl State {
@@ -630,10 +637,10 @@ pub fn apply(app: &mut App, action: Action) {
             if let Some(workspace) = app.active_workspace_mut() {
                 let me = workspace.info.user_id.clone();
                 if let Some(user) = workspace.users.get_mut(&me) {
-                    let before = (
-                        std::mem::replace(&mut user.status_emoji, emoji.clone()),
-                        std::mem::replace(&mut user.status_text, text.clone()),
-                    );
+                    let before = PriorStatus {
+                        emoji: std::mem::replace(&mut user.status_emoji, emoji.clone()),
+                        text: std::mem::replace(&mut user.status_text, text.clone()),
+                    };
                     app.people.status_before.insert(team.clone(), before);
                 }
             }
@@ -731,7 +738,9 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
         },
         Event::StatusSet { result } => {
             if let Err(error) = result {
-                if let (Some((emoji, text)), Some(user)) = (before, workspace.users.get_mut(&me)) {
+                if let (Some(PriorStatus { emoji, text }), Some(user)) =
+                    (before, workspace.users.get_mut(&me))
+                {
                     user.status_emoji = emoji;
                     user.status_text = text;
                 }

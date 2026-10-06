@@ -504,13 +504,13 @@ impl App {
         self.drafts.retain(|key, _| !ours(key));
         self.jumps.retain(|j| !ours(&j.list));
         self.scroll_to_bottom.retain(|key| !ours(key));
-        if self.read_line.as_ref().is_some_and(|(key, _)| ours(key)) {
+        if self.read_line.as_ref().is_some_and(|line| ours(&line.list)) {
             self.read_line = None;
         }
-        if self.prepended.as_ref().is_some_and(|(key, _)| ours(key)) {
+        if self.prepended.as_deref().is_some_and(ours) {
             self.prepended = None;
         }
-        self.marks.retain(|(t, _), _| t != team);
+        self.marked.retain(|(t, _), _| t != team);
         self.pending_marks.retain(|(t, _), _| t != team);
         self.popouts.retain(|p| p.team != team);
         self.views.teams.remove(team);
@@ -587,7 +587,7 @@ impl App {
         let (arrived, first) =
             workspace.history_arrived(channel, messages, has_more, cursor, older);
         if older {
-            self.prepended = Some((format!("{team}/{channel}"), 0.0));
+            self.prepended = Some(format!("{team}/{channel}"));
         }
         if first {
             self.scroll_to_bottom

@@ -119,7 +119,11 @@ pub(super) fn modal_frame(app: &App) -> egui::Frame {
 /// The quick switcher, which with `>` typed first is the command palette
 /// (see [`crate::palette`]).
 fn switcher(app: &mut App, ctx: &egui::Context) {
-    let Some((mut query, mut selected)) = app.switcher.take() else {
+    let Some(crate::app::Switcher {
+        mut query,
+        mut selected,
+    }) = app.switcher.take()
+    else {
         return;
     };
     let focus = std::mem::take(&mut app.focus_overlay);
@@ -225,7 +229,7 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
         return;
     }
     if !close {
-        app.switcher = Some((query, selected));
+        app.switcher = Some(crate::app::Switcher { query, selected });
     }
 }
 
@@ -927,7 +931,7 @@ fn profile(app: &mut App, ctx: &egui::Context) {
 }
 
 fn confirm_delete(app: &mut App, ctx: &egui::Context) {
-    let Some((channel, ts)) = app.confirm_delete.clone() else {
+    let Some(crate::app::MessageDeletion { channel, ts }) = app.confirm_delete.clone() else {
         return;
     };
     let answer = confirm(
@@ -949,7 +953,7 @@ fn confirm_delete(app: &mut App, ctx: &egui::Context) {
 
 /// "Delete sidebar-v2.png?" for your own file.
 fn confirm_delete_file(app: &mut App, ctx: &egui::Context) {
-    let Some((file, name)) = app.confirm_delete_file.clone() else {
+    let Some(crate::app::FileDeletion { file, name }) = app.confirm_delete_file.clone() else {
         return;
     };
     let answer = confirm(
@@ -1018,7 +1022,12 @@ fn confirm(app: &App, ctx: &egui::Context, id: &str, title: &str, body: &str) ->
 /// The question an app asked to have put before its button is pressed,
 /// in the app's words where it gave them.
 fn confirm_press(app: &mut App, ctx: &egui::Context) {
-    let Some((press, confirm, link)) = app.confirm_press.clone() else {
+    let Some(crate::app::PressConfirmation {
+        press,
+        confirm,
+        link,
+    }) = app.confirm_press.clone()
+    else {
         return;
     };
     let palette = app.palette;

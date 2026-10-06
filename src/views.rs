@@ -15,7 +15,7 @@ pub mod schedule;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::app::{App, Draft, WorkspaceState};
+use crate::app::{App, LentDraft, WorkspaceState};
 use crate::backend;
 use crate::failure::Failure;
 use crate::i18n::{t, tf};
@@ -572,7 +572,7 @@ pub struct TeamViews {
 pub struct Pending {
     pub team: String,
     /// The composer it came from, and its draft as it was.
-    pub draft: Option<(String, Draft)>,
+    pub draft: Option<LentDraft>,
     /// The scheduled message it replaces.
     pub replace: Option<String>,
 }
@@ -1038,7 +1038,7 @@ fn schedule_draft(
         request,
         Pending {
             team: team.to_owned(),
-            draft: Some((key, draft)),
+            draft: Some(LentDraft { key, draft }),
             replace: None,
         },
     );
@@ -1184,7 +1184,7 @@ fn scheduled(
                 dialog.busy = false;
             }
             // Back in its composer, unless something new was typed there.
-            if let Some((key, draft)) = pending.and_then(|p| p.draft) {
+            if let Some(LentDraft { key, draft }) = pending.and_then(|p| p.draft) {
                 let current = app.drafts.entry(key).or_default();
                 if current.text.trim().is_empty() {
                     *current = draft;

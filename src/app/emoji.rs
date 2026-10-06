@@ -10,10 +10,14 @@ use crate::custom_emoji::{Dialog, MAX_BYTES, Picked};
 use crate::failure::Failure;
 use crate::i18n::tf;
 
-/// A picture picked for a new emoji: the workspace it is for, and its
-/// file name and bytes, or why it could not be read; `None` when the
-/// picker was closed without one.
-pub(super) type PickedImage = (String, Option<Result<(String, Vec<u8>), Failure>>);
+/// A picture picked for a new emoji.
+pub(super) struct PickedImage {
+    /// The workspace it is for.
+    team: String,
+    /// Its file name and bytes, or why it could not be read; `None` when
+    /// the picker was closed without one.
+    read: Option<Result<(String, Vec<u8>), Failure>>,
+}
 
 impl App {
     /// Opens the "Add emoji" dialog over the picker, for the workspace on
@@ -42,25 +46,28 @@ impl App {
         };
         dialog.busy = true;
         let team = dialog.team.clone();
-        let sender = self.emoji_images.0.clone();
+        let sender = self.emoji_images.sender.clone();
         let waker = self.waker.clone();
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
                 .add_filter("Images", &["png", "jpg", "jpeg", "gif"])
                 .pick_file();
             // Nothing picked still ends the wait.
-            let _ = sender.send((team, picked.map(|path| read_limited(&path))));
+            let _ = sender.send(PickedImage {
+                team,
+                read: picked.map(|path| read_limited(&path)),
+            });
             waker.wake();
         });
     }
 
     /// A picture the file picker's thread read, for the open dialog.
-    pub(super) fn emoji_image_picked(&mut self, (team, result): PickedImage) {
+    pub(super) fn emoji_image_picked(&mut self, PickedImage { team, read }: PickedImage) {
         let Some(dialog) = self.add_emoji.as_mut().filter(|d| d.team == team) else {
             return;
         };
         dialog.busy = false;
-        match result {
+        match read {
             Some(Ok((file_name, bytes))) => {
                 self.emoji_picks += 1;
                 // The file's own name, as the emoji's, when it fits.
