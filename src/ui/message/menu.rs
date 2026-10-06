@@ -319,6 +319,10 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
         }));
         ui.close();
     }
+    // A message still on its way has no link for the reminder to carry.
+    if !message.ts.is_local() {
+        remind_menu(ui, row, message, actions);
+    }
     // Slack keeps a thread's read state apart from the conversation's
     // (`subscriptions.thread.mark`, for its own apps only), so this is for
     // the conversation's own list.
@@ -369,4 +373,31 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
         }));
         ui.close();
     }
+}
+
+/// "Remind me", with the times to be reminded at and one of your own.
+fn remind_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<Action>) {
+    use crate::views::{Action as Views, remind::RemindIn};
+    ui.menu_button(t("Remind me"), |ui| {
+        for when in RemindIn::ALL {
+            if ui.button(when.label()).clicked() {
+                actions.push(Action::Views(Views::Remind {
+                    channel: row.channel.to_owned(),
+                    ts: message.ts.clone(),
+                    thread: message.thread_ts.clone(),
+                    when,
+                }));
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui.button(t("Custom time…")).clicked() {
+            actions.push(Action::Views(Views::AskRemind {
+                channel: row.channel.to_owned(),
+                ts: message.ts.clone(),
+                thread: message.thread_ts.clone(),
+            }));
+            ui.close();
+        }
+    });
 }

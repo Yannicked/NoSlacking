@@ -2288,3 +2288,33 @@ msgstr "de afbeelding is te groot voor een emoji"
 
 msgid "Slack could not read the picture"
 msgstr "Slack kon de afbeelding niet lezen"
+
+msgid "Remind me"
+msgstr "Herinner me"
+
+msgid "In 20 minutes"
+msgstr "Over 20 minuten"
+
+msgid "In 1 hour"
+msgstr "Over 1 uur"
+
+msgid "In 3 hours"
+msgstr "Over 3 uur"
+
+msgid "Next Monday at 9:00"
+msgstr "Volgende maandag om 9:00"
+
+msgid "Remind me at a time of your choosing"
+msgstr "Herinner me op een zelfgekozen tijd"
+
+msgid "Slack sets reminders at most five years ahead."
+msgstr "Slack zet herinneringen hooguit vijf jaar vooruit."
+
+msgid "I will remind you {when}"
+msgstr "Je krijgt een herinnering op {when}"
+
+msgid "Setting a reminder needs the reminders:write permission, which your Slack app does not have."
+msgstr "Voor een herinnering is de machtiging reminders:write nodig, die je Slack-app niet heeft."
+
+msgid "Could not set the reminder: {error}"
+msgstr "Kon de herinnering niet zetten: {error}"

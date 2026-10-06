@@ -152,6 +152,14 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
                 },
             }
         }
+        Command::Remind { text, time } => views::Event::Reminded {
+            time,
+            result: client
+                .act::<serde_json::Value>("reminders.add", &views::remind::params(&text, time))
+                .await
+                .map(|_| ())
+                .map_err(|e| failure(&e)),
+        },
         Command::CompleteReminder { id } => match client
             .act::<serde_json::Value>("reminders.complete", &[("reminder", id.clone())])
             .await

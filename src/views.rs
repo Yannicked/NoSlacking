@@ -10,6 +10,7 @@
 //! back as [`Event`]s for [`handle`]. What the views hold lives in
 //! [`State`], kept on [`App`].
 
+pub mod remind;
 pub mod schedule;
 
 use std::collections::{HashMap, HashSet};
@@ -104,6 +105,20 @@ pub enum Action {
     CloseSchedule,
     /// Keeps a scheduled message from being sent.
     CancelScheduled { channel: String, id: String },
+    /// Sets a reminder about message `ts` of `channel` (a reply in
+    /// `thread`) for `when`.
+    Remind {
+        channel: String,
+        ts: Ts,
+        thread: Option<Ts>,
+        when: remind::RemindIn,
+    },
+    /// Asks when to be reminded about message `ts` of `channel`.
+    AskRemind {
+        channel: String,
+        ts: Ts,
+        thread: Option<Ts>,
+    },
 }
 
 /// What the interface asks the worker to do for one workspace.
@@ -145,6 +160,8 @@ pub enum Command {
     },
     /// `chat.deleteScheduledMessage`, already taken off the list.
     CancelScheduled { channel: String, id: String },
+    /// `reminders.add` with this text, at `time` (seconds since the epoch).
+    Remind { text: String, time: i64 },
 }
 
 impl Command {
@@ -185,6 +202,10 @@ impl Command {
                 result: Err(error),
             },
             Self::CancelScheduled { .. } => Event::CancelFailed { error },
+            Self::Remind { time, .. } => Event::Reminded {
+                time: *time,
+                result: Err(error),
+            },
         }
     }
 }
@@ -243,6 +264,11 @@ pub enum Event {
     },
     /// A scheduled message could not be cancelled; the list is read again.
     CancelFailed { error: Failure },
+    /// Slack answered a reminder set for `time`.
+    Reminded {
+        time: i64,
+        result: Result<(), Failure>,
+    },
     /// A command that needs no answer was carried out (or not, which
     /// changes nothing on screen).
     Nothing,
@@ -754,6 +780,33 @@ pub fn apply(app: &mut App, action: Action) {
             }
             send(app, &team, Command::CancelScheduled { channel, id });
         }
+        Action::Remind {
+            channel,
+            ts,
+            thread,
+            when,
+        } => {
+            if let Some(time) = when.at(&jiff::Zoned::now()) {
+                remind(app, &team, &channel, &ts, thread.as_ref(), time);
+            }
+        }
+        Action::AskRemind {
+            channel,
+            ts,
+            thread,
+        } => {
+            app.focus_overlay = true;
+            app.views.dialog = Some(schedule::Dialog::new(
+                schedule::Target::Remind {
+                    channel,
+                    ts,
+                    thread,
+                },
+                String::new(),
+                None,
+                &jiff::Zoned::now(),
+            ));
+        }
         Action::OpenThread { channel, ts } => {
             let newest = app
                 .views
@@ -841,6 +894,25 @@ fn schedule_draft(
     );
 }
 
+/// Asks Slack to remind you at `time` about message `ts` of `channel`,
+/// quoting it and linking to it, since a reminder cannot point at a
+/// message itself.
+fn remind(app: &mut App, team: &str, channel: &str, ts: &Ts, thread: Option<&Ts>, time: i64) {
+    let Some(workspace) = app.workspaces.iter().find(|w| w.info.team_id == team) else {
+        return;
+    };
+    let Some(link) = crate::links::permalink(&workspace.info.domain, channel, ts, thread) else {
+        app.toast(t("This message has no link yet"), true);
+        return;
+    };
+    let plain = workspace
+        .find_message(channel, ts)
+        .map(|m| crate::ui::plain_text(workspace, m))
+        .unwrap_or_default();
+    let text = remind::reminder_text(&plain, &link);
+    send(app, team, Command::Remind { text, time });
+}
+
 fn next_request(app: &mut App) -> u64 {
     app.views.next_request += 1;
     app.views.next_request
@@ -856,11 +928,12 @@ fn confirm_schedule(app: &mut App, team: &str) {
         return;
     }
     let now = jiff::Zoned::now();
-    let post_at = match schedule::moment(
+    let post_at = match schedule::moment_within(
         &dialog.date,
         &dialog.time,
         now.time_zone(),
         now.timestamp().as_second(),
+        dialog.target.max_ahead(),
     ) {
         Ok(post_at) => post_at,
         Err(problem) => {
@@ -876,6 +949,14 @@ fn confirm_schedule(app: &mut App, team: &str) {
         } => {
             app.views.dialog = None;
             schedule_draft(app, team, key, channel, thread, post_at);
+        }
+        schedule::Target::Remind {
+            channel,
+            ts,
+            thread,
+        } => {
+            app.views.dialog = None;
+            remind(app, team, &channel, &ts, thread.as_ref(), post_at);
         }
         schedule::Target::Edit(old) => {
             if dialog.text.trim().is_empty() {
@@ -1189,8 +1270,34 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
             app.views.team_mut(team).scheduled.start();
             send(app, team, Command::Scheduled);
         }
+        Event::Reminded { time, result } => match result {
+            Ok(()) => {
+                let when = crate::ui::moment_label(time);
+                app.toast(tf("I will remind you {when}", &[("when", &when)]), false);
+                // The Later view lists reminders: it shows the new one.
+                let views = app.views.team_mut(team);
+                if views.reminders.value.is_some() || views.reminders.loading {
+                    views.reminders.start();
+                    send(app, team, Command::Reminders);
+                }
+            }
+            Err(error) => app.toast(remind_failure(&error), true),
+        },
         Event::Nothing => {}
     }
+}
+
+/// Why a reminder was not set, in words. A sign-in through your own Slack
+/// app made from a manifest older than reminders lacks `reminders:write`:
+/// say which permission, as for bookmarks.
+fn remind_failure(error: &Failure) -> String {
+    if *error == Failure::MissingPermission {
+        return t("Setting a reminder needs the reminders:write permission, which your Slack app does not have.").into_owned();
+    }
+    tf(
+        "Could not set the reminder: {error}",
+        &[("error", &error.message())],
+    )
 }
 
 #[cfg(test)]
@@ -1205,6 +1312,14 @@ mod tests {
             message: bare_message(Ts::new(ts), Some("U1".into()), text.into(), None),
             unread: false,
         }
+    }
+
+    #[test]
+    fn a_reminder_refused_for_want_of_its_permission_names_it() {
+        let missing = remind_failure(&Failure::MissingPermission);
+        assert!(missing.contains("reminders:write"), "{missing}");
+        let other = remind_failure(&Failure::ConversationGone);
+        assert!(!other.contains("reminders:write"), "{other}");
     }
 
     #[test]

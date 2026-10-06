@@ -58,6 +58,10 @@ pub fn answer(team: &str, command: Command) -> Vec<Event> {
             ]),
         },
         Command::Save { .. } | Command::CompleteReminder { .. } => views::Event::Nothing,
+        Command::Remind { time, .. } => views::Event::Reminded {
+            time,
+            result: Ok(()),
+        },
         Command::Scheduled => views::Event::ScheduledList {
             result: Ok(vec![
                 Scheduled {
