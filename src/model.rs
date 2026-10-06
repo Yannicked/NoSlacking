@@ -318,6 +318,106 @@ pub struct File {
     /// Deleted: Slack keeps the message and says "This file was deleted"
     /// in its place, and only the id is left.
     pub deleted: bool,
+    /// Slack's kind for it (`python`, `json`, `xlsx`), which names the
+    /// language a preview is coloured as.
+    pub filetype: String,
+    /// The first lines of a snippet or text file, as Slack sends them, so
+    /// it can be glanced at without fetching it.
+    pub preview: Option<TextPreview>,
+    /// A PDF Slack made of an Office document, for "Open as PDF".
+    pub converted_pdf: Option<String>,
+    /// A smaller copy of a video Slack made, quicker to fetch for playing.
+    pub mp4_low: Option<String>,
+    /// An MP4 copy of an old WebM voice clip, which more players open.
+    pub aac: Option<String>,
+    /// How long a video or sound lasts, in milliseconds.
+    pub duration_ms: Option<u64>,
+    /// A voice clip recorded in Slack, shown as a waveform rather than as a
+    /// file.
+    pub voice: bool,
+    /// A voice clip's loudness over its length, from 0 to 100, as Slack
+    /// measured it (a hundred of them).
+    pub wave: Vec<u8>,
+    /// The start of what Slack heard in a voice clip or video.
+    pub transcript: Option<String>,
+}
+
+/// The first lines of a text file, as Slack previews it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TextPreview {
+    /// Plain text: Slack's highlighted HTML is never used.
+    pub text: String,
+    /// How many lines of the file the preview leaves out, when Slack says.
+    pub lines_more: Option<u32>,
+    /// How many lines the whole file has, when Slack says.
+    pub lines: Option<u32>,
+    /// Whether Slack cut the preview short.
+    pub truncated: bool,
+}
+
+/// What a preview leaves unshown, for the line under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum More {
+    /// The preview shows the whole file.
+    Nothing,
+    /// This many lines more.
+    Lines(u32),
+    /// More, but Slack did not say how much.
+    Unknown,
+}
+
+impl TextPreview {
+    /// The lines to show, at most `cap` of them, and what is left out:
+    /// the preview's own lines past the cap plus the lines Slack left out
+    /// of it.
+    pub fn shown(&self, cap: usize) -> (Vec<&str>, More) {
+        let all: Vec<&str> = self.text.trim_end().lines().collect();
+        let shown: Vec<&str> = all.iter().copied().take(cap).collect();
+        let cut = u32::try_from(all.len() - shown.len()).unwrap_or(u32::MAX);
+        let count = u32::try_from(shown.len()).unwrap_or(u32::MAX);
+        let more = match (self.lines_more, self.lines) {
+            (Some(more), _) => Some(cut.saturating_add(more)),
+            (None, Some(lines)) => Some(lines.saturating_sub(count)),
+            (None, None) => None,
+        };
+        let more = match more {
+            Some(0) if !self.truncated => More::Nothing,
+            Some(0) => More::Unknown,
+            Some(n) => More::Lines(n),
+            None if self.truncated => More::Unknown,
+            None if cut > 0 => More::Lines(cut),
+            None => More::Nothing,
+        };
+        (shown, more)
+    }
+}
+
+/// How long a video or sound lasts, as a player shows it: "0:07",
+/// "4:39", "1:02:05". Rounded down to the second, so a clip never seems
+/// longer than it is.
+pub fn duration_text(ms: u64) -> String {
+    let seconds = ms / 1000;
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+/// `name` with its extension replaced by `ext`, or `ext` added when it has
+/// none: what a converted copy of a file is called.
+fn with_extension(name: &str, ext: &str) -> String {
+    let name = name.trim();
+    let stem = match name.rsplit_once('.') {
+        Some((stem, old)) if !stem.is_empty() && !old.is_empty() && !old.contains(' ') => stem,
+        _ => name,
+    };
+    if stem.is_empty() {
+        format!("file.{ext}")
+    } else {
+        format!("{stem}.{ext}")
+    }
 }
 
 /// A file to play rather than look at.
@@ -347,6 +447,42 @@ impl File {
 
     pub fn is_pdf(&self) -> bool {
         self.mimetype.eq_ignore_ascii_case("application/pdf")
+    }
+
+    /// What "Open as PDF" fetches and the name it is opened under: Slack's
+    /// PDF of an Office document, called after the document ("Budget.xlsx"
+    /// opens as "Budget.pdf").
+    pub fn as_pdf(&self) -> Option<(String, String)> {
+        let url = self.converted_pdf.clone()?;
+        Some((url, with_extension(self.shown_name(), "pdf")))
+    }
+
+    /// What plays in the system's player and the name it is saved under:
+    /// the smaller copy of a video and the MP4 of an old WebM voice clip
+    /// when Slack made one (named for what they are, so the player knows
+    /// them), else the file itself.
+    pub fn player(&self) -> Option<(String, String)> {
+        let copy = match self.media() {
+            Some(Media::Video) => self.mp4_low.clone().map(|url| (url, "mp4")),
+            Some(Media::Audio) => self.aac.clone().map(|url| (url, "m4a")),
+            None => None,
+        };
+        if let Some((url, ext)) = copy {
+            return Some((url, with_extension(self.shown_name(), ext)));
+        }
+        self.url_private
+            .clone()
+            .or_else(|| self.download_url.clone())
+            .map(|url| (url, self.name.clone()))
+    }
+
+    /// The name to call it by: its file name, else its title.
+    fn shown_name(&self) -> &str {
+        if self.name.trim().is_empty() {
+            &self.title
+        } else {
+            &self.name
+        }
     }
 
     /// Whether `me` may delete it from here: its uploader, while it is
@@ -1369,6 +1505,127 @@ mod tests {
         assert!(!c.has_unread());
         c.latest = Some(Ts::new("6.0"));
         assert!(c.has_unread());
+    }
+
+    fn preview(text: &str, lines_more: Option<u32>, lines: Option<u32>) -> TextPreview {
+        TextPreview {
+            text: text.into(),
+            lines_more,
+            lines,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn a_preview_shows_at_most_its_cap_and_counts_the_rest() {
+        let ten = (1..=10)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Two lines past the cap, and the 30 Slack left out.
+        let long = preview(&ten, Some(30), None);
+        let (shown, more) = long.shown(8);
+        assert_eq!(shown.len(), 8);
+        assert_eq!(shown.last(), Some(&"line 8"));
+        assert_eq!(more, More::Lines(32));
+        // The whole file, within the cap.
+        let whole = preview("a\nb\n\n", Some(0), Some(2));
+        let (shown, more) = whole.shown(8);
+        assert_eq!(shown, vec!["a", "b"], "trailing blank lines dropped");
+        assert_eq!(more, More::Nothing);
+        // Only the file's length known.
+        assert_eq!(preview("a\nb", None, Some(40)).shown(8).1, More::Lines(38));
+        // Nothing known but the cap.
+        assert_eq!(preview(&ten, None, None).shown(8).1, More::Lines(2));
+        assert_eq!(preview("a", None, None).shown(8).1, More::Nothing);
+        // Cut short by Slack, without saying by how much.
+        let cut = TextPreview {
+            truncated: true,
+            ..preview("a", None, None)
+        };
+        assert_eq!(cut.shown(8).1, More::Unknown);
+    }
+
+    #[test]
+    fn durations_read_like_a_players() {
+        assert_eq!(duration_text(0), "0:00");
+        assert_eq!(duration_text(999), "0:00", "rounded down");
+        assert_eq!(duration_text(13_977), "0:13");
+        assert_eq!(duration_text(279_145), "4:39");
+        assert_eq!(duration_text(3_725_000), "1:02:05");
+    }
+
+    #[test]
+    fn open_as_pdf_names_the_pdf_after_the_document() {
+        let file = |name: &str| File {
+            name: name.into(),
+            title: "Quarterly numbers".into(),
+            converted_pdf: Some(
+                "https://files.slack.com/files-tmb/T-F-x/budget_converted.pdf".into(),
+            ),
+            ..File::default()
+        };
+        let name = |name: &str| file(name).as_pdf().map(|(_, name)| name);
+        assert_eq!(name("Budget.xlsx").as_deref(), Some("Budget.pdf"));
+        assert_eq!(name("Q3.final.pptx").as_deref(), Some("Q3.final.pdf"));
+        assert_eq!(name("README").as_deref(), Some("README.pdf"));
+        assert_eq!(
+            name(".docx").as_deref(),
+            Some(".docx.pdf"),
+            "a name that is all extension"
+        );
+        assert_eq!(
+            name("").as_deref(),
+            Some("Quarterly numbers.pdf"),
+            "the title"
+        );
+        assert_eq!(
+            file("Budget.xlsx").as_pdf().map(|(url, _)| url).as_deref(),
+            Some("https://files.slack.com/files-tmb/T-F-x/budget_converted.pdf")
+        );
+        let plain = File {
+            converted_pdf: None,
+            ..file("Budget.xlsx")
+        };
+        assert_eq!(plain.as_pdf(), None, "no PDF made");
+    }
+
+    #[test]
+    fn the_player_gets_the_smaller_copy_when_there_is_one() {
+        let video = File {
+            name: "talk.mov".into(),
+            mimetype: "video/quicktime".into(),
+            url_private: Some("https://files.slack.com/files-pri/T-F/talk.mov".into()),
+            ..File::default()
+        };
+        assert_eq!(
+            video.player(),
+            Some((
+                "https://files.slack.com/files-pri/T-F/talk.mov".into(),
+                "talk.mov".into()
+            ))
+        );
+        let low = File {
+            mp4_low: Some("https://files.slack.com/files-tmb/T-F-x/talk_trans.mp4".into()),
+            ..video.clone()
+        };
+        assert_eq!(
+            low.player(),
+            Some((
+                "https://files.slack.com/files-tmb/T-F-x/talk_trans.mp4".into(),
+                "talk.mp4".into()
+            ))
+        );
+        // A sound's MP4 copy is not a video's.
+        let pdf = File {
+            mimetype: "application/pdf".into(),
+            aac: Some("https://files.slack.com/x.mp4".into()),
+            ..video
+        };
+        assert_eq!(
+            pdf.player().map(|(_, name)| name).as_deref(),
+            Some("talk.mov")
+        );
     }
 
     #[test]
