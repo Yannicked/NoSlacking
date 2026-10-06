@@ -135,11 +135,6 @@ async fn run(
             }
         }
     };
-    if let Some(call) = &joined.call_id
-        && let Err(error) = join::leave(&client, &channel, call).await
-    {
-        log::debug!("huddle audio: rooms.leave: {error}");
-    }
     // Stopping the device waits for its thread; not on this one.
     let _ = tokio::task::spawn_blocking(move || drop(speaker)).await;
     log::info!(
