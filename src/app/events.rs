@@ -100,6 +100,19 @@ impl App {
                 }
             }
             Event::ConversationGone { team, channel } => self.conversation_gone(&team, &channel),
+            Event::Opened {
+                team,
+                channel,
+                open,
+            } => {
+                let unknown = self
+                    .workspace_mut(&team)
+                    .is_some_and(|w| w.opened(&channel, open));
+                if unknown {
+                    self.backend
+                        .send(Command::FetchConversation { team, channel });
+                }
+            }
             Event::Users { team, users } => {
                 if let Some(workspace) = self.workspace_mut(&team) {
                     workspace.users_arrived(users);

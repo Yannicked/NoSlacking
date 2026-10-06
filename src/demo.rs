@@ -139,6 +139,8 @@ fn conversation(
         unread: 0,
         mentions: 0,
         external: false,
+        is_open: None,
+        empty: false,
     }
 }
 

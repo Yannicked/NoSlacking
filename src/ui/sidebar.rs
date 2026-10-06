@@ -421,9 +421,14 @@ fn list(
         )
     });
     let ctx = ui.ctx().clone();
-    let drawn = drawn(workspace, &shown, closed, filter, |key| {
-        folding(&ctx, &workspace.info.team_id, key)
-    });
+    let drawn = drawn(
+        workspace,
+        &shown,
+        closed,
+        drafts.as_deref(),
+        filter,
+        |key| folding(&ctx, &workspace.info.team_id, key),
+    );
     for section in &drawn {
         section_view(ui, palette, workspace, section, actions);
     }
@@ -462,11 +467,15 @@ pub(super) struct Drawn<'s, 'a> {
 /// An open section holds back its quiet conversations (see
 /// [`sidebar::is_inactive`]) and the direct messages past [`DM_LIMIT`]
 /// behind one "N more" row, until it is expanded to show everything.
-/// Searching shows every match, quiet or not.
+/// Searching shows every match, quiet or not. Direct messages closed here
+/// (`closed`) or in Slack ([`sidebar::is_shut`], which reads `drafts`)
+/// are left out, searched for or not, unless open: the switcher finds
+/// them.
 pub(super) fn drawn<'s, 'a>(
     workspace: &WorkspaceState,
     shown: &'s [sidebar::Shown<'a>],
     closed: Option<&std::collections::BTreeMap<String, String>>,
+    drafts: Option<&std::collections::HashSet<String>>,
     filter: &str,
     folding: impl Fn(&str) -> (bool, bool),
 ) -> Vec<Drawn<'s, 'a>> {
@@ -488,6 +497,11 @@ pub(super) fn drawn<'s, 'a>(
             .filter(|(c, _)| matches(workspace, c, filter))
             // Closed ones stay out until something new arrives, unless open.
             .filter(|(c, _)| active(c) || !sidebar::is_closed(closed, c))
+            // As are those Slack has closed, until something brings them back.
+            .filter(|(c, _)| {
+                let draft = drafts.is_some_and(|drafts| drafts.contains(&c.id));
+                active(c) || !sidebar::is_shut(c, c.has_unread(), draft)
+            })
             .filter(|(c, _)| {
                 // Skip deactivated people's DMs unless they have something new.
                 c.user

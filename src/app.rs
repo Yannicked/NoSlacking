@@ -902,11 +902,24 @@ impl App {
             return;
         };
         // Opening a closed conversation opens it in the sidebar again.
-        if let Some(closed) = self.settings.closed.get_mut(&team)
-            && closed.remove(channel).is_some()
-            && closed.is_empty()
+        let mut reopened = false;
+        if let Some(closed) = self.settings.closed.get_mut(&team) {
+            reopened = closed.remove(channel).is_some();
+            if closed.is_empty() {
+                self.settings.closed.remove(&team);
+            }
+        }
+        // Closing it here closed it in Slack too, which then says so;
+        // undo that here as well, or it would leave the sidebar again
+        // once another conversation opens. One Slack closed elsewhere
+        // shows only while open.
+        if reopened
+            && let Some(conversation) = self
+                .workspace_mut(&team)
+                .and_then(|w| w.conversation_mut(channel))
+            && conversation.is_open == Some(false)
         {
-            self.settings.closed.remove(&team);
+            conversation.is_open = Some(true);
         }
         if let Some(workspace) = self.workspace_mut(&team) {
             workspace.active = Some(channel.to_owned());

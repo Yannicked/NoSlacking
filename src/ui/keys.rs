@@ -195,7 +195,8 @@ fn visible<'a>(
         |c| workspace.rank(c),
         arrange,
     );
-    super::sidebar::drawn(workspace, &shown, closed, filter, folding)
+    let drafts = arrange.tidy.and_then(|tidy| tidy.drafts);
+    super::sidebar::drawn(workspace, &shown, closed, drafts, filter, folding)
         .into_iter()
         .flat_map(|section| section.rows)
         .collect()
@@ -249,6 +250,8 @@ mod tests {
             unread: 0,
             mentions: 0,
             external: false,
+            is_open: None,
+            empty: false,
         }
     }
 
@@ -348,6 +351,63 @@ mod tests {
     }
 
     #[test]
+    fn group_dms_slack_closed_or_never_used_stay_out_of_sight() {
+        let mut w = workspace(None);
+        let group = |id: &str, name: &str| Conversation {
+            kind: ConversationKind::Group,
+            ..channel(id, name, false)
+        };
+        // Closed in Slack, read; closed but unread; never used at all.
+        w.conversations = vec![
+            Conversation {
+                is_open: Some(false),
+                ..group("G1", "closed")
+            },
+            Conversation {
+                is_open: Some(false),
+                ..group("G2", "closed but new")
+            },
+            Conversation {
+                latest: None,
+                last_read: None,
+                empty: true,
+                ..group("G3", "never used")
+            },
+            Conversation {
+                latest: None,
+                last_read: None,
+                ..group("G4", "not known")
+            },
+        ];
+        w.conversations[1].latest = Some(Ts::new("2.0"));
+        let shown_ids = |w: &WorkspaceState, drafts| {
+            let arrange = tidied(None, drafts);
+            ids(&visible(w, &arrange, None, "", |_| (true, false)))
+        };
+        // The closed read one is gone; the never-used one waits behind
+        // "N more"; the unknown one shows.
+        assert_eq!(shown_ids(&w, None), ["G2", "G4"]);
+        let drafts = std::collections::HashSet::from(["G1".to_owned(), "G3".to_owned()]);
+        assert_eq!(shown_ids(&w, Some(&drafts)), ["G2", "G1", "G3", "G4"]);
+        // Open (and so held), the closed one shows while it is open.
+        w.active = Some("G1".into());
+        let held = crate::sidebar::Hold {
+            id: "G1".into(),
+            rank: crate::sidebar::Rank::Read,
+        };
+        let open = ids(&visible(&w, &tidied(Some(&held), None), None, "", |_| {
+            (true, false)
+        }));
+        assert_eq!(open, ["G2", "G1", "G4"]);
+        // Expanded, the never-used one shows; the closed one stays out.
+        w.active = None;
+        let arrange = tidied(None, None);
+        let all = ids(&visible(&w, &arrange, None, "", |_| (true, true)));
+        assert!(all.contains(&"G3".to_owned()));
+        assert!(!all.contains(&"G1".to_owned()));
+    }
+
+    #[test]
     fn quiet_conversations_wait_behind_n_more() {
         let w = workspace(None);
         let arrange = tidied(None, None);
@@ -360,17 +420,17 @@ mod tests {
             &arrange,
         );
         // Alpha and gamma are long quiet; beta is unread.
-        let tidy = super::super::sidebar::drawn(&w, &shown, None, "", |_| (true, false));
+        let tidy = super::super::sidebar::drawn(&w, &shown, None, None, "", |_| (true, false));
         assert_eq!(ids(&tidy[0].rows), ["C2"]);
         assert_eq!((tidy[0].more, tidy[0].less), (2, false));
         assert_eq!((tidy[1].more, tidy[1].less), (0, false), "nothing to hide");
         // Expanded: everything, in order, and "Show less".
-        let all = super::super::sidebar::drawn(&w, &shown, None, "", |_| (true, true));
+        let all = super::super::sidebar::drawn(&w, &shown, None, None, "", |_| (true, true));
         assert_eq!(ids(&all[0].rows), ["C1", "C2", "C3"]);
         assert_eq!((all[0].more, all[0].less), (0, true));
         assert!(!all[1].less, "an expanded section with nothing hidden");
         // Searching finds quiet ones too.
-        let found = super::super::sidebar::drawn(&w, &shown, None, "gam", |_| (true, false));
+        let found = super::super::sidebar::drawn(&w, &shown, None, None, "gam", |_| (true, false));
         assert_eq!(ids(&found[0].rows), ["C3"]);
         assert_eq!(found[0].more, 0);
     }
@@ -413,7 +473,7 @@ mod tests {
             |c| w.rank(c),
             &arrange,
         );
-        let drawn = super::super::sidebar::drawn(&w, &shown, None, "", |_| (true, false));
+        let drawn = super::super::sidebar::drawn(&w, &shown, None, None, "", |_| (true, false));
         assert_eq!(drawn[1].more, 4 + 5, "past the limit, and the quiet ones");
         let all = visible(&w, &arrange, None, "", |_| (true, true));
         assert_eq!(all.len(), 34);

@@ -465,6 +465,23 @@ impl WorkspaceState {
         fetch
     }
 
+    /// Slack says a direct message or group DM was opened or closed in
+    /// your sidebar, here or in another client. Channels have no such
+    /// state, so word about one changes nothing. Answers whether one just
+    /// opened is unknown here and should be fetched, once: the full list
+    /// may have been asked for before it opened.
+    pub(super) fn opened(&mut self, channel: &str, open: bool) -> bool {
+        match self.conversation_mut(channel) {
+            Some(conversation) => {
+                if conversation.kind.is_dm() {
+                    conversation.is_open = Some(open);
+                }
+                false
+            }
+            None => open && self.loaded && self.requested_conversations.insert(channel.to_owned()),
+        }
+    }
+
     /// You left a conversation, or it was archived or deleted.
     pub(super) fn conversation_gone(&mut self, channel: &str) {
         self.conversations.retain(|c| c.id != channel);
@@ -976,6 +993,11 @@ impl WorkspaceState {
             if new && let Some(conversation) = self.conversation_mut(channel) {
                 if conversation.latest.as_ref().is_none_or(|l| *l < ts) {
                     conversation.latest = Some(ts.clone());
+                }
+                // Something new opens a closed direct message again, as
+                // in Slack; this does not wait for Slack to say so.
+                if conversation.is_open == Some(false) {
+                    conversation.is_open = Some(true);
                 }
                 if from_me {
                     conversation.last_read = Some(ts.clone());
@@ -1566,11 +1588,18 @@ fn merge_conversation(existing: &mut Conversation, fresh: Conversation, held: bo
     } else {
         existing.unread
     };
+    // A copy that does not say (most calls leave `is_open` out) keeps
+    // what was known; one that does is the newer word.
+    let is_open = fresh.is_open.or(existing.is_open);
+    // Known empty stays known until a message is known.
+    let empty = latest.is_none() && (fresh.empty || existing.empty);
     *existing = Conversation {
         latest,
         last_read,
         mentions,
         unread,
+        is_open,
+        empty,
         ..fresh
     };
     // Read on another device: Slack's count lags, the markers do not.
@@ -1726,6 +1755,8 @@ mod tests {
             unread: 0,
             mentions: 2,
             external: false,
+            is_open: None,
+            empty: false,
         };
         let fresh = Conversation {
             name: "renamed".into(),
@@ -1756,6 +1787,8 @@ mod tests {
             unread,
             mentions,
             external: false,
+            is_open: None,
+            empty: false,
         }
     }
 
@@ -1771,6 +1804,59 @@ mod tests {
         merge_conversation(&mut existing, conversation("6.0", "9.0", 3, 0), false);
         assert_eq!(existing.unread, 3);
         assert_eq!(existing.mentions, 1);
+    }
+
+    #[test]
+    fn a_copy_that_does_not_say_keeps_open_and_empty() {
+        let mut existing = Conversation {
+            kind: ConversationKind::Group,
+            latest: None,
+            last_read: None,
+            is_open: Some(false),
+            empty: true,
+            ..conversation("1.0", "1.0", 0, 0)
+        };
+        // `conversations.info` without `is_open`, history not asked.
+        let partial = Conversation {
+            is_open: None,
+            empty: false,
+            ..existing.clone()
+        };
+        merge_conversation(&mut existing, partial, false);
+        assert_eq!(existing.is_open, Some(false));
+        assert!(existing.empty);
+        // A copy that says is the newer word.
+        let opened = Conversation {
+            is_open: Some(true),
+            ..existing.clone()
+        };
+        merge_conversation(&mut existing, opened, false);
+        assert_eq!(existing.is_open, Some(true));
+        // A message known: no longer empty.
+        let written = Conversation {
+            latest: Some(Ts::new("3.0")),
+            ..existing.clone()
+        };
+        merge_conversation(&mut existing, written, false);
+        assert!(!existing.empty);
+    }
+
+    #[test]
+    fn a_new_message_opens_a_closed_direct_message() {
+        let mut w = workspace();
+        w.conversations.push(Conversation {
+            id: "D1".into(),
+            kind: ConversationKind::Direct,
+            latest: None,
+            last_read: None,
+            is_open: Some(false),
+            empty: true,
+            ..conversation("1.0", "1.0", 0, 0)
+        });
+        w.message_arrived("D1", message("5.0", None), false);
+        let d1 = w.conversation("D1").expect("kept");
+        assert_eq!(d1.is_open, Some(true));
+        assert_eq!(d1.latest, Some(Ts::new("5.0")));
     }
 
     fn message(ts: &str, thread: Option<&str>) -> Message {

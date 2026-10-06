@@ -1549,6 +1549,8 @@ mod tests {
             unread: 0,
             mentions: 0,
             external: false,
+            is_open: None,
+            empty: false,
         });
         assert_eq!(
             existing_dm(&workspace, &["U1".into()]).as_deref(),
@@ -1673,6 +1675,8 @@ mod tests {
             unread: 0,
             mentions: 0,
             external: false,
+            is_open: None,
+            empty: false,
         });
         assert_eq!(
             new_channel_name(&workspace, "General"),
@@ -1948,6 +1952,8 @@ mod tests {
             unread: 0,
             mentions: 0,
             external: false,
+            is_open: None,
+            empty: false,
         });
         let first = candidates_fingerprint(&workspace);
         assert_eq!(candidates_fingerprint(&workspace), first);
