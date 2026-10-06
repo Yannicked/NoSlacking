@@ -243,6 +243,10 @@ pub enum Command {
     /// Leaves the huddle being listened to.
     #[cfg(feature = "huddle-audio")]
     LeaveHuddle,
+    /// Mutes (closing the microphone) or unmutes (opening it) in the
+    /// huddle being listened to.
+    #[cfg(feature = "huddle-audio")]
+    MuteHuddle { muted: bool },
 }
 
 /// How often, at most, Slack hears that you are active: Slack's desktop
@@ -334,6 +338,12 @@ pub enum Event {
     Listening {
         channel: String,
         state: crate::huddles::Listen,
+    },
+    /// What the microphone did in the huddle in `channel`.
+    #[cfg(feature = "huddle-audio")]
+    Microphone {
+        channel: String,
+        news: crate::huddle_mic::MicNews,
     },
 }
 
@@ -773,7 +783,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
         | Event::InviteDeclined { .. }
         | Event::Reconnected => {}
         #[cfg(feature = "huddle-audio")]
-        Event::Listening { .. } => {}
+        Event::Listening { .. } | Event::Microphone { .. } => {}
     }
     if let Some((text, error)) = toast {
         app.toast(text, error);

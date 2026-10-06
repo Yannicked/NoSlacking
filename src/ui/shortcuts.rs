@@ -158,6 +158,14 @@ pub const GROUPS: &[Group] = &[
             line("Close the thread or the open dialog", &["Escape"]),
         ],
     },
+    #[cfg(feature = "huddle-audio")]
+    Group {
+        title: "Huddles",
+        shortcuts: &[line(
+            "Mute / unmute the microphone",
+            &[super::huddle_mic::TOGGLE],
+        )],
+    },
 ];
 
 /// The first chord of the line labelled `label`, for showing beside what
@@ -458,6 +466,12 @@ mod tests {
                 if path.is_dir() {
                     walk(&path, out);
                 } else if path.extension().is_some_and(|e| e == "rs") {
+                    // Compiled only with huddle audio, and listed only then.
+                    if !cfg!(feature = "huddle-audio")
+                        && path.file_name().is_some_and(|n| n == "huddle_mic.rs")
+                    {
+                        continue;
+                    }
                     let text = std::fs::read_to_string(&path).expect("read file");
                     let code = text.split("#[cfg(test)]").next().unwrap_or_default();
                     out.push((path.display().to_string(), code.to_owned()));

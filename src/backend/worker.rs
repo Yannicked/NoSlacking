@@ -1682,6 +1682,10 @@ impl Worker {
                 self.huddle_audio.stop();
                 return;
             }
+            crate::people::Command::MuteHuddle { muted } => {
+                self.huddle_audio.set_muted(muted);
+                return;
+            }
             other => other,
         };
         if let Some(command) = super::people::call(client, team.clone(), command, sink) {

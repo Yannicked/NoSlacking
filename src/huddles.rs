@@ -183,6 +183,8 @@ pub struct Listening {
     pub channel: String,
     /// Whether the audio plays yet.
     pub live: bool,
+    /// The microphone: muted on joining.
+    pub mic: crate::huddle_mic::Mic,
 }
 
 /// The app's side of huddles.
@@ -235,6 +237,9 @@ pub enum Action {
     /// Leaves the huddle being listened to.
     #[cfg(feature = "huddle-audio")]
     Leave,
+    /// Mutes or unmutes the microphone in the huddle being listened to.
+    #[cfg(feature = "huddle-audio")]
+    Microphone(crate::huddle_mic::MicAction),
 }
 
 /// Applies a view's request.
@@ -292,12 +297,15 @@ pub fn apply(app: &mut App, action: Action) {
                 team: team.clone(),
                 channel: channel.clone(),
                 live: false,
+                mic: crate::huddle_mic::Mic::Muted,
             });
             app.backend.send(backend::Command::People {
                 team,
                 command: people::Command::ListenHuddle { channel },
             });
         }
+        #[cfg(feature = "huddle-audio")]
+        Action::Microphone(action) => crate::huddle_mic::apply(app, action),
         #[cfg(feature = "huddle-audio")]
         Action::Leave => {
             if let Some(last) = app.huddles.listening.take() {
@@ -499,6 +507,11 @@ pub fn handle(app: &mut App, team: &str, event: people::Event) -> Option<people:
                     }
                 }
             }
+            None
+        }
+        #[cfg(feature = "huddle-audio")]
+        people::Event::Microphone { channel, news } => {
+            crate::huddle_mic::news(app, team, &channel, news);
             None
         }
         people::Event::InviteDeclined { result } => {

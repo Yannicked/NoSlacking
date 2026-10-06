@@ -10,6 +10,8 @@ mod desktop;
 mod details;
 mod format;
 mod hooks;
+#[cfg(feature = "huddle-audio")]
+mod huddle_mic;
 mod keys;
 mod lightbox;
 mod login;

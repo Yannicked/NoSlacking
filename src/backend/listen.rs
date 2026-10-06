@@ -4,14 +4,23 @@
 //! starts. Its news goes to the interface as
 //! [`crate::people::Event::Listening`]; failures as a
 //! [`Failure`], their technical detail only in the log.
+//!
+//! Joined muted. The microphone opens only when the interface unmutes
+//! and closes when it mutes or the huddle is left; what it is doing goes
+//! back as [`crate::people::Event::Microphone`]. The session sends the
+//! microphone's frames only once it is open (`effective` below), so a
+//! microphone that would not open never unmutes the call.
 
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{Event, Sink};
 use crate::failure::{Failure, HuddleTrouble};
 use crate::huddle_audio::join::{self, JoinFailure};
-use crate::huddle_audio::media::{self, Stage};
+use crate::huddle_audio::media::{self, Stage, Uplink};
+use crate::huddle_audio::microphone::{Cpal, MicControl, Wiring};
+use crate::huddle_audio::processing::RenderTap;
 use crate::huddle_audio::speaker::Speaker;
+use crate::huddle_mic::MicNews;
 use crate::huddles::Listen;
 use crate::people;
 use crate::slack::Client;
@@ -21,6 +30,8 @@ use crate::slack::Client;
 struct Running {
     team: String,
     stop: watch::Sender<bool>,
+    /// Whether the interface wants the microphone muted.
+    muted: watch::Sender<bool>,
 }
 
 /// The one listening session there may be.
@@ -35,8 +46,16 @@ impl Listener {
     pub fn start(&mut self, client: Client, team: String, channel: String, sink: Sink) {
         self.stop();
         let (stop, stopped) = watch::channel(false);
-        tokio::spawn(run(client, team.clone(), channel, stopped, sink));
-        self.running = Some(Running { team, stop });
+        let (muted, wanted) = watch::channel(true);
+        tokio::spawn(run(client, team.clone(), channel, stopped, wanted, sink));
+        self.running = Some(Running { team, stop, muted });
+    }
+
+    /// Mutes or unmutes the microphone in the huddle, if there is one.
+    pub fn set_muted(&mut self, muted: bool) {
+        if let Some(running) = &self.running {
+            let _ = running.muted.send(muted);
+        }
     }
 
     /// Leaves the huddle; the session says when it has.
@@ -75,12 +94,69 @@ fn join_failure(error: &JoinFailure) -> Failure {
     }
 }
 
+/// Opens and closes the microphone as `wanted` says, until `done`,
+/// telling the session through `effective` and the interface through
+/// `tell`; closes it at the end whatever happened.
+async fn microphone(
+    mut wanted: watch::Receiver<bool>,
+    effective: watch::Sender<bool>,
+    wiring: Wiring,
+    mut done: oneshot::Receiver<()>,
+    tell: impl Fn(MicNews),
+) {
+    let mut control = Some(MicControl::new(Cpal::new(wiring)));
+    loop {
+        tokio::select! {
+            _ = &mut done => break,
+            changed = wanted.changed() => if changed.is_err() {
+                break;
+            },
+        }
+        let muted = *wanted.borrow_and_update();
+        let Some(mut held) = control.take() else {
+            break;
+        };
+        // Opening and closing wait on the device's thread: not on this one.
+        let (held, result) = match tokio::task::spawn_blocking(move || {
+            let result = held.set_muted(muted);
+            (held, result)
+        })
+        .await
+        {
+            Ok(done) => done,
+            Err(error) => {
+                log::warn!("huddle microphone: the device thread failed: {error}");
+                let _ = effective.send(true);
+                tell(MicNews::Failed(Failure::Huddle(HuddleTrouble::Microphone)));
+                return;
+            }
+        };
+        control = Some(held);
+        match result {
+            Ok(()) => {
+                let _ = effective.send(muted);
+                tell(if muted { MicNews::Muted } else { MicNews::Live });
+            }
+            Err(error) => {
+                log::warn!("huddle microphone: {error}");
+                let _ = effective.send(true);
+                tell(MicNews::Failed(Failure::Huddle(HuddleTrouble::Microphone)));
+            }
+        }
+    }
+    let _ = effective.send(true);
+    if let Some(control) = control {
+        let _ = tokio::task::spawn_blocking(move || drop(control)).await;
+    }
+}
+
 /// One listening session, start to end.
 async fn run(
     client: Client,
     team: String,
     channel: String,
     stopped: watch::Receiver<bool>,
+    wanted: watch::Receiver<bool>,
     sink: Sink,
 ) {
     let tell = |state: Listen| {
@@ -93,19 +169,22 @@ async fn run(
         });
     };
     tell(Listen::Joining);
-    let (speaker, feed) = match tokio::task::spawn_blocking(|| Speaker::open(None)).await {
-        Ok(Ok(opened)) => opened,
-        Ok(Err(why)) => {
-            log::warn!("huddle audio: {why}");
-            tell(Listen::Ended(Err(Failure::Huddle(HuddleTrouble::NoSound))));
-            return;
-        }
-        Err(error) => {
-            log::warn!("huddle audio: the device thread failed: {error}");
-            tell(Listen::Ended(Err(Failure::Huddle(HuddleTrouble::NoSound))));
-            return;
-        }
-    };
+    let tap = RenderTap::default();
+    let speaker_tap = tap.clone();
+    let (speaker, feed) =
+        match tokio::task::spawn_blocking(move || Speaker::open(Some(speaker_tap))).await {
+            Ok(Ok(opened)) => opened,
+            Ok(Err(why)) => {
+                log::warn!("huddle audio: {why}");
+                tell(Listen::Ended(Err(Failure::Huddle(HuddleTrouble::NoSound))));
+                return;
+            }
+            Err(error) => {
+                log::warn!("huddle audio: the device thread failed: {error}");
+                tell(Listen::Ended(Err(Failure::Huddle(HuddleTrouble::NoSound))));
+                return;
+            }
+        };
     let region = crate::huddle_audio::region::for_join(None).await;
     let joined = match join::join(&client, &channel, &region).await {
         Ok(joined) => joined,
@@ -115,8 +194,35 @@ async fn run(
             return;
         }
     };
+    let (frames, frames_in) = mpsc::channel(25);
+    let (effective, muted) = watch::channel(true);
+    let (close_mic, mic_done) = oneshot::channel();
+    let mic_sink = sink.clone();
+    let (mic_team, mic_channel) = (team.clone(), channel.clone());
+    let mic = tokio::spawn(microphone(
+        wanted,
+        effective,
+        Wiring {
+            frames,
+            render: tap,
+        },
+        mic_done,
+        move |news| {
+            mic_sink.send(Event::People {
+                team: mic_team.clone(),
+                event: people::Event::Microphone {
+                    channel: mic_channel.clone(),
+                    news,
+                },
+            });
+        },
+    ));
+    let uplink = Uplink {
+        frames: frames_in,
+        muted,
+    };
     let (live, connected) = oneshot::channel();
-    let listening = media::listen(&joined, Some(feed), None, stopped, Some(live));
+    let listening = media::listen(&joined, Some(feed), Some(uplink), stopped, Some(live));
     tokio::pin!(listening);
     let mut connected = Some(connected);
     let (report, result) = loop {
@@ -135,6 +241,9 @@ async fn run(
             }
         }
     };
+    // Left: the microphone closes before anything else.
+    let _ = close_mic.send(());
+    let _ = mic.await;
     if let Some(call) = &joined.call_id
         && let Err(error) = join::leave(&client, &channel, call).await
     {
