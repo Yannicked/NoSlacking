@@ -85,7 +85,11 @@ thread_local! {
 /// theme: the palette's accent, warning and danger are all chosen to stand
 /// out on its surfaces.
 #[cfg(feature = "highlight")]
-fn code_color(palette: &Palette, base: Color32, kind: crate::highlight::Kind) -> Color32 {
+pub(super) fn code_color(
+    palette: &Palette,
+    base: Color32,
+    kind: crate::highlight::Kind,
+) -> Color32 {
     use crate::highlight::Kind;
     match kind {
         Kind::Plain => base,

@@ -2292,3 +2292,22 @@ msgstr "Slack kon de afbeelding niet lezen"
 # The "+" on the Direct messages line.
 msgid "Message someone"
 msgstr "Iemand een bericht sturen"
+
+# Clicking the first page of an Office document Slack made a PDF of.
+msgid "Open {name} as a PDF"
+msgstr "{name} als pdf openen"
+
+msgid "Open as PDF"
+msgstr "Openen als pdf"
+
+msgid "Open a PDF of {name}"
+msgstr "Een pdf van {name} openen"
+
+# Under the first lines of a text file Slack previews.
+msgid "{count} more line"
+msgid_plural "{count} more lines"
+msgstr[0] "nog {count} regel"
+msgstr[1] "nog {count} regels"
+
+msgid "More in the file"
+msgstr "Meer in het bestand"
