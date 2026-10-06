@@ -650,18 +650,16 @@ impl Client {
     /// `finish` is asked once the bytes are up, just before Slack is told
     /// to share the file, which can't be taken back: it answers whether to
     /// go on. `Ok(false)` means it said no and nothing was posted.
-    #[allow(clippy::too_many_arguments)]
     pub async fn upload(
         &self,
         channel: &str,
         thread: Option<&str>,
-        name: &str,
-        file: tokio::fs::File,
-        length: u64,
+        outgoing: Outgoing<'_>,
         comment: &str,
         progress: impl Fn(u64) + Send + Sync + 'static,
         finish: impl FnOnce() -> bool,
     ) -> Result<bool, SlackError> {
+        let Outgoing { file, length, name } = outgoing;
         let target: types::UploadUrl = self
             .act(
                 "files.getUploadURLExternal",
@@ -697,6 +695,15 @@ impl Client {
         let _: serde_json::Value = self.act("files.completeUploadExternal", &params).await?;
         Ok(true)
     }
+}
+
+/// The file [`Client::upload`] sends: its open handle, its size in bytes
+/// (Slack asks for it before the bytes come) and the name it is shared
+/// under.
+pub struct Outgoing<'a> {
+    pub file: tokio::fs::File,
+    pub length: u64,
+    pub name: &'a str,
 }
 
 /// Where and what [`Client::add_emoji`] posts, but the picture: the

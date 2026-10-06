@@ -147,7 +147,16 @@ pub(super) async fn upload(
     };
     match client
         .upload(
-            &channel, thread, &name, file, size, &comment, progress, finish,
+            &channel,
+            thread,
+            crate::slack::client::Outgoing {
+                file,
+                length: size,
+                name: &name,
+            },
+            &comment,
+            progress,
+            finish,
         )
         .await
     {
