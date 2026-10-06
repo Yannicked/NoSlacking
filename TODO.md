@@ -750,6 +750,25 @@ Slack already makes most previews; NoSlacking parses few of them.
       `egui_extras::TableBuilder` grid; caps on download size, rows,
       columns, zip entries and compression ratio, like
       `images::check_decoded_size`.
+      - Built on the `feat/file-viewer` branch (2026-10-06), held back
+        from 0.1.0: a "View" button on file cards opens a full-window
+        viewer for xlsx/ods (sheet tabs, a grid), CSV/TSV, zip listings
+        (never unpacked) and text with find. 20 MB download cap, caps on
+        rows, columns, cells, parts and ratio, zip bombs refused.
+      - Before merging it, parse in a child process. Release builds
+        abort on a panic, so a calamine panic on a crafted xlsx/ods from
+        someone in the workspace closes the whole app; the caps bound
+        memory but not panics. A helper process (the same binary with a
+        `--parse-file` mode, bytes on stdin, the `Document` back on
+        stdout, a time and memory limit) turns a panic into "could not
+        read this file".
+      - With the helper process, `.xls` and `.xlsb` can open too. They
+        are left out now because calamine reserves memory from their
+        declared sizes and slices their records unchecked.
+      - Its "Freeze first row" checkbox has no visible box, as the
+        thread's broadcast checkbox had (fixed there in the composer
+        only). Fix it once in `theme::apply_to_style` so every checkbox
+        on a `surface` background gets a border.
 - [x] **Audio in the app (small–medium).** `rodio` + `symphonia` (aac,
       isomp4, mp3, vorbis, flac, wav; no Opus) with `cpal`; the packages
       need ALSA, the Flatpak `--socket=pulseaudio`.
