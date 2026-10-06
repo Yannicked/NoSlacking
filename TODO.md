@@ -745,30 +745,34 @@ Slack already makes most previews; NoSlacking parses few of them.
         a height known before it is drawn. `mp4`, `hls`, `vtt` and the
         larger image thumbnails are left for the players and viewer
         below, which will need them.
-- [ ] **A viewer for spreadsheets, CSV, zip listings and whole text files
+- [x] **A viewer for spreadsheets, CSV, zip listings and whole text files
       (medium).** `calamine` (MIT) and `csv`; a read-only
       `egui_extras::TableBuilder` grid; caps on download size, rows,
       columns, zip entries and compression ratio, like
       `images::check_decoded_size`.
-      - Built on the `feat/file-viewer` branch (2026-10-06), held back
-        from 0.1.0: a "View" button on file cards opens a full-window
-        viewer for xlsx/ods (sheet tabs, a grid), CSV/TSV, zip listings
-        (never unpacked) and text with find. 20 MB download cap, caps on
-        rows, columns, cells, parts and ratio, zip bombs refused.
-      - Before merging it, parse in a child process. Release builds
-        abort on a panic, so a calamine panic on a crafted xlsx/ods from
-        someone in the workspace closes the whole app; the caps bound
-        memory but not panics. A helper process (the same binary with a
-        `--parse-file` mode, bytes on stdin, the `Document` back on
-        stdout, a time and memory limit) turns a panic into "could not
-        read this file".
-      - With the helper process, `.xls` and `.xlsb` can open too. They
-        are left out now because calamine reserves memory from their
-        declared sizes and slices their records unchecked.
-      - Its "Freeze first row" checkbox has no visible box, as the
-        thread's broadcast checkbox had (fixed there in the composer
-        only). Fix it once in `theme::apply_to_style` so every checkbox
-        on a `surface` background gets a border.
+      - Done: "View" on a file's card opens `ui::viewer`, an overlay over
+        the window: sheet tabs, column letters, row numbers and a frozen
+        first row for `.xlsx`, `.xlsm`, `.ods`, CSV (separator sniffed)
+        and TSV; a zip's listing from its central directory; text and
+        code with line numbers, colour and find. The worker downloads at
+        most 20 MB into memory and parses on a blocking thread
+        (`src/viewer.rs`). Caps: 50,000 rows, 500 columns, 64 sheets, 2
+        million cells, 1,000 characters a cell, 200,000 lines of 5,000
+        characters, 10,000 entries listed (100,000 declared at most);
+        workbooks are refused past 200 MB unpacked, a ratio of 200 in a
+        part over 1 MB, a part unpacking to more than it declares
+        (measured first), 2 million shared strings, or 4 million cells
+        an `.ods` table's repeats would spell out. In 0.1.0.
+- [ ] **Read viewer files in a child process (0.2).** Release builds
+      abort on a panic, so a calamine panic on a crafted xlsx/ods from
+      someone in the workspace closes the whole app; the caps bound memory
+      but not panics. A helper process (the same binary with a
+      `--parse-file` mode, bytes on stdin, the `Document` back on stdout,
+      a time and memory limit) turns a panic into "could not read this
+      file".
+      - With it, `.xls` and `.xlsb` can open too. They are left out now
+        because calamine reserves memory from their declared sizes and
+        slices their records unchecked.
 - [x] **Audio in the app (small–medium).** `rodio` + `symphonia` (aac,
       isomp4, mp3, vorbis, flac, wav; no Opus) with `cpal`; the packages
       need ALSA, the Flatpak `--socket=pulseaudio`.

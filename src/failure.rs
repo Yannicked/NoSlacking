@@ -87,6 +87,15 @@ pub enum Failure {
     /// Slack named a workspace outside slack.com, so the session was not
     /// sent there.
     NotSlackAddress,
+    /// A file too large for the viewer, or declaring more than it holds.
+    ViewTooLarge,
+    /// A file the viewer could not read (damaged, or not what its name
+    /// says); the detail is the reader's own and technical.
+    Unreadable(String),
+    /// A compressed file that would unpack to far more than its size.
+    Bomb,
+    /// A file the viewer was to show as text that is not text.
+    NotText,
     /// The browser could not be opened for the sign-in.
     NoBrowser,
     /// What was pasted is not a `slack://` sign-in link.
@@ -228,6 +237,15 @@ impl Failure {
                 );
             }
             Self::NotOpenable => t("it cannot be opened here; download it instead"),
+            Self::ViewTooLarge => t("it is too large to show here; download it instead"),
+            Self::Unreadable(detail) => {
+                return fill(
+                    &t("the file could not be read ({detail})"),
+                    &[("detail", detail)],
+                );
+            }
+            Self::Bomb => t("it would unpack to far more than its size, so it is not opened"),
+            Self::NotText => t("it is not a text file"),
             Self::NotSlackAddress => {
                 t("Slack named a workspace outside slack.com, so NoSlacking did not sign in there.")
             }
@@ -490,6 +508,10 @@ mod tests {
             Failure::Io("broken pipe".into()),
             Failure::NotOpenable,
             Failure::NotSlackAddress,
+            Failure::ViewTooLarge,
+            Failure::Unreadable("invalid zip".into()),
+            Failure::Bomb,
+            Failure::NotText,
             Failure::NoBrowser,
             Failure::NotASignInLink,
             Failure::NoClientId,

@@ -52,4 +52,5 @@ pub mod spell;
 pub mod theme;
 pub mod tray;
 mod ui;
+pub mod viewer;
 pub mod views;

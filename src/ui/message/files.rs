@@ -393,7 +393,7 @@ fn file_card(ui: &mut egui::Ui, palette: &Palette, file: &File, actions: &mut Ve
         rect.min + Vec2::splat(PAD),
         Vec2::new(rect.width() - PAD * 2.0, ICON),
     );
-    let mut right = row.right();
+    let mut right = view_button(ui, palette, file, row.right(), row.center().y, actions);
     if let Some(pdf) = file.as_pdf() {
         let label = t("Open as PDF");
         let button = text_button(
@@ -418,6 +418,58 @@ fn file_card(ui: &mut egui::Ui, palette: &Palette, file: &File, actions: &mut Ve
     card_title(ui, palette, file, row, right);
     download_on_click(file, response, actions);
     rect
+}
+
+/// Opening `file` in the app's own viewer, when it opens there.
+fn view(file: &File) -> Option<Action> {
+    let kind = crate::viewer::kind(
+        &file.name,
+        &file.filetype,
+        &file.mimetype,
+        file.preview.is_some(),
+    )?;
+    let url = file
+        .url_private
+        .clone()
+        .or_else(|| file.download_url.clone())?;
+    Some(Action::ViewFile {
+        url,
+        name: file.name.clone(),
+        filetype: file.filetype.clone(),
+        kind,
+        size: file.size,
+    })
+}
+
+/// A "View" button ending at `right` on a card's first row, for a file
+/// the viewer opens. Returns where whatever is left of it must end.
+fn view_button(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    file: &File,
+    right: f32,
+    y: f32,
+    actions: &mut Vec<Action>,
+) -> f32 {
+    let Some(action) = view(file) else {
+        return right;
+    };
+    let button = text_button(
+        ui,
+        palette,
+        right,
+        y,
+        &t("View"),
+        egui::Id::new(("view-file", &file.id)),
+    );
+    let left = button.rect.left() - 8.0;
+    if button
+        .on_hover_text(tf("Show {name} here", &[("name", &file.name)]))
+        .clicked()
+    {
+        actions.push(action);
+    }
+    left
 }
 
 /// Makes a card's own click save the file, as a file card always has.
@@ -457,7 +509,15 @@ fn text_card(
         egui::pos2(row.right() - BUTTON / 2.0, row.center().y),
         Vec2::splat(BUTTON),
     );
-    card_title(ui, palette, file, row, button.left() - 8.0);
+    let right = view_button(
+        ui,
+        palette,
+        file,
+        button.left() - 8.0,
+        row.center().y,
+        actions,
+    );
+    card_title(ui, palette, file, row, right);
     let code = Rect::from_min_size(
         egui::pos2(row.left(), row.bottom() + PAD),
         Vec2::new(row.width(), preview_box_height(lines.len())),

@@ -497,6 +497,35 @@ pub fn secondary_button(ui: &mut egui::Ui, palette: &Palette, label: &str) -> eg
     .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// A checkbox whose box shows on a `surface` background. egui fills the
+/// box with the widget colour, which is `surface` too, and the theme gives
+/// widgets no border, so a plain checkbox there showed only its label.
+pub fn checkbox(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    checked: &mut bool,
+    text: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    ui.scope(|ui| {
+        let widgets = &mut ui.visuals_mut().widgets;
+        let border = palette.secondary.gamma_multiply(0.7);
+        widgets.inactive.bg_stroke = Stroke::new(1.5, border);
+        widgets.hovered.bg_stroke = Stroke::new(1.5, palette.accent);
+        widgets.active.bg_stroke = Stroke::new(1.5, palette.accent);
+        // The theme's rounding turns a box this small into a circle, which
+        // reads as a radio button.
+        for state in [
+            &mut widgets.inactive,
+            &mut widgets.hovered,
+            &mut widgets.active,
+        ] {
+            state.corner_radius = CornerRadius::same(3);
+        }
+        ui.checkbox(checked, text)
+    })
+    .inner
+}
+
 /// A deterministic colour for someone without an avatar.
 pub fn identity_color(id: &str) -> Color32 {
     const COLORS: [Color32; 8] = [

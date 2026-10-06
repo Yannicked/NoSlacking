@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use tokio::sync::mpsc;
 
+mod files;
 mod views;
 
 use crate::backend::{Command, Event, Sink, Socket, UploadGate};
@@ -940,8 +941,8 @@ fn shared_files() -> Vec<Message> {
                            #[test]\n\
                            fn backoff_is_capped() {"
                         .into(),
-                    lines_more: Some(14),
-                    lines: Some(24),
+                    lines_more: Some(16),
+                    lines: Some(26),
                     truncated: false,
                 }),
                 ..file("F20", "backoff.rs", "text/plain", 742)
@@ -995,6 +996,21 @@ fn shared_files() -> Vec<Message> {
             5000,
             "U01",
             "Budget for next quarter, with the new build machines.",
+        ),
+        with(
+            vec![file("F26", "deploys.csv", "text/csv", 7_412)],
+            4_600,
+            "U02",
+            "Every deploy since July, for the retro.",
+        ),
+        with(
+            vec![File {
+                filetype: "zip".into(),
+                ..file("F27", "logs.zip", "application/zip", 98_220)
+            }],
+            4_200,
+            "U04",
+            "The logs from that night, zipped.",
         ),
         with(
             vec![File {
@@ -1294,12 +1310,6 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
     });
     sink.send(Event::Socket(Socket::Connected));
     sink.send(crate::backend::people::demo_huddle(TEAM));
-    // A few seconds in, Bob rings you into a huddle in #general.
-    let ringing = sink.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        ringing.send(crate::backend::huddles::demo_invite(TEAM));
-    });
     // Ana keeps typing in her direct message, as Slack repeats it.
     let typing = sink.clone();
     tokio::spawn(async move {
@@ -1317,8 +1327,22 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
     });
     let mut sent = 0;
     let mut uploads: HashMap<u64, (tokio::task::AbortHandle, UploadGate)> = HashMap::new();
+    // Bob rings you into a huddle in #general the first time you open
+    // #design (the huddle view), and not over every other view.
+    let mut rang = false;
     while let Some(command) = commands.recv().await {
         match command {
+            Command::Focus {
+                channel: Some(channel),
+                ..
+            } if channel == "C03" && !rang => {
+                rang = true;
+                let ringing = sink.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    ringing.send(crate::backend::huddles::demo_invite(TEAM));
+                });
+            }
             // #general pages like the real API, slowly, to exercise loading
             // and scrolling; the rest arrive at once.
             Command::LoadHistory { team, channel } if channel == "C01" => {
@@ -1538,6 +1562,25 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                 id,
                 result: Ok(demo_sound()),
             }),
+            // Read for real, from the demo's own bytes, a moment late so the
+            // viewer's loading state shows.
+            Command::ViewFile { id, url, kind, .. } => {
+                let sink = sink.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(LATENCY).await;
+                    let result = match files::contents(&url) {
+                        Some(bytes) => tokio::task::spawn_blocking(move || {
+                            crate::viewer::read(kind, &bytes, false)
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(crate::failure::Failure::Unreadable(e.to_string()))
+                        }),
+                        None => Err(crate::failure::Failure::Http(404)),
+                    };
+                    sink.send(Event::FileView { id, result });
+                });
+            }
             Command::Convos { team, command } => {
                 for event in crate::backend::convos::demo(&team, command) {
                     sink.send(event);

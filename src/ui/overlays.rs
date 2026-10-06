@@ -14,6 +14,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     picker(app, ctx);
     profile(app, ctx);
     super::lightbox::show(app, ctx);
+    super::viewer::show(app, ctx);
     confirm_delete(app, ctx);
     confirm_press(app, ctx);
     confirm_delete_file(app, ctx);

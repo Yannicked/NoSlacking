@@ -2461,3 +2461,120 @@ msgstr "Slack accepteerde de sessie voor deze werkruimte niet. Meld je opnieuw a
 
 msgid "Slack named a workspace outside slack.com, so NoSlacking did not sign in there."
 msgstr "Slack noemde een werkruimte buiten slack.com, dus NoSlacking heeft zich daar niet aangemeld."
+
+# Why the file viewer cannot show a file.
+msgid "it is too large to show here; download it instead"
+msgstr "het is te groot om hier te tonen; download het in plaats daarvan"
+
+msgid "the file could not be read ({detail})"
+msgstr "het bestand kon niet worden gelezen ({detail})"
+
+msgid "it would unpack to far more than its size, so it is not opened"
+msgstr "het zou uitpakken tot veel meer dan zijn grootte, dus het wordt niet geopend"
+
+msgid "it is not a text file"
+msgstr "het is geen tekstbestand"
+
+# The file viewer: a spreadsheet, CSV file, zip archive or text file
+# shown in the app. "View" is the button on a file's card.
+msgid "View"
+msgstr "Bekijken"
+
+msgid "Show {name} here"
+msgstr "{name} hier tonen"
+
+msgid "Loading {name}…"
+msgstr "{name} laden…"
+
+msgid "Could not show {name}"
+msgstr "Kan {name} niet tonen"
+
+msgid "{count} sheet"
+msgid_plural "{count} sheets"
+msgstr[0] "{count} blad"
+msgstr[1] "{count} bladen"
+
+msgid "{count} row"
+msgid_plural "{count} rows"
+msgstr[0] "{count} rij"
+msgstr[1] "{count} rijen"
+
+msgid "{count} item"
+msgid_plural "{count} items"
+msgstr[0] "{count} item"
+msgstr[1] "{count} items"
+
+msgid "{size} unpacked"
+msgstr "{size} uitgepakt"
+
+msgid "{count} line"
+msgid_plural "{count} lines"
+msgstr[0] "{count} regel"
+msgstr[1] "{count} regels"
+
+msgid "Only the first {size} of the file is shown."
+msgstr "Alleen de eerste {size} van het bestand wordt getoond."
+
+msgid "Only the first {count} rows are shown."
+msgstr "Alleen de eerste {count} rijen worden getoond."
+
+msgid "Only the first {count} columns are shown."
+msgstr "Alleen de eerste {count} kolommen worden getoond."
+
+msgid "Only {shown} of {total} sheets are shown."
+msgstr "Alleen {shown} van de {total} bladen worden getoond."
+
+msgid "{count} long cell is cut short."
+msgid_plural "{count} long cells are cut short."
+msgstr[0] "{count} lange cel is ingekort."
+msgstr[1] "{count} lange cellen zijn ingekort."
+
+msgid "Only the first {count} lines are shown."
+msgstr "Alleen de eerste {count} regels worden getoond."
+
+msgid "{count} long line is cut short."
+msgid_plural "{count} long lines are cut short."
+msgstr[0] "{count} lange regel is ingekort."
+msgstr[1] "{count} lange regels zijn ingekort."
+
+msgid "Only {shown} of {total} entries are listed."
+msgstr "Alleen {shown} van de {total} items worden getoond."
+
+msgid "Some characters could not be read and show as �."
+msgstr "Sommige tekens konden niet worden gelezen en worden als � getoond."
+
+msgid "This archive unpacks to {ratio} times its size; take care unpacking it."
+msgstr "Dit archief pakt uit tot {ratio} keer zijn grootte; wees voorzichtig met uitpakken."
+
+msgid "Freeze first row"
+msgstr "Eerste rij vastzetten"
+
+msgid "This sheet is empty."
+msgstr "Dit blad is leeg."
+
+msgid "Size"
+msgstr "Grootte"
+
+msgid "Packed"
+msgstr "Ingepakt"
+
+msgid "Modified"
+msgstr "Gewijzigd"
+
+msgid "Locked with a password"
+msgstr "Beveiligd met een wachtwoord"
+
+msgid "Find in file"
+msgstr "Zoeken in bestand"
+
+msgid "No matches"
+msgstr "Geen resultaten"
+
+msgid "{current} of {count}"
+msgstr "{current} van {count}"
+
+msgid "Previous match"
+msgstr "Vorig resultaat"
+
+msgid "Next match"
+msgstr "Volgend resultaat"

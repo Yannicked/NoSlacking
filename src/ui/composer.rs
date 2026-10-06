@@ -661,23 +661,9 @@ pub fn show(
                     |ui| {
                         ui.set_max_width(room);
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                        // The box is filled with the composer's own colour,
-                        // so without a border it vanished in both themes.
-                        let widgets = &mut ui.visuals_mut().widgets;
-                        let border = palette.secondary.gamma_multiply(0.7);
-                        widgets.inactive.bg_stroke = egui::Stroke::new(1.5, border);
-                        widgets.hovered.bg_stroke = egui::Stroke::new(1.5, palette.accent);
-                        widgets.active.bg_stroke = egui::Stroke::new(1.5, palette.accent);
-                        // The theme's rounding turns a box this small into a
-                        // circle, which reads as a radio button.
-                        for state in [
-                            &mut widgets.inactive,
-                            &mut widgets.hovered,
-                            &mut widgets.active,
-                        ] {
-                            state.corner_radius = CornerRadius::same(3);
-                        }
-                        ui.checkbox(
+                        theme::checkbox(
+                            ui,
+                            palette,
                             &mut draft.broadcast,
                             RichText::new(&label)
                                 .font(theme::regular(12.5))

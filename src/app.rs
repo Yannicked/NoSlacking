@@ -240,6 +240,11 @@ pub struct App {
     pub picker_query: String,
     /// The image viewer, when open.
     pub preview: Option<crate::lightbox::Lightbox>,
+    /// The file viewer (spreadsheets, CSV, archives, text), when open.
+    pub viewer: Option<crate::viewer::Viewer>,
+    /// The id of the last file asked for by the viewer, counted like
+    /// uploads.
+    next_view: u64,
     /// A message waiting for "Delete?" to be answered.
     pub confirm_delete: Option<(String, Ts)>,
     /// A button press waiting for the app's own "Are you sure?" to be
@@ -441,6 +446,8 @@ impl App {
             picker: None,
             picker_query: String::new(),
             preview: None,
+            viewer: None,
+            next_view: 0,
             confirm_delete: None,
             confirm_press: None,
             confirm_delete_file: None,
@@ -1130,6 +1137,33 @@ impl App {
                 }
             }
             Action::Audio(request) => self.audio(request),
+            Action::ViewFile {
+                url,
+                name,
+                filetype,
+                kind,
+                size,
+            } => {
+                if let Some(team) = self.active_team() {
+                    self.next_view += 1;
+                    let id = self.next_view;
+                    self.viewer = Some(crate::viewer::Viewer::loading(
+                        id,
+                        name,
+                        filetype,
+                        kind,
+                        Some(url.clone()),
+                    ));
+                    self.backend.send(Command::ViewFile {
+                        id,
+                        team,
+                        url,
+                        kind,
+                        size,
+                    });
+                }
+            }
+            Action::CloseViewer => self.viewer = None,
             Action::Sidebar(edit) => self.edit_sidebar(edit),
             // What floats over the window.
             Action::PickReaction { channel, ts } => {
@@ -1773,6 +1807,7 @@ impl App {
             || self.picker.is_some()
             || self.profile.is_some()
             || self.preview.is_some()
+            || self.viewer.is_some()
             || self.confirm_delete.is_some()
             || self.confirm_press.is_some()
             || self.confirm_delete_file.is_some()

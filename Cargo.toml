@@ -93,6 +93,16 @@ spellbook = "0.4.2"
 # Opus decoder; those open in the system's player.
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp4", "mp3", "vorbis", "flac", "wav"], optional = true }
 
+# The file viewer (src/viewer.rs): spreadsheets (MIT, pure Rust; only its
+# XML readers are used), CSV and TSV (Unlicense/MIT), and zip listings.
+# zip and quick-xml are calamine's own, at its versions and features, named
+# here because the viewer measures a workbook's parts before calamine reads
+# them; they add no crate.
+calamine = { version = "0.36", default-features = false }
+csv = { version = "1.4", default-features = false }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+quick-xml = { version = "0.41", default-features = false }
+
 # Desktop notifications: D-Bus on Linux and the BSDs, the notification
 # center on macOS, toasts on Windows. Elsewhere there are none.
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly", target_os = "macos", windows))'.dependencies]
