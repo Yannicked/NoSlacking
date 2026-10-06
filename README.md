@@ -1,40 +1,110 @@
-<img src="packaging/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg" alt="" width="96" align="right">
+<div align="center">
+
+<img src="packaging/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg" alt="NoSlacking logo" width="112">
 
 # NoSlacking
 
-A native [Slack](https://slack.com) client for Linux, macOS and Windows,
-written in Rust. It is small, fast and quiet: one window, your channels and
-DMs, threads, reactions, files and emoji, with no Electron.
+**A fast, native Slack client for Linux, macOS and Windows.**<br>
+One small window for all your workspaces. No Electron, no browser engine.
 
-It is built on [egui](https://github.com/emilk/egui) and the
-[fastframe](https://github.com/crmne/fastframe) crates, the same foundation as
-[ZapFast](https://github.com/crmne/zapfast) and
-[Spotifast](https://github.com/crmne/spotifast).
+[![CI](https://github.com/Yannicked/NoSlacking/actions/workflows/ci.yml/badge.svg)](https://github.com/Yannicked/NoSlacking/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/Yannicked/NoSlacking?include_prereleases&sort=semver)](https://github.com/Yannicked/NoSlacking/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## What it does
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/light.png">
+  <img src="docs/screenshots/dark.png" alt="NoSlacking showing the #engineering channel, with a thread open beside it" width="900">
+</picture>
 
-- **Workspaces:** channels, private channels, direct messages and group DMs,
-  in one workspace rail across several workspaces, with your Slack sidebar
-  sections.
-- **Messages:** history that scrolls back, day separators, an unread line,
-  and "jump to unread" and "jump to newest".
-- **Threads:** a side panel, with "also send to the channel".
-- **Search:** messages and files, with Slack's `from:`, `in:`, `before:`
-  and `has:` filters, and jumping to a result in context.
-- **Conversations:** start direct and group messages; browse, join, leave
-  and create channels; channel details, pins and bookmarks.
-- **Composer:** `@mention`, `#channel` and `:emoji:` autocomplete, slash
-  commands, formatting shortcuts, drafts kept across restarts, and
-  uploading pasted images and dropped files.
-- **Rendering:** reactions with skin tones, your workspace's custom emoji,
-  inline images, file cards, highlighted code blocks, and Slack's markup.
-- **Notifications:** for DMs, mentions and your own keywords, with mute,
-  per-conversation levels and Do Not Disturb.
-- **Desktop:** the unread count in the title and launcher, a tray icon,
-  start at login, themes (dark, light, your own palettes, and Omarchy on
-  Linux), and a Ctrl+K quick switcher.
-- **Accessibility:** keyboard navigation of messages, screen reader labels,
-  and an English and Dutch interface.
+</div>
+
+## Why NoSlacking
+
+- **Native and light.** Written in Rust on [egui](https://github.com/emilk/egui),
+  with no browser engine inside: one small program instead of a copy of
+  Chrome.
+- **Everything you do in Slack every day.** Channels, DMs, threads,
+  reactions, files, search, notifications and your sidebar sections, across
+  all your workspaces.
+- **Built for the keyboard.** Ctrl+K to jump anywhere, single keys for the
+  selected message, and a sheet of every shortcut on Ctrl+/.
+- **Calm by default.** Unread conversations rise to the top of their section;
+  quiet ones tuck away behind "N more" until you need them.
+- **Your secrets stay put.** Tokens and cookies live only in your operating
+  system's keyring, never in a file or the log.
+- **Yours to tweak.** Dark and light themes, your own palettes, a compact
+  layout, and scripting hooks that run your programs on new messages.
+
+## Features
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/link-quotes.png" alt="A direct message where links to Slack messages show as quotes"></td>
+<td width="50%"><img src="docs/screenshots/search.png" alt="Searching messages with Slack's filters"></td>
+</tr>
+<tr>
+<td align="center">Links to Slack messages show as quotes</td>
+<td align="center">Search with Slack's own filters</td>
+</tr>
+</table>
+
+**Conversations**
+- Channels, private channels, direct and group messages, in one workspace
+  rail across several workspaces, with your Slack sidebar sections.
+- Unread conversations first, quiet ones behind "N more", and closed or
+  empty group chats out of the way.
+- Start DMs and group DMs with the + on Direct messages; browse, join, leave
+  and create channels; channel details, pins and bookmarks you can add and
+  edit.
+
+**Messages**
+- History that scrolls back smoothly, an unread line, and "jump to unread"
+  and "jump to newest".
+- Threads in a side panel, with "also send to the channel".
+- Reactions with skin tones, your workspace's custom emoji (and adding new
+  ones), inline images, file cards, highlighted code blocks and Slack's rich
+  text, drawn just as Slack lays it out.
+- Links to Slack messages shown as quotes, and app buttons you can press
+  (with browser sign-in).
+- Mark unread, save for later, share to another conversation, pin, copy a
+  link, edit, delete, and delete your own files.
+
+**Writing**
+- `@mention`, `@group`, `#channel` and `:emoji:` autocomplete, slash
+  commands, formatting shortcuts, Shift+Enter for a new line, and spell
+  checking.
+- Drafts kept across restarts, Send later, and pasting images or files to
+  upload them.
+
+**Staying in the loop**
+- Notifications for DMs, mentions and your own keywords, with mute,
+  per-conversation levels and Do Not Disturb; they still arrive when the live
+  connection drops.
+- Activity, All unreads, Threads, Later and Scheduled views, and search over
+  messages and files with `from:`, `in:`, `before:` and `has:`.
+- Presence and typing, your status, and "always show as active".
+
+**On your desktop**
+- A tray icon that keeps you connected when the window is closed, the unread
+  count in the title and launcher, and start at login.
+- Themes (dark, light, your own palettes, and Omarchy on Linux) and a compact
+  layout.
+- Keyboard navigation, screen reader labels, and an English and Dutch
+  interface.
+
+## Installing
+
+Every [release](https://github.com/Yannicked/NoSlacking/releases) has:
+
+| System | Download |
+|---|---|
+| Debian, Ubuntu | `.deb` |
+| Fedora, openSUSE | `.rpm` |
+| Any Linux | `.flatpak` (install with `flatpak install --user <file>`) or `.tar.gz` |
+| macOS | `.zip` with the app |
+| Windows | `.zip` with the program |
+
+Then start NoSlacking and sign in.
 
 ## Signing in
 
@@ -60,22 +130,15 @@ cookies are stored only in your operating system's keyring (Secret Service on
 Linux, the Keychain on macOS, the Credential Manager on Windows), never in a
 file, and never written to the log.
 
-## Installing
-
-Each [release](https://github.com/Yannicked/NoSlacking/releases) has a
-`.deb` (Debian, Ubuntu), an `.rpm` (Fedora, openSUSE) and a `.tar.gz` for
-Linux, a `.zip` with the app for macOS, and a `.zip` with the program for
-Windows.
-
-## Building
+## Building from source
 
 ```
-cargo run
+cargo run --release
 ```
 
 You need a Rust toolchain and the egui build dependencies; see
 [`CONTRIBUTING.md`](CONTRIBUTING.md). To try the interface without a Slack
-account:
+account, run the demo:
 
 ```
 cargo run --features demo
@@ -83,11 +146,15 @@ cargo run --features demo
 
 ## Scripting hooks
 
-In the spirit of wee-slack's hooks, NoSlacking can run your own programs on
-new messages: to speak them aloud, log them, or light a lamp. Hooks are off
-until you turn them on under **Settings → Scripting hooks**, where each hook
-names a program and what it runs for: mentions of you, direct messages, or
-keywords (comma separated, matched as whole words, ignoring case).
+NoSlacking can run your own programs on new messages: to speak them aloud,
+log them, or light a lamp. Turn them on under **Settings → Scripting hooks**.
+
+<details>
+<summary>How hooks run, and the JSON they get</summary>
+
+Hooks work in the spirit of wee-slack's. Each one names a program and what
+it runs for: mentions of you, direct messages, or keywords (comma separated,
+matched as whole words, ignoring case).
 
 - The program runs directly, never through a shell. Its command line is
   split on spaces; put `"…"` or `'…'` around a part with spaces. There are no
@@ -135,6 +202,8 @@ per message.
 - `version` goes up only when the shape changes in a way a script would
   notice; new fields may appear at any time.
 
+</details>
+
 ## Files
 
 NoSlacking keeps settings and themes in your config directory, logs and read
@@ -170,6 +239,11 @@ Use NoSlacking only with your own account, and use your own Slack app (the
 documented route) where your workspace requires it.
 
 ## Thanks
+
+NoSlacking is built on [egui](https://github.com/emilk/egui) and the
+[fastframe](https://github.com/crmne/fastframe) crates, the same foundation
+as [ZapFast](https://github.com/crmne/zapfast) and
+[Spotifast](https://github.com/crmne/spotifast).
 
 NoSlacking owes its approach to two other unofficial clients:
 
