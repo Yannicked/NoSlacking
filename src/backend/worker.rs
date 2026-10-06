@@ -676,10 +676,6 @@ impl Worker {
             Command::CancelSignIn => self.cancel_sign_in(),
             Command::Callback(url) => self.callback(url),
             Command::PasteToken(token) => self.paste_token(token),
-            Command::SignInSession {
-                cookie,
-                workspace_url,
-            } => self.sign_in_session(cookie, &workspace_url),
             Command::SignInLink(link) => self.sign_in_link(&link),
             Command::StartBrowserSignIn => self.start_browser_sign_in(),
             Command::SignOut(team) => self.sign_out(&team),

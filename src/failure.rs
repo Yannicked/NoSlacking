@@ -84,8 +84,9 @@ pub enum Failure {
     Io(String),
     /// A file that could run code if opened, so only downloading is offered.
     NotOpenable,
-    /// The sign-in by cookie needs the workspace's address.
-    NoWorkspaceAddress,
+    /// Slack named a workspace outside slack.com, so the session was not
+    /// sent there.
+    NotSlackAddress,
     /// The browser could not be opened for the sign-in.
     NoBrowser,
     /// What was pasted is not a `slack://` sign-in link.
@@ -94,12 +95,10 @@ pub enum Failure {
     NoClientId,
     /// What was pasted is not a Slack token.
     NotAToken,
-    /// What was pasted is not a `d` session cookie (`xoxd-…`).
-    NotACookie,
     /// The cookie signed in, but the workspace's page carried no session
     /// token.
     NoSessionToken,
-    /// The cookie did not sign in to the workspace.
+    /// The session did not sign in to the workspace.
     CookieRefused,
     /// A bot token was pasted where a user token is needed.
     BotToken,
@@ -229,8 +228,8 @@ impl Failure {
                 );
             }
             Self::NotOpenable => t("it cannot be opened here; download it instead"),
-            Self::NoWorkspaceAddress => {
-                t("Enter your workspace's Slack address, such as acme.slack.com.")
+            Self::NotSlackAddress => {
+                t("Slack named a workspace outside slack.com, so NoSlacking did not sign in there.")
             }
             Self::NoBrowser => {
                 t("Could not open the browser. Open app.slack.com/ssb/signin yourself.")
@@ -242,14 +241,11 @@ impl Failure {
             Self::NotAToken => {
                 t("That does not look like a Slack token (it should start with xoxp-).")
             }
-            Self::NotACookie => t(
-                "That does not look like a session cookie (it should start with xoxd-). Copy the value of the cookie named d.",
-            ),
             Self::NoSessionToken => t(
                 "Slack signed in, but did not put a session token on the page for this workspace.",
             ),
             Self::CookieRefused => t(
-                "The d cookie did not sign in. Copy a fresh one from a browser where this workspace is open.",
+                "Slack did not accept the session for this workspace. Sign in with your browser again.",
             ),
             Self::BotToken => {
                 t("That is a bot token. NoSlacking needs the User OAuth Token (xoxp-).")
@@ -493,12 +489,11 @@ mod tests {
             Failure::DiskFull,
             Failure::Io("broken pipe".into()),
             Failure::NotOpenable,
-            Failure::NoWorkspaceAddress,
+            Failure::NotSlackAddress,
             Failure::NoBrowser,
             Failure::NotASignInLink,
             Failure::NoClientId,
             Failure::NotAToken,
-            Failure::NotACookie,
             Failure::NoSessionToken,
             Failure::CookieRefused,
             Failure::BotToken,

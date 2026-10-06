@@ -1,5 +1,6 @@
 //! Signing in with your own Slack browser session, the way wee-slack and
-//! msga do, for people who cannot or do not want to register a Slack app.
+//! msga do: the browser sign-in hands over the account's cookie, and this
+//! turns it into a session for each workspace.
 //!
 //! Slack's web client authenticates with a per-session `xoxc-` token that is
 //! embedded in each workspace's boot page, plus the account-wide `d` cookie
@@ -9,7 +10,7 @@
 //! One `d` cookie covers every workspace the account is signed in to. It
 //! rotates when you sign out or change your password, so the workspace URL
 //! is kept to derive a fresh token from a new cookie later. This uses
-//! undocumented endpoints and is a fallback to the Slack-app sign-in.
+//! endpoints that Slack does not document.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +28,8 @@ pub struct SessionSignIn {
     pub token: Token,
 }
 
-/// Normalises what the user typed into `https://team.slack.com`.
+/// Normalises a workspace address into `https://team.slack.com`, or `None`
+/// when it is not on slack.com.
 pub fn normalize_workspace(input: &str) -> Option<String> {
     let trimmed = input.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -128,6 +130,9 @@ pub enum Refusal {
     NoToken,
     /// The cookie did not sign in.
     CookieRefused,
+    /// The workspace's address is not on slack.com, so the cookie is not
+    /// sent there.
+    NotSlack,
 }
 
 /// Derives and validates a session token for one workspace.
@@ -136,6 +141,12 @@ pub async fn derive(cookie: &str, workspace_url: &str) -> Result<SessionSignIn, 
     if !cookie.starts_with("xoxd-") {
         return Err(SlackError::Session(Refusal::NotACookie));
     }
+    // The address comes from Slack's answer, but the cookie is the whole
+    // account: it only ever goes to a slack.com host.
+    let Some(workspace_url) = normalize_workspace(workspace_url) else {
+        return Err(SlackError::Session(Refusal::NotSlack));
+    };
+    let workspace_url = workspace_url.as_str();
     let http = seeded_client(&cookie)?;
     // The boot page returns HTTP 403 while still carrying the token, so the
     // body is what matters, not the status.

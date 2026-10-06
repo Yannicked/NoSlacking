@@ -55,27 +55,6 @@ impl Worker {
         });
     }
 
-    pub(super) fn sign_in_session(&mut self, cookie: String, workspace_url: &str) {
-        let Some(workspace_url) = crate::slack::session::normalize_workspace(workspace_url) else {
-            self.sink
-                .send(Event::SignIn(SignIn::Failed(Failure::NoWorkspaceAddress)));
-            return;
-        };
-        let internal = self.internal.clone();
-        self.sink.send(Event::SignIn(SignIn::Exchanging));
-        tokio::spawn(async move {
-            let result = crate::slack::session::derive(cookie.trim(), &workspace_url)
-                .await
-                .map(|signed| SignedIn {
-                    team_id: signed.team_id,
-                    user_id: signed.user_id,
-                    token: signed.token,
-                })
-                .map_err(|e| failure(&e));
-            let _ = internal.send(Internal::SignedIn(result));
-        });
-    }
-
     /// Opens Slack's sign-in page in the browser and starts
     /// accepting the link it hands back.
     pub(super) fn start_browser_sign_in(&mut self) {
@@ -109,7 +88,7 @@ impl Worker {
 
     /// Signs in to every workspace a pasted `slack://` sign-in link names:
     /// redeems its tokens for the account's session cookie, then signs in to
-    /// each team with that cookie like [`Self::sign_in_session`].
+    /// each team with that cookie.
     pub(super) fn sign_in_link(&mut self, link: &str) {
         let Some(sets) = crate::slack::magic::parse_link(link) else {
             self.sink

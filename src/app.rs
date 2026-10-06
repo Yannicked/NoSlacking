@@ -176,9 +176,6 @@ pub struct SetupForm {
     pub app_token: String,
     pub user_token: String,
     pub show_manual: bool,
-    /// Session sign-in: the workspace address and the `d` cookie.
-    pub session_workspace: String,
-    pub session_cookie: String,
     /// Browser sign-in: the `slack://` link Slack's page hands over.
     pub session_link: String,
     /// Whether the "use your own Slack app" section is expanded.
@@ -190,7 +187,6 @@ impl std::fmt::Debug for SetupForm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SetupForm")
             .field("client_id", &self.client_id)
-            .field("session_workspace", &self.session_workspace)
             .field("show_manual", &self.show_manual)
             .field("show_app", &self.show_app)
             .finish_non_exhaustive()
@@ -1243,13 +1239,6 @@ impl App {
             Action::ApplyProxy => self
                 .backend
                 .send(Command::SetProxy(self.settings.proxy.clone())),
-            Action::SignInSession => {
-                self.sign_in = None;
-                self.backend.send(Command::SignInSession {
-                    cookie: self.setup.session_cookie.trim().to_owned(),
-                    workspace_url: self.setup.session_workspace.trim().to_owned(),
-                });
-            }
             Action::StartBrowserSignIn => {
                 self.sign_in = None;
                 self.backend.send(Command::StartBrowserSignIn);

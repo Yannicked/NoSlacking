@@ -49,12 +49,6 @@ pub enum Command {
     Callback(String),
     /// Signs in with a user token copied from the app's settings page.
     PasteToken(String),
-    /// Signs in by reusing the browser session: the `d` cookie and a
-    /// workspace URL.
-    SignInSession {
-        cookie: String,
-        workspace_url: String,
-    },
     /// Signs in with the `slack://` link Slack's browser sign-in hands over
     /// (see [`crate::slack::magic`]).
     SignInLink(String),
@@ -297,11 +291,6 @@ impl std::fmt::Debug for Command {
             Self::PasteToken(_) => f.debug_tuple("PasteToken").field(&REDACTED).finish(),
             Self::SignInLink(_) => f.debug_tuple("SignInLink").field(&REDACTED).finish(),
             Self::StartBrowserSignIn => f.write_str("StartBrowserSignIn"),
-            Self::SignInSession { workspace_url, .. } => f
-                .debug_struct("SignInSession")
-                .field("cookie", &REDACTED)
-                .field("workspace_url", workspace_url)
-                .finish(),
             Self::SignOut(team) => f.debug_tuple("SignOut").field(team).finish(),
             Self::Focus { team, channel } => f
                 .debug_struct("Focus")
@@ -1027,10 +1016,7 @@ mod tests {
         let printed = format!(
             "{:?} {:?} {:?} {:?}",
             Command::PasteToken("xoxp-secret".into()),
-            Command::SignInSession {
-                cookie: "xoxd-secret".into(),
-                workspace_url: "https://acme.slack.com".into(),
-            },
+            Command::SignInLink("slack://login/xoxd-secret".into()),
             Command::Callback("noslacking://oauth/callback?code=c0de&state=s".into()),
             Command::SaveApp(AppCredentials {
                 client_id: "1.2".into(),
@@ -1041,7 +1027,6 @@ mod tests {
         for secret in ["xoxp-secret", "xoxd-secret", "c0de", "hush", "xapp-secret"] {
             assert!(!printed.contains(secret), "{printed}");
         }
-        assert!(printed.contains("acme.slack.com"), "{printed}");
         assert_eq!(
             format!("{:?}", Command::SignOut("T1".into())),
             r#"SignOut("T1")"#
