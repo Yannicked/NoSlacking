@@ -59,6 +59,27 @@ impl App {
                 command,
                 result,
             } => self.slash_done(id, &command, result),
+            Event::Pressed {
+                team,
+                press,
+                result,
+            } => {
+                if let Some(workspace) = self.workspace_mut(&team) {
+                    workspace.pressing.remove(&press);
+                }
+                // Taken: the app answers by changing the message, or by
+                // opening a form, which only Slack itself can show.
+                if let Err(error) = result {
+                    let label = crate::mrkdwn::unescape(&press.text);
+                    self.toast(
+                        tf(
+                            "Could not press {button}: {error}",
+                            &[("button", &label), ("error", &error.message())],
+                        ),
+                        true,
+                    );
+                }
+            }
             Event::Notice(notice) => self.toast(notice.message(), false),
             Event::Dnd { team, dnd } => self.dnd_arrived(&team, dnd),
             Event::SlackPrefs { team, prefs } => self.prefs_arrived(&team, prefs),
@@ -401,6 +422,7 @@ impl App {
             self.editing = None;
             self.selected = None;
             self.confirm_delete = None;
+            self.confirm_press = None;
             self.picker = None;
             self.share = None;
             self.views.open = None;

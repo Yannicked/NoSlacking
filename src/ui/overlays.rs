@@ -15,6 +15,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     profile(app, ctx);
     super::lightbox::show(app, ctx);
     confirm_delete(app, ctx);
+    confirm_press(app, ctx);
     section_dialog(app, ctx);
     super::share::dialog(app, ctx);
     super::people::status_dialog(app, ctx);
@@ -854,6 +855,88 @@ fn confirm_delete(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// The question an app asked to have put before its button is pressed,
+/// in the app's words where it gave them.
+fn confirm_press(app: &mut App, ctx: &egui::Context) {
+    let Some((press, confirm)) = app.confirm_press.clone() else {
+        return;
+    };
+    let palette = app.palette;
+    let mut answer = None;
+    let title = confirm
+        .title
+        .as_deref()
+        .map(crate::mrkdwn::unescape)
+        .unwrap_or_else(|| t("Are you sure?").into_owned());
+    let go = confirm
+        .confirm
+        .as_deref()
+        .map(crate::mrkdwn::unescape)
+        .unwrap_or_else(|| t("Yes").into_owned());
+    let back = confirm
+        .deny
+        .as_deref()
+        .map(crate::mrkdwn::unescape)
+        .unwrap_or_else(|| t("Cancel").into_owned());
+    let mut actions = Vec::new();
+    let response = egui::Modal::new(egui::Id::new("confirm-press"))
+        .frame(modal_frame(app))
+        .show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.label(
+                RichText::new(title)
+                    .font(theme::bold(17.0))
+                    .color(palette.text),
+            );
+            if let Some(text) = &confirm.text
+                && let Some(workspace) = app.active_workspace()
+            {
+                let rich = crate::ui::rich::Rich::new(&palette, workspace)
+                    .size(14.0)
+                    .color(palette.secondary);
+                crate::ui::rich::show(ui, &rich, text, false, &mut actions);
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if theme::secondary_button(ui, &palette, &back).clicked() {
+                    answer = Some(false);
+                }
+                let (fill, color) = if confirm.style.as_deref() == Some("danger") {
+                    (palette.danger, egui::Color32::WHITE)
+                } else {
+                    (palette.accent, palette.on_accent)
+                };
+                let yes =
+                    egui::Button::new(RichText::new(go).font(theme::medium(14.0)).color(color))
+                        .fill(fill)
+                        .min_size(Vec2::new(0.0, 32.0));
+                if ui.add(yes).clicked() {
+                    answer = Some(true);
+                }
+            });
+            if ui.input(|i| i.key_pressed(Key::Enter)) {
+                answer = Some(true);
+            }
+        });
+    // Links in the app's text still open.
+    app.actions.extend(actions);
+    if response.should_close() {
+        answer = Some(false);
+    }
+    match answer {
+        Some(true) => {
+            app.confirm_press = None;
+            app.actions.push(Action::PressButton {
+                press,
+                confirm: Some(confirm),
+                confirmed: true,
+            });
+        }
+        Some(false) => app.confirm_press = None,
+        None => {}
+    }
+}
+
 fn toasts(app: &mut App, ctx: &egui::Context) {
     if app.toasts.is_empty() {
         return;
@@ -915,6 +998,7 @@ mod tests {
             domain: "acme".into(),
             icon: None,
             user_id: "U0".into(),
+            sign_in: Default::default(),
         });
         w.emoji = crate::emoji::EmojiSet::new(
             [

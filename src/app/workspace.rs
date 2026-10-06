@@ -81,6 +81,9 @@ pub struct WorkspaceState {
     /// Messages fetched to quote under links to them, which are not
     /// loaded in any list here.
     pub quotes: crate::quotes::Cache,
+    /// Button presses sent and not yet answered, which show as busy and
+    /// cannot be pressed again meanwhile.
+    pub pressing: HashSet<crate::model::Press>,
 }
 
 /// What became of a send Slack answered (see [`WorkspaceState::sent`]).
@@ -136,6 +139,7 @@ impl WorkspaceState {
             cancelled: HashSet::new(),
             suppressed: HashSet::new(),
             quotes: crate::quotes::Cache::default(),
+            pressing: HashSet::new(),
         }
     }
 
@@ -1734,6 +1738,7 @@ mod tests {
             domain: "acme".into(),
             icon: None,
             user_id: "U1".into(),
+            sign_in: Default::default(),
         })
     }
 

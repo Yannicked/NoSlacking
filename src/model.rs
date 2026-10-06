@@ -115,6 +115,8 @@ pub struct Workspace {
     pub icon: Option<String>,
     /// You, in this workspace.
     pub user_id: String,
+    /// How you signed in to it.
+    pub sign_in: SignInKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -409,21 +411,144 @@ pub struct Quote {
     pub unavailable: bool,
 }
 
-/// A Block Kit button. Only links can be followed here; interactive buttons
-/// need the app's own server.
-#[derive(Clone, Debug, PartialEq)]
+/// A Block Kit button: a link to follow, or an interactive button whose
+/// press Slack hands to the app that posted it (see [`button_use`]).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Button {
+    /// The label as Slack sends it.
     pub text: String,
     pub url: Option<String>,
     /// `primary` or `danger`, for colour.
     pub style: Option<String>,
+    /// The app's own name for the button, which the press carries back.
+    pub action_id: Option<String>,
+    /// The block the button sits in, which the press names too.
+    pub block_id: Option<String>,
+    /// What the app put in the button for itself.
+    pub value: Option<String>,
+    /// The question to ask before pressing, when the app wants one.
+    pub confirm: Option<Confirm>,
+}
+
+/// The dialog an app asks for before its button is pressed. A part the
+/// app left out is `None`, and is worded here instead.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Confirm {
+    pub title: Option<String>,
+    /// mrkdwn.
+    pub text: Option<String>,
+    /// The label of the button that goes ahead.
+    pub confirm: Option<String>,
+    /// The label of the button that backs out.
+    pub deny: Option<String>,
+    /// `danger` when going ahead is destructive.
+    pub style: Option<String>,
+}
+
+/// How a workspace was signed in, which decides what Slack lets this
+/// client do beyond the public Web API.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SignInKind {
+    /// A browser session (an `xoxc` token with the `d` cookie): the calls
+    /// Slack's own web client makes work too.
+    Session,
+    /// The user token of your own Slack app, from OAuth: only the public
+    /// Web API.
+    #[default]
+    App,
+}
+
+impl SignInKind {
+    /// The kind of a sign-in that is, or is not, a browser session.
+    pub fn of(session: bool) -> Self {
+        if session { Self::Session } else { Self::App }
+    }
+}
+
+/// Why an interactive button cannot be pressed here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotHere {
+    /// Only Slack's own clients press an app's buttons. A browser session
+    /// can stand in for one; an app's user token cannot, as the public API
+    /// has no method for it.
+    NeedsSession,
+    /// The message does not say which app posted it, or the button lacks
+    /// the ids a press needs.
+    NoApp,
+}
+
+/// What pressing a Block Kit button does here.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ButtonUse<'a> {
+    /// Opens its link.
+    Link(&'a str),
+    /// Sends the press to the app, as Slack's web client does.
+    Press(Press),
+    /// Nothing: the button is shown, but only works in Slack itself.
+    NotHere(NotHere),
+}
+
+/// Pressing an app's interactive button on message `ts` in `channel`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Press {
+    pub channel: String,
+    pub ts: Ts,
+    /// The bot that posted the message: Slack hands it the press.
+    pub bot_id: String,
+    pub block_id: String,
+    pub action_id: String,
+    /// The label as Slack sent it, which the press repeats.
+    pub text: String,
+    pub value: Option<String>,
+}
+
+/// What `button` on `message` (in `channel`) does in a workspace signed in
+/// by `sign_in`. A link always opens. An interactive button can be pressed
+/// only from a browser session, through the call Slack's web client makes
+/// (`blocks.actions`); an OAuth sign-in has no such call, so there the
+/// button is shown but not pressable, and the message opens in Slack.
+pub fn button_use<'a>(
+    sign_in: SignInKind,
+    channel: &str,
+    message: &Message,
+    button: &'a Button,
+) -> ButtonUse<'a> {
+    if let Some(url) = &button.url {
+        return ButtonUse::Link(url);
+    }
+    if sign_in != SignInKind::Session {
+        return ButtonUse::NotHere(NotHere::NeedsSession);
+    }
+    let (Some(bot_id), Some(block_id), Some(action_id)) = (
+        message.bot_id.as_ref(),
+        button.block_id.as_ref(),
+        button.action_id.as_ref(),
+    ) else {
+        return ButtonUse::NotHere(NotHere::NoApp);
+    };
+    if message.ts.is_local() {
+        return ButtonUse::NotHere(NotHere::NoApp);
+    }
+    ButtonUse::Press(Press {
+        channel: channel.to_owned(),
+        ts: message.ts.clone(),
+        bot_id: bot_id.clone(),
+        block_id: block_id.clone(),
+        action_id: action_id.clone(),
+        text: button.text.clone(),
+        value: button.value.clone(),
+    })
 }
 
 /// What a Block Kit section shows on its right.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Accessory {
-    Image { url: String, alt: String },
-    Button(Button),
+    Image {
+        url: String,
+        alt: String,
+    },
+    /// Boxed: a button is far larger than a picture.
+    Button(Box<Button>),
 }
 
 /// One piece of a Block Kit context line.
@@ -890,6 +1015,20 @@ pub enum Action {
         name: String,
     },
     OpenUrl(String),
+    /// Presses an app's interactive button. When the app asked for a
+    /// `confirm` dialog, this asks first, unless `confirmed`.
+    PressButton {
+        press: Press,
+        confirm: Option<Confirm>,
+        confirmed: bool,
+    },
+    /// Opens a message in Slack itself (the browser or Slack's app), for
+    /// what only works there; `thread` is its parent for a reply.
+    OpenInSlack {
+        channel: String,
+        ts: Ts,
+        thread: Option<Ts>,
+    },
     /// Copies a message's permalink; `thread` is its parent for a reply.
     CopyLink {
         channel: String,
@@ -997,6 +1136,65 @@ mod tests {
             pinned: false,
             client_msg_id: None,
         }
+    }
+
+    #[test]
+    fn buttons_press_only_from_a_browser_session() {
+        let posted = Message {
+            bot_id: Some("B09".into()),
+            ..message("1790171950.000100")
+        };
+        let approve = Button {
+            text: "Approve".into(),
+            action_id: Some("approve".into()),
+            block_id: Some("deploy".into()),
+            value: Some("1288".into()),
+            ..Button::default()
+        };
+        assert_eq!(
+            button_use(SignInKind::Session, "C05", &posted, &approve),
+            ButtonUse::Press(Press {
+                channel: "C05".into(),
+                ts: Ts::new("1790171950.000100"),
+                bot_id: "B09".into(),
+                block_id: "deploy".into(),
+                action_id: "approve".into(),
+                text: "Approve".into(),
+                value: Some("1288".into()),
+            })
+        );
+        assert_eq!(
+            button_use(SignInKind::App, "C05", &posted, &approve),
+            ButtonUse::NotHere(NotHere::NeedsSession),
+            "an OAuth token has no call to press with"
+        );
+        let link = Button {
+            url: Some("https://example.com".into()),
+            ..approve.clone()
+        };
+        assert_eq!(
+            button_use(SignInKind::App, "C05", &posted, &link),
+            ButtonUse::Link("https://example.com"),
+            "links open whatever the sign-in"
+        );
+        let unknown_app = Message {
+            bot_id: None,
+            ..posted.clone()
+        };
+        assert_eq!(
+            button_use(SignInKind::Session, "C05", &unknown_app, &approve),
+            ButtonUse::NotHere(NotHere::NoApp)
+        );
+        let no_id = Button {
+            action_id: None,
+            ..approve.clone()
+        };
+        assert_eq!(
+            button_use(SignInKind::Session, "C05", &posted, &no_id),
+            ButtonUse::NotHere(NotHere::NoApp)
+        );
+        assert_eq!(SignInKind::of(true), SignInKind::Session);
+        assert_eq!(SignInKind::of(false), SignInKind::App);
     }
 
     #[test]

@@ -2187,3 +2187,24 @@ msgstr "De bladwijzer kon niet worden verwijderd: {error}"
 
 msgid "Changing bookmarks needs the bookmarks:write permission, which your Slack app does not have."
 msgstr "Voor het wijzigen van bladwijzers is de toestemming bookmarks:write nodig, die je Slack-app niet heeft."
+
+msgid "Waiting for Slack…"
+msgstr "Wachten op Slack…"
+
+msgid "Slack lets only its own apps and browser sign-ins press an app's buttons. Open the message in Slack to use it."
+msgstr "Slack laat alleen zijn eigen apps en aanmeldingen via de browser de knoppen van een app indrukken. Open het bericht in Slack om hem te gebruiken."
+
+msgid "Open in Slack"
+msgstr "Openen in Slack"
+
+msgid "Open this message in Slack, where its buttons work"
+msgstr "Open dit bericht in Slack, waar de knoppen werken"
+
+msgid "Could not press {button}: {error}"
+msgstr "Kon {button} niet indrukken: {error}"
+
+msgid "Are you sure?"
+msgstr "Weet je het zeker?"
+
+msgid "Yes"
+msgstr "Ja"

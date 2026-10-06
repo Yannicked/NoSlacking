@@ -1506,6 +1506,7 @@ mod tests {
             domain: "acme".into(),
             icon: None,
             user_id: "U0".into(),
+            sign_in: Default::default(),
         });
         for user in people() {
             workspace.users.insert(user.id.clone(), user);
@@ -1532,6 +1533,7 @@ mod tests {
             domain: "acme".into(),
             icon: None,
             user_id: "U0".into(),
+            sign_in: Default::default(),
         });
         workspace.conversations.push(Conversation {
             id: "D1".into(),
@@ -1564,6 +1566,7 @@ mod tests {
             domain: "acme".into(),
             icon: None,
             user_id: "U0".into(),
+            sign_in: Default::default(),
         });
         let message = Message {
             ts: Ts::new("1.0"),
@@ -1654,6 +1657,7 @@ mod tests {
             domain: "acme".into(),
             icon: None,
             user_id: "U0".into(),
+            sign_in: Default::default(),
         });
         workspace.conversations.push(Conversation {
             id: "C1".into(),
@@ -1928,6 +1932,7 @@ mod tests {
             domain: "acme".into(),
             icon: None,
             user_id: "U0".into(),
+            sign_in: Default::default(),
         });
         workspace.conversations.push(Conversation {
             id: "C1".into(),

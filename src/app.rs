@@ -244,6 +244,9 @@ pub struct App {
     pub preview: Option<crate::lightbox::Lightbox>,
     /// A message waiting for "Delete?" to be answered.
     pub confirm_delete: Option<(String, Ts)>,
+    /// A button press waiting for the app's own "Are you sure?" to be
+    /// answered, with the dialog the app asked for.
+    pub confirm_press: Option<(crate::model::Press, crate::model::Confirm)>,
     pub section_dialog: Option<SectionDialog>,
     /// Whether the keyboard shortcut sheet is open.
     pub shortcuts: bool,
@@ -359,6 +362,9 @@ impl App {
                 domain: meta.domain.clone(),
                 icon: meta.icon.clone(),
                 user_id: meta.user_id.clone(),
+                // Known once the worker has the token; until then, buttons
+                // take the cautious way.
+                sign_in: Default::default(),
             });
             state.active = settings.last_conversation.get(&meta.team_id).cloned();
             state.desktop = settings.desktop.team_state(&meta.team_id);
@@ -421,6 +427,7 @@ impl App {
             picker_query: String::new(),
             preview: None,
             confirm_delete: None,
+            confirm_press: None,
             section_dialog: None,
             shortcuts: false,
             share: None,
@@ -1130,6 +1137,16 @@ impl App {
             Action::DismissError => self.toasts.clear(),
             // Leaving the app: links, folders and the clipboard.
             Action::OpenUrl(url) => self.open_url(&url),
+            Action::PressButton {
+                press,
+                confirm,
+                confirmed,
+            } => self.press_button(press, confirm, confirmed),
+            Action::OpenInSlack {
+                channel,
+                ts,
+                thread,
+            } => self.open_in_slack(&channel, &ts, thread.as_ref()),
             Action::NotifyLevel { channel, level } => self.set_notify_level(&channel, level),
             Action::Snooze(choice) => self.snooze(choice),
             Action::Mute { channel, muted } => self.mute(&channel, muted),
@@ -1545,6 +1562,51 @@ impl App {
         true
     }
 
+    /// Presses an app's button in the open workspace, after its own
+    /// question when it has one. A press already on its way is not sent
+    /// again: the app would get it twice.
+    fn press_button(
+        &mut self,
+        press: crate::model::Press,
+        confirm: Option<crate::model::Confirm>,
+        confirmed: bool,
+    ) {
+        if let Some(confirm) = confirm.filter(|_| !confirmed) {
+            self.focus_overlay = true;
+            self.confirm_press = Some((press, confirm));
+            return;
+        }
+        let Some(team) = self.active_team() else {
+            return;
+        };
+        let fresh = self
+            .workspace_mut(&team)
+            .is_some_and(|w| w.pressing.insert(press.clone()));
+        if fresh {
+            self.backend.send(Command::PressButton { team, press });
+        }
+    }
+
+    /// Opens a message in Slack's own client, in the browser or Slack's
+    /// app, for what only works there. Not through [`Self::open_url`],
+    /// which would open a link into a signed-in workspace right here.
+    fn open_in_slack(&mut self, channel: &str, ts: &Ts, thread: Option<&Ts>) {
+        let link = self
+            .active_workspace()
+            .and_then(|w| crate::links::permalink(&w.info.domain, channel, ts, thread));
+        let Some(link) = link else {
+            self.toast(t("This message has no link yet"), true);
+            return;
+        };
+        if let Err(error) = open::that_detached(&link) {
+            let error = error.to_string();
+            self.toast(
+                tf("Could not open the link: {error}", &[("error", &error)]),
+                true,
+            );
+        }
+    }
+
     /// Copies the permalink of a message of the open workspace.
     fn copy_link(&mut self, ctx: &egui::Context, channel: &str, ts: &Ts, thread: Option<&Ts>) {
         let link = self
@@ -1623,6 +1685,7 @@ impl App {
             || self.profile.is_some()
             || self.preview.is_some()
             || self.confirm_delete.is_some()
+            || self.confirm_press.is_some()
             || self.section_dialog.is_some()
             || self.shortcuts
             || self.share.is_some()

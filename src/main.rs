@@ -452,6 +452,9 @@ struct DemoSetup {
     share: Option<noslacking::model::Ts>,
     /// Whether the share dialog's comment was typed in yet.
     commented: bool,
+    /// Whether to press the deploy bot's Approve button in #deploys once it
+    /// has arrived, which asks the app's question first.
+    approve: bool,
 }
 
 #[cfg(feature = "demo")]
@@ -497,6 +500,7 @@ impl DemoSetup {
             image: None,
             share: None,
             commented: false,
+            approve: false,
         }
     }
 
@@ -543,6 +547,30 @@ impl DemoSetup {
             });
             self.share = None;
         }
+        if self.approve
+            && let Some(workspace) = app.active_workspace()
+            && let Some(message) = workspace.find_message(
+                "C05",
+                &Ts::new(format!("{}.000100", noslacking::demo::APPROVAL)),
+            )
+        {
+            use noslacking::model::{ButtonUse, KitBlock, button_use};
+            let pressed = message.blocks.iter().find_map(|block| match block {
+                KitBlock::Actions(buttons) => buttons.first(),
+                _ => None,
+            });
+            if let Some(button) = pressed
+                && let ButtonUse::Press(press) =
+                    button_use(workspace.info.sign_in, "C05", message, button)
+            {
+                app.actions.push(Action::PressButton {
+                    press,
+                    confirm: button.confirm.clone(),
+                    confirmed: false,
+                });
+            }
+            self.approve = false;
+        }
         // The share dialog, once open, with a comment typed in it.
         if !self.commented
             && let Some(share) = app.share.as_mut()
@@ -584,6 +612,17 @@ impl DemoSetup {
             // #design, with a huddle going on.
             Some("huddle") => app.actions.push(Action::OpenConversation("C03".into())),
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
+            // The deploy bot's Approve button pressed: its question.
+            Some("approve") => {
+                app.actions.push(Action::OpenConversation("C05".into()));
+                self.approve = true;
+            }
+            // #deploys in the workspace signed in by OAuth, where app
+            // buttons only work in Slack.
+            Some("deploys-oauth") => {
+                app.actions.push(Action::SelectWorkspace("TDEMO2".into()));
+                app.actions.push(Action::OpenConversation("C05".into()));
+            }
             Some("general") => app.actions.push(Action::OpenConversation("C01".into())),
             // #engineering in IRC-style rows.
             Some("compact") => app.settings.density = settings::Density::Compact,

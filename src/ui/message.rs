@@ -514,7 +514,7 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
     if message.uses_blocks() {
         // Apps send `text` only as the notification fallback; the blocks are
         // the message.
-        blocks_view(ui, row, &message.blocks, actions);
+        blocks_view(ui, row, message, &message.blocks, actions);
     } else if !message.text.is_empty() {
         let rich = Rich::new(palette, row.workspace);
         rich::message(ui, &rich, message, message.edited, actions);
@@ -523,7 +523,7 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
         file_view(ui, row, message, file, actions);
     }
     for attachment in &message.attachments {
-        attachment_view(ui, row, attachment, actions);
+        attachment_view(ui, row, message, attachment, actions);
     }
     quote::own_quotes(ui, row, message, actions);
     if !message.reactions.is_empty() {
@@ -853,6 +853,7 @@ mod tests {
             domain: String::new(),
             icon: None,
             user_id: "U1".into(),
+            sign_in: Default::default(),
         });
         w.groups.push(crate::model::UserGroup {
             id: "S1".into(),

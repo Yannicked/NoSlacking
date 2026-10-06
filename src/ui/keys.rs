@@ -259,6 +259,7 @@ mod tests {
             domain: "acme".into(),
             icon: None,
             user_id: "U1".into(),
+            sign_in: Default::default(),
         });
         w.conversations = vec![
             channel("C3", "gamma", false),

@@ -1149,6 +1149,7 @@ mod tests {
             domain: "acme".into(),
             icon: None,
             user_id: "U0".into(),
+            sign_in: Default::default(),
         });
         let user =
             |id: &str, name: &str, real: &str, display: &str, bot: bool| crate::model::User {

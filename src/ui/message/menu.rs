@@ -313,6 +313,16 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
         });
         ui.close();
     }
+    // For what only works in Slack itself, such as an app's buttons with
+    // an OAuth sign-in.
+    if !message.ts.is_local() && ui.button(t("Open in Slack")).clicked() {
+        actions.push(Action::OpenInSlack {
+            channel: row.channel.to_owned(),
+            ts: message.ts.clone(),
+            thread: message.thread_ts.clone(),
+        });
+        ui.close();
+    }
     // A message still on its way has no link to share yet.
     if !message.ts.is_local() && ui.button(t("Share message…")).clicked() {
         actions.push(Action::Share {

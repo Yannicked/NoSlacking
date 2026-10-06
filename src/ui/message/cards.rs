@@ -6,8 +6,11 @@ use egui::{CornerRadius, Margin, RichText, Sense, Stroke, Vec2};
 use super::Row;
 use super::files::{fit_within, placeholder, play_badge, shows};
 use crate::i18n::t;
-use crate::model::{Accessory, Action, Attachment, Button, ContextItem, Field, KitBlock};
-use crate::theme::{self, Palette};
+use crate::model::{
+    Accessory, Action, Attachment, Button, ButtonUse, ContextItem, Field, KitBlock, Message,
+    NotHere,
+};
+use crate::theme;
 use crate::ui::rich::{self, Rich};
 
 /// The large picture an attachment shows under its text.
@@ -73,6 +76,7 @@ fn card_icon(ui: &mut egui::Ui, team: &str, url: &str, round: bool) {
 pub(super) fn attachment_view(
     ui: &mut egui::Ui,
     row: &Row<'_>,
+    message: &Message,
     attachment: &Attachment,
     actions: &mut Vec<Action>,
 ) {
@@ -184,7 +188,7 @@ pub(super) fn attachment_view(
                         fields_grid(ui, row, &attachment.fields, actions);
                     }
                     if !attachment.blocks.is_empty() {
-                        blocks_view(ui, row, &attachment.blocks, actions);
+                        blocks_view(ui, row, message, &attachment.blocks, actions);
                     }
                     let name = attachment.title.as_deref().unwrap_or_default();
                     let picture = attachment
@@ -325,9 +329,19 @@ fn fields_grid(ui: &mut egui::Ui, row: &Row<'_>, fields: &[Field], actions: &mut
     }
 }
 
-/// A Block Kit button: links open in the browser; anything else needs the
-/// app's own server, so it is shown but cannot be pressed.
-fn kit_button(ui: &mut egui::Ui, palette: &Palette, button: &Button, actions: &mut Vec<Action>) {
+/// A Block Kit button. A link opens in the browser. An app's interactive
+/// button is pressed from a browser session, and busy until Slack takes
+/// the press; with an OAuth sign-in it is shown but only works in Slack
+/// (see [`crate::model::button_use`]). Returns whether it cannot be
+/// pressed here, so the caller offers to open the message in Slack.
+fn kit_button(
+    ui: &mut egui::Ui,
+    row: &Row<'_>,
+    message: &Message,
+    button: &Button,
+    actions: &mut Vec<Action>,
+) -> bool {
+    let palette = row.palette;
     let (fill, text_color) = match button.style.as_deref() {
         Some("primary") => (palette.accent, palette.on_accent),
         Some("danger") => (palette.danger, egui::Color32::WHITE),
@@ -341,20 +355,68 @@ fn kit_button(ui: &mut egui::Ui, palette: &Palette, button: &Button, actions: &m
         .stroke(Stroke::new(1.0, palette.outline))
         .corner_radius(CornerRadius::same(theme::RADIUS_SMALL + 2))
         .min_size(Vec2::new(0.0, 28.0));
-    match &button.url {
-        Some(url) => {
+    let sign_in = row.workspace.info.sign_in;
+    match crate::model::button_use(sign_in, row.channel, message, button) {
+        ButtonUse::Link(url) => {
             let response = ui
                 .add(widget)
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text(url);
             if response.clicked() {
-                actions.push(Action::OpenUrl(url.clone()));
+                actions.push(Action::OpenUrl(url.to_owned()));
             }
+            false
         }
-        None => {
+        ButtonUse::Press(press) if row.workspace.pressing.contains(&press) => {
             ui.add_enabled(false, widget)
-                .on_disabled_hover_text(t("This button works only in Slack itself."));
+                .on_disabled_hover_text(t("Waiting for Slack…"));
+            ui.add(egui::Spinner::new().size(14.0).color(palette.secondary));
+            false
         }
+        ButtonUse::Press(press) => {
+            let response = ui
+                .add(widget)
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if response.clicked() {
+                actions.push(Action::PressButton {
+                    press,
+                    confirm: button.confirm.clone(),
+                    confirmed: false,
+                });
+            }
+            false
+        }
+        ButtonUse::NotHere(why) => {
+            let tip = match why {
+                NotHere::NeedsSession => t(
+                    "Slack lets only its own apps and browser sign-ins press an app's buttons. Open the message in Slack to use it.",
+                ),
+                NotHere::NoApp => t("This button works only in Slack itself."),
+            };
+            ui.add_enabled(false, widget).on_disabled_hover_text(tip);
+            true
+        }
+    }
+}
+
+/// A quiet "Open in Slack" beside buttons that only work there.
+fn open_in_slack(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<Action>) {
+    if message.ts.is_local() {
+        return;
+    }
+    let label = RichText::new(format!("{} ↗", t("Open in Slack")))
+        .font(theme::regular(13.0))
+        .color(row.palette.accent);
+    let response = ui
+        .add(egui::Button::new(label).frame(false))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(t("Open this message in Slack, where its buttons work"));
+    if response.clicked() {
+        actions.push(Action::OpenInSlack {
+            channel: row.channel.to_owned(),
+            ts: message.ts.clone(),
+            thread: message.thread_ts.clone(),
+        });
     }
 }
 
@@ -363,6 +425,7 @@ fn kit_button(ui: &mut egui::Ui, palette: &Palette, button: &Button, actions: &m
 pub(super) fn blocks_view(
     ui: &mut egui::Ui,
     row: &Row<'_>,
+    message: &Message,
     blocks: &[KitBlock],
     actions: &mut Vec<Action>,
 ) {
@@ -419,7 +482,11 @@ pub(super) fn blocks_view(
                                 .on_hover_text(alt);
                             }
                             Some(Accessory::Button(button)) => {
-                                kit_button(ui, palette, button, actions)
+                                ui.vertical(|ui| {
+                                    if kit_button(ui, row, message, button, actions) {
+                                        open_in_slack(ui, row, message, actions);
+                                    }
+                                });
                             }
                             None => {}
                         }
@@ -490,8 +557,12 @@ pub(super) fn blocks_view(
                 KitBlock::Actions(buttons) => {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
+                        let mut not_here = false;
                         for button in buttons {
-                            kit_button(ui, palette, button, actions);
+                            not_here |= kit_button(ui, row, message, button, actions);
+                        }
+                        if not_here {
+                            open_in_slack(ui, row, message, actions);
                         }
                     });
                 }
