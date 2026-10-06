@@ -650,11 +650,25 @@ pub fn show(
             }
             if let (Some(_), Some(channel)) = (&composer.thread, &composer.channel_name) {
                 ui.add_space(8.0);
-                ui.checkbox(
-                    &mut draft.broadcast,
-                    RichText::new(tf("Also send to #{channel}", &[("channel", channel)]))
-                        .font(theme::regular(12.5))
-                        .color(palette.secondary),
+                // The label gets what the row has left after the send
+                // buttons on the right, cut short with "…" in a narrow
+                // thread panel: drawn whole, it ran under those buttons.
+                let label = tf("Also send to #{channel}", &[("channel", channel)]);
+                let room = (ui.available_width() - SEND_BUTTONS).max(0.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(room, 28.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_max_width(room);
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                        ui.checkbox(
+                            &mut draft.broadcast,
+                            RichText::new(&label)
+                                .font(theme::regular(12.5))
+                                .color(palette.secondary),
+                        )
+                        .on_hover_text(&label);
+                    },
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -979,6 +993,10 @@ fn formatting_bar(ui: &mut egui::Ui, palette: &Palette) -> Option<Format> {
     });
     clicked
 }
+
+/// The width the Send later and Send buttons take at the right of the
+/// composer's bottom row, with the space between them.
+const SEND_BUTTONS: f32 = 84.0;
 
 fn suggestion_list(
     ui: &mut egui::Ui,
