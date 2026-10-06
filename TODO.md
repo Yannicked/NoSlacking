@@ -694,11 +694,28 @@ Slack already makes most previews; NoSlacking parses few of them.
         a height known before it is drawn. `mp4`, `hls`, `vtt` and the
         larger image thumbnails are left for the players and viewer
         below, which will need them.
-- [ ] **A viewer for spreadsheets, CSV, zip listings and whole text files
+- [x] **A viewer for spreadsheets, CSV, zip listings and whole text files
       (medium).** `calamine` (MIT) and `csv`; a read-only
       `egui_extras::TableBuilder` grid; caps on download size, rows,
       columns, zip entries and compression ratio, like
       `images::check_decoded_size`.
+      - Done: "View" on a file's card opens `ui::viewer`, an overlay over
+        the window: sheet tabs, column letters, row numbers and a frozen
+        first row for `.xlsx`, `.xlsm`, `.ods`, CSV (separator sniffed)
+        and TSV; a zip's listing from its central directory; text and
+        code with line numbers, colour and find. The worker downloads at
+        most 20 MB into memory and parses on a blocking thread
+        (`src/viewer.rs`). Caps: 50,000 rows, 500 columns, 64 sheets, 2
+        million cells, 1,000 characters a cell, 200,000 lines of 5,000
+        characters, 10,000 entries listed (100,000 declared at most);
+        workbooks are refused past 200 MB unpacked, a ratio of 200 in a
+        part over 1 MB, a part unpacking to more than it declares
+        (measured first), 2 million shared strings, or 4 million cells
+        an `.ods` table's repeats would spell out. Not opened: `.xls`
+        and `.xlsb`, whose calamine readers slice records and reserve
+        memory as the file claims; with `panic = "abort"` one bad file
+        would close the app. Reading them in a child process would
+        make them safe.
 - [ ] **Audio in the app (small–medium).** `rodio` + `symphonia` (aac,
       isomp4, mp3, vorbis, flac, wav; no Opus) with `cpal`; the packages
       need ALSA, the Flatpak `--socket=pulseaudio`.
