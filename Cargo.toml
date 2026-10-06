@@ -86,6 +86,12 @@ chacha20poly1305 = { version = "0.11", default-features = false, features = ["al
 # Spell checking in the composer with the system's Hunspell dictionaries:
 # pure Rust (Helix's), MPL-2.0, two small dependencies.
 spellbook = "0.4.2"
+# Voice clips and sound files play in the app (the `audio` feature).
+# rodio drives the sound device through cpal (ALSA on Linux, so the
+# packages need libasound2) and decodes with symphonia (MPL-2.0, pure
+# Rust): AAC in MP4/M4A, MP3, Ogg Vorbis, FLAC and WAV. Symphonia has no
+# Opus decoder; those open in the system's player.
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp4", "mp3", "vorbis", "flac", "wav"], optional = true }
 
 # Desktop notifications: D-Bus on Linux and the BSDs, the notification
 # center on macOS, toasts on Windows. Elsewhere there are none.
@@ -119,7 +125,7 @@ maintainer = "Yannick de Jong <yannickludodejong@gmail.com>"
 section = "net"
 priority = "optional"
 extended-description = "One window for your Slack workspaces: channels, direct messages, threads, reactions, files and notifications, without Electron."
-depends = "$auto, libxkbcommon0, libegl1, libgl1"
+depends = "$auto, libxkbcommon0, libegl1, libgl1, libasound2"
 recommends = "libwayland-client0, libxkbcommon-x11-0"
 assets = [
     ["target/release/noslacking", "usr/bin/", "755"],
@@ -139,7 +145,7 @@ assets = [
 [package.metadata.generate-rpm]
 auto-req = "auto"
 # By library, so the same package fits Fedora and openSUSE.
-requires = { "libxkbcommon.so.0()(64bit)" = "*", "libEGL.so.1()(64bit)" = "*", "libGL.so.1()(64bit)" = "*" }
+requires = { "libxkbcommon.so.0()(64bit)" = "*", "libEGL.so.1()(64bit)" = "*", "libGL.so.1()(64bit)" = "*", "libasound.so.2()(64bit)" = "*" }
 recommends = { "libwayland-client.so.0()(64bit)" = "*", "libxkbcommon-x11.so.0()(64bit)" = "*" }
 assets = [
     { source = "target/release/noslacking", dest = "/usr/bin/noslacking", mode = "755" },
@@ -157,7 +163,10 @@ assets = [
 ]
 
 [features]
-default = ["highlight", "bundled-emoji"]
+default = ["highlight", "bundled-emoji", "audio"]
+# Plays voice clips and sound files in the app. Without it they open in
+# the system's player, and the build needs no sound libraries.
+audio = ["dep:rodio"]
 # Compiles all of Noto Color Emoji (about 10 MB) into Linux and other Unix
 # builds, for desktops whose emoji font is one fastframe-emoji cannot draw
 # (COLRv1 only, as on Fedora). Without it the app reads
