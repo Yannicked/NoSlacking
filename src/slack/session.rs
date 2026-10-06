@@ -12,12 +12,10 @@
 //! is kept to derive a fresh token from a new cookie later. This uses
 //! endpoints that Slack does not document.
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::cookie::Jar;
-
 use super::client::{self, SlackError};
+use super::cookies::{self, Cookies};
 use super::{Token, types};
 
 /// Who a derived token belongs to.
@@ -103,22 +101,16 @@ fn looks_logged_in(html: &str) -> bool {
     html.contains("\"api_token\"") || html.contains("\"team_id\"") || html.contains("boot_data")
 }
 
-/// A client whose cookie jar carries the `d` cookie across the boot page's
-/// redirect chain (`/` → `/ssb/redirect`), which a raw header would not
-/// survive.
-fn seeded_client(cookie: &str) -> Result<reqwest::Client, SlackError> {
-    let jar = Arc::new(Jar::default());
-    let url = "https://slack.com"
-        .parse::<reqwest::Url>()
-        .map_err(|e| SlackError::Network(e.to_string()))?;
-    jar.add_cookie_str(&format!("d={cookie}; Domain=.slack.com; Path=/"), &url);
-    super::net::builder()
+/// A browser-like client for the session's API calls. The boot page goes
+/// through [`cookies::client`] instead, which leaves redirects to
+/// [`cookies::get`] so the `d` cookie survives the redirect chain
+/// (`/` → `/ssb/redirect`), which reqwest drops on a change of host.
+fn api_client() -> Result<reqwest::Client, SlackError> {
+    Ok(super::net::builder()
         .user_agent(BROWSER_UA)
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(60))
-        .cookie_provider(jar)
-        .build()
-        .map_err(|e| SlackError::Network(e.to_string()))
+        .build()?)
 }
 
 /// Why a cookie did not give a session, for the interface to word.
@@ -147,10 +139,13 @@ pub async fn derive(cookie: &str, workspace_url: &str) -> Result<SessionSignIn, 
         return Err(SlackError::Session(Refusal::NotSlack));
     };
     let workspace_url = workspace_url.as_str();
-    let http = seeded_client(&cookie)?;
+    let boot =
+        reqwest::Url::parse(workspace_url).map_err(|e| SlackError::Network(e.to_string()))?;
     // The boot page returns HTTP 403 while still carrying the token, so the
-    // body is what matters, not the status.
-    let response = http.get(workspace_url).send().await?;
+    // body is what matters, not the status. Cookies the redirects set ride
+    // along to the next hop, as a browser's would.
+    let mut jar = Cookies::with_d(&cookie);
+    let response = cookies::get(&cookies::client(BROWSER_UA)?, boot, &mut jar).await?;
     let status = response.status();
     let body = response.text().await?;
     log::debug!(
@@ -166,7 +161,7 @@ pub async fn derive(cookie: &str, workspace_url: &str) -> Result<SessionSignIn, 
         })
     })?;
     let session = Token::session(token, cookie, workspace_url);
-    let client = client::Client::new(http, session.clone());
+    let client = client::Client::new(api_client()?, session.clone());
     let test: types::AuthTest = client.call("auth.test", &[]).await?;
     Ok(SessionSignIn {
         team_id: test.team_id,

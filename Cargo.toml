@@ -21,9 +21,7 @@ name = "noslacking"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
 thiserror = "2"
-clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
@@ -33,7 +31,7 @@ directories = "6"
 keyring-core = "1"
 # The whole UI. glow keeps the binary and the dependency tree small; a chat
 # client draws nothing wgpu would help with.
-eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "links", "wayland", "x11", "persistence"] }
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "wayland", "x11", "persistence"] }
 egui = "0.36"
 egui_extras = { version = "0.36", features = ["image", "svg", "gif", "webp"] }
 # Slack serves avatars as JPEG and PNG, custom emoji as PNG and GIF, and
@@ -56,7 +54,7 @@ fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
 # TLS stack and builds without OpenSSL on every platform.
 # socks and system-proxy: Settings → Network (the system's proxy settings
 # on macOS and Windows as well as the environment, or a SOCKS5 proxy).
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "http2", "multipart", "cookies", "stream", "socks", "system-proxy"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "http2", "multipart", "stream", "socks", "system-proxy"] }
 # Already under reqwest: its proxy matcher, so the WebSockets pick the same
 # proxy as every HTTP request.
 hyper-util = { version = "0.1.21", default-features = false, features = ["client-proxy", "client-proxy-system"] }
@@ -71,7 +69,7 @@ sha1 = "0.11"
 sha2 = "0.11"
 base64 = "0.22"
 rand = "0.10"
-urlencoding = "2"
+percent-encoding = "2"
 open = "5"
 jiff = "0.2"
 # The native file picker for uploads.
@@ -99,11 +97,16 @@ rodio = { version = "0.22.2", default-features = false, features = ["playback", 
 # ahead of time and checked in (src/huddle_audio/chime/), so the build
 # needs no protoc, only prost's derive.
 prost = { version = "0.14", default-features = false, features = ["derive", "std"], optional = true }
-# WebRTC, sans-IO, with its default crypto, aws-lc-rs (its DTLS, dimpl,
-# makes certificates with rcgen on aws-lc-rs whichever backend is chosen,
-# so the "pure Rust" one would build aws-lc too). aws-lc-sys builds with
-# the C compiler ring already needs, no CMake; NASM on Windows, below.
-str0m = { version = "0.24.1", default-features = false, features = ["aws-lc-rs"], optional = true }
+# WebRTC, sans-IO, with OpenSSL's DTLS on every platform. Chime's media
+# servers refuse the handshake of str0m's own DTLS, dimpl (alert 40,
+# handshake_failure), which every other str0m backend (aws-lc-rs,
+# rust-crypto, apple-crypto, wincrypto) uses; OpenSSL's was taken. Linux
+# links the system's OpenSSL (libssl-dev to build); macOS and Windows
+# build it from source, below.
+str0m = { version = "0.24.1", default-features = false, features = ["openssl"], optional = true }
+# The certificate Chime's media server shows, read for the log only
+# (str0m-openssl's own OpenSSL, so no crate is added).
+openssl = { version = "0.10.78", optional = true }
 # Opus in pure Rust, without unsafe code or a C library to find.
 opus-decoder = { version = "0.1.1", optional = true }
 # The TURN client's long-term credential: HMAC-SHA1 (sha1 is above) keyed
@@ -146,21 +149,19 @@ quick-xml = { version = "0.41", default-features = false }
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly", target_os = "macos", windows))'.dependencies]
 notify-rust = "4.18"
 
+# For huddle-audio: OpenSSL built from source with the app (openssl-src;
+# Perl and a C compiler, which the CI runners have), as macOS and Windows
+# have no OpenSSL to link. The same str0m as above, one feature more.
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+str0m = { version = "0.24.1", default-features = false, features = ["openssl", "vendored"], optional = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store = { version = "1.1", default-features = false }
-# For huddle-audio: aws-lc's x86-64 assembly comes prebuilt, so a Windows
-# build needs no NASM. Only switches a feature on str0m's own aws-lc-sys.
-aws-lc-sys = { version = "0.45", default-features = false, features = ["prebuilt-nasm"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# For huddle-openssl: OpenSSL's own DTLS in place of dimpl. Chime's media
-# servers refused dimpl's ClientHello (alert 40, handshake_failure); its
-# DTLS 1.2 offers only ECDHE_ECDSA suites, OpenSSL also the RSA and CBC
-# ones browsers offer. Linux only while it is tried out.
-str0m-openssl = { version = "0.6.0", optional = true }
 # The unread count on the launcher icon (the LauncherEntry signal). Already
 # in the tree for the keyring and accessibility; same version.
 zbus = { version = "5.19", default-features = false, features = ["blocking-api"] }
@@ -233,12 +234,10 @@ audio = ["dep:rodio"]
 bundled-emoji = []
 # Sample data and the screenshot flag; never part of a release build.
 demo = []
-# Listening to huddles (src/huddle_audio.rs): a spike, off until it is
-# proven against Slack. Adds `noslacking --huddle-probe`.
-huddle-audio = ["audio", "dep:prost", "dep:str0m", "dep:aws-lc-sys", "dep:opus-decoder", "dep:hmac", "dep:md-5", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:tracing", "tokio/signal", "dep:opus-rs", "dep:sonora", "dep:sonora-agc2", "dep:sonora-common-audio", "dep:sonora-simd"]
-# Huddle audio with OpenSSL's DTLS (Linux, needs its headers): a trial of
-# whether Chime takes OpenSSL's handshake where it refused dimpl's.
-huddle-openssl = ["huddle-audio", "dep:str0m-openssl"]
+# Listening and talking in huddles (src/huddle_audio.rs): off until it
+# has been tried more widely. Adds `noslacking --huddle-probe`. Needs
+# OpenSSL's headers on Linux (libssl-dev, openssl-devel).
+huddle-audio = ["audio", "dep:prost", "dep:str0m", "dep:openssl", "dep:opus-decoder", "dep:hmac", "dep:md-5", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:tracing", "tokio/signal", "dep:opus-rs", "dep:sonora", "dep:sonora-agc2", "dep:sonora-common-audio", "dep:sonora-simd"]
 # Colours code blocks that name their language (```` ```rust ````). Our own
 # small lexer, a few kilobytes; turn it off for plain code blocks.
 highlight = []

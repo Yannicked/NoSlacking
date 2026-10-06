@@ -19,6 +19,8 @@ pub enum When {
     EnterSends,
     /// With "Enter sends" off.
     EnterNewLine,
+    /// In builds that listen to huddles (the `huddle-audio` feature).
+    HuddleAudio,
 }
 
 /// One line of the sheet.
@@ -146,6 +148,14 @@ pub const GROUPS: &[Group] = &[
             line("Keyboard shortcuts", &["Cmd+Slash"]),
             line("Settings", &["Cmd+Comma"]),
             Shortcut {
+                when: When::HuddleAudio,
+                ..line("Leave the huddle", &["Cmd+Shift+H"])
+            },
+            Shortcut {
+                when: When::HuddleAudio,
+                ..line("Mute / unmute the microphone", &["Cmd+Shift+Space"])
+            },
+            Shortcut {
                 also: &["Cmd+Shift+Equals", "Cmd+Plus"],
                 ..line("Zoom in / out", &["Cmd+Equals", "Cmd+Minus"])
             },
@@ -157,14 +167,6 @@ pub const GROUPS: &[Group] = &[
             line("Open what is picked", &["Enter"]),
             line("Close the thread or the open dialog", &["Escape"]),
         ],
-    },
-    #[cfg(feature = "huddle-audio")]
-    Group {
-        title: "Huddles",
-        shortcuts: &[line(
-            "Mute / unmute the microphone",
-            &[super::huddle_mic::TOGGLE],
-        )],
     },
 ];
 
@@ -184,6 +186,7 @@ pub fn shown(group: &Group, enter_sends: bool) -> impl Iterator<Item = &Shortcut
         When::Always => true,
         When::EnterSends => enter_sends,
         When::EnterNewLine => !enter_sends,
+        When::HuddleAudio => cfg!(feature = "huddle-audio"),
     })
 }
 
@@ -466,12 +469,6 @@ mod tests {
                 if path.is_dir() {
                     walk(&path, out);
                 } else if path.extension().is_some_and(|e| e == "rs") {
-                    // Compiled only with huddle audio, and listed only then.
-                    if !cfg!(feature = "huddle-audio")
-                        && path.file_name().is_some_and(|n| n == "huddle_mic.rs")
-                    {
-                        continue;
-                    }
                     let text = std::fs::read_to_string(&path).expect("read file");
                     let code = text.split("#[cfg(test)]").next().unwrap_or_default();
                     out.push((path.display().to_string(), code.to_owned()));

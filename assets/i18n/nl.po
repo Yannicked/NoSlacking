@@ -2592,9 +2592,6 @@ msgstr "Deelnemen…"
 msgid "Leave the huddle"
 msgstr "De huddle verlaten"
 
-msgid "Could not listen to the huddle: {error}"
-msgstr "Kon niet naar de huddle luisteren: {error}"
-
 msgid "the sound device could not be opened"
 msgstr "het geluidsapparaat kon niet worden geopend"
 
@@ -2618,6 +2615,53 @@ msgstr "de geluidsverbinding is verbroken"
 
 msgid "Listen here"
 msgstr "Hier luisteren"
+
+# The call bar, while a huddle plays here.
+msgid "Listening in #{channel}"
+msgstr "Luisteren in #{channel}"
+
+msgid "Listening with {name}"
+msgstr "Luisteren met {name}"
+
+# How long you have been listening, as a clock (2:14).
+msgid "Live · {time}"
+msgstr "Live · {time}"
+
+msgid "Could not listen: {error}"
+msgstr "Kon niet luisteren: {error}"
+
+msgid "The huddle ended"
+msgstr "De huddle is afgelopen"
+
+msgid "Everyone else left the huddle"
+msgstr "Iedereen anders heeft de huddle verlaten"
+
+msgid "{name} (you, listening here)"
+msgstr "{name} (jij, luistert hier)"
+
+msgid "{name} (you, talking here)"
+msgstr "{name} (jij, praat hier)"
+
+# A huddle participant whose Slack account is not known.
+msgid "Someone"
+msgstr "Iemand"
+
+msgid "Open in Slack, to talk"
+msgstr "Openen in Slack, om te praten"
+
+msgid "Leave the huddle ({shortcut})"
+msgstr "De huddle verlaten ({shortcut})"
+
+msgid "{name}, speaking"
+msgstr "{name}, praat"
+
+msgid "{name}, muted"
+msgstr "{name}, gedempt"
+
+msgid "{count} more person"
+msgid_plural "{count} more people"
+msgstr[0] "nog {count} persoon"
+msgstr[1] "nog {count} personen"
 
 # Talking in a huddle: the microphone opens only when you unmute.
 msgid "Unmute"
@@ -2647,9 +2691,6 @@ msgstr "er kon geen microfoon worden geopend"
 msgid "no microphone could be opened; check that Windows' privacy settings let apps use it"
 msgstr "er kon geen microfoon worden geopend; kijk of de privacyinstellingen van Windows apps de microfoon laten gebruiken"
 
-# The shortcut sheet's heading for huddles, and its line.
-msgid "Huddles"
-msgstr "Huddles"
-
+# The shortcut sheet's line for it.
 msgid "Mute / unmute the microphone"
 msgstr "Microfoon dempen / dempen opheffen"

@@ -713,6 +713,19 @@ engineering, as for the rest of the session sign-in.
         `rtm.connect` socket and showed its card, so the flannel gateway
         is not needed for invitations. With `huddle-audio` the card offers
         Listen here (opens the conversation and listens) and Open in Slack.
+      - Seen on the same socket in a real huddle: `huddle_invite_cancel`
+        (the call stopped ringing: its card goes, and on Linux its
+        notification; its fields are not documented, so the room is read
+        from `call_id`, `room_id`, `room` or `huddle`, the conversation
+        from `channel_id` or `channel`, and the keys are logged when none
+        is there), `sh_room_update` (now read from the full `room` beside
+        a short `huddle` object, or by room as the whole participant
+        list; a room that names no participants ends nothing), and
+        `user_huddle_changed`, `activity`, `badge_counts_updated`,
+        `search_recents`, ignored quietly. To check against a real log:
+        that `huddle_invite_cancel` carries one of those fields, and that
+        `sh_room_update` updates the header's count (the log names the
+        keys of one not understood).
       - Was unverified: `sh_room_*` reach `rtm.connect` sockets (slack-go's
         RTM maps them), but no open-source `rtm.connect` client handles
         `huddle_invite`; HuddleFM hears it on the flannel gateway
@@ -721,87 +734,111 @@ engineering, as for the rest of the session sign-in.
       - Skipped "Open in Slack app": after a browser sign-in NoSlacking
         stays the `slack://` handler, so `slack://channel?…` would come
         straight back here. It needs the claim given back first.
-- [ ] **Listen-only spike (1–2 weeks), behind a `huddle-audio` feature:**
+- [x] **Listen-only (1–2 weeks), behind a `huddle-audio` feature:**
       join, receive Chime's mixed audio and play it (`str0m` or
       `webrtc-rs`, `opus`, `cpal`), to prove the path and judge echo
       cancellation (`webrtc-audio-processing`) before going further.
-      - Built, off by default, unproven against Slack
-        (`src/huddle_audio/`): `rooms.join` → `ChimeJoin` (join token
-        redacted); Chime signaling (the vendored Apache-2.0 proto,
+      - Works against Slack (2026-10-06): a live huddle was heard in the
+        app, 0 late or concealed frames. The path, as it ran:
+        `rooms.join` → Chime signaling JOIN/JOIN_ACK → TURN relay over
+        UDP → INDEX → SUBSCRIBE/SUBSCRIBE_ACK → ICE → DTLS (OpenSSL's) →
+        SRTP_AEAD_AES_256_GCM → Opus. Then AUDIO_STREAM_ID_INFO (one
+        stream per attendee, external user ids `TEAM-ROOM-USER`, ours
+        with a device suffix), AUDIO_METADATA several times a second,
+        INDEX again as people came and went (participants=2, then 1).
+        Answered by the probe's open questions: `regions` takes one Chime
+        region (the nearest, `eu-central-1` here); `free_willy` is Chime's
+        PascalCase; Chime takes `str0m`'s rewritten offer, the muted
+        SUBSCRIBE and `receive_stream_ids: [0]`; `rooms.leave` is not a
+        method Slack takes (`invalid_arguments`), so leaving is Chime's
+        LEAVE alone, as with HuddleFM, and the guess is gone.
+      - DTLS: Chime's media servers refused dimpl's ClientHello (alert
+        40, handshake_failure) and took OpenSSL's. Every other `str0m`
+        backend uses dimpl (`wincrypto` always does, and `apple-crypto`
+        depends on it), so `huddle-audio` now uses OpenSSL on every
+        platform: the system's on Linux (`libssl-dev` to build), built
+        from source (`vendored`, openssl-src: Perl, and NASM where the
+        runner has it) on macOS and Windows, unproven there until CI
+        builds it. aws-lc, rcgen and the RustCrypto duplicates left the
+        tree. The log names the DTLS version, the SRTP profile and the
+        media server's key (`src/huddle_audio/dtls.rs`); str0m-openssl
+        does not hand out the cipher suite. That key and a ClientHello
+        capture are what patching dimpl upstream would start from.
+      - Built (`src/huddle_audio/`): `rooms.join` → `ChimeJoin` (join
+        token redacted); Chime signaling (the vendored Apache-2.0 proto,
         compiled ahead of time by `tools/chime-protogen` with `protox`,
-        so no `protoc`; JOIN, JOIN_ACK's TURN credentials, INDEX,
-        SUBSCRIBE/SUBSCRIBE_ACK, pings, AUDIO_STATUS, presence, LEAVE) as
-        a state machine; our own TURN client (Allocate with the long-term
-        credential, CreatePermission, Send/Data; UDP, then TLS, then TCP);
-        `str0m` with the relay as its only candidate; Opus through a
-        jitter buffer (60 ms, concealment, trimming past 300 ms) to the
-        default device at the system's volume. Muted: SUBSCRIBE says so
-        and only Opus silence goes out. In the app: "Listen"
-        beside a browser sign-in's "Huddle · N people", then "Joining…" and
-        "Leave"; one huddle at a time, left on sign-out and on quit (the
-        app waits up to 4 s for LEAVE_ACK).
+        so no `protoc`) as a state machine; our own TURN client (Allocate
+        with the long-term credential, CreatePermission, Send/Data; UDP,
+        then TLS, then TCP); `str0m` with the relay as its only
+        candidate; Opus through a jitter buffer (60 ms, concealment,
+        trimming past 300 ms) to the default device at the system's
+        volume. Muted: SUBSCRIBE says so and only Opus silence goes out.
+      - In the app: "Listen" beside a browser sign-in's "Huddle · N
+        people", or Listen here on an invitation. A call bar at the foot
+        of the sidebar (and of the settings page) shows the huddle from
+        joining until it is left: where (a click opens the conversation),
+        Joining…, Live with the time, or why it failed (Try again,
+        Close); who is in it, the speaking ringed and the muted marked
+        (Chime's attendees by the `U…` of their external id, speaking from
+        AUDIO_METADATA, sent to the window at most four times a second
+        and only when it changes); Leave (also Ctrl+Shift+H) and Open in
+        Slack, to talk. One huddle at a time; left on sign-out and on quit
+        (the app waits up to 4 s for LEAVE_ACK), by itself when no one
+        else has been in it for a minute (INDEX and the streams agree)
+        with "Everyone else left the huddle", and when Chime ends the
+        meeting (close 4410, audio status 410) with "The huddle ended".
+        `--demo --demo-view listening` shows the bar.
+      - To check in a real huddle: the speaking ring follows who talks
+        (Chime's volume is read as decibels below full scale, 0 the
+        loudest, silent from 42 as in its JS SDK; if it rings the silent,
+        that reading is upside down); the bar's faces match the header's
+        count; leaving alone after a minute; "The huddle ended" when the
+        last other person ends it.
       - Checked offline: frame round trips, the join as data, RFC 5769's
         STUN vectors, the SDP both ways through a second `str0m`, ICE,
         DTLS and Opus through the relay against a pretend TURN server,
-        and (ignored by default, loopback sockets) the whole session
-        against a pretend Chime: `cargo test --all-features -- --ignored
-        loopback`.
+        the roster and alone decisions, and (ignored by default, loopback
+        sockets) the whole session against a pretend Chime: `cargo test
+        --all-features -- --ignored loopback`.
       - WebRTC: **`str0m`**. Sans-IO, so the TURN relay is ours to put
         under it, and its SDP and ICE are small enough to read. Neither it
         nor `webrtc-rs` (0.21, now on its sans-IO `rtc` crates) relays
         over TCP or TLS (`webrtc-rs` skips non-UDP TURN URLs), and a TURN
         client is a few hundred lines with RFC test vectors, so that
-        decided it. Crypto: its default, aws-lc-rs. Its "pure Rust"
-        backend still builds aws-lc (dimpl makes its certificate with
-        rcgen on aws-lc-rs), so the choice buys nothing; aws-lc-sys builds
-        with the C compiler `ring` already needs, no CMake, and with
-        prebuilt NASM objects on Windows (`prebuilt-nasm`).
+        decided it.
       - Opus: **`opus-decoder`** (pure Rust, `forbid(unsafe_code)`, no C,
         MIT/Apache, passes the 12 RFC 8251 vectors by its own account,
         but young: 0.1, March 2026). libopus through the `opus` crate
         builds its bundled C with CMake on Windows and macOS (or needs
         the system's library on Linux, which the Flatpak runtime has);
-        it is the fallback if the decoder sounds wrong.
-      - Cost when on: about 55 more crates (aws-lc, str0m, dimpl, prost),
-        several duplicates of older RustCrypto versions (digest 0.10,
-        sha1/sha2 0.10, hmac 0.12, aes 0.8, rand 0.9, itertools 0.14);
-        `cargo deny` passes as is. The default build pulls none of it.
-        The release binary grows from 46.3 to 52.7 MB (Linux, x86-64).
-      - Try it: `cargo run --release --features huddle-audio --
-        --huddle-probe TEAM CHANNEL [--seconds 30]
+        it is the fallback if the decoder sounds wrong. It has not.
+      - Cost when on: str0m, str0m-openssl, OpenSSL, prost and the Opus
+        decoder; `cargo deny` passes as is. The default build pulls none
+        of it, and no release (`.tar.gz`, `.deb`, `.rpm`, Flatpak, macOS,
+        Windows) enables the feature. The Linux x86-64 release binary is
+        49.5 MB with it (47.2 MiB; libssl and libcrypto linked from the
+        system), against 52.7 MB with aws-lc and dimpl before.
+      - Try it from the command line: `cargo run --release --features
+        huddle-audio -- --huddle-probe TEAM CHANNEL [--seconds 30]
         [--huddle-region REGION]`, with the browser sign-in saved for
-        TEAM. Without `--huddle-region` the region `rooms.join` is asked
-        for is the nearest one AWS names at
-        `nearest-media-region.l.chime.aws` (the SDK demo's
-        `getNearestMediaRegion`; no Slack credentials, 2 s at most,
-        validated, kept for the run), else `us-east-1`; the log says
-        which and why. It joins (and so starts one, if none is going on: use a
-        quiet channel or a DM), plays for N seconds, leaves (also on
-        Ctrl+C), and ends with a summary and "probe: OK" or "probe:
-        FAILED at <step>". More detail: `--verbose`, and
-        `NOSLACKING_LOG=noslacking=debug,str0m=debug,dimpl=debug,info` for
-        ICE and DTLS. The log is also in the state folder's
-        `noslacking.log`.
-      - Open questions, for the probe to answer: whether `regions` takes
-        one Chime region name, as asked here (HuddleFM passes its config's
-        media region; the nearest region is AWS's own answer, but whether
-        Slack wants that or a list is unknown); whether `free_willy`'s keys are Chime's PascalCase (read
-        in any case here); whether `rooms.leave` exists (the probe calls
-        it with `channel_id` and `room_id`, a guess, and logs the answer;
-        HuddleFM only sends Chime's LEAVE); whether Chime takes `str0m`'s
-        offer (origin line and media ids rewritten to a browser's, but
-        its own extmaps, `a=ice-options:trickle` and H.264 list), the
-        muted SUBSCRIBE (`audio_muted`, which HuddleFM leaves false) and
-        HuddleFM's `receive_stream_ids: [0]`; whether aws-lc's DTLS 1.2
-        agrees with Chime's media servers; and how Chime's own clock
-        drifts against the device's (the jitter buffer trims, never
-        stretches). Not done: reconnecting, the TURN control URL (JOIN_ACK
-        carries the credentials in SDK 3.31), TURN through a proxy,
-        zlib-compressed SDP.
-- [ ] **Two-way audio (4–8 weeks more, plus 2–4 hardening)**, only if the
-      spike holds up: microphone with echo cancellation and noise
-      suppression, mute, devices, who is talking, reconnects. Video and
-      screen viewing after that (+4–8 weeks).
+        TEAM. Without `--huddle-region` the region is the nearest one AWS
+        names at `nearest-media-region.l.chime.aws`, else `us-east-1`. It
+        joins (and so starts one, if none is going on: use a quiet channel
+        or a DM), plays for N seconds, leaves (also on Ctrl+C), and ends
+        with a summary and "probe: OK" or "probe: FAILED at <step>". More
+        detail: `--verbose`, and
+        `NOSLACKING_LOG=noslacking=debug,str0m=debug,info` for ICE and
+        DTLS. The log is also in the state folder's `noslacking.log`.
+      - Not done: reconnecting, the TURN control URL (JOIN_ACK carries
+        the credentials in SDK 3.31), TURN through a proxy,
+        zlib-compressed SDP, how Chime's clock drifts against the
+        device's over a long call (the jitter buffer trims, never
+        stretches).
+- [ ] **Two-way audio (4–8 weeks more, plus 2–4 hardening)**, next now
+      that listening works: the microphone (an Opus encoder, the SUBSCRIBE
+      unmuted, Chime's AUDIO_CONTROL for mute), echo cancellation and
+      noise suppression, devices, reconnects. Who is talking is done (the
+      call bar). Video and screen viewing after that (+4–8 weeks).
       - Built, unproven against Slack (steps 1 and 2; also `huddle-audio`):
         microphone → 48 kHz mono → WebRTC's audio processing → Opus → the
         audio track we already send silence on. `src/huddle_audio/`:
@@ -822,35 +859,47 @@ engineering, as for the rest of the session sign-in.
         Muting is signalled as the JS SDK does (`DefaultSignalingClient
         .mute`: an AUDIO_CONTROL frame with `muted`, on every mute and
         unmute; SUBSCRIBE carries the state at the time), while silence
-        keeps flowing. In the app: a mute button beside Leave (red while
-        live; Cmd+Shift+Space), joined muted. `--huddle-probe … --send-tone`
-        joins unmuted and sends a quiet 440 Hz tone instead of the
-        microphone, logging what was sent and Chime's RTCP receiver
-        reports every 5 s. The loopback test now has the pretend Chime
-        decode our Opus and hear the mute.
-      - In-band FEC is off: `opus-rs` 0.1.34's VOIP packets with FEC on
-        decode wrong whenever the sound is voiced (a tone, a vowel) in
-        both decoders, so the fault is its encoder's LBRR. Turn it on
-        when fixed upstream; `encoded_speech_decodes_back_with_both_decoders`
-        shows it. Playing stays on `opus-decoder`: `opus-rs`'s decoder
-        conceals a loss but cannot decode FEC.
+        keeps flowing. In the app: a mute button in the call bar beside
+        Leave (red while live; Cmd+Shift+Space), joined muted; your own
+        face there shows the microphone as it really is.
+        `--huddle-probe … --send-tone` joins unmuted and sends a quiet
+        440 Hz tone instead of the microphone, logging what was sent and
+        Chime's RTCP receiver reports every 5 s. The loopback test has the
+        pretend Chime decode our Opus and hear the mute.
+      - In-band FEC is off, an upstream `opus-rs` bug to report: with
+        0.1.34, `OpusEncoder::new(48000, 1, Application::Voip)`,
+        `use_inband_fec = true` and `packet_loss_perc = 10`, one second of
+        a 0.3 sine at 440 Hz decodes to 3.9 times the energy put in (5.2
+        times for a 120 Hz harmonic "vowel"; 2.7 to 3.3 with CBR; 1.8 to
+        4.6 across 16–40 kbit/s), frame levels swinging from -1 to -50
+        dBFS where -14 went in. `opus-decoder` and `opus-rs`'s own
+        decoder agree sample for sample, so the encoder's LBRR is at
+        fault. With FEC off: 0.95 to 0.98, as it should be; white noise
+        is fine either way. Turn it on when fixed;
+        `encoded_speech_decodes_back_with_both_decoders` shows it.
+        Playing stays on `opus-decoder`: `opus-rs`'s decoder conceals a
+        loss but cannot decode FEC.
       - Cost: `opus-rs` (no dependencies; its unsafe is SIMD and
         unchecked indexing), `sonora` and its six crates (unsafe only in
         SIMD behind runtime CPU detection), `derive_more`; all
         BSD-3-Clause or MIT/Apache, `cargo deny` passes. The default build
-        is unchanged. With `huddle-audio`, the release binary grows from
-        49.3 to 54.0 MB (Linux, x86-64).
+        gains no crate. With `huddle-audio`, talking added 4.6 MB to the
+        release binary (49.3 to 54.0 MB, Linux x86-64, measured before
+        the move to OpenSSL).
       - Packaging: macOS's Info.plist has `NSMicrophoneUsageDescription`
         (ad-hoc signed without the hardened runtime, so no entitlement);
         the Flatpak's `--socket=pulseaudio` carries recording too; on
         Windows, a refused microphone says to check the privacy settings.
-      - Try it: the probe with `--send-tone` (above) first, then the app
-        with headphones (no echo path; is our voice clear, the level
-        right?), then without (does the far end hear itself back?).
+      - Try it: first `cargo run --release --features huddle-audio --
+        --huddle-probe TEAM CHANNEL --seconds 60 --send-tone` (the others
+        should hear a quiet 440 Hz tone; the log shows what was sent and
+        Chime's receiver reports), then `cargo run --release --features
+        huddle-audio`, Listen and Unmute: with headphones (is the voice
+        clear, the level right?), then without (does the far end hear
+        itself back?).
       - Not done: choosing the input device (the system's default for
-        now), a level meter, reconnects, the far end's speaking state,
-        a microphone that fails while open (it logs and goes quiet; mute
-        and unmute again).
+        now), a level meter, reconnects, a microphone that fails while
+        open (it logs and goes quiet; mute and unmute again).
 
 ## Media and file previews in the app (researched 2026-10-06)
 

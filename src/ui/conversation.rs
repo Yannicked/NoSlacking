@@ -228,15 +228,6 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                         huddles.listening.as_ref(),
                         actions,
                     );
-                    // For now beside Leave; its place is the call bar.
-                    #[cfg(feature = "huddle-audio")]
-                    if let Some(listening) = huddles.listening.as_ref().filter(|l| {
-                        l.live && l.team == workspace.info.team_id && l.channel == conversation.id
-                    }) && let Some(action) =
-                        super::huddle_mic::mute_button(ui, &palette, listening.mic)
-                    {
-                        actions.push(Action::Huddle(crate::huddles::Action::Microphone(action)));
-                    }
                 });
             });
         });

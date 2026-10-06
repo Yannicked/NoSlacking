@@ -316,6 +316,13 @@ pub enum Event {
         room: String,
         from: String,
     },
+    /// A call stopped ringing (`huddle_invite_cancel`): the caller hung
+    /// up, or someone else answered. Slack's fields for it are not
+    /// documented, so either may be missing.
+    HuddleInviteCancelled {
+        channel: Option<String>,
+        room: Option<String>,
+    },
     /// A huddle changed, known only by its room.
     HuddleRoom {
         room: String,
@@ -778,6 +785,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
         }
         // Taken by `huddles::handle` above.
         Event::HuddleInvite { .. }
+        | Event::HuddleInviteCancelled { .. }
         | Event::HuddleRoom { .. }
         | Event::HuddleChecked { .. }
         | Event::InviteDeclined { .. }

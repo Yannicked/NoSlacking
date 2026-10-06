@@ -1,4 +1,4 @@
-//! Listening to a huddle: the spike behind the `huddle-audio` feature.
+//! Listening to a huddle: the `huddle-audio` feature.
 //!
 //! A huddle is an Amazon Chime meeting. `rooms.join` (a browser session's
 //! method, like the rest of [`crate::huddles`]) hands out the meeting's
@@ -19,7 +19,8 @@
 //! AUDIO_CONTROL frame. `probe` runs the whole path from the command line
 //! (`noslacking --huddle-probe`, with `--send-tone` to be heard without
 //! talking) so it can be tried against a real huddle and its log sent
-//! back. See TODO.md for what is proven.
+//! back. Listening has been heard working against Slack, talking not yet;
+//! what was checked and what is next is in TODO.md.
 //!
 //! Secrets: the join token and the TURN password never reach the log; the
 //! types holding them print `<redacted>`. Chime's URLs are logged by host
@@ -28,6 +29,7 @@
 #![warn(missing_docs)]
 
 pub mod chime;
+pub mod dtls;
 pub mod encoder;
 pub mod jitter;
 pub mod join;
@@ -36,6 +38,7 @@ pub mod microphone;
 pub mod probe;
 pub mod processing;
 pub mod region;
+pub mod roster;
 pub mod sdp;
 pub mod signaling;
 pub mod speaker;

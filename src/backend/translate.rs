@@ -276,6 +276,12 @@ pub(super) fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> 
                 }));
             }
         }
+        // A browser session's socket also carries what Slack's own client
+        // keeps for its activity badge, counts and search box, none of
+        // which shows here. `user_huddle_changed` is a person's "in a
+        // huddle" mark on their profile; the model keeps no such mark,
+        // as who is in a huddle comes from the `sh_room_*` events.
+        "activity" | "badge_counts_updated" | "search_recents" | "user_huddle_changed" => {}
         _ => match super::people::translate(event) {
             Some(event) => out.push(Translated::Event(Event::People { team, event })),
             None => log::debug!("unhandled event {kind}"),

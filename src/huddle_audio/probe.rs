@@ -242,18 +242,9 @@ async fn probe(
     } else {
         (None, None)
     };
-    let (report, result) = media::listen(&joined, feed, uplink, stopped, None).await;
+    let (report, result) = media::listen(&joined, feed, uplink, stopped, None, None).await;
     drop(tone);
     timer.abort();
-
-    // Slack learns of the leave from Chime; this asks it as well and logs
-    // what it says, since no source shows the method.
-    if let Some(call) = &joined.call_id {
-        match join::leave(&client, &options.channel, call).await {
-            Ok(()) => log::info!("slack: rooms.leave: ok"),
-            Err(error) => log::info!("slack: rooms.leave: {error}"),
-        }
-    }
 
     log::info!(
         "summary: ended: {}",

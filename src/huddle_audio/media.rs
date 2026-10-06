@@ -1,9 +1,8 @@
 //! The listening session: signaling, the TURN relay and the WebRTC peer,
 //! driven together on one task.
 //!
-//! WebRTC is `str0m`: sans-IO like the TURN client, with its default
-//! crypto (aws-lc-rs; DTLS 1.2 through `dimpl`), so no OpenSSL on any
-//! platform; aws-lc builds with the C compiler `ring` already needs. It
+//! WebRTC is `str0m`: sans-IO like the TURN client, with OpenSSL's DTLS
+//! and SRTP ([`super::dtls`]), the one DTLS Chime was seen to take. It
 //! gathers nothing itself; the only local candidate is the TURN relay
 //! ([`super::turn`]), as Chime reaches media only through one. What
 //! `str0m` sends from the relay's address goes to the TURN server as a
@@ -35,7 +34,9 @@ use str0m::{Candidate, Event as RtcEvent, IceConnectionState, Input, Output, Rtc
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::chime::{self, FrameType};
+use super::dtls;
 use super::join::ChimeJoin;
+use super::roster::{self, Roster, Voices};
 use super::sdp::{self, Mids};
 use super::signaling::{Ending, Handshake, Incoming, Socket, Step, TurnCredentials};
 use super::speaker::Feed;
@@ -117,6 +118,9 @@ pub struct Report {
     pub audio_bytes: u64,
     /// The most attendees Chime listed at once.
     pub most_attendees: usize,
+    /// Whether it ended because the meeting did: Chime's close 4410 or
+    /// its audio status 410. Not a failure; the huddle is over.
+    pub meeting_ended: bool,
     /// Opus frames sent from the microphone (or the probe's tone).
     pub sent_frames: u64,
     /// Their bytes.
@@ -271,15 +275,6 @@ async fn open_relay(server: &Server, turn: &TurnCredentials) -> Result<Relay, St
     })
 }
 
-/// The DTLS and SRTP crypto: OpenSSL's in the `huddle-openssl` trial on
-/// Linux, else the default (aws-lc-rs, DTLS through dimpl).
-fn crypto() -> str0m::crypto::CryptoProvider {
-    #[cfg(all(feature = "huddle-openssl", target_os = "linux"))]
-    return str0m_openssl::default_provider();
-    #[cfg(not(all(feature = "huddle-openssl", target_os = "linux")))]
-    str0m::crypto::from_feature_flags()
-}
-
 /// The WebRTC peer, its one candidate the relay at `relayed` (reached
 /// from `local`): Opus, and VP8 and H.264 for the video m-line.
 fn new_peer(relayed: SocketAddr, local: SocketAddr) -> Result<Rtc, String> {
@@ -288,7 +283,7 @@ fn new_peer(relayed: SocketAddr, local: SocketAddr) -> Result<Rtc, String> {
         .enable_opus(true, false)
         .enable_vp8(true)
         .enable_h264(true)
-        .set_crypto_provider(Arc::new(crypto()))
+        .set_crypto_provider(Arc::new(dtls::provider()))
         // Brings Chime's RTCP receiver reports on what we send.
         .set_stats_interval(Some(STATS_EVERY))
         .build(Instant::now());
@@ -386,6 +381,12 @@ struct Session<'a> {
     feed: Option<Feed>,
     /// Told once the audio connection is up.
     live: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Told who is in the huddle and speaking, when that changes.
+    roster: Option<tokio::sync::watch::Sender<Roster>>,
+    /// When each attendee was last heard.
+    voices: Voices,
+    /// Chime's head count, from the last INDEX.
+    count: Option<u32>,
     report: Report,
     /// How it ended, once it has.
     over: Option<Result<(), Failure>>,
@@ -456,6 +457,18 @@ impl Session<'_> {
         log::info!("signaling: over: {ending}");
         self.report.ending = Some(ending.to_string());
         if self.over.is_some() {
+            return;
+        }
+        let meeting_ended = matches!(
+            ending,
+            Ending::Closed {
+                code: super::signaling::MEETING_ENDED_CLOSE,
+                ..
+            } | Ending::Audio(chime::AudioStatus::MeetingEnded)
+        );
+        if meeting_ended {
+            self.report.meeting_ended = true;
+            self.over = Some(Ok(()));
             return;
         }
         let stage = match self.handshake_stage() {
@@ -972,11 +985,40 @@ impl Session<'_> {
             }
             self.next_stats = now + STATS_EVERY;
         }
+        // Speaking marks fade even when no frame comes to say so.
+        self.tell_roster(now);
+    }
+
+    /// Tells who is in the huddle and speaking, if that changed.
+    fn tell_roster(&mut self, now: Instant) {
+        let Some(tell) = &self.roster else {
+            return;
+        };
+        let now = roster::roster(
+            self.handshake.attendees(),
+            &self.join.attendee_id,
+            &self.voices,
+            self.count,
+            now,
+        );
+        tell.send_if_modified(|roster| {
+            let changed = *roster != now;
+            if changed {
+                *roster = now;
+            }
+            changed
+        });
     }
 
     /// One frame from Chime.
     async fn on_frame(&mut self, frame: &chime::Frame) {
         self.last_inbound = Instant::now();
+        if let Some(metadata) = &frame.audio_metadata {
+            self.voices.metadata(metadata, self.last_inbound);
+        }
+        if let Some(count) = frame.index.as_ref().and_then(|i| i.num_participants) {
+            self.count = Some(count);
+        }
         let name = chime::type_name(frame);
         *self.report.frames.entry(name).or_default() += 1;
         if quiet(frame) {
@@ -986,6 +1028,7 @@ impl Session<'_> {
         }
         let steps = self.handshake.on_frame(frame, now_ms());
         self.carry(steps).await;
+        self.tell_roster(self.last_inbound);
     }
 
     /// Starts leaving: LEAVE, then up to three seconds for LEAVE_ACK.
@@ -1057,15 +1100,17 @@ async fn mute_change(
 }
 
 /// Listens to the huddle `join` describes until `stop` turns true or the
-/// session ends, feeding the audio to `feed` and telling `live` once the
-/// audio connection is up; talks too, if given an `uplink` (otherwise
-/// muted throughout). Leaves cleanly either way.
+/// session ends, feeding the audio to `feed`, telling `live` once the
+/// audio connection is up and `roster` who is in it whenever that
+/// changes; talks too, if given an `uplink` (otherwise muted
+/// throughout). Leaves cleanly either way.
 pub async fn listen(
     join: &ChimeJoin,
     feed: Option<Feed>,
     uplink: Option<Uplink>,
     mut stop: tokio::sync::watch::Receiver<bool>,
     live: Option<tokio::sync::oneshot::Sender<()>>,
+    roster: Option<tokio::sync::watch::Sender<Roster>>,
 ) -> (Report, Result<(), Failure>) {
     log::info!(
         "signaling: opening {} for attendee {}",
@@ -1129,6 +1174,9 @@ pub async fn listen(
         flowing: false,
         feed,
         live,
+        roster,
+        voices: Voices::default(),
+        count: None,
         report: Report::default(),
         over: None,
     };
@@ -1233,7 +1281,7 @@ mod tests {
         assert!(offer.sdp.contains("opus/48000/2"));
 
         let mut chime = RtcConfig::new()
-            .set_crypto_provider(Arc::new(crypto()))
+            .set_crypto_provider(Arc::new(dtls::provider()))
             .build(Instant::now());
         let server: SocketAddr = "192.0.2.10:3478".parse().expect("an address");
         chime.add_local_candidate(Candidate::host(server, "udp").expect("a candidate"));
@@ -1313,7 +1361,7 @@ mod tests {
         let mut ours = new_peer(relayed, local).expect("a peer");
         let offer = make_offer(&mut ours).expect("an offer");
         let mut chime = RtcConfig::new()
-            .set_crypto_provider(Arc::new(crypto()))
+            .set_crypto_provider(Arc::new(dtls::provider()))
             .build(now);
         chime.add_local_candidate(Candidate::host(server, "udp").expect("a candidate"));
         let answer_sdp = chime
@@ -1539,7 +1587,7 @@ mod tests {
                     offer = offer_inbox.recv() => {
                         let Some((offer, reply)) = offer else { return };
                         let mut rtc = RtcConfig::new()
-                            .set_crypto_provider(Arc::new(crypto()))
+                            .set_crypto_provider(Arc::new(dtls::provider()))
                             .build(Instant::now());
                         rtc.add_local_candidate(Candidate::host(media_server, "udp").expect("a candidate"));
                         let answer = rtc.sdp_api()
@@ -1687,7 +1735,7 @@ mod tests {
             frames: frames_in,
             muted,
         };
-        let (report, result) = listen(&join, None, Some(uplink), stopped, None).await;
+        let (report, result) = listen(&join, None, Some(uplink), stopped, None, None).await;
         drop(tone);
         assert_eq!(result, Ok(()), "{report:?}");
         assert_eq!(report.ending.as_deref(), Some("left"));

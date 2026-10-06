@@ -350,6 +350,17 @@ pub(super) fn room(room: &Value) -> Option<(Vec<String>, Option<people::Huddle>)
     Some((strings("channels"), huddle))
 }
 
+/// Whether a room object says who is in it, or that it ended: anything
+/// less is a partial update, which must not be read as an empty huddle.
+pub(super) fn says_who_or_ended(room: &Value) -> bool {
+    room.get("participants").is_some_and(Value::is_array)
+        || room.get("has_ended").and_then(Value::as_bool) == Some(true)
+        || room
+            .get("date_end")
+            .and_then(Value::as_i64)
+            .is_some_and(|end| end > 0)
+}
+
 /// The huddle a message stands for, live: a new `huddle_thread` message,
 /// or a change to one (someone joined, left, or it ended).
 pub fn huddle_in_message(event: &Value) -> Option<people::Event> {
@@ -418,11 +429,16 @@ pub fn translate(event: &Value) -> Option<people::Event> {
         // sessions, over RTM). Without the conversations, only the room
         // is known.
         kind if kind.starts_with("sh_room_") => {
-            let whole = event
-                .get("huddle")
-                .or_else(|| event.get("room"))
-                .and_then(room)
-                .filter(|(channels, _)| !channels.is_empty());
+            // The `huddle` object may be a short one without the
+            // conversations (as in `rooms.join`'s answer) beside a full
+            // `room`: each is tried, and only one that says who is in it
+            // or that it ended counts, so a partial one ends nothing.
+            let whole = ["room", "huddle"]
+                .into_iter()
+                .filter_map(|key| event.get(key))
+                .filter(|r| says_who_or_ended(r))
+                .filter_map(room)
+                .find(|(channels, _)| !channels.is_empty());
             match whole {
                 Some((channels, huddle)) => Some(people::Event::Huddles {
                     changes: channels.into_iter().map(|c| (c, huddle.clone())).collect(),
@@ -430,8 +446,9 @@ pub fn translate(event: &Value) -> Option<people::Event> {
                 None => super::huddles::room_change(kind, event),
             }
         }
-        // Someone rings you into a huddle (browser sessions).
+        // Someone rings you into a huddle (browser sessions), or stopped.
         "huddle_invite" => super::huddles::invite(event),
+        "huddle_invite_cancel" => super::huddles::invite_cancel(event),
         // You set yourself away or active, here or in another client.
         "manual_presence_change" => Some(people::Event::ManualPresence {
             away: event.get("presence")?.as_str()? == "away",
@@ -472,10 +489,48 @@ pub fn demo_huddle(team: &str) -> Event {
 pub fn demo(team: &str, command: Command) -> Vec<Event> {
     match command {
         Command::Typing { .. } | Command::Active | Command::CheckHuddle { .. } => Vec::new(),
+        // Listening plays nothing in the demo, but the call bar shows as
+        // it would: joined, live, and who is in #design's huddle.
         #[cfg(feature = "huddle-audio")]
-        Command::ListenHuddle { .. } | Command::LeaveHuddle | Command::MuteHuddle { .. } => {
-            Vec::new()
+        Command::ListenHuddle { channel } => {
+            let roster = crate::demo::listening().roster;
+            [
+                crate::huddles::Listen::Joining,
+                crate::huddles::Listen::Live,
+                crate::huddles::Listen::Roster(roster),
+            ]
+            .into_iter()
+            .map(|state| Event::People {
+                team: team.to_owned(),
+                event: people::Event::Listening {
+                    channel: channel.clone(),
+                    state,
+                },
+            })
+            .collect()
         }
+        // Left at once; the demo has one huddle to leave, in #design.
+        #[cfg(feature = "huddle-audio")]
+        Command::LeaveHuddle => vec![Event::People {
+            team: team.to_owned(),
+            event: people::Event::Listening {
+                channel: "C03".into(),
+                state: crate::huddles::Listen::Ended(Ok(crate::huddles::Left::Asked)),
+            },
+        }],
+        // The demo has no microphone; it opens and closes as asked.
+        #[cfg(feature = "huddle-audio")]
+        Command::MuteHuddle { muted } => vec![Event::People {
+            team: team.to_owned(),
+            event: people::Event::Microphone {
+                channel: "C03".into(),
+                news: if muted {
+                    crate::huddle_mic::MicNews::Muted
+                } else {
+                    crate::huddle_mic::MicNews::Live
+                },
+            },
+        }],
         Command::DeclineHuddle { .. } => vec![Event::People {
             team: team.to_owned(),
             event: people::Event::InviteDeclined { result: Ok(()) },

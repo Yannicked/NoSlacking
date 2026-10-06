@@ -11,6 +11,8 @@
 //! microphone's frames only once it is open (`effective` below), so a
 //! microphone that would not open never unmutes the call.
 
+use std::time::Duration;
+
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{Event, Sink};
@@ -19,11 +21,17 @@ use crate::huddle_audio::join::{self, JoinFailure};
 use crate::huddle_audio::media::{self, Stage, Uplink};
 use crate::huddle_audio::microphone::{Cpal, MicControl, Wiring};
 use crate::huddle_audio::processing::RenderTap;
+use crate::huddle_audio::roster::Roster;
 use crate::huddle_audio::speaker::Speaker;
 use crate::huddle_mic::MicNews;
-use crate::huddles::Listen;
+use crate::huddles::{Left, Listen};
 use crate::people;
 use crate::slack::Client;
+
+/// The shortest time between two rosters sent to the interface. Chime
+/// sends volumes several times a second; the window need not wake for
+/// each, and a speaking mark held a moment longer reads as well.
+const ROSTER_EVERY: Duration = Duration::from_millis(250);
 
 /// The huddle being listened to.
 #[derive(Debug)]
@@ -150,6 +158,19 @@ async fn microphone(
     }
 }
 
+/// How a session that ran ended, for the interface: left when asked,
+/// the huddle over, or a failure in words.
+fn ending(meeting_ended: bool, result: Result<(), media::Failure>) -> Result<Left, Failure> {
+    match result {
+        Ok(()) if meeting_ended => Ok(Left::Ended),
+        Ok(()) => Ok(Left::Asked),
+        Err(failure) => {
+            log::warn!("huddle audio: {failure}");
+            Err(Failure::Huddle(trouble(failure.stage)))
+        }
+    }
+}
+
 /// One listening session, start to end.
 async fn run(
     client: Client,
@@ -222,9 +243,20 @@ async fn run(
         muted,
     };
     let (live, connected) = oneshot::channel();
-    let listening = media::listen(&joined, Some(feed), Some(uplink), stopped, Some(live));
+    let (roster, mut rosters) = watch::channel(Roster::default());
+    let listening = media::listen(
+        &joined,
+        Some(feed),
+        Some(uplink),
+        stopped,
+        Some(live),
+        Some(roster),
+    );
     tokio::pin!(listening);
     let mut connected = Some(connected);
+    // The next roster goes no sooner than this, and none once the
+    // session has let go of its end.
+    let mut next_roster = Some(tokio::time::Instant::now());
     let (report, result) = loop {
         tokio::select! {
             ended = &mut listening => break ended,
@@ -239,16 +271,28 @@ async fn run(
                     tell(Listen::Live);
                 }
             }
+            changed = async {
+                match next_roster {
+                    Some(at) => {
+                        tokio::time::sleep_until(at).await;
+                        rosters.changed().await
+                    }
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed.is_ok() {
+                    let roster = rosters.borrow_and_update().clone();
+                    tell(Listen::Roster(roster));
+                    next_roster = Some(tokio::time::Instant::now() + ROSTER_EVERY);
+                } else {
+                    next_roster = None;
+                }
+            }
         }
     };
     // Left: the microphone closes before anything else.
     let _ = close_mic.send(());
     let _ = mic.await;
-    if let Some(call) = &joined.call_id
-        && let Err(error) = join::leave(&client, &channel, call).await
-    {
-        log::debug!("huddle audio: rooms.leave: {error}");
-    }
     // Stopping the device waits for its thread; not on this one.
     let _ = tokio::task::spawn_blocking(move || drop(speaker)).await;
     log::info!(
@@ -257,10 +301,7 @@ async fn run(
         report.audio_bytes,
         report.ending.as_deref().unwrap_or("-")
     );
-    tell(Listen::Ended(result.map_err(|failure| {
-        log::warn!("huddle audio: {failure}");
-        Failure::Huddle(trouble(failure.stage))
-    })));
+    tell(Listen::Ended(ending(report.meeting_ended, result)));
 }
 
 #[cfg(test)]
@@ -282,6 +323,18 @@ mod tests {
         assert_eq!(
             join_failure(&JoinFailure::NotSession),
             Failure::NeedsSession
+        );
+        assert_eq!(ending(true, Ok(())), Ok(Left::Ended));
+        assert_eq!(ending(false, Ok(())), Ok(Left::Asked));
+        assert_eq!(
+            ending(
+                false,
+                Err(media::Failure {
+                    stage: Stage::Media,
+                    why: "relay lost".into()
+                })
+            ),
+            Err(Failure::Huddle(HuddleTrouble::Lost))
         );
     }
 }

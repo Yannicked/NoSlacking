@@ -42,6 +42,7 @@ pub mod palette;
 pub mod paste;
 pub mod paths;
 pub mod people;
+pub mod percent;
 pub mod quotes;
 pub mod redact;
 pub mod revision;

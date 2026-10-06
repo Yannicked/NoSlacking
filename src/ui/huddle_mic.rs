@@ -1,13 +1,15 @@
-//! The microphone's mute button in a huddle (the `huddle-audio`
-//! feature): one self-contained widget, placed for now beside "Leave" in
-//! the conversation's header.
+//! The microphone's mute button in the call bar (the `huddle-audio`
+//! feature), beside Leave while the huddle is live: one self-contained
+//! widget.
 //!
-//! Muted it is a plain button with a struck-through microphone; live it
-//! is filled red, so an open microphone is never missed. Cmd+Shift+Space
-//! (Slack's own chord for it) toggles it wherever the widget shows.
+//! Muted it is a quiet button with a red, struck-through microphone;
+//! live it is filled with the huddle's green and a white microphone, so
+//! an open microphone is never missed and never looks like Leave's red.
+//! Cmd+Shift+Space toggles it (Slack's own chord) wherever the bar shows.
 
-use egui::{Key, Modifiers, RichText};
+use egui::{Color32, Key, Modifiers, RichText, Vec2};
 
+use super::people::ACTIVE;
 use super::shortcuts::spell;
 use crate::huddle_mic::{Mic, MicAction};
 use crate::i18n::{t, tf};
@@ -54,20 +56,18 @@ pub fn mute_button(ui: &mut egui::Ui, palette: &Palette, mic: Mic) -> Option<Mic
             ),
         ),
     };
-    let live = mic == Mic::Live;
-    let (ink, fill) = if live {
-        (egui::Color32::WHITE, Some(palette.danger))
-    } else {
-        (palette.text, None)
+    let (fill, ink, icon_ink) = match mic {
+        Mic::Live => (ACTIVE, Color32::WHITE, Color32::WHITE),
+        Mic::Opening => (palette.surface_hover, palette.secondary, palette.secondary),
+        Mic::Muted => (palette.surface_hover, palette.text, palette.danger),
     };
-    let mut button = egui::Button::image_and_text(
-        icon.image(if live { ink } else { palette.secondary }, 14.0),
-        RichText::new(label).font(theme::regular(12.5)).color(ink),
+    let button = egui::Button::image_and_text(
+        icon.image(icon_ink, 14.0),
+        RichText::new(label).font(theme::medium(13.0)).color(ink),
     )
-    .corner_radius(egui::CornerRadius::same(theme::RADIUS_SMALL + 2));
-    if let Some(fill) = fill {
-        button = button.fill(fill);
-    }
+    .fill(fill)
+    .corner_radius(egui::CornerRadius::same(theme::RADIUS_SMALL + 2))
+    .min_size(Vec2::new(0.0, 28.0));
     let response = ui
         .add(button)
         .on_hover_cursor(egui::CursorIcon::PointingHand)
