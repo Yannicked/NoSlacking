@@ -1,11 +1,16 @@
 name: Release
 
 # Pushing a tag like v0.2.0 builds every platform and publishes a GitHub
-# release with the archives, .deb and .rpm packages and a Flatpak attached. The tag must match the version in
-# Cargo.toml.
+# release with the archives, .deb and .rpm packages and a Flatpak attached.
+# The tag must match the version in Cargo.toml.
+#
+# Run by hand (Actions → Release → Run workflow) it is a dry run: the same
+# builds for Cargo.toml's version, kept as the run's artifacts, and nothing
+# published.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,24 +21,37 @@ env:
 # Actions are pinned by commit SHA, the release tag in the comment. Release
 # builds start from a clean target directory: no rust-cache.
 jobs:
+  # The version every package is named for: Cargo.toml's, which a tag must
+  # match.
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Version
+        id: version
+        run: |
+          crate=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "${GITHUB_REF_NAME#v}" != "$crate" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $crate" >&2
+            exit 1
+          fi
+          echo "version=$crate" >> "$GITHUB_OUTPUT"
+
   linux:
     name: linux x86_64
+    needs: version
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Toolchain
         run: rustup toolchain install
-      - name: Version
-        id: version
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          crate=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-          if [ "$version" != "$crate" ]; then
-            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $crate" >&2
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Build dependencies and packaging validators
         run: |
           sudo apt-get update
@@ -41,8 +59,6 @@ jobs:
       - name: Build
         run: cargo build --locked --release
       - name: Package
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
           name="noslacking-$VERSION-linux-x86_64"
           root="dist/$name"
@@ -79,9 +95,11 @@ jobs:
   # flatpak-builder-tools' generator at a fixed commit.
   flatpak:
     name: flatpak x86_64
+    needs: version
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
+      VERSION: ${{ needs.version.outputs.version }}
       GENERATOR_REV: 74697c75b630d7330e77250fc13cb5ea688d9479
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -109,10 +127,9 @@ jobs:
             packaging/flatpak/build packaging/flatpak/cloud.yannick.NoSlacking.yml
       - name: Bundle
         run: |
-          version="${GITHUB_REF_NAME#v}"
           mkdir -p dist
           flatpak build-bundle packaging/flatpak/repo \
-            "dist/noslacking-$version-linux-x86_64.flatpak" cloud.yannick.NoSlacking \
+            "dist/noslacking-$VERSION-linux-x86_64.flatpak" cloud.yannick.NoSlacking \
             --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -122,8 +139,11 @@ jobs:
 
   macos:
     name: macos universal
+    needs: version
     runs-on: macos-latest
     timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Toolchain
@@ -141,10 +161,9 @@ jobs:
           lipo -info dist/noslacking
       - name: Package
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          name="noslacking-$version-macos-universal"
+          name="noslacking-$VERSION-macos-universal"
           mkdir -p "dist/$name"
-          packaging/macos/bundle.sh dist/noslacking "$version" "dist/$name"
+          packaging/macos/bundle.sh dist/noslacking "$VERSION" "dist/$name"
           cp LICENSE README.md "dist/$name/"
           # ditto keeps the bundle's symlinks, permissions and signature.
           ditto -c -k --keepParent "dist/$name" "dist/$name.zip"
@@ -156,8 +175,11 @@ jobs:
 
   windows:
     name: windows x86_64
+    needs: version
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Toolchain
@@ -167,8 +189,7 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $name = "noslacking-$version-windows-x86_64"
+          $name = "noslacking-$($env:VERSION)-windows-x86_64"
           New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
           Copy-Item target/release/noslacking.exe, LICENSE, README.md "dist/$name/"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
@@ -181,6 +202,8 @@ jobs:
   publish:
     name: publish
     needs: [linux, flatpak, macos, windows]
+    # Only a tag publishes; a run by hand stops at the artifacts.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
