@@ -161,9 +161,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             ui.add_space(40.0 + theme::titlebar_inset(ui.ctx()));
                             header(app, ui, &palette);
                             session_card(app, ui, &palette);
-                            ui.add_space(12.0);
-                            app_card(app, ui, &palette);
                             keyring_note(app, ui, &palette);
+                            ui.add_space(28.0);
+                            app_card(app, ui, &palette);
                             ui.add_space(48.0);
                         });
                     });
@@ -182,7 +182,11 @@ fn header(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 .fit_to_exact_size(egui::Vec2::splat(40.0)),
             );
             ui.add_space(4.0);
-            ui.label(RichText::new("NoSlacking").font(theme::bold(30.0)).color(palette.text));
+            ui.label(
+                RichText::new("NoSlacking")
+                    .font(theme::bold(30.0))
+                    .color(palette.text),
+            );
             if !app.workspaces.is_empty() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if theme::secondary_button(ui, palette, &t("Back")).clicked() {
@@ -192,9 +196,11 @@ fn header(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             }
         });
         ui.label(
-            RichText::new(t("A native Slack client. Connect a workspace by reusing your browser session, or with your own Slack app."))
-                .font(theme::regular(14.5))
-                .color(palette.secondary),
+            RichText::new(t(
+                "A native Slack client. Sign in with your browser to connect a workspace.",
+            ))
+            .font(theme::regular(14.5))
+            .color(palette.secondary),
         );
         ui.add_space(20.0);
     });
@@ -208,96 +214,56 @@ fn session_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     card(palette).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 8.0;
-        step(ui, palette, 1, &t("Sign in with your Slack session"), false);
         ui.label(
-            RichText::new(t("Reuse the Slack you are already logged in to in your browser. Nothing to register. New messages arrive live over Slack's session socket."))
+            RichText::new(t("Sign in to Slack"))
+                .font(theme::semibold(17.0))
+                .color(palette.text),
+        );
+        ui.label(
+            RichText::new(t("NoSlacking opens Slack's sign-in page in your browser. Sign in as usual, with your password, an emailed code or single sign-on, and NoSlacking finishes by itself."))
                 .font(theme::regular(13.5))
                 .color(palette.secondary),
         );
-        ui.add_space(2.0);
-        browser_sign_in(app, ui, palette);
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new(t("Or paste the session cookie"))
-                .font(theme::semibold(13.5))
-                .color(palette.text),
-        );
-        field(
-            ui,
-            palette,
-            &t("Workspace address"),
-            &mut app.setup.session_workspace,
-            "acme.slack.com",
-            false,
-        );
-        field(
-            ui,
-            palette,
-            &t("Session cookie (the d cookie)"),
-            &mut app.setup.session_cookie,
-            "xoxd-…",
-            true,
-        );
-        egui::CollapsingHeader::new(
-            RichText::new(t("How to find the d cookie"))
-                .font(theme::medium(13.0))
-                .color(palette.link),
-        )
-        .id_salt("cookie-help")
-        .show(ui, |ui| {
-            ui.label(
-                RichText::new(t(
-                    "1. Open app.slack.com in your browser and sign in.\n\
-                     2. Open developer tools (F12) → Application (or Storage) → Cookies → https://app.slack.com.\n\
-                     3. Copy the value of the cookie named d — it starts with xoxd-.\n\
-                     It is a secret: treat it like a password. One cookie covers every workspace you are signed in to.",
-                ))
-                .font(theme::regular(13.0))
-                .color(palette.secondary),
-            );
-            if ui.link(t("Open app.slack.com")).clicked() {
-                app.actions.push(Action::OpenUrl("https://app.slack.com".into()));
-            }
-        });
-        let ready = app.setup.session_cookie.trim().starts_with("xoxd-")
-            && !app.setup.session_workspace.trim().is_empty()
-            && !busy(app);
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.add_enabled_ui(ready, |ui| {
-                if theme::primary_button(ui, palette, &t("Sign in")).clicked() {
-                    app.actions.push(Action::SignInSession);
+            ui.add_enabled_ui(!busy(app), |ui| {
+                if theme::primary_button(ui, palette, &t("Sign in with your browser")).clicked() {
+                    app.actions.push(Action::StartBrowserSignIn);
                 }
             });
             sign_in_status(app, ui, palette);
         });
+        ui.add_space(2.0);
+        link_fallback(app, ui, palette);
     });
 }
 
-/// Signing in through the browser, as msga does: Slack's page hands its
-/// `slack://` link back through the desktop, or offers it to paste here.
-fn browser_sign_in(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
-    ui.horizontal(|ui| {
-        if theme::secondary_button(ui, palette, &t("Sign in with your browser")).clicked() {
-            app.actions.push(Action::StartBrowserSignIn);
-        }
-    });
-    ui.label(
-        RichText::new(t(
-            "Sign in there as usual; NoSlacking finishes by itself. If your browser asks, let it open NoSlacking. If nothing happens, paste the slack:// link from the page here (open the page source with Ctrl+U and search for magic-login).",
-        ))
-        .font(theme::regular(13.0))
-        .color(palette.secondary),
-    );
-    field(
-        ui,
-        palette,
-        &t("Sign-in link"),
-        &mut app.setup.session_link,
-        "slack://…",
-        true,
-    );
-    let ready = app.setup.session_link.trim().starts_with("slack://") && !busy(app);
-    ui.horizontal(|ui| {
+/// When the browser does not hand the sign-in back: Slack's page still
+/// holds the `slack://` link, which can be pasted here instead.
+fn link_fallback(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
+    egui::CollapsingHeader::new(
+        RichText::new(t("Nothing happened after signing in?"))
+            .font(theme::medium(13.0))
+            .color(palette.link),
+    )
+    .id_salt("link-fallback")
+    .show(ui, |ui| {
+        ui.label(
+            RichText::new(t(
+                "If your browser asks, let it open NoSlacking. Otherwise paste the slack:// link from Slack's page here: open the page source with Ctrl+U and search for magic-login.",
+            ))
+            .font(theme::regular(13.0))
+            .color(palette.secondary),
+        );
+        field(
+            ui,
+            palette,
+            &t("Sign-in link"),
+            &mut app.setup.session_link,
+            "slack://…",
+            true,
+        );
+        let ready = app.setup.session_link.trim().starts_with("slack://") && !busy(app);
         ui.add_enabled_ui(ready, |ui| {
             if theme::primary_button(ui, palette, &t("Sign in with the link")).clicked() {
                 app.actions.push(Action::SignInLink);
@@ -340,9 +306,9 @@ fn app_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         .as_ref()
         .is_some_and(AppCredentials::can_sign_in);
     let header = egui::CollapsingHeader::new(
-        RichText::new(t("Advanced: use your own Slack app"))
-            .font(theme::semibold(14.0))
-            .color(palette.text),
+        RichText::new(t("Advanced: sign in with your own Slack app"))
+            .font(theme::regular(13.0))
+            .color(palette.dim),
     )
     .id_salt("app-path")
     .default_open(app.setup.show_app && !saved);

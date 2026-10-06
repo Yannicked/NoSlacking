@@ -108,22 +108,18 @@ Then start NoSlacking and sign in.
 
 ## Signing in
 
-Three ways, chosen on the sign-in screen. The first two reuse your own
-Slack session; neither needs anything registered.
-
 - **Sign in with your browser.** NoSlacking opens Slack's sign-in page in
   your browser. Sign in as usual (password, emailed code or SSO); when Slack
   hands the sign-in back, the browser passes it to NoSlacking, which
   registers itself for `slack://` links when you start this sign-in (and
   only then, as it takes them over from the Slack app). If your browser does
-  not pass it on, paste the `slack://` link from the page instead.
-- **Paste your session cookie.** Paste your workspace address and the `d`
-  cookie from a browser where you are logged in to Slack. The sign-in page
-  explains where to find it.
-- **Your own Slack app (advanced).** Create a free Slack app from the bundled
-  manifest, paste its credentials, and sign in. This is the route Slack
-  documents and supports, with live Socket Mode updates; a workspace admin
-  may need to approve the app.
+  not pass it on, paste the `slack://` link from the page instead. Nothing
+  needs to be registered with Slack.
+- **Your own Slack app (advanced).** Tucked away at the bottom of the
+  sign-in screen: create a free Slack app from the bundled manifest, paste
+  its credentials, and sign in. This is the route Slack documents and
+  supports, with live Socket Mode updates; a workspace admin may need to
+  approve the app.
 
 The manifest is at version 2 (its description says "manifest v2"). Version
 2 adds `dnd:read`, `dnd:write`, `usergroups:read` and `bookmarks:write`, for
@@ -136,7 +132,7 @@ open your app on [api.slack.com/apps](https://api.slack.com/apps), paste it
 under App Manifest and save, reinstall the app when Slack asks, and press
 Sign in again.
 
-Session sign-ins get live messages over Slack's session socket. Tokens and
+Browser sign-ins get live messages over Slack's session socket. Tokens and
 cookies are stored only in your operating system's keyring (Secret Service on
 Linux, the Keychain on macOS, the Credential Manager on Windows), never in a
 file, and never written to the log.
@@ -230,8 +226,8 @@ client works with.
 
 Before you use it, know that:
 
-- **Session sign-in is unsupported.** Both browser sign-in and the pasted
-  cookie use endpoints that Slack does not document. Slack can change or
+- **Browser sign-in is unsupported.** It uses endpoints that Slack does
+  not document. Slack can change or
   remove them at any time, and NoSlacking may stop working without warning.
 - **It may break your workspace's rules or Slack's terms.** Slack's terms
   limit third-party clients, and your workspace may only allow approved

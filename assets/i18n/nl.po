@@ -258,38 +258,11 @@ msgstr "Uit sectie halen"
 msgid "Back"
 msgstr "Terug"
 
-msgid "A native Slack client. Connect a workspace by reusing your browser session, or with your own Slack app."
-msgstr "Een native Slack-client. Koppel een werkruimte via je browsersessie of met je eigen Slack-app."
-
-msgid "Sign in with your Slack session"
-msgstr "Aanmelden met je Slack-sessie"
-
-msgid "Reuse the Slack you are already logged in to in your browser. Nothing to register. New messages arrive live over Slack's session socket."
-msgstr "Gebruik de Slack waarbij je in je browser al bent aangemeld. Niets te registreren. Nieuwe berichten komen live binnen via de sessiesocket van Slack."
-
-msgid "Workspace address"
-msgstr "Adres van de werkruimte"
-
-msgid "Session cookie (the d cookie)"
-msgstr "Sessiecookie (de d-cookie)"
-
-msgid "How to find the d cookie"
-msgstr "Zo vind je de d-cookie"
-
-msgid "1. Open app.slack.com in your browser and sign in.\n2. Open developer tools (F12) → Application (or Storage) → Cookies → https://app.slack.com.\n3. Copy the value of the cookie named d — it starts with xoxd-.\nIt is a secret: treat it like a password. One cookie covers every workspace you are signed in to."
-msgstr "1. Open app.slack.com in je browser en meld je aan.\n2. Open de ontwikkelaarshulpmiddelen (F12) → Application (of Opslag) → Cookies → https://app.slack.com.\n3. Kopieer de waarde van de cookie met de naam d — die begint met xoxd-.\nHet is geheim: behandel hem als een wachtwoord. Eén cookie geldt voor elke werkruimte waarbij je bent aangemeld."
-
-msgid "Open app.slack.com"
-msgstr "app.slack.com openen"
-
 msgid "Sign in"
 msgstr "Aanmelden"
 
 msgid "Signing in…"
 msgstr "Aanmelden…"
-
-msgid "Advanced: use your own Slack app"
-msgstr "Geavanceerd: je eigen Slack-app gebruiken"
 
 msgid "Official OAuth sign-in and live Socket Mode updates, through a free Slack app you create. A workspace admin may need to approve it."
 msgstr "Officieel aanmelden met OAuth en live-updates via Socket Mode, met een gratis Slack-app die je zelf maakt. Een beheerder van de werkruimte moet die mogelijk goedkeuren."
@@ -677,9 +650,6 @@ msgstr "Het bericht kon niet worden verwijderd"
 msgid "Could not edit the message"
 msgstr "Het bericht kon niet worden bewerkt"
 
-msgid "Or paste the session cookie"
-msgstr "Of plak de sessiecookie"
-
 msgid "Sign in with the link"
 msgstr "Inloggen met de link"
 
@@ -688,9 +658,6 @@ msgstr "Inloggen met je browser"
 
 msgid "Sign-in link"
 msgstr "Inloglink"
-
-msgid "Sign in there as usual; NoSlacking finishes by itself. If your browser asks, let it open NoSlacking. If nothing happens, paste the slack:// link from the page here (open the page source with Ctrl+U and search for magic-login)."
-msgstr "Log daar zoals gewoonlijk in; NoSlacking rondt het daarna zelf af. Als je browser het vraagt, laat hem NoSlacking openen. Gebeurt er niets, plak dan hier de slack://-link van de pagina (open de paginabron met Ctrl+U en zoek naar magic-login)."
 
 # Desktop integration: notifications.
 msgid "All new messages"
@@ -1843,9 +1810,6 @@ msgstr "er is geen map voor downloads"
 msgid "it cannot be opened here; download it instead"
 msgstr "het kan hier niet worden geopend; download het in plaats daarvan"
 
-msgid "Enter your workspace's Slack address, such as acme.slack.com."
-msgstr "Vul het Slack-adres van je werkruimte in, zoals acme.slack.com."
-
 msgid "Could not open the browser. Open app.slack.com/ssb/signin yourself."
 msgstr "Kan de browser niet openen. Open zelf app.slack.com/ssb/signin."
 
@@ -1946,14 +1910,8 @@ msgstr "de schijf is vol"
 msgid "the file system failed: {detail}"
 msgstr "het bestandssysteem faalde: {detail}"
 
-msgid "That does not look like a session cookie (it should start with xoxd-). Copy the value of the cookie named d."
-msgstr "Dat lijkt geen sessiecookie (die begint met xoxd-). Kopieer de waarde van de cookie met de naam d."
-
 msgid "Slack signed in, but did not put a session token on the page for this workspace."
 msgstr "Slack heeft je aangemeld, maar zette geen sessietoken op de pagina van deze werkruimte."
-
-msgid "The d cookie did not sign in. Copy a fresh one from a browser where this workspace is open."
-msgstr "De d-cookie meldde je niet aan. Kopieer een nieuwe uit een browser waarin deze werkruimte open is."
 
 msgid "the proxy URL cannot be used; check it in Settings"
 msgstr "de proxy-URL is niet bruikbaar; controleer hem in Instellingen"
@@ -2479,3 +2437,27 @@ msgstr "Er is geen geluidsapparaat om op af te spelen."
 
 msgid "This sound could not be played in the app."
 msgstr "Dit geluid kon niet in de app worden afgespeeld."
+
+msgid "A native Slack client. Sign in with your browser to connect a workspace."
+msgstr "Een native Slack-client. Meld je aan via je browser om een werkruimte te verbinden."
+
+msgid "Sign in to Slack"
+msgstr "Aanmelden bij Slack"
+
+msgid "NoSlacking opens Slack's sign-in page in your browser. Sign in as usual, with your password, an emailed code or single sign-on, and NoSlacking finishes by itself."
+msgstr "NoSlacking opent de aanmeldpagina van Slack in je browser. Meld je aan zoals altijd, met je wachtwoord, een code per e-mail of single sign-on, en NoSlacking rondt het zelf af."
+
+msgid "Nothing happened after signing in?"
+msgstr "Gebeurde er niets na het aanmelden?"
+
+msgid "If your browser asks, let it open NoSlacking. Otherwise paste the slack:// link from Slack's page here: open the page source with Ctrl+U and search for magic-login."
+msgstr "Als je browser het vraagt, laat hem NoSlacking openen. Plak anders hier de slack://-link van de pagina van Slack: open de paginabron met Ctrl+U en zoek naar magic-login."
+
+msgid "Advanced: sign in with your own Slack app"
+msgstr "Geavanceerd: aanmelden met je eigen Slack-app"
+
+msgid "Slack did not accept the session for this workspace. Sign in with your browser again."
+msgstr "Slack accepteerde de sessie voor deze werkruimte niet. Meld je opnieuw aan via je browser."
+
+msgid "Slack named a workspace outside slack.com, so NoSlacking did not sign in there."
+msgstr "Slack noemde een werkruimte buiten slack.com, dus NoSlacking heeft zich daar niet aangemeld."

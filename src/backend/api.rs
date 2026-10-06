@@ -54,7 +54,8 @@ pub(super) fn failure(error: &SlackError) -> Failure {
         SlackError::Decode(detail) => Failure::Unexpected(detail.clone()),
         SlackError::NoUserToken => Failure::NoUserToken,
         SlackError::Session(refusal) => match refusal {
-            Refusal::NotACookie => Failure::NotACookie,
+            Refusal::NotACookie => Failure::NoSessionCookie,
+            Refusal::NotSlack => Failure::NotSlackAddress,
             Refusal::NoToken => Failure::NoSessionToken,
             Refusal::CookieRefused => Failure::CookieRefused,
         },

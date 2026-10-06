@@ -1507,11 +1507,9 @@ pub enum Action {
     /// checking.
     ApplySpelling,
     DismissError,
-    // Sign-in. These carry no secrets: the app reads the typed cookie,
-    // token and credentials from its form, so they never sit in an action
-    // that might be printed.
-    /// Signs in with the session cookie and workspace from the form.
-    SignInSession,
+    // Sign-in. These carry no secrets: the app reads the typed link, token
+    // and credentials from its form, so they never sit in an action that
+    // might be printed.
     /// Signs in with the pasted `slack://` link from the browser sign-in.
     SignInLink,
     /// Opens Slack's sign-in page in the browser.
