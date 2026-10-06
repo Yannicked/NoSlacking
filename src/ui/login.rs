@@ -23,7 +23,7 @@ pub fn manifest_url() -> String {
     let compact: serde_json::Value = serde_json::from_str(MANIFEST).unwrap_or_default();
     format!(
         "https://api.slack.com/apps?new_app=1&manifest_json={}",
-        urlencoding::encode(&compact.to_string())
+        crate::percent::encode(&compact.to_string())
     )
 }
 

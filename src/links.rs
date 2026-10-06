@@ -197,7 +197,7 @@ fn param(query: &str, key: &str) -> Option<String> {
         .split('&')
         .filter_map(|pair| pair.split_once('='))
         .find(|(k, _)| *k == key)
-        .and_then(|(_, value)| urlencoding::decode(value).ok())
+        .and_then(|(_, value)| crate::percent::decode(value).ok())
         .map(|value| value.into_owned())
 }
 
