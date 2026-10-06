@@ -319,7 +319,7 @@ impl App {
     /// Adds a file to the composer of `target`, once.
     pub(super) fn stage(&mut self, (team, channel, thread): UploadTarget, path: PathBuf) {
         let key = Self::draft_key(&team, &channel, thread.as_ref());
-        let draft = self.drafts.entry(key).or_default();
+        let draft = self.drafts.edit(key);
         if !draft.attachments.contains(&path) {
             draft.attachments.push(path);
         }
@@ -374,7 +374,7 @@ impl App {
     /// Puts a draft that was sent back in its composer, as sending it
     /// failed; unless something new was typed there meanwhile.
     fn give_back_draft(&mut self, key: String, draft: Draft) {
-        let current = self.drafts.entry(key).or_default();
+        let current = self.drafts.edit(key);
         if current.text.trim().is_empty() {
             current.text = draft.text;
             current.mentions = draft.mentions;

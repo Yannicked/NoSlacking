@@ -417,6 +417,7 @@ fn list(
                     now,
                     drafts: drafts.as_deref(),
                 }),
+                revision: Some(workspace.revision()),
             },
         )
     });

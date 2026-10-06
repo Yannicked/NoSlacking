@@ -6,7 +6,7 @@ use egui::{Align, Margin, RichText, Stroke};
 use super::composer::{self, Composer};
 use super::message::{self, Lead, Row};
 use super::rows;
-use crate::app::{App, Draft};
+use crate::app::App;
 use crate::i18n::{t, tn};
 use crate::model::Action;
 use crate::theme::{self, Icon};
@@ -20,7 +20,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         return;
     };
     let key = App::draft_key(&team, &channel, Some(&ts));
-    let mut draft: Draft = app.drafts.remove(&key).unwrap_or_default();
+    let mut taken = app.drafts.take(&key);
     let to_bottom = app.scroll_to_bottom.remove(&key);
     let width = app.settings.thread_width;
     let overlay = app.overlay_open();
@@ -44,7 +44,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let mut target: Option<(f32, f32)> = None;
     let Some(workspace) = crate::app::active_in(workspaces, settings) else {
         // Put the draft back: it was taken out to be edited.
-        app.drafts.insert(key, draft);
+        app.drafts.put_back(key, taken);
         return;
     };
     let channel_name = workspace
@@ -144,9 +144,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         channel_name: Some(channel_name.clone()),
                         uploads: transfers,
                     };
-                    let before = draft.text.clone();
-                    composer::show(ui, &composer, &mut draft, actions);
-                    if crate::people::is_typing(&before, &draft.text) {
+                    let before = taken.draft.text.clone();
+                    composer::show(ui, &composer, &mut taken.draft, actions);
+                    if crate::people::is_typing(&before, &taken.draft.text) {
                         actions.push(Action::People(crate::people::Action::Typing {
                             channel: channel.clone(),
                             thread: Some(ts.clone()),
@@ -342,7 +342,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 });
         });
     let width = response.response.rect.width();
-    app.drafts.insert(key, draft);
+    app.drafts.put_back(key, taken);
     if (width - app.settings.thread_width).abs() > 1.0 {
         app.settings.thread_width = width;
         app.settings_changed();

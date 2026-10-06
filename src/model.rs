@@ -100,10 +100,38 @@ impl PartialOrd for Ts {
 
 impl Ord for Ts {
     fn cmp(&self, other: &Self) -> Ordering {
+        // Two of Slack's own, written alike (as nearly all are), order as
+        // their text does, without taking either apart.
+        if self.0.len() == other.0.len()
+            && let Some(dot) = plain_dot(&self.0)
+            && plain_dot(&other.0) == Some(dot)
+        {
+            return self.0.cmp(&other.0);
+        }
         self.key()
             .cmp(&other.key())
             .then_with(|| self.0.cmp(&other.0))
     }
+}
+
+/// Where the dot of a plainly written real timestamp is (its length when
+/// it has none): one to 19 digits, which always fit [`Ts::key`]'s seconds,
+/// then perhaps a dot and more digits. Two of the same length with the dot
+/// in the same place order by their text exactly as by [`Ts::key`] and
+/// then their text: digit by digit is number by number at equal widths,
+/// and the microseconds the key reads are the fraction's first digits.
+fn plain_dot(ts: &str) -> Option<usize> {
+    let bytes = ts.as_bytes();
+    let dot = bytes
+        .iter()
+        .position(|&b| !b.is_ascii_digit())
+        .unwrap_or(bytes.len());
+    let fraction = match bytes.get(dot) {
+        None => &[][..],
+        Some(b'.') => &bytes[dot + 1..],
+        Some(_) => return None,
+    };
+    ((1..=19).contains(&dot) && fraction.iter().all(u8::is_ascii_digit)).then_some(dot)
 }
 
 /// A signed-in workspace.
@@ -1148,6 +1176,28 @@ impl Message {
     }
 }
 
+/// Puts a newer copy of a message in place of `existing`.
+fn replace(existing: &mut Message, mut message: Message) {
+    // A copy that gives no reply count may be trimmed, as some
+    // edits and API answers are: keep the thread counters already
+    // known. One that gives a count, even zero, carries Slack's
+    // real counters, and zero then means the replies are gone.
+    if !message.replies_known {
+        message.reply_count = existing.reply_count;
+        message.replies_known = existing.replies_known;
+        message.reply_users = std::mem::take(&mut existing.reply_users);
+        message.latest_reply = existing.latest_reply.take();
+        if message.thread_ts.is_none() {
+            message.thread_ts = existing.thread_ts.take();
+        }
+    }
+    // Only some copies say whether you follow the thread.
+    if message.subscribed.is_none() {
+        message.subscribed = existing.subscribed;
+    }
+    *existing = message;
+}
+
 /// How many messages [`Timeline::held`] keeps: about a page.
 const HELD_LIMIT: usize = 100;
 
@@ -1186,25 +1236,7 @@ impl Timeline {
     /// Inserts or replaces a message, keeping the order.
     pub fn upsert(&mut self, message: Message) {
         if let Some(existing) = self.messages.iter_mut().find(|m| m.ts == message.ts) {
-            // A copy that gives no reply count may be trimmed, as some
-            // edits and API answers are: keep the thread counters already
-            // known. One that gives a count, even zero, carries Slack's
-            // real counters, and zero then means the replies are gone.
-            let mut message = message;
-            if !message.replies_known {
-                message.reply_count = existing.reply_count;
-                message.replies_known = existing.replies_known;
-                message.reply_users = std::mem::take(&mut existing.reply_users);
-                message.latest_reply = existing.latest_reply.take();
-                if message.thread_ts.is_none() {
-                    message.thread_ts = existing.thread_ts.take();
-                }
-            }
-            // Only some copies say whether you follow the thread.
-            if message.subscribed.is_none() {
-                message.subscribed = existing.subscribed;
-            }
-            *existing = message;
+            replace(existing, message);
             return;
         }
         if message.ts.is_local() {
@@ -1224,9 +1256,38 @@ impl Timeline {
     }
 
     /// Merges a page of history: newer pages replace what they cover, older
-    /// ones go in front.
+    /// ones go in front. The same as [`Self::upsert`] for each message in
+    /// turn, but in one pass over the list rather than one per message.
     pub fn merge(&mut self, page: Vec<Message>) {
-        for message in page {
+        let real = self.first_local();
+        let ordered = self.messages[..real].windows(2).all(|w| w[0].ts < w[1].ts)
+            && self.messages[real..].iter().all(|m| m.ts.is_local());
+        if !ordered {
+            // Not the shape `upsert` keeps (changed by hand): go its way.
+            for message in page {
+                self.upsert(message);
+            }
+            return;
+        }
+        let (mut fresh, local): (Vec<Message>, Vec<Message>) =
+            page.into_iter().partition(|m| !m.ts.is_local());
+        // Stable, so copies of one message keep the page's order.
+        fresh.sort_by(|a, b| a.ts.cmp(&b.ts));
+        let mut old = std::mem::take(&mut self.messages).into_iter().peekable();
+        let mut merged = Vec::with_capacity(old.len() + fresh.len());
+        for message in fresh {
+            // What is here comes first, so a page's copy replaces it.
+            while let Some(kept) = old.next_if(|m| !m.ts.is_local() && m.ts <= message.ts) {
+                merged.push(kept);
+            }
+            match merged.last_mut() {
+                Some(last) if last.ts == message.ts => replace(last, message),
+                _ => merged.push(message),
+            }
+        }
+        merged.extend(old);
+        self.messages = merged;
+        for message in local {
             self.upsert(message);
         }
     }
@@ -1756,6 +1817,134 @@ mod tests {
             press_step(Some(&confirm), true, None),
             PressStep::Go { open: None }
         );
+    }
+
+    /// How [`Timeline::merge`] used to work, to hold it to.
+    fn merge_one_by_one(timeline: &mut Timeline, page: Vec<Message>) {
+        for message in page {
+            timeline.upsert(message);
+        }
+    }
+
+    #[test]
+    fn merging_a_page_is_upserting_each_message() {
+        // A small fixed generator: the same cases every run.
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |below: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % below
+        };
+        let pool = [
+            "1700000000.000100",
+            "1700000000.000200",
+            "1700000000.000300",
+            "1700000001.000000",
+            "1700000002.500000",
+            "999999999.999999",
+            "1700000000.5",
+            "1700000000",
+            "garbage",
+            "1.x",
+            "local-1",
+            "local-2",
+            "local-10",
+        ];
+        let mut copy = 0;
+        let mut random = |next: &mut dyn FnMut(u64) -> u64| {
+            copy += 1;
+            let ts = pool[next(pool.len() as u64) as usize];
+            Message {
+                text: format!("{ts} copy {copy}"),
+                replies_known: next(2) == 0,
+                reply_count: next(4) as u32,
+                reply_users: (0..next(3)).map(|i| format!("U{i}")).collect(),
+                latest_reply: (next(2) == 0).then(|| Ts::new("1700000009.000000")),
+                thread_ts: (next(2) == 0).then(|| Ts::new(ts)),
+                subscribed: [None, Some(true), Some(false)][next(3) as usize],
+                ..message(ts)
+            }
+        };
+        for case in 0..3000 {
+            let mut timeline = Timeline::default();
+            for _ in 0..next(10) {
+                let message = random(&mut next);
+                if case % 10 == 0 {
+                    // Some lists out of shape, changed by hand.
+                    timeline.messages.push(message);
+                } else {
+                    timeline.upsert(message);
+                }
+            }
+            let page: Vec<Message> = (0..next(14)).map(|_| random(&mut next)).collect();
+            let mut expected = timeline.clone();
+            merge_one_by_one(&mut expected, page.clone());
+            timeline.merge(page);
+            assert_eq!(timeline.messages, expected.messages, "case {case}");
+        }
+    }
+
+    #[test]
+    fn the_quick_order_of_timestamps_is_the_parsed_one() {
+        let parsed = |a: &Ts, b: &Ts| a.key().cmp(&b.key()).then_with(|| a.0.cmp(&b.0));
+        let tricky = [
+            "1700000000.000100",
+            "1700000000.000200",
+            "1700000000.000099",
+            "1700000001.000000",
+            "0999999999.999999",
+            "999999999.999999",
+            "1700000000.1",
+            "1700000000.5",
+            "1700000000.10",
+            "1700000000.100000",
+            "1700000000.0000001",
+            "1700000000.0000002",
+            "1700000000.1234567",
+            "1700000000.1234568",
+            "1700000000.",
+            "1700000000",
+            "1800000000",
+            "0001.000000",
+            "0002.000000",
+            "1000.000000",
+            "1.5",
+            "2.5",
+            "01.5",
+            "1.05",
+            "0.000000",
+            "9999999999999999999.000000",
+            "1844674407370955161.5",
+            "18446744073709551615.000000",
+            "18446744073709551616.000000",
+            "99999999999999999999.000000",
+            "99999999999999999998.000000",
+            ".500000",
+            ".400000",
+            "+170000000.000100",
+            "-170000000.000100",
+            "1700000000.00010x",
+            "170000000x.000100",
+            "1700000000.000.10",
+            "1700000000..00010",
+            "17000000 0.000100",
+            "1700000000.00 100",
+            "local-1",
+            "local-9",
+            "local-10",
+            "local-x",
+            "local-",
+            "garbage",
+            "",
+            "١٧٠٠.٠٠٠١",
+        ];
+        for a in tricky {
+            for b in tricky {
+                let (a, b) = (Ts::new(a), Ts::new(b));
+                assert_eq!(a.cmp(&b), parsed(&a, &b), "{a:?} against {b:?}");
+            }
+        }
     }
 
     #[test]

@@ -1310,7 +1310,7 @@ mod tests {
     fn channels_suggest_by_name_and_become_channel_links() {
         use crate::model::ConversationKind::{Channel, Direct, Private};
         let mut w = workspace();
-        w.conversations = vec![
+        *w.conversations = vec![
             channel("C1", "random", Channel),
             channel("C2", "design-review", Private),
             channel("C3", "design", Channel),

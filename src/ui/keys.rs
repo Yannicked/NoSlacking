@@ -139,6 +139,7 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
                     now: app.now_seconds(),
                     drafts: Some(&drafts),
                 }),
+                revision: None,
             };
             let order = visible(
                 w,
@@ -265,7 +266,7 @@ mod tests {
             sign_in: Default::default(),
             scopes: None,
         });
-        w.conversations = vec![
+        *w.conversations = vec![
             channel("C3", "gamma", false),
             channel("C1", "alpha", false),
             channel("C2", "beta", true),
@@ -359,7 +360,7 @@ mod tests {
             ..channel(id, name, false)
         };
         // Closed in Slack, read; closed but unread; never used at all.
-        w.conversations = vec![
+        *w.conversations = vec![
             Conversation {
                 is_open: Some(false),
                 ..group("G1", "closed")
@@ -441,7 +442,7 @@ mod tests {
         let mut w = workspace(None);
         let at = |seconds: i64| Ts::new(format!("{seconds}.000100"));
         // 28 people spoke lately, 5 long ago.
-        w.conversations = (0..33)
+        *w.conversations = (0..33)
             .map(|i| {
                 let latest = if i < 28 {
                     at(NOW - 60 - i)

@@ -42,6 +42,7 @@ pub mod paths;
 pub mod people;
 pub mod quotes;
 pub mod redact;
+pub mod revision;
 pub mod scopes;
 pub mod search;
 pub mod settings;

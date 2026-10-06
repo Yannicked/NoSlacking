@@ -49,12 +49,25 @@ pub fn quick_reactions_id() -> egui::Id {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let quick = std::sync::Arc::new(app.quick_reactions());
     ui.data_mut(|d| d.insert_temp(quick_reactions_id(), quick));
-    let drafts = std::sync::Arc::new(
-        app.active_team()
-            .map(|team| app.channels_with_drafts(&team))
-            .unwrap_or_default(),
-    );
-    ui.data_mut(|d| d.insert_temp(drafts_id(), drafts));
+    // Gathered again only when the drafts or the workspace change.
+    let team = app.active_workspace().map(|w| w.info.team_id.as_str());
+    let revision = app.drafts.revision();
+    let stale = ui.data_mut(|d| {
+        let kept = d.get_temp::<std::sync::Arc<std::collections::HashSet<String>>>(drafts_id());
+        let seen = d.get_temp_mut_or_default::<(Option<String>, u64)>(drafts_id().with("seen"));
+        let stale = kept.is_none() || seen.1 != revision || seen.0.as_deref() != team;
+        if stale {
+            *seen = (team.map(str::to_owned), revision);
+        }
+        stale
+    });
+    if stale {
+        let drafts = std::sync::Arc::new(
+            team.map(|team| app.channels_with_drafts(team))
+                .unwrap_or_default(),
+        );
+        ui.data_mut(|d| d.insert_temp(drafts_id(), drafts));
+    }
     let view_open = app.views.open.is_some();
     ui.data_mut(|d| d.insert_temp(views::open_id(), view_open));
     let saved = std::sync::Arc::new(
