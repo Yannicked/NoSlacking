@@ -338,7 +338,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         ui,
                         &palette,
                         workspace,
-                        settings.closed.get(&workspace.info.team_id),
                         sidebar_filter,
                         settings,
                         now,
@@ -377,21 +376,20 @@ fn matches(workspace: &WorkspaceState, conversation: &Conversation, filter: &str
             .contains(&filter.to_lowercase())
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the sidebar's parts, borrowed apart from the app"
-)]
+/// The workspace's conversations, section by section, narrowed to those
+/// whose names hold `filter` and arranged as `settings` say; `now` decides
+/// which have gone quiet.
 fn list(
     ui: &mut egui::Ui,
     palette: &Palette,
     workspace: &WorkspaceState,
-    closed: Option<&std::collections::BTreeMap<String, String>>,
     filter: &str,
     settings: &crate::settings::Settings,
     now: i64,
     actions: &mut Vec<Action>,
 ) {
     let filter = filter.trim();
+    let closed = settings.closed.get(&workspace.info.team_id);
     let sections = workspace.sections.as_deref();
     let drafts = ui.data(|d| {
         d.get_temp::<std::sync::Arc<std::collections::HashSet<String>>>(super::drafts_id())

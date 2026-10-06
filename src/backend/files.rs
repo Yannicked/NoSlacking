@@ -52,22 +52,42 @@ impl UploadGate {
     }
 }
 
+/// Where an upload is shared: a conversation, or a thread in it.
+pub(super) struct Destination {
+    /// The workspace the conversation is in.
+    pub team: String,
+    /// The conversation.
+    pub channel: String,
+    /// The thread's parent, when the file goes into a thread.
+    pub thread: Option<Ts>,
+}
+
+/// What an upload sends: a file on disk, and the words posted with it.
+pub(super) struct Attachment {
+    /// The file to send.
+    pub path: std::path::PathBuf,
+    /// The message shared with it, if any.
+    pub comment: String,
+}
+
 /// Uploads one file for [`Worker::upload`](super::worker::Worker::upload),
 /// telling the interface how far it got along the way. Returns whether
 /// the file was shared.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn upload(
     id: u64,
     client: Client,
-    team: String,
-    channel: String,
-    thread: Option<Ts>,
-    path: std::path::PathBuf,
-    comment: String,
+    to: Destination,
+    file: Attachment,
     poll_after: bool,
     gate: UploadGate,
     sink: &Sink,
 ) -> bool {
+    let Destination {
+        team,
+        channel,
+        thread,
+    } = to;
+    let Attachment { path, comment } = file;
     let name = file_name(&path);
     // The size comes from the open file, so it is the size of what
     // gets streamed, not of whatever the path named a moment

@@ -18,7 +18,9 @@ use super::fetch::{
     Boot, boot, conversation_info, conversations, edit_sidebar, history, sections, thread,
     workspace_details,
 };
-use super::files::{UploadGate, download, fetch_bytes, file_name, open_file, upload, view};
+use super::files::{
+    Attachment, Destination, UploadGate, download, fetch_bytes, file_name, open_file, upload, view,
+};
 use super::translate::{Translated, str_of, translate};
 use super::{Change, Command, Event, Gate, SignIn, Sink, Socket};
 use crate::auth::{Flow, SignedIn};
@@ -1103,10 +1105,13 @@ impl Worker {
         let task = {
             let gate = gate.clone();
             tokio::spawn(async move {
-                let shared = upload(
-                    id, client, team, channel, thread, path, comment, poll_after, gate, &sink,
-                )
-                .await;
+                let to = Destination {
+                    team,
+                    channel,
+                    thread,
+                };
+                let file = Attachment { path, comment };
+                let shared = upload(id, client, to, file, poll_after, gate, &sink).await;
                 sink.send(Event::UploadDone { id, shared });
             })
         };

@@ -407,24 +407,33 @@ fn card_guess(message: &Message) -> f32 {
     76.0 + (message.text.len() / 90) as f32 * 20.0
 }
 
+/// What a [`card`] shows, and what a click on it asks for.
+struct Card<'a> {
+    /// The message itself.
+    message: &'a Message,
+    /// Where and why, said above the author, if that is said.
+    above: Option<&'a str>,
+    /// Whether it wears an unread dot.
+    unread: bool,
+    /// What a click on the card asks for (showing the message in
+    /// context, say).
+    open: Action,
+}
+
 /// One message as a card: where and why above it, if that is said, then
 /// who wrote it and what it says, with `buttons` on the right. A click on
-/// the card asks for `open` (showing the message in context, say); the
-/// buttons, links and mentions inside it take their own clicks.
-#[allow(clippy::too_many_arguments)]
+/// the card asks for its `open`; the buttons, links and mentions inside
+/// it take their own clicks.
 fn card(
     ui: &mut egui::Ui,
     palette: &Palette,
     workspace: &WorkspaceState,
-    open: Action,
-    message: &Message,
-    above: Option<&str>,
-    unread: bool,
+    card: Card<'_>,
     actions: &mut Vec<Action>,
     buttons: impl FnOnce(&mut egui::Ui, &mut Vec<Action>),
 ) {
     let background = ui.painter().add(egui::Shape::Noop);
-    let author = workspace.author(message);
+    let author = workspace.author(card.message);
     // Sensed before its contents are laid out, so they sit on top of it.
     let scope = ui.scope_builder(
         egui::UiBuilder::new().sense(Sense::click()).id_salt("card"),
@@ -433,9 +442,7 @@ fn card(
                 .inner_margin(Margin::symmetric(20, 10))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    card_contents(
-                        ui, palette, workspace, message, &author, above, unread, actions, buttons,
-                    );
+                    card_contents(ui, palette, workspace, &card, &author, actions, buttons);
                 });
         },
     );
@@ -458,29 +465,32 @@ fn card(
         rect.bottom(),
         Stroke::new(1.0, palette.outline.gamma_multiply(0.6)),
     );
-    let spoken = match above {
+    let spoken = match card.above {
         Some(above) => format!("{above}: {author}"),
         None => author.clone(),
     };
     theme::describe(&response, egui::WidgetType::Button, &spoken);
     if response.clicked() {
-        actions.push(open);
+        actions.push(card.open);
     }
 }
 
-/// What a [`card`] holds.
-#[allow(clippy::too_many_arguments)]
+/// What a [`card`] holds, `author` being who wrote its message.
 fn card_contents(
     ui: &mut egui::Ui,
     palette: &Palette,
     workspace: &WorkspaceState,
-    message: &Message,
+    card: &Card<'_>,
     author: &str,
-    above: Option<&str>,
-    unread: bool,
     actions: &mut Vec<Action>,
     buttons: impl FnOnce(&mut egui::Ui, &mut Vec<Action>),
 ) {
+    let Card {
+        message,
+        above,
+        unread,
+        ..
+    } = *card;
     let time = |ui: &mut egui::Ui| {
         ui.label(
             RichText::new(when(&message.ts))
@@ -596,10 +606,12 @@ fn activity(
             ui,
             palette,
             workspace,
-            jump(&item.channel, &item.message),
-            &item.message,
-            Some(&above),
-            item.unread,
+            Card {
+                message: &item.message,
+                above: Some(&above),
+                unread: item.unread,
+                open: jump(&item.channel, &item.message),
+            },
             actions,
             |_, _| {},
         );
@@ -701,10 +713,12 @@ fn unreads(
                 ui,
                 palette,
                 workspace,
-                jump(&conversations[c].id, &messages(c)[m]),
-                &messages(c)[m],
-                None,
-                false,
+                Card {
+                    message: &messages(c)[m],
+                    above: None,
+                    unread: false,
+                    open: jump(&conversations[c].id, &messages(c)[m]),
+                },
                 actions,
                 |_, _| {},
             ),
@@ -937,10 +951,12 @@ fn threads(
                     ui,
                     palette,
                     workspace,
-                    open(thread),
-                    &thread.parent,
-                    None,
-                    false,
+                    Card {
+                        message: &thread.parent,
+                        above: None,
+                        unread: false,
+                        open: open(thread),
+                    },
                     actions,
                     |_, _| {},
                 );
@@ -957,10 +973,12 @@ fn threads(
                             ui,
                             palette,
                             workspace,
-                            open(thread),
-                            &thread.replies[r],
-                            None,
-                            new,
+                            Card {
+                                message: &thread.replies[r],
+                                above: None,
+                                unread: new,
+                                open: open(thread),
+                            },
                             actions,
                             |_, _| {},
                         );
@@ -1115,10 +1133,12 @@ fn later(
                     ui,
                     palette,
                     workspace,
-                    jump(&item.channel, &item.message),
-                    &item.message,
-                    Some(&above),
-                    false,
+                    Card {
+                        message: &item.message,
+                        above: Some(&above),
+                        unread: false,
+                        open: jump(&item.channel, &item.message),
+                    },
                     actions,
                     |ui, actions| {
                         if theme::icon_button(ui, palette, Icon::X, 14.0, &t("Remove from Later"))
