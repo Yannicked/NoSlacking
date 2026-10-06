@@ -15,8 +15,8 @@ mod files;
 mod menu;
 mod quote;
 
-use cards::{attachment_media, attachment_view, blocks_view};
-use files::{file_view, poster_size};
+use cards::{attachment_media, attachment_view, blocks_view, kit_image_size};
+use files::{file_view, poster_size, thumb_size};
 use menu::{context_id, context_menu, toolbar};
 
 pub struct Row<'a> {
@@ -154,17 +154,16 @@ pub fn guess_height(message: &Message, lead: Lead, look: Look) -> f32 {
         }
     };
     for file in &message.files {
-        height += match file.thumb_size {
+        height += if file.deleted {
             // "This file was deleted."
-            _ if file.deleted => 20.0,
-            Some([w, h]) if file.is_image() && w > 0.0 && h > 0.0 => {
-                let scale = (420.0 / w).min(320.0 / h).min(1.0);
-                picture((h * scale).max(24.0) + 4.0)
-            }
-            _ if file.is_image() => picture(244.0),
+            20.0
+        } else if file.is_image() {
+            picture(thumb_size(file, 420.0).y + 4.0)
+        } else if file.poster.is_some() {
             // A still above the card.
-            _ if file.poster.is_some() => picture(poster_size(file, 420.0).y + 4.0) + 64.0,
-            _ => 64.0,
+            picture(poster_size(file, 420.0).y + 4.0) + 64.0
+        } else {
+            64.0
         };
     }
     for attachment in &message.attachments {
@@ -172,6 +171,11 @@ pub fn guess_height(message: &Message, lead: Lead, look: Look) -> f32 {
             + attachment_media(attachment, 560.0).map_or(0.0, |(_, size)| picture(size.y + 4.0));
     }
     height += message.blocks.len() as f32 * 30.0;
+    for block in &message.blocks {
+        if let crate::model::KitBlock::Image { size, .. } = block {
+            height += picture(kit_image_size(*size, 440.0).y);
+        }
+    }
     if !message.reactions.is_empty() {
         height += 32.0;
     }

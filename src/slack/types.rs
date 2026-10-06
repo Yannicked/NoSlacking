@@ -591,6 +591,7 @@ pub fn kit_blocks(blocks: &[Value]) -> Vec<model::KitBlock> {
                         .unwrap_or("")
                         .to_owned(),
                     title: block.get("title").and_then(kit_text),
+                    size: size_of(block.get("image_width"), block.get("image_height")),
                 }),
             "actions" => {
                 let buttons: Vec<model::Button> = block
@@ -1559,6 +1560,59 @@ mod tests {
         let post = &message.attachments[1];
         assert_eq!(post.video, None);
         assert_eq!(post.image_size, Some([1200.0, 630.0]));
+    }
+
+    #[test]
+    fn picture_files_keep_the_size_of_the_thumbnail_they_show() {
+        let message = parsed(
+            r#"{"type":"message","ts":"1.0","user":"U1","text":"",
+            "files":[{"id":"F1","name":"big.png","mimetype":"image/png","size":900000,
+            "original_w":3024,"original_h":4032,
+            "thumb_360":"https://files.slack.com/t360.png","thumb_360_w":270,"thumb_360_h":360,
+            "thumb_720":"https://files.slack.com/t720.png","thumb_720_w":540,"thumb_720_h":720},
+            {"id":"F2","name":"tiny.gif","mimetype":"image/gif","size":2000,
+            "url_private":"https://files.slack.com/tiny.gif","original_w":64,"original_h":48}]}"#,
+        );
+        let [big, tiny] = &message.files[..] else {
+            panic!("two files");
+        };
+        assert_eq!(
+            big.thumb.as_deref(),
+            Some("https://files.slack.com/t720.png")
+        );
+        assert_eq!(
+            big.thumb_size,
+            Some([540.0, 720.0]),
+            "the largest thumbnail's"
+        );
+        assert_eq!(big.original_size, Some([3024.0, 4032.0]));
+        // Shown as it is, without a thumbnail: its own size.
+        assert_eq!(
+            tiny.thumb.as_deref(),
+            Some("https://files.slack.com/tiny.gif")
+        );
+        assert_eq!(tiny.thumb_size, Some([64.0, 48.0]));
+    }
+
+    #[test]
+    fn image_blocks_keep_the_size_slack_adds() {
+        let message = parsed(
+            r#"{"type":"message","ts":"1.0","bot_id":"B1","text":"chart",
+            "blocks":[{"type":"image","image_url":"https://ci.example/a.png","alt_text":"a",
+              "image_width":1024,"image_height":"512","image_bytes":20000},
+             {"type":"image","image_url":"https://ci.example/b.png","alt_text":"b"},
+             {"type":"image","image_url":"https://ci.example/c.png","alt_text":"c",
+              "image_width":0,"image_height":300}]}"#,
+        );
+        let sizes: Vec<_> = message
+            .blocks
+            .iter()
+            .map(|block| match block {
+                model::KitBlock::Image { size, .. } => *size,
+                other => panic!("an image block, not {other:?}"),
+            })
+            .collect();
+        assert_eq!(sizes, [Some([1024.0, 512.0]), None, None]);
     }
 
     #[test]

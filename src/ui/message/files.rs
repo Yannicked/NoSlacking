@@ -31,25 +31,21 @@ pub(super) fn file_view(
     if file.is_image()
         && let Some(thumb) = &file.thumb
     {
-        let [w, h] = file.thumb_size.unwrap_or([360.0, 240.0]);
-        let max = Vec2::new(ui.available_width().min(420.0), 320.0);
-        let scale = (max.x / w).min(max.y / h).min(1.0);
-        let size = Vec2::new(w * scale, h * scale).max(Vec2::splat(24.0));
+        let size = thumb_size(file, ui.available_width());
         let uri = crate::ui::image_uri(team, thumb);
         if !shows(ui, row, &uri) {
             placeholder(ui, row, &uri, &file.name);
             return;
         }
-        let response = ui
-            .add(
-                egui::Image::new(uri.clone())
-                    .fit_to_exact_size(size)
-                    .corner_radius(CornerRadius::same(theme::RADIUS))
-                    .show_loading_spinner(true)
-                    .sense(Sense::click()),
-            )
-            .on_hover_cursor(egui::CursorIcon::ZoomIn)
-            .on_hover_text(&file.name);
+        let response = crate::ui::picture(
+            ui,
+            uri.clone(),
+            size,
+            CornerRadius::same(theme::RADIUS),
+            Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ZoomIn)
+        .on_hover_text(&file.name);
         // In the thread panel the viewer steps through the thread's
         // pictures; a parent is its own thread.
         let thread = row.in_thread.then(|| {
@@ -107,15 +103,14 @@ pub(super) fn file_view(
         placeholder(ui, row, uri, &file.name);
     } else if let Some(uri) = poster {
         let size = poster_size(file, ui.available_width());
-        let response = ui
-            .add(
-                egui::Image::new(uri)
-                    .fit_to_exact_size(size)
-                    .corner_radius(CornerRadius::same(theme::RADIUS))
-                    .show_loading_spinner(true)
-                    .sense(Sense::click()),
-            )
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let response = crate::ui::picture(
+            ui,
+            uri,
+            size,
+            CornerRadius::same(theme::RADIUS),
+            Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
         let tip = if file.media().is_some() {
             tf("Play {name}", &[("name", &file.name)])
         } else {
@@ -293,6 +288,17 @@ pub(super) fn fit_within(size: Option<[f32; 2]>, max: Vec2, fallback: Vec2) -> V
     Vec2::new(w * scale, h * scale).max(Vec2::splat(24.0))
 }
 
+/// How large a picture file is shown, in a column `width` wide: the size
+/// of the thumbnail Slack gave, shrunk to fit, or a fixed box when Slack
+/// gave none. The same before it has loaded as after.
+pub(super) fn thumb_size(file: &File, width: f32) -> Vec2 {
+    fit_within(
+        file.thumb_size,
+        Vec2::new(width.min(420.0), 320.0),
+        Vec2::new(360.0, 240.0),
+    )
+}
+
 /// How large a video's or PDF's still is shown, in a column `width` wide.
 /// A page is shown smaller than a frame: it is there to recognise the
 /// document, not to read it.
@@ -443,5 +449,36 @@ mod tests {
         assert_eq!(fit_within(Some([0.0, 10.0]), max, fallback), fallback);
         // A sliver stays big enough to see and press.
         assert_eq!(fit_within(Some([4000.0, 10.0]), max, fallback).y, 24.0);
+    }
+
+    #[test]
+    fn a_picture_file_takes_the_same_room_loaded_or_not() {
+        let file = File {
+            mimetype: "image/png".into(),
+            thumb: Some("https://files.slack.com/t720.png".into()),
+            thumb_size: Some([540.0, 720.0]),
+            ..File::default()
+        };
+        let size = thumb_size(&file, 800.0);
+        assert_eq!(size, Vec2::new(240.0, 320.0));
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        // While it loads, and once the thumbnail Slack described arrives.
+        assert_eq!(crate::ui::contain(rect, None), rect);
+        assert_eq!(
+            crate::ui::contain(rect, Some(Vec2::new(540.0, 720.0))),
+            rect
+        );
+    }
+
+    #[test]
+    fn a_picture_file_of_unknown_size_gets_a_fixed_box() {
+        let file = File {
+            mimetype: "image/png".into(),
+            thumb: Some("https://files.slack.com/t.png".into()),
+            ..File::default()
+        };
+        assert_eq!(thumb_size(&file, 800.0), Vec2::new(360.0, 240.0));
+        // A narrow column shrinks the box, keeping its shape.
+        assert_eq!(thumb_size(&file, 180.0), Vec2::new(180.0, 120.0));
     }
 }

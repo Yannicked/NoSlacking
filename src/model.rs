@@ -590,6 +590,9 @@ pub enum KitBlock {
         url: String,
         alt: String,
         title: Option<String>,
+        /// The picture's size, which Slack adds to the blocks it hands
+        /// back, so it takes its place before it has loaded.
+        size: Option<[f32; 2]>,
     },
     Actions(Vec<Button>),
     /// What people type, as Slack laid it out: the message's `text` says

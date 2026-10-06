@@ -17,12 +17,18 @@ use crate::ui::rich::{self, Rich};
 pub(super) enum CardMedia<'a> {
     /// A video's thumbnail, with a play button that opens `link`.
     Video { thumb: &'a str, link: &'a str },
-    /// A picture whose size Slack gave.
+    /// A picture.
     Image(&'a str),
 }
 
+/// The box a link card's picture whose size Slack did not give is shown
+/// in: as wide as most previews, in the shape most sites make theirs.
+const UNSIZED_CARD: Vec2 = Vec2::new(400.0, 225.0);
+
 /// What large picture `attachment` shows, and how big, in a card `width`
-/// wide. A picture of unknown size is left out: it is sized once loaded.
+/// wide. The size is known before the picture loads: Slack's, shrunk to
+/// fit, or a fixed box the picture is fitted into when Slack gave none, so
+/// the card never changes height when it arrives.
 pub(super) fn attachment_media(
     attachment: &Attachment,
     width: f32,
@@ -36,13 +42,21 @@ pub(super) fn attachment_media(
         return Some((CardMedia::Video { thumb, link }, size));
     }
     let image = attachment.image.as_deref()?;
-    let size = attachment.image_size?;
     let size = fit_within(
-        Some(size),
+        attachment.image_size,
         Vec2::new(width.min(400.0), 300.0),
-        Vec2::new(400.0, 300.0),
+        UNSIZED_CARD,
     );
     Some((CardMedia::Image(image), size))
+}
+
+/// The box a Block Kit picture whose size Slack did not give is shown in.
+const UNSIZED_KIT: Vec2 = Vec2::new(440.0, 247.5);
+
+/// How large a Block Kit picture is shown in a column `width` wide: the
+/// size Slack gave, shrunk to fit, or a fixed box when it gave none.
+pub(super) fn kit_image_size(size: Option<[f32; 2]>, width: f32) -> Vec2 {
+    fit_within(size, Vec2::new(width.min(440.0), 320.0), UNSIZED_KIT)
 }
 
 /// A small picture before a name in a card's header: a site's or an
@@ -205,15 +219,14 @@ pub(super) fn attachment_view(
                     } else {
                         match attachment_media(attachment, ui.available_width()) {
                             Some((CardMedia::Video { thumb, link }, size)) => {
-                                let response = ui
-                                    .add(
-                                        egui::Image::new(crate::ui::image_uri(team, thumb))
-                                            .fit_to_exact_size(size)
-                                            .corner_radius(CornerRadius::same(theme::RADIUS_SMALL))
-                                            .show_loading_spinner(true)
-                                            .sense(Sense::click()),
-                                    )
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                let response = crate::ui::picture(
+                                    ui,
+                                    crate::ui::image_uri(team, thumb),
+                                    size,
+                                    CornerRadius::same(theme::RADIUS_SMALL),
+                                    Sense::click(),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
                                 play_badge(ui, response.rect.center(), response.hovered());
                                 let tip = t("Play in the browser");
                                 theme::describe(&response, egui::WidgetType::Button, &tip);
@@ -223,15 +236,14 @@ pub(super) fn attachment_view(
                             }
                             Some((CardMedia::Image(image), size)) => {
                                 let uri = crate::ui::image_uri(team, image);
-                                let response = ui
-                                    .add(
-                                        egui::Image::new(uri.clone())
-                                            .fit_to_exact_size(size)
-                                            .corner_radius(CornerRadius::same(theme::RADIUS_SMALL))
-                                            .show_loading_spinner(true)
-                                            .sense(Sense::click()),
-                                    )
-                                    .on_hover_cursor(egui::CursorIcon::ZoomIn);
+                                let response = crate::ui::picture(
+                                    ui,
+                                    uri.clone(),
+                                    size,
+                                    CornerRadius::same(theme::RADIUS_SMALL),
+                                    Sense::click(),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::ZoomIn);
                                 if response.clicked() {
                                     actions.push(Action::Preview {
                                         uri,
@@ -239,19 +251,7 @@ pub(super) fn attachment_view(
                                     });
                                 }
                             }
-                            None => {
-                                if let Some(image) = &attachment.image {
-                                    ui.add(
-                                        egui::Image::new(crate::ui::image_uri(team, image))
-                                            .fit_to_original_size(1.0)
-                                            .max_size(Vec2::new(
-                                                ui.available_width().min(400.0),
-                                                300.0,
-                                            ))
-                                            .corner_radius(CornerRadius::same(theme::RADIUS_SMALL)),
-                                    );
-                                }
-                            }
+                            None => {}
                         }
                     }
                     if let Some(footer) = &attachment.footer {
@@ -262,10 +262,12 @@ pub(super) fn attachment_view(
                     }
                 });
                 if let Some(thumb) = side_thumb {
-                    ui.add(
-                        egui::Image::new(crate::ui::image_uri(team, thumb))
-                            .fit_to_exact_size(Vec2::splat(THUMB))
-                            .corner_radius(CornerRadius::same(theme::RADIUS_SMALL)),
+                    crate::ui::picture(
+                        ui,
+                        crate::ui::image_uri(team, thumb),
+                        Vec2::splat(THUMB),
+                        CornerRadius::same(theme::RADIUS_SMALL),
+                        Sense::hover(),
                     );
                 }
             });
@@ -474,10 +476,12 @@ pub(super) fn blocks_view(
                         });
                         match accessory {
                             Some(Accessory::Image { url, alt }) => {
-                                ui.add(
-                                    egui::Image::new(crate::ui::image_uri(team, url))
-                                        .fit_to_exact_size(Vec2::splat(SIDE))
-                                        .corner_radius(CornerRadius::same(theme::RADIUS_SMALL)),
+                                crate::ui::picture(
+                                    ui,
+                                    crate::ui::image_uri(team, url),
+                                    Vec2::splat(SIDE),
+                                    CornerRadius::same(theme::RADIUS_SMALL),
+                                    Sense::hover(),
                                 )
                                 .on_hover_text(alt);
                             }
@@ -504,10 +508,12 @@ pub(super) fn blocks_view(
                                     rich::show(ui, &rich, text, false, actions);
                                 }
                                 ContextItem::Image { url, alt } => {
-                                    ui.add(
-                                        egui::Image::new(crate::ui::image_uri(team, url))
-                                            .fit_to_exact_size(Vec2::splat(16.0))
-                                            .corner_radius(CornerRadius::same(3)),
+                                    crate::ui::picture(
+                                        ui,
+                                        crate::ui::image_uri(team, url),
+                                        Vec2::splat(16.0),
+                                        CornerRadius::same(3),
+                                        Sense::hover(),
                                     )
                                     .on_hover_text(alt);
                                 }
@@ -524,7 +530,12 @@ pub(super) fn blocks_view(
                         Stroke::new(1.0, palette.outline),
                     );
                 }
-                KitBlock::Image { url, alt, title } => {
+                KitBlock::Image {
+                    url,
+                    alt,
+                    title,
+                    size,
+                } => {
                     if let Some(title) = title {
                         let rich = Rich::new(palette, row.workspace)
                             .size(13.0)
@@ -536,17 +547,15 @@ pub(super) fn blocks_view(
                         placeholder(ui, row, &uri, alt);
                         continue;
                     }
-                    let response = ui
-                        .add(
-                            egui::Image::new(uri.clone())
-                                .fit_to_original_size(1.0)
-                                .max_size(Vec2::new(ui.available_width().min(440.0), 320.0))
-                                .corner_radius(CornerRadius::same(theme::RADIUS))
-                                .show_loading_spinner(true)
-                                .sense(Sense::click()),
-                        )
-                        .on_hover_cursor(egui::CursorIcon::ZoomIn)
-                        .on_hover_text(alt);
+                    let response = crate::ui::picture(
+                        ui,
+                        uri.clone(),
+                        kit_image_size(*size, ui.available_width()),
+                        CornerRadius::same(theme::RADIUS),
+                        Sense::click(),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::ZoomIn)
+                    .on_hover_text(alt);
                     if response.clicked() {
                         actions.push(Action::Preview {
                             uri,
@@ -592,7 +601,15 @@ mod tests {
             image: Some("https://blog.example/p.png".into()),
             ..Attachment::default()
         };
-        assert!(attachment_media(&unsized_image, 560.0).is_none());
+        // Without a size: the fixed box, the same before and after.
+        assert!(matches!(
+            attachment_media(&unsized_image, 560.0),
+            Some((CardMedia::Image(_), size)) if size == UNSIZED_CARD
+        ));
+        assert!(matches!(
+            attachment_media(&unsized_image, 200.0),
+            Some((CardMedia::Image(_), size)) if size == Vec2::new(200.0, 112.5)
+        ));
         let sized = Attachment {
             image_size: Some([800.0, 400.0]),
             ..unsized_image
@@ -601,5 +618,20 @@ mod tests {
             attachment_media(&sized, 300.0),
             Some((CardMedia::Image(_), size)) if size == Vec2::new(300.0, 150.0)
         ));
+    }
+
+    #[test]
+    fn kit_pictures_are_sized_by_slack_or_a_fixed_box() {
+        assert_eq!(
+            kit_image_size(Some([1024.0, 512.0]), 800.0),
+            Vec2::new(440.0, 220.0)
+        );
+        assert_eq!(
+            kit_image_size(Some([100.0, 80.0]), 800.0),
+            Vec2::new(100.0, 80.0),
+            "never grown"
+        );
+        assert_eq!(kit_image_size(None, 800.0), UNSIZED_KIT);
+        assert_eq!(kit_image_size(None, 220.0), Vec2::new(220.0, 123.75));
     }
 }

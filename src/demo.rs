@@ -351,7 +351,7 @@ fn glitchtip_alert() -> Message {
 }
 
 /// A Block Kit message: header, a section with fields and an image, a
-/// context line, a divider and link buttons.
+/// picture with its size, a context line, a divider and link buttons.
 fn block_kit_release() -> Message {
     from_json(&format!(
         r##"{{"type":"message","subtype":"bot_message","ts":"{}.000100","bot_id":"B08","username":"Release Bot",
@@ -361,7 +361,10 @@ fn block_kit_release() -> Message {
           {{"type":"section","text":{{"type":"mrkdwn","text":"*14 changes* since the last release, built from `main` by <@U02>."}},
             "fields":[{{"type":"mrkdwn","text":"*Status*\nPassed"}},{{"type":"mrkdwn","text":"*Duration*\n6m 12s"}},
                       {{"type":"mrkdwn","text":"*Platforms*\nLinux, macOS, Windows"}},{{"type":"mrkdwn","text":"*Size*\n9.4 MB"}}],
-            "accessory":{{"type":"image","image_url":"{PICTURE}","alt_text":"build preview"}}}},
+            "accessory":{{"type":"image","image_url":"slow://build-preview.png","alt_text":"build preview"}}}},
+          {{"type":"image","image_url":"slow://build-times.png","alt_text":"build times",
+            "title":{{"type":"plain_text","text":"Build times this week"}},
+            "image_width":480,"image_height":270,"image_bytes":48213}},
           {{"type":"context","elements":[{{"type":"mrkdwn","text":"Triggered by a push to `main` · <https://ci.example.com/1288|build #1288>"}}]}},
           {{"type":"divider"}},
           {{"type":"actions","block_id":"release","elements":[
@@ -401,6 +404,20 @@ fn deploy_approval(answer: Option<&str>) -> Message {
           {{"type":"section","block_id":"ask","text":{{"type":"mrkdwn","text":"*Deploy 2026.10.1 to production?*\nRequested by <@U02> · build #1288 passed"}}}},
           {last}
         ]}}"##
+    ))
+}
+
+/// A chart an app posted as a Block Kit image whose size Slack did not
+/// give, as older messages have it.
+fn block_kit_chart() -> Message {
+    from_json(&format!(
+        r##"{{"type":"message","subtype":"bot_message","ts":"{}.000100","bot_id":"B08","username":"Release Bot",
+        "text":"Error rate after the release",
+        "blocks":[
+          {{"type":"image","image_url":"slow://error-rate.png","alt_text":"error rate",
+            "title":{{"type":"plain_text","text":"Error rate after the release"}}}}
+        ]}}"##,
+        NOW - 40
     ))
 }
 
@@ -515,7 +532,7 @@ fn history(channel: &str) -> Vec<Message> {
                     size: 48_213,
                     url_private: None,
                     download_url: None,
-                    thumb: Some(PICTURE.into()),
+                    thumb: Some("slow://sidebar-v2.png".into()),
                     thumb_size: Some([480.0, 270.0]),
                     permalink: None,
                     original_size: Some([480.0, 270.0]),
@@ -534,7 +551,7 @@ fn history(channel: &str) -> Vec<Message> {
                     title: "sidebar-v2-light.png".into(),
                     mimetype: "image/png".into(),
                     size: 51_002,
-                    thumb: Some(PICTURE.into()),
+                    thumb: Some("slow://sidebar-v2-light.png".into()),
                     thumb_size: Some([480.0, 270.0]),
                     original_size: Some([480.0, 270.0]),
                     permalink: Some(
@@ -612,6 +629,7 @@ fn history(channel: &str) -> Vec<Message> {
             glitchtip_alert(),
             block_kit_release(),
             deploy_approval(None),
+            block_kit_chart(),
         ],
         "D01" => vec![
             message(NOW - 1000, ME, "Can you look at the new reaction picker?"),
@@ -651,7 +669,7 @@ fn history(channel: &str) -> Vec<Message> {
                     author_link: Some("https://www.youtube.com/@rustconf".into()),
                     title: Some("Immediate mode interfaces in practice".into()),
                     title_link: Some("https://www.youtube.com/watch?v=demo".into()),
-                    thumb: Some(PICTURE.into()),
+                    thumb: Some("slow://talk-thumb.jpg".into()),
                     thumb_size: Some([480.0, 270.0]),
                     video: Some("https://www.youtube.com/watch?v=demo".into()),
                     color: Some(egui::Color32::from_rgb(0xff, 0x00, 0x33)),
@@ -671,7 +689,7 @@ fn history(channel: &str) -> Vec<Message> {
                     text:
                         "How much should fit on one screen? Notes from a year of compact layouts."
                             .into(),
-                    image: Some(PICTURE.into()),
+                    image: Some("slow://density.png".into()),
                     image_size: Some([1200.0, 675.0]),
                     ..Attachment::default()
                 }],
@@ -687,7 +705,7 @@ fn history(channel: &str) -> Vec<Message> {
                         url_private: Some(
                             "https://files.slack.com/files-pri/TDEMO-F10/walkthrough.mp4".into(),
                         ),
-                        poster: Some(PICTURE.into()),
+                        poster: Some("slow://walkthrough.jpg".into()),
                         poster_size: Some([640.0, 360.0]),
                         ..File::default()
                     },
@@ -717,7 +735,7 @@ fn history(channel: &str) -> Vec<Message> {
                     url_private: Some(
                         "https://files.slack.com/files-pri/TDEMO-F12/style-guide.pdf".into(),
                     ),
-                    poster: Some(PICTURE.into()),
+                    poster: Some("slow://style-guide.png".into()),
                     poster_size: Some([480.0, 270.0]),
                     ..File::default()
                 }],
