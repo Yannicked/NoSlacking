@@ -1432,6 +1432,28 @@ impl WorkspaceState {
         self.added_emoji.insert(name, url);
     }
 
+    /// A custom emoji was added, removed or renamed, here or elsewhere.
+    /// One added here and waiting for Slack's list follows the change too,
+    /// so a later list does not bring back what is gone.
+    pub(super) fn emoji_changed(&mut self, change: &crate::emoji::EmojiChange) {
+        use crate::emoji::EmojiChange;
+        self.emoji.apply(change);
+        match change {
+            // Slack has it now.
+            EmojiChange::Added { name, .. } => {
+                self.added_emoji.remove(name);
+            }
+            EmojiChange::Removed(names) => {
+                for name in names {
+                    self.added_emoji.remove(name);
+                }
+            }
+            EmojiChange::Renamed { old, .. } => {
+                self.added_emoji.remove(old);
+            }
+        }
+    }
+
     /// You deleted file `id`: it is hidden at once, wherever it shows,
     /// until Slack answers ([`Self::file_delete_settled`]).
     pub(super) fn hide_file(&mut self, id: &str) {
@@ -2041,6 +2063,26 @@ mod tests {
             "Slack's word is final after that"
         );
         assert!(!w.can_add_emoji);
+    }
+
+    #[test]
+    fn an_emoji_removed_elsewhere_does_not_come_back_from_the_wait_for_slack() {
+        use crate::emoji::EmojiChange;
+        let mut w = workspace();
+        w.emoji_added("shipit".into(), "bytes://new/shipit.png".into());
+        w.emoji_changed(&EmojiChange::Removed(vec!["shipit".into()]));
+        assert!(!w.emoji.contains("shipit"));
+        // A list from before the removal reached Slack's list.
+        w.emoji_arrived(HashMap::new(), true);
+        assert!(!w.emoji.contains("shipit"), "not kept as waiting any more");
+        w.emoji_changed(&EmojiChange::Added {
+            name: "parrot".into(),
+            value: "https://x/parrot.gif".into(),
+        });
+        assert_eq!(
+            w.emoji.resolve("parrot"),
+            crate::emoji::Resolved::Image("https://x/parrot.gif".into())
+        );
     }
 
     /// A workspace with a parent in C1 and two replies loaded in its thread.

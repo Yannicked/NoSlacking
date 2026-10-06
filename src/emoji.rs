@@ -22,6 +22,24 @@ const SLACK_NAMES: &[(&str, &str)] = &[
     ("party_popper", "tada"),
 ];
 
+/// A change to a workspace's custom emoji made anywhere, as Slack's
+/// `emoji_changed` event tells it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EmojiChange {
+    /// `name` was added: `value` is its picture's address, or `alias:`
+    /// and the name it stands for.
+    Added { name: String, value: String },
+    /// These were removed, with every alias of them.
+    Removed(Vec<String>),
+    /// `old` is now called `new`; `value` is what it shows, when Slack
+    /// says.
+    Renamed {
+        old: String,
+        new: String,
+        value: Option<String>,
+    },
+}
+
 /// A workspace's custom emoji, from `emoji.list`.
 #[derive(Clone, Debug, Default)]
 pub struct EmojiSet {
@@ -41,6 +59,45 @@ impl EmojiSet {
     /// Adds a custom emoji just made here, before Slack's list says so.
     pub fn insert(&mut self, name: String, url: String) {
         self.custom.insert(name, url);
+    }
+
+    /// Applies a change made elsewhere, so it shows without fetching the
+    /// whole list again.
+    pub fn apply(&mut self, change: &EmojiChange) {
+        match change {
+            EmojiChange::Added { name, value } => {
+                self.custom.insert(name.clone(), value.clone());
+            }
+            EmojiChange::Removed(names) => {
+                for name in names {
+                    self.custom.remove(name);
+                }
+                // Slack removes an emoji's aliases with it, and may not
+                // name them.
+                self.custom.retain(|_, value| {
+                    value
+                        .strip_prefix("alias:")
+                        .is_none_or(|target| !names.iter().any(|name| name == target))
+                });
+            }
+            EmojiChange::Renamed { old, new, value } => {
+                let Some(before) = self.custom.remove(old) else {
+                    if let Some(value) = value {
+                        self.custom.insert(new.clone(), value.clone());
+                    }
+                    return;
+                };
+                self.custom
+                    .insert(new.clone(), value.clone().unwrap_or(before));
+                // Its aliases follow it to its new name.
+                let alias = format!("alias:{old}");
+                for value in self.custom.values_mut() {
+                    if *value == alias {
+                        *value = format!("alias:{new}");
+                    }
+                }
+            }
+        }
     }
 
     pub fn custom_names(&self) -> impl Iterator<Item = (&str, &str)> {
@@ -283,6 +340,85 @@ pub fn group_name(group: emojis::Group) -> std::borrow::Cow<'static, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A set with a picture, `shipit`, and an alias of it, `ship`.
+    fn shipit() -> EmojiSet {
+        EmojiSet::new(HashMap::from([
+            ("shipit".to_owned(), "https://x/shipit.png".to_owned()),
+            ("ship".to_owned(), "alias:shipit".to_owned()),
+        ]))
+    }
+
+    #[test]
+    fn an_emoji_added_elsewhere_shows_and_so_does_its_alias() {
+        let mut set = shipit();
+        set.apply(&EmojiChange::Added {
+            name: "parrot".into(),
+            value: "https://x/parrot.gif".into(),
+        });
+        set.apply(&EmojiChange::Added {
+            name: "party".into(),
+            value: "alias:parrot".into(),
+        });
+        assert_eq!(
+            set.resolve("party"),
+            Resolved::Image("https://x/parrot.gif".into())
+        );
+        // An alias of a standard emoji is a name for it.
+        set.apply(&EmojiChange::Added {
+            name: "yay".into(),
+            value: "alias:tada".into(),
+        });
+        assert_eq!(set.resolve("yay"), Resolved::Unicode("🎉".into()));
+        let names: Vec<&str> = set.custom_names().map(|(name, _)| name).collect();
+        assert!(
+            !names.contains(&"party"),
+            "the picker lists pictures, not aliases"
+        );
+    }
+
+    #[test]
+    fn an_emoji_removed_elsewhere_takes_its_aliases_with_it() {
+        let mut set = shipit();
+        set.apply(&EmojiChange::Removed(vec!["shipit".into()]));
+        assert!(!set.contains("shipit"));
+        assert!(!set.contains("ship"), "Slack removes aliases with it");
+        // Back to the standard emoji of that name.
+        assert_eq!(set.resolve("ship"), Resolved::Unicode("🚢".into()));
+        let mut set = shipit();
+        set.apply(&EmojiChange::Removed(vec!["ship".into()]));
+        assert!(set.contains("shipit"), "removing an alias keeps the emoji");
+    }
+
+    #[test]
+    fn an_emoji_renamed_elsewhere_keeps_its_picture_and_aliases() {
+        let mut set = shipit();
+        set.apply(&EmojiChange::Renamed {
+            old: "shipit".into(),
+            new: "ship-it".into(),
+            value: None,
+        });
+        assert!(!set.contains("shipit"));
+        assert_eq!(
+            set.resolve("ship-it"),
+            Resolved::Image("https://x/shipit.png".into())
+        );
+        assert_eq!(
+            set.resolve("ship"),
+            Resolved::Image("https://x/shipit.png".into()),
+            "the alias follows it"
+        );
+        // Slack's value wins, and a name not known here is simply added.
+        set.apply(&EmojiChange::Renamed {
+            old: "unknown".into(),
+            new: "known".into(),
+            value: Some("https://x/known.png".into()),
+        });
+        assert_eq!(
+            set.resolve("known"),
+            Resolved::Image("https://x/known.png".into())
+        );
+    }
 
     #[test]
     fn slack_names_resolve_and_are_what_we_send() {

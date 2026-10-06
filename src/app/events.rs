@@ -151,6 +151,11 @@ impl App {
                     workspace.emoji_arrived(emoji, can_add);
                 }
             }
+            Event::EmojiChanged { team, change } => {
+                if let Some(workspace) = self.workspace_mut(&team) {
+                    workspace.emoji_changed(&change);
+                }
+            }
             Event::EmojiAdded { team, name, result } => self.emoji_added(&team, name, result),
             Event::UserGroups { team, groups } => {
                 if let Some(workspace) = self.workspace_mut(&team) {

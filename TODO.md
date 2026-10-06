@@ -590,6 +590,13 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       once and `emoji.list` is fetched again. OAuth sign-ins don't see the
       +. Untested against a real workspace: the request shape and Slack's
       error codes come from those tools and `admin.emoji.add`'s docs.*
+- [x] **Custom emoji added elsewhere show without a restart.**
+      *`emoji_changed` (`backend/translate.rs`) adds (`add`, a picture or
+      an `alias:`), removes (`remove`, with the aliases of what is
+      removed) and renames (`rename`, aliases following) in the
+      workspace's emoji set; no subtype or an unknown one fetches
+      `emoji.list` again, as Slack's docs ask. Not yet seen from a real
+      workspace: the shapes are those of the docs' examples.*
 - [x] **Send rich text as Slack's composer does.** *`chat.postMessage`,
       `chat.update` and `chat.scheduleMessage` send a `rich_text` block in
       `blocks` beside the mrkdwn `text` (`slack/rich_out.rs`): sections,

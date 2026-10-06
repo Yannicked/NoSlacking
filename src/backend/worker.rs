@@ -1535,6 +1535,14 @@ impl Worker {
                         tokio::spawn(sections(client, team.to_owned(), sink));
                     }
                 }
+                Translated::RefreshEmoji => {
+                    if let Some((client, sink)) = self.team(team) {
+                        let team = team.to_owned();
+                        tokio::spawn(
+                            async move { super::fetch::emoji(&client, &team, &sink).await },
+                        );
+                    }
+                }
                 Translated::RefreshPrefs => {
                     if let Some((client, sink)) = self.team(team)
                         && client.token().is_session()
