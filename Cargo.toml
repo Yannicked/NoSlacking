@@ -141,6 +141,11 @@ windows-native-keyring-store = { version = "1.1", default-features = false }
 aws-lc-sys = { version = "0.45", default-features = false, features = ["prebuilt-nasm"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# For huddle-openssl: OpenSSL's own DTLS in place of dimpl. Chime's media
+# servers refused dimpl's ClientHello (alert 40, handshake_failure); its
+# DTLS 1.2 offers only ECDHE_ECDSA suites, OpenSSL also the RSA and CBC
+# ones browsers offer. Linux only while it is tried out.
+str0m-openssl = { version = "0.6.0", optional = true }
 # The unread count on the launcher icon (the LauncherEntry signal). Already
 # in the tree for the keyring and accessibility; same version.
 zbus = { version = "5.19", default-features = false, features = ["blocking-api"] }
@@ -216,6 +221,9 @@ demo = []
 # Listening to huddles (src/huddle_audio.rs): a spike, off until it is
 # proven against Slack. Adds `noslacking --huddle-probe`.
 huddle-audio = ["audio", "dep:prost", "dep:str0m", "dep:aws-lc-sys", "dep:opus-decoder", "dep:hmac", "dep:md-5", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:tracing", "tokio/signal"]
+# Huddle audio with OpenSSL's DTLS (Linux, needs its headers): a trial of
+# whether Chime takes OpenSSL's handshake where it refused dimpl's.
+huddle-openssl = ["huddle-audio", "dep:str0m-openssl"]
 # Colours code blocks that name their language (```` ```rust ````). Our own
 # small lexer, a few kilobytes; turn it off for plain code blocks.
 highlight = []

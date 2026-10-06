@@ -246,6 +246,15 @@ async fn open_relay(server: &Server, turn: &TurnCredentials) -> Result<Relay, St
     })
 }
 
+/// The DTLS and SRTP crypto: OpenSSL's in the `huddle-openssl` trial on
+/// Linux, else the default (aws-lc-rs, DTLS through dimpl).
+fn crypto() -> str0m::crypto::CryptoProvider {
+    #[cfg(all(feature = "huddle-openssl", target_os = "linux"))]
+    return str0m_openssl::default_provider();
+    #[cfg(not(all(feature = "huddle-openssl", target_os = "linux")))]
+    str0m::crypto::from_feature_flags()
+}
+
 /// The WebRTC peer, its one candidate the relay at `relayed` (reached
 /// from `local`): Opus, and VP8 and H.264 for the video m-line.
 fn new_peer(relayed: SocketAddr, local: SocketAddr) -> Result<Rtc, String> {
@@ -254,7 +263,7 @@ fn new_peer(relayed: SocketAddr, local: SocketAddr) -> Result<Rtc, String> {
         .enable_opus(true, false)
         .enable_vp8(true)
         .enable_h264(true)
-        .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
+        .set_crypto_provider(Arc::new(crypto()))
         .build(Instant::now());
     let candidate =
         Candidate::relayed(relayed, local, "udp").map_err(|e| format!("relay candidate: {e}"))?;
@@ -1062,7 +1071,7 @@ mod tests {
         assert!(offer.sdp.contains("opus/48000/2"));
 
         let mut chime = RtcConfig::new()
-            .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
+            .set_crypto_provider(Arc::new(crypto()))
             .build(Instant::now());
         let server: SocketAddr = "192.0.2.10:3478".parse().expect("an address");
         chime.add_local_candidate(Candidate::host(server, "udp").expect("a candidate"));
@@ -1142,7 +1151,7 @@ mod tests {
         let mut ours = new_peer(relayed, local).expect("a peer");
         let offer = make_offer(&mut ours).expect("an offer");
         let mut chime = RtcConfig::new()
-            .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
+            .set_crypto_provider(Arc::new(crypto()))
             .build(now);
         chime.add_local_candidate(Candidate::host(server, "udp").expect("a candidate"));
         let answer_sdp = chime
@@ -1348,7 +1357,7 @@ mod tests {
                     offer = offer_inbox.recv() => {
                         let Some((offer, reply)) = offer else { return };
                         let mut rtc = RtcConfig::new()
-                            .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
+                            .set_crypto_provider(Arc::new(crypto()))
                             .build(Instant::now());
                         rtc.add_local_candidate(Candidate::host(media_server, "udp").expect("a candidate"));
                         let answer = rtc.sdp_api()
