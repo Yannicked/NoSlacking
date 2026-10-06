@@ -90,6 +90,15 @@ holds the AppKit `unsafe`), forwarding each URL into the same path a second
 launch's `Request::Open` takes (`Command::Callback`). Until then sign-in on
 macOS uses the loopback redirect, the default on every platform.
 
+The bundle declares `noslacking://` only. Linux and Windows borrow
+`slack://` for a browser sign-in and give it back afterwards
+(`src/slack_links.rs`); on macOS that takes Launch Services calls
+(`LSSetDefaultHandlerForURLScheme` to claim, `LSCopyDefaultHandlerForURLScheme`
+to remember the Slack app's bundle id), which also need `unsafe` here. A
+bundle that declared `slack` would let Launch Services pick NoSlacking for
+the Slack app's links with nothing to give them back, so it waits for the
+same `fastframe-macos` API.
+
 ### Windows
 
 `build.rs` embeds `windows/noslacking.ico` and the version info in

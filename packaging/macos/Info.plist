@@ -2,9 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- The NoSlacking.app Info.plist. packaging/macos/bundle.sh fills in
      @VERSION@. CFBundleURLTypes is what lets macOS route noslacking://
-     and slack:// links to the app. The app cannot receive them yet: macOS
-     delivers them as an open-URL Apple event that nothing in the app
-     handles (see CONTRIBUTING.md, Packaging, macOS). -->
+     links to the app. The app cannot receive them yet: macOS delivers
+     them as an open-URL Apple event that nothing in the app handles (see
+     CONTRIBUTING.md, Packaging, macOS). slack:// is not declared: Launch
+     Services could then hand the Slack app's links to NoSlacking for
+     good, and the app can neither use them nor give them back. -->
 <plist version="1.0">
 <dict>
   <key>CFBundleDevelopmentRegion</key>
@@ -35,7 +37,6 @@
       <key>CFBundleURLSchemes</key>
       <array>
         <string>noslacking</string>
-        <string>slack</string>
       </array>
     </dict>
   </array>
