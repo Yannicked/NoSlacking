@@ -245,16 +245,27 @@ async fn schedule(
     thread: Option<&Ts>,
     post_at: i64,
 ) -> Result<String, SlackError> {
-    let mut params = vec![
-        ("channel", channel.to_owned()),
-        ("text", text.to_owned()),
-        ("post_at", post_at.to_string()),
-    ];
+    let params = schedule_params(channel, text, thread, post_at);
+    let answer: ScheduleAnswer =
+        super::worker::act_with_blocks(client, "chat.scheduleMessage", &params).await?;
+    Ok(answer.scheduled_message_id)
+}
+
+/// What `chat.scheduleMessage` is given: the text and its `rich_text`
+/// block, as a message sent now.
+fn schedule_params(
+    channel: &str,
+    text: &str,
+    thread: Option<&Ts>,
+    post_at: i64,
+) -> Vec<(&'static str, String)> {
+    let mut params = vec![("channel", channel.to_owned())];
+    super::worker::with_text(&mut params, text.to_owned());
+    params.push(("post_at", post_at.to_string()));
     if let Some(thread) = thread {
         params.push(("thread_ts", thread.0.clone()));
     }
-    let answer: ScheduleAnswer = client.act("chat.scheduleMessage", &params).await?;
-    Ok(answer.scheduled_message_id)
+    params
 }
 
 /// Keeps a scheduled message from being sent. One already gone is no
@@ -915,6 +926,29 @@ pub async fn fetch_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduled_messages_carry_their_rich_text() {
+        let wire = "_later_ :tada:";
+        let params = schedule_params("C1", wire, Some(&Ts::new("1.0")), 1_700_000_000);
+        let block = crate::slack::rich_out::rich_text(wire).expect("a block");
+        assert_eq!(
+            params,
+            [
+                ("channel", "C1".to_owned()),
+                ("text", wire.to_owned()),
+                ("blocks", serde_json::json!([block]).to_string()),
+                ("post_at", "1700000000".to_owned()),
+                ("thread_ts", "1.0".to_owned()),
+            ]
+        );
+        let date = "<!date^1700000000^{date}|Nov 14>";
+        assert!(
+            schedule_params("C1", date, None, 1)
+                .iter()
+                .all(|(name, _)| *name != "blocks")
+        );
+    }
 
     #[test]
     fn the_feed_names_mentions_and_threads() {

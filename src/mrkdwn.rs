@@ -84,6 +84,17 @@ pub fn escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Whether `text` holds a `<!…>` command other than a broadcast or a user
+/// group, such as a date. [`parse`] keeps only its label, so whatever is
+/// rebuilt from the parsed blocks would lose what it stands for.
+pub fn has_commands(text: &str) -> bool {
+    text.match_indices("<!").any(|(at, _)| {
+        let rest = &text[at + 2..];
+        let word = rest.split(['>', '|', '^']).next().unwrap_or(rest);
+        !matches!(word, "here" | "channel" | "everyone" | "subteam")
+    })
+}
+
 #[cfg(test)]
 thread_local! {
     /// The bytes the parser has looked at, so a test can tell linear from
