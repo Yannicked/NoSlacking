@@ -98,6 +98,8 @@ rodio = { version = "0.22.2", default-features = false, features = ["playback", 
 # ahead of time and checked in (src/huddle_audio/chime/), so the build
 # needs no protoc, only prost's derive.
 prost = { version = "0.14", default-features = false, features = ["derive", "std"], optional = true }
+# Opus in pure Rust, without unsafe code or a C library to find.
+opus-decoder = { version = "0.1.1", optional = true }
 # The TURN client's long-term credential: HMAC-SHA1 (sha1 is above) keyed
 # with MD5.
 hmac = { version = "0.13", optional = true }
@@ -199,7 +201,7 @@ bundled-emoji = []
 demo = []
 # Listening to huddles (src/huddle_audio.rs): a spike, off until it is
 # proven against Slack. Adds `noslacking --huddle-probe`.
-huddle-audio = ["audio", "dep:prost", "dep:hmac", "dep:md-5"]
+huddle-audio = ["audio", "dep:prost", "dep:opus-decoder", "dep:hmac", "dep:md-5"]
 # Colours code blocks that name their language (```` ```rust ````). Our own
 # small lexer, a few kilobytes; turn it off for plain code blocks.
 highlight = []

@@ -23,9 +23,11 @@
 #![warn(missing_docs)]
 
 pub mod chime;
+pub mod jitter;
 pub mod join;
 pub mod sdp;
 pub mod signaling;
+pub mod speaker;
 pub mod turn;
 
 /// The host of `url`, for the log: what a protocol mismatch needs to
