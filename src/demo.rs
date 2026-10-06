@@ -248,6 +248,27 @@ fn conversations() -> Vec<Conversation> {
         NOW - 3000,
         NOW - 3000,
     ));
+    // Group DMs Slack has closed: out of the sidebar, unless something
+    // new came (the second one, unread, shows).
+    for (id, name, latest, read) in [
+        ("M02", "ana, dev", NOW - 2 * DAY, NOW - 2 * DAY),
+        ("M03", "bob, carla, dev", NOW - 600, NOW - 4000),
+    ] {
+        list.push(Conversation {
+            is_open: Some(false),
+            ..conversation(id, name, ConversationKind::Group, latest, read)
+        });
+    }
+    // Group DMs nobody ever wrote in, as Slack's counts report them:
+    // behind "N more" while hiding quiet conversations.
+    for (id, name) in [("M04", "ana, bob, dev"), ("M05", "carla, lee")] {
+        list.push(Conversation {
+            latest: None,
+            last_read: None,
+            empty: true,
+            ..conversation(id, name, ConversationKind::Group, 0, 0)
+        });
+    }
     list
 }
 
