@@ -1,9 +1,11 @@
 //! NoSlacking's entry point: command line, logging, single instance, and
 //! the window.
 
+mod cli;
+
 use std::sync::mpsc;
 
-use clap::Parser;
+use cli::Cli;
 
 use noslacking::app::{self, App};
 use noslacking::backend::Waker;
@@ -11,138 +13,8 @@ use noslacking::paths::{APP_ID, AppDirs};
 use noslacking::single_instance::{self, Outcome, Request};
 use noslacking::{settings, theme};
 
-/// A native Slack client.
-#[derive(Parser, Debug)]
-#[command(name = "noslacking", version, about)]
-struct Cli {
-    /// A noslacking:// link; the desktop passes sign-in redirects this way.
-    link: Option<String>,
-
-    /// Start in the tray without a window, as at login. Only with the tray
-    /// item and "Keep running in the tray" on; otherwise the window opens.
-    #[arg(long)]
-    hidden: bool,
-
-    /// Log more (also NOSLACKING_LOG=debug).
-    #[arg(long)]
-    verbose: bool,
-
-    /// Give slack:// links back to whatever had them before, if a browser
-    /// sign-in left them with NoSlacking, and quit. Every start does this
-    /// too.
-    #[arg(long)]
-    release_slack_links: bool,
-
-    /// Join the huddle in a conversation, listen and leave, logging each
-    /// step, and quit: a test of huddle audio against real Slack. Takes
-    /// the workspace's team id and the channel id, and the browser
-    /// sign-in saved for that workspace.
-    #[cfg(feature = "huddle-audio")]
-    #[arg(long, num_args = 2, value_names = ["TEAM", "CHANNEL"])]
-    huddle_probe: Option<Vec<String>>,
-
-    /// How long the huddle probe listens, in seconds.
-    #[cfg(feature = "huddle-audio")]
-    #[arg(long, value_name = "N", default_value_t = 30)]
-    seconds: u64,
-
-    /// The media region the huddle probe asks Slack for. Without it, the
-    /// nearest is asked of AWS, falling back to us-east-1.
-    #[cfg(feature = "huddle-audio")]
-    #[arg(long, value_name = "REGION")]
-    huddle_region: Option<String>,
-
-    /// Run against a pretend Slack, offline, with sample data.
-    #[cfg(feature = "demo")]
-    #[arg(long)]
-    demo: bool,
-
-    /// Save a screenshot of the demo to PATH and quit.
-    #[cfg(feature = "demo")]
-    #[arg(long, value_name = "PATH")]
-    demo_shot: Option<std::path::PathBuf>,
-
-    /// The demo window's size as WxH logical points.
-    #[cfg(feature = "demo")]
-    #[arg(long, value_name = "WxH")]
-    demo_size: Option<String>,
-
-    /// Hold a pretend pointer at X,Y (logical points), to capture hover states.
-    #[cfg(feature = "demo")]
-    #[arg(long, value_name = "X,Y")]
-    demo_hover: Option<String>,
-
-    /// Open a view before the screenshot: thread, settings, sign-in,
-    /// switcher, palette, picker, profile, share, upload, drafts, lightbox,
-    /// media, previews, viewer-sheet, viewer-csv, viewer-zip, viewer-text,
-    /// compact, held-media, shortcuts, delete-file, add-emoji or (with
-    /// huddle-audio) listening.
-    #[cfg(feature = "demo")]
-    #[arg(long, value_name = "VIEW")]
-    demo_view: Option<String>,
-
-    /// Use the light palette in the demo.
-    #[cfg(feature = "demo")]
-    #[arg(long)]
-    demo_light: bool,
-
-    /// Right-click at X,Y (logical points) 2 s in, to show a context menu.
-    #[cfg(feature = "demo")]
-    #[arg(long, value_name = "X,Y")]
-    demo_right_click: Option<String>,
-
-    /// Click at X,Y (logical points) 2.5 s in, after any right-click.
-    #[cfg(feature = "demo")]
-    #[arg(long, value_name = "X,Y")]
-    demo_click: Option<String>,
-
-    /// Press keys one per frame from 2.5 s in, such as
-    /// "Shift+ArrowUp,ArrowUp,R" (egui key names), to capture keyboard
-    /// states.
-    #[cfg(feature = "demo")]
-    #[arg(long, value_name = "KEYS")]
-    demo_keys: Option<String>,
-
-    /// Scroll the message list up by this many lines, 2.5 s in, as a
-    /// reader would.
-    #[cfg(feature = "demo")]
-    #[arg(long, value_name = "LINES")]
-    demo_wheel: Option<f32>,
-
-    /// Type TEXT into the focused field from 2.5 s in, a character every
-    /// other frame, as a person typing would.
-    #[cfg(feature = "demo")]
-    #[arg(long, value_name = "TEXT")]
-    demo_type: Option<String>,
-
-    /// Save every frame from 2.5 s in to DIR (frame-000.png, …) until the
-    /// typing is done, then quit: for catching a frame that draws wrong.
-    #[cfg(feature = "demo")]
-    #[arg(long, value_name = "DIR")]
-    demo_frames: Option<std::path::PathBuf>,
-
-    /// Wait this long before the demo screenshot (default 1500 ms), for
-    /// catching animations at different moments.
-    #[cfg(feature = "demo")]
-    #[arg(long, value_name = "MS", default_value_t = 1500)]
-    demo_shot_delay: u64,
-}
-
-impl Cli {
-    fn demo(&self) -> bool {
-        #[cfg(feature = "demo")]
-        {
-            self.demo
-        }
-        #[cfg(not(feature = "demo"))]
-        {
-            false
-        }
-    }
-}
-
 fn main() -> eframe::Result<()> {
-    let cli = Cli::parse();
+    let cli = command_line();
     let demo = cli.demo();
     let dirs = if demo {
         // Under this user's own cache, not a shared temp folder another
@@ -187,7 +59,7 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
     #[cfg(feature = "huddle-audio")]
-    if let Some([team, channel]) = cli.huddle_probe.as_deref() {
+    if let Some([team, channel]) = &cli.huddle_probe {
         let code =
             noslacking::huddle_audio::probe::run(&noslacking::huddle_audio::probe::Options {
                 team: team.clone(),
@@ -300,6 +172,31 @@ fn main() -> eframe::Result<()> {
         }
     }
     ran
+}
+
+/// The command line, or the answer to `--help`, `--version` or a mistake
+/// in it, and quit: 0 for an answer, 2 for a mistake, as clap had it.
+#[expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "the answer to a command typed in a terminal"
+)]
+fn command_line() -> Cli {
+    match cli::parse(std::env::args_os().skip(1)) {
+        Ok(cli::Parsed::Run(cli)) => *cli,
+        Ok(cli::Parsed::Help) => {
+            print!("{}", cli::help());
+            std::process::exit(0);
+        }
+        Ok(cli::Parsed::Version) => {
+            println!("{}", cli::version());
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    }
 }
 
 /// `--release-slack-links`: gives the links back and says how it went.
