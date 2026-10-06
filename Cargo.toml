@@ -135,7 +135,9 @@ maintainer = "Yannick de Jong <yannickludodejong@gmail.com>"
 section = "net"
 priority = "optional"
 extended-description = "One window for your Slack workspaces: channels, direct messages, threads, reactions, files and notifications, without Electron."
-depends = "$auto, libxkbcommon0, libegl1, libgl1, libasound2"
+# ALSA is linked, so $auto finds it (as libasound2t64 on newer releases);
+# the others are loaded at run time and must be named.
+depends = "$auto, libxkbcommon0, libegl1, libgl1"
 recommends = "libwayland-client0, libxkbcommon-x11-0"
 assets = [
     ["target/release/noslacking", "usr/bin/", "755"],
@@ -155,7 +157,7 @@ assets = [
 [package.metadata.generate-rpm]
 auto-req = "auto"
 # By library, so the same package fits Fedora and openSUSE.
-requires = { "libxkbcommon.so.0()(64bit)" = "*", "libEGL.so.1()(64bit)" = "*", "libGL.so.1()(64bit)" = "*", "libasound.so.2()(64bit)" = "*" }
+requires = { "libxkbcommon.so.0()(64bit)" = "*", "libEGL.so.1()(64bit)" = "*", "libGL.so.1()(64bit)" = "*" }
 recommends = { "libwayland-client.so.0()(64bit)" = "*", "libxkbcommon-x11.so.0()(64bit)" = "*" }
 assets = [
     { source = "target/release/noslacking", dest = "/usr/bin/noslacking", mode = "755" },
