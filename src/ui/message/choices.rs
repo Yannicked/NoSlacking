@@ -31,12 +31,14 @@ fn framed<'a>(atoms: impl egui::IntoAtoms<'a>, row: &Row<'_>) -> egui::Button<'a
         .min_size(Vec2::new(28.0, 28.0))
 }
 
-/// Sends `choice` from the menu `press` is on, after the app's question.
+/// Sends `choice` from the menu `press` is on, after the app's question;
+/// a choice's link opens only once the question is answered yes.
 fn choose(press: &Press, menu: &Menu, choice: &MenuChoice, actions: &mut Vec<Action>) {
     actions.push(Action::PressButton {
-        press: press.choosing(choice),
+        press: Box::new(press.choosing(choice)),
         confirm: menu.confirm.clone(),
         confirmed: false,
+        link: choice.url.clone(),
     });
 }
 
@@ -220,12 +222,17 @@ fn overflow(
                     _ => item,
                 };
                 if item.clicked() {
-                    // Slack opens the link and tells the app too.
-                    if let Some(url) = &choice.url {
-                        actions.push(Action::OpenUrl(url.clone()));
-                    }
-                    if let Ok(press) = usable {
-                        choose(press, menu, choice, actions);
+                    // Slack opens the link and tells the app too, both
+                    // after the app's question. Where the app cannot be
+                    // told, the link alone opens: nothing the question is
+                    // about happens.
+                    match usable {
+                        Ok(press) => choose(press, menu, choice, actions),
+                        Err(_) => {
+                            if let Some(url) = &choice.url {
+                                actions.push(Action::OpenUrl(url.clone()));
+                            }
+                        }
                     }
                     ui.close();
                 }

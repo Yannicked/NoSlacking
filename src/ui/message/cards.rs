@@ -382,9 +382,10 @@ fn kit_button(
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             if response.clicked() {
                 actions.push(Action::PressButton {
-                    press,
+                    press: Box::new(press),
                     confirm: button.confirm.clone(),
                     confirmed: false,
+                    link: None,
                 });
             }
             false

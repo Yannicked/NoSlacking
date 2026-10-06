@@ -830,6 +830,31 @@ pub fn menu_use(
     })
 }
 
+/// What pressing does next, by [`press_step`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PressStep<'a> {
+    /// Ask the app's question; nothing opens or is sent until it is
+    /// answered, and backing out does neither.
+    Ask,
+    /// Open `open`, if the choice has a link, and send the press.
+    Go { open: Option<&'a str> },
+}
+
+/// Whether a press asks the app's `confirm` question first, or goes ahead
+/// (`confirmed` once it was answered yes). An overflow choice's `link`
+/// opens only when it goes ahead, so backing out opens nothing.
+pub fn press_step<'a>(
+    confirm: Option<&Confirm>,
+    confirmed: bool,
+    link: Option<&'a str>,
+) -> PressStep<'a> {
+    if confirm.is_some() && !confirmed {
+        PressStep::Ask
+    } else {
+        PressStep::Go { open: link }
+    }
+}
+
 /// The bot, block and action a press on `message` names, when `sign_in`
 /// can send one at all.
 fn press_target(
@@ -1393,12 +1418,16 @@ pub enum Action {
         name: String,
     },
     OpenUrl(String),
-    /// Presses an app's interactive button. When the app asked for a
-    /// `confirm` dialog, this asks first, unless `confirmed`.
+    /// Presses an app's interactive button, or sends a menu choice. When
+    /// the app asked for a `confirm` dialog, this asks first, unless
+    /// `confirmed`; `link` (an overflow choice's) opens only once it goes
+    /// ahead (see [`press_step`]).
     PressButton {
-        press: Press,
+        /// Boxed: a press is far larger than most actions.
+        press: Box<Press>,
         confirm: Option<Confirm>,
         confirmed: bool,
+        link: Option<String>,
     },
     /// Opens a message in Slack itself (the browser or Slack's app), for
     /// what only works there; `thread` is its parent for a reply.
@@ -1656,6 +1685,30 @@ mod tests {
             menu_use(SignInKind::Session, "C05", &local, &select),
             Err(NotHere::NoApp),
             "a message not yet on Slack has nothing to answer"
+        );
+    }
+
+    #[test]
+    fn a_link_with_a_question_opens_only_once_answered_yes() {
+        let confirm = Confirm::default();
+        let link = Some("https://example.com/plan");
+        assert_eq!(
+            press_step(Some(&confirm), false, link),
+            PressStep::Ask,
+            "nothing opens before the answer; backing out ends here"
+        );
+        assert_eq!(
+            press_step(Some(&confirm), true, link),
+            PressStep::Go { open: link }
+        );
+        assert_eq!(
+            press_step(None, false, link),
+            PressStep::Go { open: link },
+            "without a question, at once"
+        );
+        assert_eq!(
+            press_step(Some(&confirm), true, None),
+            PressStep::Go { open: None }
         );
     }
 

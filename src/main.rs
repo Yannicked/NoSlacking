@@ -572,9 +572,10 @@ impl DemoSetup {
                     button_use(workspace.info.sign_in, "C05", message, button)
             {
                 app.actions.push(Action::PressButton {
-                    press,
+                    press: Box::new(press),
                     confirm: button.confirm.clone(),
                     confirmed: false,
+                    link: None,
                 });
             }
             self.approve = false;

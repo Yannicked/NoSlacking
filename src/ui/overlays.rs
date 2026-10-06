@@ -1016,7 +1016,7 @@ fn confirm(app: &App, ctx: &egui::Context, id: &str, title: &str, body: &str) ->
 /// The question an app asked to have put before its button is pressed,
 /// in the app's words where it gave them.
 fn confirm_press(app: &mut App, ctx: &egui::Context) {
-    let Some((press, confirm)) = app.confirm_press.clone() else {
+    let Some((press, confirm, link)) = app.confirm_press.clone() else {
         return;
     };
     let palette = app.palette;
@@ -1085,9 +1085,10 @@ fn confirm_press(app: &mut App, ctx: &egui::Context) {
         Some(true) => {
             app.confirm_press = None;
             app.actions.push(Action::PressButton {
-                press,
+                press: Box::new(press),
                 confirm: Some(confirm),
                 confirmed: true,
+                link,
             });
         }
         Some(false) => app.confirm_press = None,
