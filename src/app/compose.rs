@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use super::workspace::local_message;
-use super::{App, Draft, Upload, UploadTarget, to_wire};
+use super::{App, Draft, LentDraft, PickedFile, Upload, UploadTarget, to_wire};
 use crate::backend::Command;
 use crate::failure::Failure;
 use crate::i18n::{t, tf};
@@ -41,7 +41,11 @@ impl App {
                 self.settings.skin_tone,
             );
             self.used_emoji(&crate::emoji::used_in(&wire));
-            let target = (team, channel, thread);
+            let target = UploadTarget {
+                team,
+                channel,
+                thread,
+            };
             let mut comment = wire;
             let mut kept = (!comment.trim().is_empty()).then(|| Draft {
                 attachments: Vec::new(),
@@ -51,7 +55,13 @@ impl App {
                 let id = self.start_upload(target.clone(), path, std::mem::take(&mut comment));
                 // The text goes with the first file: kept until it is up.
                 if let Some(kept) = kept.take() {
-                    self.uploading.insert(id, (key.clone(), kept));
+                    self.uploading.insert(
+                        id,
+                        LentDraft {
+                            key: key.clone(),
+                            draft: kept,
+                        },
+                    );
                 }
             }
             self.scroll_to_bottom.insert(key);
@@ -70,7 +80,7 @@ impl App {
                     // Kept until it has run, to give back if it fails.
                     self.next_slash += 1;
                     let id = self.next_slash;
-                    self.slashing.insert(id, (key, draft));
+                    self.slashing.insert(id, LentDraft { key, draft });
                     self.backend.send(Command::Slash {
                         id,
                         team,
@@ -301,7 +311,11 @@ impl App {
             Some(_) => self.thread.as_ref().map(|(c, _)| c.clone()),
             None => self.active_workspace().and_then(|w| w.active.clone()),
         }?;
-        Some((team, channel, thread))
+        Some(UploadTarget {
+            team,
+            channel,
+            thread,
+        })
     }
 
     /// A file for the composer: one with a comment goes now; one without
@@ -317,8 +331,8 @@ impl App {
     }
 
     /// Adds a file to the composer of `target`, once.
-    pub(super) fn stage(&mut self, (team, channel, thread): UploadTarget, path: PathBuf) {
-        let key = Self::draft_key(&team, &channel, thread.as_ref());
+    pub(super) fn stage(&mut self, target: UploadTarget, path: PathBuf) {
+        let key = Self::draft_key(&target.team, &target.channel, target.thread.as_ref());
         let draft = self.drafts.edit(key);
         if !draft.attachments.contains(&path) {
             draft.attachments.push(path);
@@ -340,7 +354,11 @@ impl App {
     /// Sends a file to the worker and lists it under its composer.
     fn start_upload(
         &mut self,
-        (team, channel, thread): UploadTarget,
+        UploadTarget {
+            team,
+            channel,
+            thread,
+        }: UploadTarget,
         path: PathBuf,
         comment: String,
     ) -> u64 {
@@ -391,7 +409,7 @@ impl App {
         result: Result<Option<String>, Failure>,
     ) {
         let name = format!("/{command}");
-        if let Some((key, draft)) = self.slashing.remove(&id)
+        if let Some(LentDraft { key, draft }) = self.slashing.remove(&id)
             && result.is_err()
         {
             self.give_back_draft(key, draft);
@@ -441,7 +459,7 @@ impl App {
             return false;
         };
         let upload = self.transfers.remove(index);
-        if let Some((key, draft)) = self.uploading.remove(&id)
+        if let Some(LentDraft { key, draft }) = self.uploading.remove(&id)
             && !shared
         {
             self.give_back_draft(key, draft);
@@ -462,13 +480,16 @@ impl App {
         let Some(target) = self.upload_target(thread) else {
             return;
         };
-        let sender = self.uploads.0.clone();
+        let sender = self.uploads.sender.clone();
         let waker = self.waker.clone();
         let dir = self.dirs.pasted();
         std::thread::spawn(move || match crate::paste::clipboard_files(&dir) {
             Ok(paths) => {
                 for path in paths {
-                    let _ = sender.send((target.clone(), path));
+                    let _ = sender.send(PickedFile {
+                        target: target.clone(),
+                        path,
+                    });
                 }
                 waker.wake();
             }
@@ -482,11 +503,11 @@ impl App {
         let Some(target) = self.upload_target(thread) else {
             return;
         };
-        let sender = self.uploads.0.clone();
+        let sender = self.uploads.sender.clone();
         let waker = self.waker.clone();
         std::thread::spawn(move || {
             if let Some(path) = rfd::FileDialog::new().pick_file() {
-                let _ = sender.send((target, path));
+                let _ = sender.send(PickedFile { target, path });
                 waker.wake();
             }
         });

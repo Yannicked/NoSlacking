@@ -30,7 +30,7 @@ struct Borrowed {
     active_workspace: Option<String>,
     active_channel: Option<String>,
     focus_composer: bool,
-    prepended: Option<(String, f32)>,
+    prepended: Option<String>,
     actions: Vec<Action>,
     page: Page,
 }
@@ -101,7 +101,7 @@ impl App {
 
     fn borrow_for(&mut self, popout: &Popout) -> Borrowed {
         let prepended = match &self.prepended {
-            Some((owner, _)) if *owner == format!("{}/{}", popout.team, popout.channel) => None,
+            Some(owner) if *owner == format!("{}/{}", popout.team, popout.channel) => None,
             _ => self.prepended.take(),
         };
         let mut borrowed = Borrowed {

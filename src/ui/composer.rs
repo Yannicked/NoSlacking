@@ -153,8 +153,8 @@ struct Person {
 /// Everyone who can be mentioned, built when people arrive.
 #[derive(Clone, Debug, Default)]
 struct People {
-    /// `users.len()` and [`WorkspaceState::users_version`] when built.
-    version: (usize, u64),
+    /// The workspace's people when built.
+    version: crate::app::PeopleStamp,
     people: Vec<Person>,
 }
 
@@ -183,48 +183,61 @@ impl People {
             })
             .collect();
         Self {
-            version: People::version_of(workspace),
+            version: crate::app::PeopleStamp::of(workspace),
             people,
         }
-    }
-
-    fn version_of(workspace: &WorkspaceState) -> (usize, u64) {
-        (workspace.users.len(), workspace.users_version())
     }
 }
 
 /// How many custom emoji, conversations and user groups a workspace has:
 /// when one changes, remembered suggestions may be out of date.
-type Counts = (usize, usize, usize);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Counts {
+    emoji: usize,
+    conversations: usize,
+    groups: usize,
+}
+
+/// The suggestions found for a word, and the counts they were found with.
+#[derive(Clone, Debug)]
+struct Found {
+    word: String,
+    counts: Counts,
+    suggestions: Vec<Suggestion>,
+}
 
 /// The suggestions for the last word typed, kept per composer: the field
 /// asks again on every frame while the word stays the same.
 #[derive(Clone, Debug, Default)]
 struct Memo {
     people: People,
-    /// The word, the counts, and what was found.
-    last: Option<(String, Counts, Vec<Suggestion>)>,
+    /// What was found for the last word.
+    last: Option<Found>,
 }
 
 impl Memo {
     fn suggestions(&mut self, workspace: &WorkspaceState, word: &str) -> Vec<Suggestion> {
-        if self.people.version != People::version_of(workspace) {
+        if self.people.version != crate::app::PeopleStamp::of(workspace) {
             self.people = People::build(workspace);
             self.last = None;
         }
-        let custom = (
-            workspace.emoji.custom_names().count(),
-            workspace.conversations.len(),
-            workspace.groups.len(),
-        );
-        if let Some((last, count, found)) = &self.last
-            && last == word
-            && *count == custom
+        let counts = Counts {
+            emoji: workspace.emoji.custom_names().count(),
+            conversations: workspace.conversations.len(),
+            groups: workspace.groups.len(),
+        };
+        if let Some(last) = &self.last
+            && last.word == word
+            && last.counts == counts
         {
-            return found.clone();
+            return last.suggestions.clone();
         }
         let found = suggest(&self.people, workspace, word);
-        self.last = Some((word.to_owned(), custom, found.clone()));
+        self.last = Some(Found {
+            word: word.to_owned(),
+            counts,
+            suggestions: found.clone(),
+        });
         found
     }
 }

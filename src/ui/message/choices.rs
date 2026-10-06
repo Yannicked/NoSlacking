@@ -68,28 +68,43 @@ pub(super) fn kit_menu(
                 .and_then(|press| row.workspace.chosen(press))
         })
         .or(menu.initial.as_ref().map(|c| c.value.as_str()));
+    let standing = Standing {
+        usable: &usable,
+        busy,
+        chosen,
+    };
     match menu.kind {
-        MenuKind::Select => select(ui, row, message, menu, &usable, busy, chosen, actions),
-        MenuKind::Overflow => overflow(ui, row, message, menu, &usable, busy, actions),
-        MenuKind::Radio => radio(ui, row, menu, &usable, busy, chosen, actions),
+        MenuKind::Select => select(ui, row, message, menu, standing, actions),
+        MenuKind::Overflow => overflow(ui, row, message, menu, standing, actions),
+        MenuKind::Radio => radio(ui, row, menu, standing, actions),
     }
 }
 
+/// Where a menu stands, worked out once for whichever way it is drawn.
+#[derive(Clone, Copy)]
+struct Standing<'a> {
+    /// What choosing sends, or why nothing can be chosen here.
+    usable: &'a Result<Press, NotHere>,
+    /// The choice on its way, while Slack has not taken it.
+    busy: Option<&'a Press>,
+    /// The value chosen: on its way, last made, or the app's initial one.
+    chosen: Option<&'a str>,
+}
+
 /// A drop-down showing the choice made, or the app's placeholder.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the parts of one menu, worked out once by the caller"
-)]
 fn select(
     ui: &mut egui::Ui,
     row: &Row<'_>,
     message: &Message,
     menu: &Menu,
-    usable: &Result<Press, NotHere>,
-    busy: Option<&Press>,
-    chosen: Option<&str>,
+    standing: Standing<'_>,
     actions: &mut Vec<Action>,
 ) -> bool {
+    let Standing {
+        usable,
+        busy,
+        chosen,
+    } = standing;
     let palette = row.palette;
     // The chosen label, from the menu or, for a choice it no longer lists,
     // from the press or the app's own initial choice.
@@ -183,10 +198,10 @@ fn overflow(
     row: &Row<'_>,
     message: &Message,
     menu: &Menu,
-    usable: &Result<Press, NotHere>,
-    busy: Option<&Press>,
+    standing: Standing<'_>,
     actions: &mut Vec<Action>,
 ) -> bool {
+    let Standing { usable, busy, .. } = standing;
     let palette = row.palette;
     let widget = framed(Icon::Ellipsis.image(palette.text, 16.0), row);
     if busy.is_some() {
@@ -246,11 +261,14 @@ fn radio(
     ui: &mut egui::Ui,
     row: &Row<'_>,
     menu: &Menu,
-    usable: &Result<Press, NotHere>,
-    busy: Option<&Press>,
-    chosen: Option<&str>,
+    standing: Standing<'_>,
     actions: &mut Vec<Action>,
 ) -> bool {
+    let Standing {
+        usable,
+        busy,
+        chosen,
+    } = standing;
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 4.0;
         for choice in menu.choices() {

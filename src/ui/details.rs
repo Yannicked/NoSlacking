@@ -206,16 +206,12 @@ fn about(
                     (Field::Topic, t("Topic"), &conversation.topic),
                     (Field::Purpose, t("Description"), &conversation.purpose),
                 ] {
-                    describable(
-                        ui,
-                        palette,
-                        conversation,
-                        details,
+                    let described = Described {
                         field,
-                        &label,
+                        label: &label,
                         text,
-                        actions,
-                    );
+                    };
+                    describable(ui, palette, conversation, details, described, actions);
                     ui.add_space(12.0);
                 }
             }
@@ -261,31 +257,45 @@ fn about(
         });
 }
 
+/// A topic or a description as the details panel shows it.
+struct Described<'a> {
+    /// Which of the two it is.
+    field: Field,
+    /// Its heading, in words.
+    label: &'a str,
+    /// What it says now.
+    text: &'a str,
+}
+
 /// A topic or description, with "Edit" to change it in place.
-#[allow(clippy::too_many_arguments)]
 fn describable(
     ui: &mut egui::Ui,
     palette: &Palette,
     conversation: &Conversation,
     details: &mut Details,
-    field: Field,
-    label: &str,
-    text: &str,
+    described: Described<'_>,
     actions: &mut Vec<Action>,
 ) {
+    let Described { field, label, text } = described;
     ui.horizontal(|ui| {
         super::section_label(ui, palette, label);
-        let editing = details.editing.as_ref().is_some_and(|(f, _)| *f == field);
+        let editing = details.editing.as_ref().is_some_and(|e| e.field == field);
         if !editing
             && ui
                 .link(RichText::new(t("Edit")).font(theme::regular(12.5)))
                 .clicked()
         {
-            details.editing = Some((field, text.to_owned()));
+            details.editing = Some(crate::convos::Describing {
+                field,
+                draft: text.to_owned(),
+            });
         }
     });
     match &mut details.editing {
-        Some((editing, draft)) if *editing == field => {
+        Some(crate::convos::Describing {
+            field: editing,
+            draft,
+        }) if *editing == field => {
             let id = egui::Id::new(("describe", conversation.id.as_str(), label));
             let field_response = ui.add(
                 egui::TextEdit::multiline(draft)

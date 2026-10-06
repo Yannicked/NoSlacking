@@ -311,10 +311,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     let mut app_scroll_again = false;
     let overlay = app.overlay_open();
     // An anchor for another list is stale by now: drop it either way.
-    let prepended = app
-        .prepended
-        .take()
-        .is_some_and(|(key, _)| key == scroll_key);
+    let prepended = app.prepended.take().is_some_and(|key| key == scroll_key);
     let App {
         workspaces,
         settings,
@@ -356,8 +353,8 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     // The newest message you had read when the conversation opened.
     let read_line: Option<Ts> = read_line
         .as_ref()
-        .filter(|(key, _)| *key == scroll_key)
-        .and_then(|(_, ts)| ts.clone());
+        .filter(|line| line.list == scroll_key)
+        .and_then(|line| line.read.clone());
     // Heights of the rows as last drawn: only the rows in and near the
     // view are laid out, the rest are placed by these.
     let heights_id = egui::Id::new(("row-heights", &scroll_key));
@@ -655,17 +652,27 @@ const NEW_LINE: f32 = 20.0;
 /// one before.
 #[derive(Default)]
 struct Days {
-    /// The seconds the last day found spans, and its date.
-    current: Option<(i64, i64, jiff::civil::Date)>,
+    /// The last day found.
+    current: Option<Day>,
+}
+
+/// A local day, and the seconds it spans.
+#[derive(Clone, Copy)]
+struct Day {
+    /// Its first second.
+    start: i64,
+    /// The first second of the next day.
+    end: i64,
+    date: jiff::civil::Date,
 }
 
 impl Days {
     fn of(&mut self, ts: &Ts) -> Option<jiff::civil::Date> {
         let seconds = ts.seconds()?;
-        if let Some((start, end, date)) = self.current
-            && (start..end).contains(&seconds)
+        if let Some(day) = self.current
+            && (day.start..day.end).contains(&seconds)
         {
-            return Some(date);
+            return Some(day.date);
         }
         let zoned = ts.zoned()?;
         let date = zoned.date();
@@ -675,7 +682,7 @@ impl Days {
             .ok()
             .and_then(|next| next.start_of_day().ok())
             .map_or(start + 86_400, |next| next.timestamp().as_second());
-        self.current = Some((start, end, date));
+        self.current = Some(Day { start, end, date });
         Some(date)
     }
 }

@@ -36,7 +36,16 @@ pub struct Picture {
     /// The file's page in Slack, for the browser.
     pub permalink: Option<String>,
     /// The message and file it came from, to find it in the gallery.
-    pub source: Option<(Ts, String)>,
+    pub source: Option<Origin>,
+}
+
+/// Where a [`Picture`] came from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Origin {
+    /// Its message.
+    pub ts: Ts,
+    /// Its file's id.
+    pub file: String,
 }
 
 /// How a picture is zoomed and moved.
@@ -157,7 +166,10 @@ pub fn picture(team: &str, ts: &Ts, file: &File) -> Option<Picture> {
         name: file.name.clone(),
         download: file.download_url.clone().or(file.url_private.clone()),
         permalink: file.permalink.clone(),
-        source: Some((ts.clone(), file.id.clone())),
+        source: Some(Origin {
+            ts: ts.clone(),
+            file: file.id.clone(),
+        }),
     })
 }
 
@@ -182,9 +194,11 @@ pub fn open<'a>(
     file: &str,
 ) -> Option<Lightbox> {
     let pictures = gallery(team, messages);
-    let index = pictures
-        .iter()
-        .position(|p| p.source.as_ref().is_some_and(|(t, f)| t == ts && f == file))?;
+    let index = pictures.iter().position(|p| {
+        p.source
+            .as_ref()
+            .is_some_and(|o| o.ts == *ts && o.file == file)
+    })?;
     Lightbox::new(pictures, index)
 }
 

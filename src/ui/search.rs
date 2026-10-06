@@ -300,12 +300,19 @@ struct Prepared {
     spoken: String,
 }
 
+/// What a search's prepared texts were made for: the query, and the
+/// people, as people are named in the text.
+#[derive(Clone, PartialEq)]
+struct Stamp {
+    query: Query,
+    people: crate::app::PeopleStamp,
+}
+
 /// The prepared texts of one search's results, kept in egui's memory.
 #[derive(Clone, Default)]
 struct Texts {
-    /// The query, and the people's count and version, they were made for:
-    /// people are named in the text.
-    stamp: Option<(Query, usize, u64)>,
+    /// What they were made for.
+    stamp: Option<Stamp>,
     texts: std::collections::HashMap<String, std::sync::Arc<Prepared>>,
 }
 
@@ -318,7 +325,10 @@ fn prepared(
     query: Option<&Query>,
     hit: &Hit,
 ) -> std::sync::Arc<Prepared> {
-    let stamp = query.map(|q| (q.clone(), workspace.users.len(), workspace.users_version()));
+    let stamp = query.map(|q| Stamp {
+        query: q.clone(),
+        people: crate::app::PeopleStamp::of(workspace),
+    });
     ctx.data_mut(|d| {
         let memo = d.get_temp_mut_or_default::<Texts>(egui::Id::new("search-texts"));
         if memo.stamp != stamp {

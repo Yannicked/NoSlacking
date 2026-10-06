@@ -407,7 +407,7 @@ impl eframe::App for Window {
             && let Some(c) = self.demo.typing.pop_front()
         {
             input.events.push(egui::Event::Text(c.to_string()));
-            self.demo.typed_frames = self.demo.filmed.0;
+            self.demo.typed_frames = self.demo.filmed.asked;
         }
         if self.demo.started.elapsed() > std::time::Duration::from_millis(2500)
             && !self.demo.keys.is_empty()
@@ -487,6 +487,16 @@ fn demo_key(spec: &str) -> Option<(egui::Key, egui::Modifiers)> {
     Some((egui::Key::from_name(rest)?, modifiers))
 }
 
+/// How far filming a demo run got.
+#[cfg(feature = "demo")]
+#[derive(Clone, Default)]
+struct Filmed {
+    /// Frames asked to be saved.
+    asked: u32,
+    /// Frames saved.
+    saved: u32,
+}
+
 /// Screenshot and view options for demo runs.
 #[cfg(feature = "demo")]
 #[derive(Clone)]
@@ -508,7 +518,7 @@ struct DemoSetup {
     typing: std::collections::VecDeque<char>,
     /// Where to save every frame, and how many were asked for and saved.
     film: Option<std::path::PathBuf>,
-    filmed: (u32, u32),
+    filmed: Filmed,
     /// Whether `--demo-type` gave nothing to type.
     typing_none: bool,
     /// How many frames were asked for when the last character was typed:
@@ -562,7 +572,7 @@ impl DemoSetup {
                 .chars()
                 .collect(),
             film: cli.demo_frames.clone(),
-            filmed: (0, 0),
+            filmed: Filmed::default(),
             typed_frames: 0,
             typing_none: cli.demo_type.as_deref().is_none_or(str::is_empty),
             hover: cli
@@ -702,7 +712,10 @@ impl DemoSetup {
             Some("switcher") => app.actions.push(Action::OpenSwitcher),
             // The switcher as the command palette, `>` typed.
             Some("palette") => {
-                app.switcher = Some((">".into(), 0));
+                app.switcher = Some(noslacking::app::Switcher {
+                    query: ">".into(),
+                    selected: 0,
+                });
                 app.focus_overlay = true;
             }
             Some("picker") => app.actions.push(Action::PickReaction {
@@ -927,7 +940,7 @@ impl DemoSetup {
             return;
         };
         ctx.request_repaint();
-        let (asked, saved) = &mut self.filmed;
+        let Filmed { asked, saved } = &mut self.filmed;
         for image in ctx.input(|input| {
             input
                 .events

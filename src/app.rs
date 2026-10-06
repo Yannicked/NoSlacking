@@ -196,14 +196,122 @@ impl std::fmt::Debug for SetupForm {
     }
 }
 
-/// Where a file goes: the team, the channel and the thread, if any.
-type UploadTarget = (String, String, Option<Ts>);
+/// Where a file goes.
+#[derive(Clone)]
+struct UploadTarget {
+    team: String,
+    channel: String,
+    /// The thread's parent, when the file goes into a thread.
+    thread: Option<Ts>,
+}
 
 /// How putting a picture on the clipboard went.
 type CopyResult = Result<(), String>;
 
-/// A file chosen in the picker, and where it goes.
-type PickedFile = (UploadTarget, PathBuf);
+/// A file chosen in the picker or pasted, and where it goes.
+struct PickedFile {
+    target: UploadTarget,
+    path: PathBuf,
+}
+
+/// Both ends of a channel that the app's own helper threads answer on:
+/// they hold a clone of `sender`, and each frame drains `inbox`.
+struct Mailbox<T> {
+    sender: mpsc::Sender<T>,
+    inbox: mpsc::Receiver<T>,
+}
+
+impl<T> Mailbox<T> {
+    fn new() -> Self {
+        let (sender, inbox) = mpsc::channel();
+        Self { sender, inbox }
+    }
+}
+
+/// A draft lent to a slash command, an upload's comment or a scheduled
+/// message, to give back to its composer if that fails.
+#[derive(Clone, Debug)]
+pub struct LentDraft {
+    /// Its composer, by [`App::draft_key`].
+    pub key: String,
+    /// The draft as it was sent.
+    pub draft: Draft,
+}
+
+/// How many people a workspace knows, and the version of what it knows
+/// about them: lists made from them are made again when either changes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PeopleStamp {
+    /// How many there are.
+    pub count: usize,
+    /// [`WorkspaceState::users_version`].
+    pub version: u64,
+}
+
+impl PeopleStamp {
+    /// The stamp of `workspace`'s people as they are now.
+    pub fn of(workspace: &WorkspaceState) -> Self {
+        Self {
+            count: workspace.users.len(),
+            version: workspace.users_version(),
+        }
+    }
+}
+
+/// The theme and zoom last handed to egui, so they are set again only
+/// when one changes.
+#[derive(Clone, Copy, PartialEq)]
+struct Applied {
+    palette: Palette,
+    zoom: f32,
+}
+
+/// The quick switcher (or, with `>` typed first, the command palette)
+/// while open.
+#[derive(Clone, Debug, Default)]
+pub struct Switcher {
+    /// What is typed so far.
+    pub query: String,
+    /// The highlighted row.
+    pub selected: usize,
+}
+
+/// Where the "New" line goes in a list.
+#[derive(Clone, Debug)]
+pub struct ReadLine {
+    /// The list, by `team/channel`.
+    pub list: String,
+    /// The newest message read when it was opened; `None` when all of it
+    /// was read.
+    pub read: Option<Ts>,
+}
+
+/// A message waiting for "Delete?" to be answered.
+#[derive(Clone, Debug)]
+pub struct MessageDeletion {
+    pub channel: String,
+    pub ts: Ts,
+}
+
+/// Your file waiting for "Delete?" to be answered.
+#[derive(Clone, Debug)]
+pub struct FileDeletion {
+    /// Its id.
+    pub file: String,
+    /// Its name, for the question.
+    pub name: String,
+}
+
+/// A button press waiting for the app's own "Are you sure?" to be
+/// answered.
+#[derive(Clone)]
+pub struct PressConfirmation {
+    pub press: crate::model::Press,
+    /// The dialog the app asked for.
+    pub confirm: crate::model::Confirm,
+    /// What the button opens once the answer is yes, if anything.
+    pub link: Option<String>,
+}
 
 pub struct AppOptions {
     pub demo: bool,
@@ -215,7 +323,7 @@ pub struct App {
     pub backend: Backend,
     pub waker: Waker,
     pub palette: Palette,
-    applied: Option<(Palette, f32)>,
+    applied: Option<Applied>,
     pub catalog: Catalog,
     pub page: Page,
     pub app_credentials: Option<AppCredentials>,
@@ -236,7 +344,7 @@ pub struct App {
     next_upload: u64,
     /// The id of the last slash command run, counted like uploads.
     next_slash: u64,
-    pub switcher: Option<(String, usize)>,
+    pub switcher: Option<Switcher>,
     pub profile: Option<String>,
     pub picker: Option<PickerTarget>,
     pub picker_query: String,
@@ -247,13 +355,9 @@ pub struct App {
     /// The id of the last file asked for by the viewer, counted like
     /// uploads.
     next_view: u64,
-    /// A message waiting for "Delete?" to be answered.
-    pub confirm_delete: Option<(String, Ts)>,
-    /// A button press waiting for the app's own "Are you sure?" to be
-    /// answered, with the dialog the app asked for.
-    pub confirm_press: Option<(crate::model::Press, crate::model::Confirm, Option<String>)>,
-    /// Your file waiting for "Delete?" to be answered: its id and name.
-    pub confirm_delete_file: Option<(String, String)>,
+    pub confirm_delete: Option<MessageDeletion>,
+    pub confirm_press: Option<PressConfirmation>,
+    pub confirm_delete_file: Option<FileDeletion>,
     /// The "Add emoji" dialog, when open.
     pub add_emoji: Option<crate::custom_emoji::Dialog>,
     pub section_dialog: Option<SectionDialog>,
@@ -270,12 +374,13 @@ pub struct App {
     /// The views at the top of the sidebar and what they list.
     pub views: crate::views::State,
     /// Where the "New" line goes: the read marker when the open
-    /// conversation was opened, by `team/channel`.
-    pub read_line: Option<(String, Option<Ts>)>,
+    /// conversation was opened.
+    pub read_line: Option<ReadLine>,
     pub sidebar_filter: String,
     pub demo: bool,
-    /// Older history arrived: the list keeps its place by this much.
-    pub prepended: Option<(String, f32)>,
+    /// Older history arrived in this list (by `team/channel`): it keeps
+    /// its place when next drawn.
+    pub prepended: Option<String>,
     /// Lists to scroll to the bottom when next drawn, by
     /// [`App::draft_key`]: a reply sent in a thread must not move the
     /// conversation beside it.
@@ -294,24 +399,23 @@ pub struct App {
     /// Messages being brought into view, at most one per list.
     pub jumps: Vec<crate::jump::Jump>,
     local_counter: u64,
-    uploads: (mpsc::Sender<PickedFile>, mpsc::Receiver<PickedFile>),
-    emoji_images: (
-        mpsc::Sender<emoji::PickedImage>,
-        mpsc::Receiver<emoji::PickedImage>,
-    ),
+    uploads: Mailbox<PickedFile>,
+    emoji_images: Mailbox<emoji::PickedImage>,
     /// Pictures picked for new emoji so far, numbering their previews.
     emoji_picks: u64,
     /// A picture on its way to the clipboard: the image loader URIs still
     /// to try, best first, and the answers of the threads that copy.
     copying: Vec<String>,
-    copied: (mpsc::Sender<CopyResult>, mpsc::Receiver<CopyResult>),
-    marks: HashMap<(String, String), (Ts, Instant)>,
+    copied: Mailbox<CopyResult>,
+    /// When a read mark was last sent, by team and channel: they go at
+    /// most once per [`MARK_EVERY`].
+    marked: HashMap<(String, String), Instant>,
     pending_marks: HashMap<(String, String), Ts>,
     /// Drafts sent as a slash command or as an upload's comment, with
     /// their composer's key, kept until it is done: by command id, and by
     /// upload id. A failure puts the text back.
-    slashing: HashMap<u64, (String, Draft)>,
-    uploading: HashMap<u64, (String, Draft)>,
+    slashing: HashMap<u64, LentDraft>,
+    uploading: HashMap<u64, LentDraft>,
     window_focused: bool,
     /// When changed settings are next written, and the thread that writes them.
     settings_due: crate::settings::Debounce,
@@ -469,12 +573,12 @@ impl App {
             jumps: Vec::new(),
             search: crate::search::Search::default(),
             local_counter: 0,
-            uploads: mpsc::channel(),
-            emoji_images: mpsc::channel(),
+            uploads: Mailbox::new(),
+            emoji_images: Mailbox::new(),
             emoji_picks: 0,
             copying: Vec::new(),
-            copied: mpsc::channel(),
-            marks: HashMap::new(),
+            copied: Mailbox::new(),
+            marked: HashMap::new(),
             pending_marks: HashMap::new(),
             slashing: HashMap::new(),
             uploading: HashMap::new(),
@@ -644,10 +748,10 @@ impl App {
                 ctx.forget_all_images();
             }
         }
-        while let Ok((target, path)) = self.uploads.1.try_recv() {
+        while let Ok(PickedFile { target, path }) = self.uploads.inbox.try_recv() {
             self.stage(target, path);
         }
-        while let Ok(picked) = self.emoji_images.1.try_recv() {
+        while let Ok(picked) = self.emoji_images.inbox.try_recv() {
             self.emoji_image_picked(picked);
         }
         self.copy_image_frame(ctx);
@@ -712,10 +816,11 @@ impl App {
         };
         self.palette = palette;
         let zoom = self.settings.zoom.clamp(0.6, 2.0);
-        if self.applied != Some((palette, zoom)) {
+        let applied = Applied { palette, zoom };
+        if self.applied != Some(applied) {
             theme::apply(ctx, &palette);
             ctx.set_zoom_factor(zoom);
-            self.applied = Some((palette, zoom));
+            self.applied = Some(applied);
         }
     }
 
@@ -835,7 +940,10 @@ impl App {
         self.pending_marks
             .insert((team.clone(), channel.to_owned()), marker.clone());
         if self.active_workspace().and_then(|w| w.active.as_deref()) == Some(channel) {
-            self.read_line = Some((format!("{team}/{channel}"), Some(marker)));
+            self.read_line = Some(ReadLine {
+                list: format!("{team}/{channel}"),
+                read: Some(marker),
+            });
         }
     }
 
@@ -849,9 +957,9 @@ impl App {
             .pending_marks
             .keys()
             .filter(|key| {
-                self.marks
+                self.marked
                     .get(*key)
-                    .is_none_or(|(_, at)| now.duration_since(*at) >= MARK_EVERY)
+                    .is_none_or(|at| now.duration_since(*at) >= MARK_EVERY)
             })
             .cloned()
             .collect();
@@ -860,9 +968,9 @@ impl App {
                 self.backend.send(Command::Mark {
                     team: key.0.clone(),
                     channel: key.1.clone(),
-                    ts: ts.clone(),
+                    ts,
                 });
-                self.marks.insert(key, (ts, now));
+                self.marked.insert(key, now);
             }
         }
         if !self.pending_marks.is_empty() {
@@ -964,7 +1072,10 @@ impl App {
             .and_then(|w| w.conversation(channel))
             .filter(|c| c.has_unread())
             .and_then(|c| c.last_read.clone());
-        self.read_line = Some((format!("{team}/{channel}"), read));
+        self.read_line = Some(ReadLine {
+            list: format!("{team}/{channel}"),
+            read,
+        });
     }
 
     /// Brings a picture asked for with "Copy image" to the clipboard: its
@@ -972,7 +1083,7 @@ impl App {
     /// with the workspace's token, from Slack only), and a thread decodes
     /// and offers them.
     fn copy_image_frame(&mut self, ctx: &egui::Context) {
-        while let Ok(result) = self.copied.1.try_recv() {
+        while let Ok(result) = self.copied.inbox.try_recv() {
             match result {
                 Ok(()) => self.toast(t("Image copied").into_owned(), false),
                 Err(error) => self.toast(
@@ -988,7 +1099,7 @@ impl App {
             Ok(egui::load::BytesPoll::Ready { bytes, .. }) => {
                 self.copying.clear();
                 let bytes = bytes.to_vec();
-                let answer = self.copied.0.clone();
+                let answer = self.copied.sender.clone();
                 let waker = self.waker.clone();
                 std::thread::spawn(move || {
                     let pixels = match crate::paste::clipboard_pixels(&bytes) {
@@ -1169,8 +1280,12 @@ impl App {
             }
             Action::PickEmoji { draft } => self.open_picker(PickerTarget::Draft(draft)),
             Action::MarkUnread { channel, ts } => self.mark_unread(&channel, &ts),
-            Action::AskDelete { channel, ts } => self.confirm_delete = Some((channel, ts)),
-            Action::AskDeleteFile { file, name } => self.confirm_delete_file = Some((file, name)),
+            Action::AskDelete { channel, ts } => {
+                self.confirm_delete = Some(MessageDeletion { channel, ts });
+            }
+            Action::AskDeleteFile { file, name } => {
+                self.confirm_delete_file = Some(FileDeletion { file, name });
+            }
             Action::AddEmoji => self.open_add_emoji(),
             Action::PickEmojiImage => self.pick_emoji_image(),
             Action::SendEmoji => self.send_emoji(),
@@ -1196,7 +1311,7 @@ impl App {
             } => self.view_image(&channel, thread.as_ref(), &ts, &file),
             Action::OpenSwitcher => {
                 self.focus_overlay = true;
-                self.switcher = Some((String::new(), 0));
+                self.switcher = Some(Switcher::default());
             }
             Action::OpenProfile(user) => self.profile = Some(user),
             Action::OpenSearch => self.open_search(),
@@ -1444,8 +1559,8 @@ impl App {
         let Some(read) = self
             .read_line
             .as_ref()
-            .filter(|(key, _)| *key == list)
-            .and_then(|(_, ts)| ts.clone())
+            .filter(|line| line.list == list)
+            .and_then(|line| line.read.clone())
         else {
             return;
         };
@@ -1666,7 +1781,11 @@ impl App {
             PressStep::Ask => {
                 if let Some(confirm) = confirm {
                     self.focus_overlay = true;
-                    self.confirm_press = Some((press, confirm, link));
+                    self.confirm_press = Some(PressConfirmation {
+                        press,
+                        confirm,
+                        link,
+                    });
                 }
                 return;
             }

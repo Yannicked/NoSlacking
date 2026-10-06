@@ -18,7 +18,9 @@ use super::fetch::{
     Boot, boot, conversation_info, conversations, edit_sidebar, history, sections, thread,
     workspace_details,
 };
-use super::files::{UploadGate, download, fetch_bytes, file_name, open_file, upload, view};
+use super::files::{
+    Attachment, Destination, UploadGate, download, fetch_bytes, file_name, open_file, upload, view,
+};
 use super::translate::{Translated, str_of, translate};
 use super::{Change, Command, Event, Gate, SignIn, Sink, Socket};
 use crate::auth::{Flow, SignedIn};
@@ -190,6 +192,22 @@ impl Team {
     }
 }
 
+/// What the interface has on screen.
+struct Focus {
+    /// The workspace.
+    team: String,
+    /// Its open conversation, if any.
+    channel: Option<String>,
+}
+
+/// An upload still running.
+struct Running {
+    /// Its task, to stop it.
+    task: tokio::task::AbortHandle,
+    /// Whether it may still be stopped.
+    gate: UploadGate,
+}
+
 /// A message to post, as `Command::Send` carries it.
 struct Outgoing {
     team: String,
@@ -239,8 +257,8 @@ pub struct Worker {
     rtm: HashMap<String, Live>,
     /// The generation the next socket gets.
     next_generation: u64,
-    /// The workspace on screen, and its open conversation if any.
-    focus: Option<(String, Option<String>)>,
+    /// What is on screen.
+    focus: Option<Focus>,
     /// The status last sent to the interface, so it hears only changes.
     reported: Option<Socket>,
     /// The poll of the open conversation that is still running, if any.
@@ -255,7 +273,7 @@ pub struct Worker {
     waiting: Option<Vec<Command>>,
     /// Uploads still running, by the interface's id, so they can be
     /// cancelled while their gate allows it.
-    uploads: HashMap<u64, (tokio::task::AbortHandle, UploadGate)>,
+    uploads: HashMap<u64, Running>,
     /// Presence and the like for the people on screen.
     people: super::people::Hub,
     /// The huddle being listened to (`huddle-audio`).
@@ -676,7 +694,7 @@ impl Worker {
         let team = self
             .focus
             .as_ref()
-            .map(|(team, _)| team.clone())
+            .map(|focus| focus.team.clone())
             .filter(|team| self.teams.contains_key(team))
             .or_else(|| self.teams.keys().min().cloned());
         let status = team.map_or(Socket::Off, |team| self.status(&team));
@@ -703,7 +721,7 @@ impl Worker {
             Command::StartBrowserSignIn => self.start_browser_sign_in(),
             Command::SignOut(team) => self.sign_out(&team),
             Command::Focus { team, channel } => {
-                self.focus = Some((team, channel));
+                self.focus = Some(Focus { team, channel });
                 self.report_socket();
             }
             Command::LoadHistory { team, channel } => self.load_history(team, channel, None),
@@ -1103,19 +1121,29 @@ impl Worker {
             return;
         };
         let poll_after = !self.is_live(&team);
-        self.uploads.retain(|_, (task, _)| !task.is_finished());
+        self.uploads
+            .retain(|_, running| !running.task.is_finished());
         let gate = UploadGate::default();
         let task = {
             let gate = gate.clone();
             tokio::spawn(async move {
-                let shared = upload(
-                    id, client, team, channel, thread, path, comment, poll_after, gate, &sink,
-                )
-                .await;
+                let to = Destination {
+                    team,
+                    channel,
+                    thread,
+                };
+                let file = Attachment { path, comment };
+                let shared = upload(id, client, to, file, poll_after, gate, &sink).await;
                 sink.send(Event::UploadDone { id, shared });
             })
         };
-        self.uploads.insert(id, (task.abort_handle(), gate));
+        self.uploads.insert(
+            id,
+            Running {
+                task: task.abort_handle(),
+                gate,
+            },
+        );
     }
 
     /// Stops an upload only while its gate still allows it. Once Slack is
@@ -1123,7 +1151,7 @@ impl Worker {
     /// ends with its own [`Event::UploadDone`], so the interface never
     /// says "cancelled" about a file that was posted.
     fn cancel_upload(&mut self, id: u64) {
-        let Some((task, gate)) = self.uploads.remove(&id) else {
+        let Some(Running { task, gate }) = self.uploads.remove(&id) else {
             // Already over: its own UploadDone was sent.
             return;
         };
@@ -1135,7 +1163,7 @@ impl Worker {
             self.sink.send(Event::UploadCancelled { id });
         } else {
             log::debug!("upload {id} is already being shared; not cancelled");
-            self.uploads.insert(id, (task, gate));
+            self.uploads.insert(id, Running { task, gate });
         }
     }
 
@@ -1713,8 +1741,8 @@ impl Worker {
             let open = self
                 .focus
                 .as_ref()
-                .filter(|(team, _)| team == id)
-                .and_then(|(_, channel)| channel.clone());
+                .filter(|focus| focus.team == *id)
+                .and_then(|focus| focus.channel.clone());
             let (client, sink, team_id) = (team.client.clone(), team.sink.clone(), id.clone());
             let round = tokio::spawn(async move {
                 super::poll::round(client, team_id, open, &mut state, sink).await;
@@ -1737,7 +1765,11 @@ impl Worker {
         {
             return;
         }
-        let Some((team, Some(channel))) = &self.focus else {
+        let Some(Focus {
+            team,
+            channel: Some(channel),
+        }) = &self.focus
+        else {
             return;
         };
         if self.is_live(team) {
@@ -2074,9 +2106,15 @@ mod tests {
         team(&mut worker, "TB", session());
         let up = live(&mut worker, Socket::Connected);
         worker.rtm.insert("TA".into(), up);
-        worker.focus = Some(("TB".into(), None));
+        worker.focus = Some(Focus {
+            team: "TB".into(),
+            channel: None,
+        });
         worker.report_socket();
-        worker.focus = Some(("TA".into(), Some("C1".into())));
+        worker.focus = Some(Focus {
+            team: "TA".into(),
+            channel: Some("C1".into()),
+        });
         worker.report_socket();
         // No change, no event.
         worker.report_socket();

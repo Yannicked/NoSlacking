@@ -526,8 +526,17 @@ pub struct ChannelData {
 pub struct Details {
     pub channel: String,
     pub tab: Tab,
-    /// The topic or purpose being edited, and the text so far.
-    pub editing: Option<(Field, String)>,
+    /// The topic or purpose being edited.
+    pub editing: Option<Describing>,
+}
+
+/// A topic or purpose being edited in the details panel.
+#[derive(Clone, Debug)]
+pub struct Describing {
+    /// Which of the two.
+    pub field: Field,
+    /// The text so far.
+    pub draft: String,
 }
 
 /// A public channel the browser lists.
@@ -551,23 +560,34 @@ pub struct NewMessage {
     pub selected: usize,
     /// Waiting for Slack to open the conversation.
     pub busy: bool,
-    /// The last query's matches, with the people's version they were found
-    /// in: a workspace can have tens of thousands of people, too many to
-    /// search on every frame.
-    found: Option<(String, (usize, u64), Vec<String>)>,
+    /// The last query's matches: a workspace can have tens of thousands
+    /// of people, too many to search on every frame.
+    found: Option<FoundPeople>,
+}
+
+/// The people a [`NewMessage`] query matched, and what it was matched
+/// against.
+#[derive(Clone, Debug)]
+struct FoundPeople {
+    /// The query and the people already picked.
+    key: String,
+    /// The people as they were searched.
+    people: crate::app::PeopleStamp,
+    /// The matching user ids, best first.
+    ids: Vec<String>,
 }
 
 impl NewMessage {
     /// The suggestions for the current query, worked out again only when
     /// the query, the picks or the people change.
     pub fn suggestions(&mut self, workspace: &WorkspaceState) -> Vec<String> {
-        let version = (workspace.users.len(), workspace.users_version());
+        let people = crate::app::PeopleStamp::of(workspace);
         let key = format!("{}\u{0}{}", self.query, self.picked.join(","));
-        if let Some((query, seen, found)) = &self.found
-            && *query == key
-            && *seen == version
+        if let Some(found) = &self.found
+            && found.key == key
+            && found.people == people
         {
-            return found.clone();
+            return found.ids.clone();
         }
         let found: Vec<String> = people_matching(
             workspace.users.values(),
@@ -579,7 +599,11 @@ impl NewMessage {
         .take(SUGGESTIONS)
         .map(|u| u.id.clone())
         .collect();
-        self.found = Some((key, version, found.clone()));
+        self.found = Some(FoundPeople {
+            key,
+            people,
+            ids: found.clone(),
+        });
         found
     }
 
@@ -607,23 +631,37 @@ pub struct Browse {
     pub error: Option<Why>,
     /// Channels being joined, waiting for Slack.
     pub joining: HashSet<String>,
-    /// The last query's matches, by index into `channels`, with the query
-    /// and how many channels there were: thousands of channels are too
-    /// many to filter on every frame.
-    found: Option<(String, usize, Vec<usize>)>,
+    /// The last query's matches: thousands of channels are too many to
+    /// filter on every frame.
+    found: Option<FoundChannels>,
+}
+
+/// The channels a [`Browse`] query matched, and what it was matched
+/// against.
+#[derive(Clone, Debug)]
+struct FoundChannels {
+    query: String,
+    /// How many channels had arrived.
+    listed: usize,
+    /// The matches, by index into [`Browse::channels`], best first.
+    indices: Vec<usize>,
 }
 
 impl Browse {
     /// The channels matching the query, best first.
     pub fn matches(&mut self) -> Vec<usize> {
-        if let Some((query, count, found)) = &self.found
-            && *query == self.query
-            && *count == self.channels.len()
+        if let Some(found) = &self.found
+            && found.query == self.query
+            && found.listed == self.channels.len()
         {
-            return found.clone();
+            return found.indices.clone();
         }
         let found = channels_matching(&self.channels, &self.query);
-        self.found = Some((self.query.clone(), self.channels.len(), found.clone()));
+        self.found = Some(FoundChannels {
+            query: self.query.clone(),
+            listed: self.channels.len(),
+            indices: found.clone(),
+        });
         found
     }
 }
