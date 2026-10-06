@@ -765,12 +765,157 @@ fn history(channel: &str) -> Vec<Message> {
                 ..message(NOW - 9000, "U03", "The style guide, updated.")
             },
         ],
+        "C04" => shared_files(),
         _ => vec![message(
             NOW - 9000,
             "U02",
             "Nothing much happening here yet.",
         )],
     }
+}
+
+/// #random's files, one of each kind Slack previews: a code snippet, a
+/// text file, a PDF, a spreadsheet with Slack's PDF of it, a voice clip
+/// and a video.
+fn shared_files() -> Vec<Message> {
+    let url = |id: &str, name: &str| {
+        Some(format!(
+            "https://files.slack.com/files-pri/TDEMO-{id}/{name}"
+        ))
+    };
+    let tmb = |id: &str, name: &str| {
+        Some(format!(
+            "https://files.slack.com/files-tmb/TDEMO-{id}-a1b2c3/{name}"
+        ))
+    };
+    let file = |id: &str, name: &str, mimetype: &str, size: u64| File {
+        id: id.into(),
+        name: name.into(),
+        title: name.into(),
+        mimetype: mimetype.into(),
+        size,
+        url_private: url(id, name),
+        download_url: url(id, &format!("download/{name}")),
+        ..File::default()
+    };
+    let with = |files: Vec<File>, seconds: u64, user: &str, text: &str| Message {
+        files,
+        ..message(NOW - seconds, user, text)
+    };
+    vec![
+        with(
+            vec![File {
+                filetype: "rust".into(),
+                preview: Some(crate::model::TextPreview {
+                    text: "/// Waits longer after each failed attempt, up to a minute.\n\
+                           fn backoff(attempt: u32) -> Duration {\n\
+                           \x20   let base = Duration::from_millis(500);\n\
+                           \x20   // Doubling, capped so it never waits for hours.\n\
+                           \x20   let factor = 2u32.saturating_pow(attempt.min(7));\n\
+                           \x20   (base * factor).min(Duration::from_secs(60))\n\
+                           }\n\
+                           \n\
+                           #[test]\n\
+                           fn backoff_is_capped() {"
+                        .into(),
+                    lines_more: Some(14),
+                    lines: Some(24),
+                    truncated: false,
+                }),
+                ..file("F20", "backoff.rs", "text/plain", 742)
+            }],
+            7200,
+            "U02",
+            "The reconnect backoff, if anyone wants to check my maths:",
+        ),
+        with(
+            vec![File {
+                filetype: "text".into(),
+                preview: Some(crate::model::TextPreview {
+                    text: "2026-09-30 11:02:14 INFO  socket: connected (wss-primary)\n\
+                           2026-09-30 11:47:51 WARN  socket: no pong in 30s, reconnecting\n\
+                           2026-09-30 11:47:52 INFO  socket: connected (wss-backup)"
+                        .into(),
+                    lines_more: Some(0),
+                    lines: Some(3),
+                    truncated: false,
+                }),
+                ..file("F21", "reconnect.log", "text/plain", 196)
+            }],
+            6800,
+            "U04",
+            "And the log from last night.",
+        ),
+        with(
+            vec![File {
+                filetype: "pdf".into(),
+                poster: Some("slow://release-notes.png".into()),
+                poster_size: Some([909.0, 1286.0]),
+                ..file("F22", "release-notes.pdf", "application/pdf", 312_400)
+            }],
+            6000,
+            "U03",
+            "Release notes for Friday.",
+        ),
+        with(
+            vec![File {
+                filetype: "xlsx".into(),
+                poster: Some("slow://budget.png".into()),
+                poster_size: Some([1210.0, 935.0]),
+                converted_pdf: tmb("F23", "budget_converted.pdf"),
+                ..file(
+                    "F23",
+                    "Q4 budget.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    75_813,
+                )
+            }],
+            5000,
+            "U01",
+            "Budget for next quarter, with the new build machines.",
+        ),
+        with(
+            vec![File {
+                filetype: "m4a".into(),
+                voice: true,
+                duration_ms: Some(13_977),
+                wave: vec![
+                    0, 0, 2, 34, 75, 57, 53, 45, 46, 48, 66, 89, 78, 54, 68, 68, 61, 48, 51, 47,
+                    47, 45, 69, 72, 47, 40, 46, 41, 37, 34, 35, 35, 36, 36, 28, 36, 39, 40, 39, 36,
+                    41, 40, 42, 33, 51, 46, 39, 32, 39, 34, 37, 32, 37, 36, 37, 32, 34, 39, 27,
+                    41, 43, 48, 68, 72, 56, 66, 52, 53, 53, 43, 39, 42, 41, 46, 49, 34, 37, 39,
+                    20, 25, 40, 37, 34, 76, 100, 53, 89, 94, 34, 48, 26, 25, 59, 29, 74, 71, 68,
+                    23, 54, 58,
+                ],
+                transcript: Some(
+                    "Quick one: the build machines arrive Tuesday, so let's move the freeze to Wednesday."
+                        .into(),
+                ),
+                ..file(
+                    "F24",
+                    "Audio clip (2026-09-30_13-50-02).m4a",
+                    "audio/mp4",
+                    171_020,
+                )
+            }],
+            900,
+            "U01",
+            "",
+        ),
+        with(
+            vec![File {
+                filetype: "mp4".into(),
+                poster: Some("slow://onboarding.jpg".into()),
+                poster_size: Some([1920.0, 1080.0]),
+                duration_ms: Some(279_145),
+                mp4_low: tmb("F25", "onboarding_trans.mp4"),
+                ..file("F25", "onboarding.mp4", "video/mp4", 30_784_549)
+            }],
+            500,
+            "U03",
+            "Onboarding walkthrough for the new folks.",
+        ),
+    ]
 }
 
 /// Everything a conversation holds, oldest first.

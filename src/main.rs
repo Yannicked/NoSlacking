@@ -49,7 +49,7 @@ struct Cli {
 
     /// Open a view before the screenshot: thread, settings, sign-in,
     /// switcher, picker, profile, share, upload, drafts, lightbox, media,
-    /// compact, held-media, shortcuts, delete-file or add-emoji.
+    /// previews, compact, held-media, shortcuts, delete-file or add-emoji.
     #[cfg(feature = "demo")]
     #[arg(long, value_name = "VIEW")]
     demo_view: Option<String>,
@@ -658,6 +658,9 @@ impl DemoSetup {
             }
             // Link previews, a video, a sound and a PDF.
             Some("media") => app.actions.push(Action::OpenConversation("C03".into())),
+            // #random's files: Slack's previews of a snippet, a text file,
+            // a PDF, a spreadsheet, a voice clip and a video.
+            Some("previews") => app.actions.push(Action::OpenConversation("C04".into())),
             // Search results, with a second page to scroll to.
             Some("search") => {
                 app.search.text = "standup in:#general".into();
