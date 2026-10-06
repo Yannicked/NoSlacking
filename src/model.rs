@@ -650,7 +650,7 @@ impl SignInKind {
     }
 }
 
-/// Why an interactive button cannot be pressed here.
+/// Why an interactive button or menu cannot be used here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotHere {
     /// Only Slack's own clients press an app's buttons. A browser session
@@ -673,7 +673,8 @@ pub enum ButtonUse<'a> {
     NotHere(NotHere),
 }
 
-/// Pressing an app's interactive button on message `ts` in `channel`.
+/// Pressing an app's interactive button, or choosing from its menu, on
+/// message `ts` in `channel`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Press {
     pub channel: String,
@@ -682,9 +683,224 @@ pub struct Press {
     pub bot_id: String,
     pub block_id: String,
     pub action_id: String,
-    /// The label as Slack sent it, which the press repeats.
+    /// The button's label, or the choice's, as Slack sent it, which the
+    /// press repeats.
     pub text: String,
+    /// The button's value, or the choice's.
     pub value: Option<String>,
+    /// What was pressed, which shapes what Slack is sent.
+    pub kind: PressKind,
+}
+
+impl Press {
+    /// Whether `other` is on the same button or menu, whatever was chosen
+    /// from it: a menu is busy while any choice of it is on its way.
+    pub fn same_control(&self, other: &Press) -> bool {
+        self.channel == other.channel
+            && self.ts == other.ts
+            && self.block_id == other.block_id
+            && self.action_id == other.action_id
+    }
+
+    /// This menu's press with `choice` chosen.
+    pub fn choosing(&self, choice: &MenuChoice) -> Press {
+        Press {
+            text: choice.text.clone(),
+            value: Some(choice.value.clone()),
+            ..self.clone()
+        }
+    }
+}
+
+/// The kind of element a [`Press`] comes from.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PressKind {
+    #[default]
+    Button,
+    /// A `static_select`, whose placeholder the press repeats.
+    Select { placeholder: Option<String> },
+    /// An `overflow` menu.
+    Overflow,
+    /// A set of `radio_buttons`.
+    Radio,
+}
+
+/// What kind of menu an app's [`Menu`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuKind {
+    /// A `static_select`: a drop-down that shows its choice.
+    Select,
+    /// An `overflow` menu: a "⋯" with a list of things to do.
+    Overflow,
+    /// `radio_buttons`: every choice in view, one of them picked.
+    Radio,
+}
+
+/// One choice of an app's menu (Slack's option object).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MenuChoice {
+    /// The label as Slack sends it.
+    pub text: String,
+    /// What the app put in the choice for itself.
+    pub value: String,
+    /// A line under the label, in mrkdwn.
+    pub description: Option<String>,
+    /// A link an overflow choice opens as well.
+    pub url: Option<String>,
+}
+
+/// Choices under a heading; a menu without headings has one group with
+/// none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChoiceGroup {
+    pub label: Option<String>,
+    pub choices: Vec<MenuChoice>,
+}
+
+/// An app's Block Kit menu: a static select, an overflow menu or radio
+/// buttons. Choosing from it works as a button press does (see
+/// [`menu_use`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Menu {
+    pub kind: MenuKind,
+    /// The app's own name for the menu, which the choice carries back.
+    pub action_id: Option<String>,
+    /// The block the menu sits in, which the choice names too.
+    pub block_id: Option<String>,
+    /// What an empty select says.
+    pub placeholder: Option<String>,
+    pub groups: Vec<ChoiceGroup>,
+    /// The choice the app shows as made.
+    pub initial: Option<MenuChoice>,
+    /// The question to ask before a choice is sent, when the app wants one.
+    pub confirm: Option<Confirm>,
+}
+
+impl Menu {
+    /// Every choice, across its groups.
+    pub fn choices(&self) -> impl Iterator<Item = &MenuChoice> {
+        self.groups.iter().flat_map(|group| &group.choices)
+    }
+
+    /// The choice whose value is `value`.
+    pub fn choice(&self, value: &str) -> Option<&MenuChoice> {
+        self.choices().find(|choice| choice.value == value)
+    }
+
+    /// The id of this menu's drop-down on message `ts` in `channel` (in
+    /// the thread panel or not), which a demo opens to show it.
+    pub fn popup_id(&self, channel: &str, ts: &Ts, in_thread: bool) -> egui::Id {
+        egui::Id::new((
+            "kit-menu",
+            channel,
+            ts.as_str(),
+            in_thread,
+            self.block_id.as_deref(),
+            self.action_id.as_deref(),
+        ))
+    }
+}
+
+/// An app's element only Slack itself can use here, such as a select
+/// whose choices come from the app, a date picker or a text input: shown
+/// by its label, never usable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Unusable {
+    /// Slack's name for the element, such as `datepicker`, from which a
+    /// label is worded when the app gave none.
+    pub kind: String,
+    /// What it says, as Slack sends it: its placeholder, or its text.
+    pub label: Option<String>,
+}
+
+/// One element of an `actions` block.
+#[derive(Clone, Debug, PartialEq)]
+pub enum KitElement {
+    Button(Button),
+    Menu(Menu),
+    Unusable(Unusable),
+}
+
+/// Where a choice from `menu` on `message` (in `channel`) goes in a
+/// workspace signed in by `sign_in`: the press without a choice yet, to
+/// [`Press::choosing`] one, or why there is none. As with [`button_use`],
+/// only a browser session can send it.
+pub fn menu_use(
+    sign_in: SignInKind,
+    channel: &str,
+    message: &Message,
+    menu: &Menu,
+) -> Result<Press, NotHere> {
+    let (bot_id, block_id, action_id) = press_target(
+        sign_in,
+        message,
+        menu.block_id.as_ref(),
+        menu.action_id.as_ref(),
+    )?;
+    let kind = match menu.kind {
+        MenuKind::Select => PressKind::Select {
+            placeholder: menu.placeholder.clone(),
+        },
+        MenuKind::Overflow => PressKind::Overflow,
+        MenuKind::Radio => PressKind::Radio,
+    };
+    Ok(Press {
+        channel: channel.to_owned(),
+        ts: message.ts.clone(),
+        bot_id,
+        block_id,
+        action_id,
+        text: String::new(),
+        value: None,
+        kind,
+    })
+}
+
+/// What pressing does next, by [`press_step`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PressStep<'a> {
+    /// Ask the app's question; nothing opens or is sent until it is
+    /// answered, and backing out does neither.
+    Ask,
+    /// Open `open`, if the choice has a link, and send the press.
+    Go { open: Option<&'a str> },
+}
+
+/// Whether a press asks the app's `confirm` question first, or goes ahead
+/// (`confirmed` once it was answered yes). An overflow choice's `link`
+/// opens only when it goes ahead, so backing out opens nothing.
+pub fn press_step<'a>(
+    confirm: Option<&Confirm>,
+    confirmed: bool,
+    link: Option<&'a str>,
+) -> PressStep<'a> {
+    if confirm.is_some() && !confirmed {
+        PressStep::Ask
+    } else {
+        PressStep::Go { open: link }
+    }
+}
+
+/// The bot, block and action a press on `message` names, when `sign_in`
+/// can send one at all.
+fn press_target(
+    sign_in: SignInKind,
+    message: &Message,
+    block_id: Option<&String>,
+    action_id: Option<&String>,
+) -> Result<(String, String, String), NotHere> {
+    if sign_in != SignInKind::Session {
+        return Err(NotHere::NeedsSession);
+    }
+    let (Some(bot_id), Some(block_id), Some(action_id)) =
+        (message.bot_id.as_ref(), block_id, action_id)
+    else {
+        return Err(NotHere::NoApp);
+    };
+    if message.ts.is_local() {
+        return Err(NotHere::NoApp);
+    }
+    Ok((bot_id.clone(), block_id.clone(), action_id.clone()))
 }
 
 /// What `button` on `message` (in `channel`) does in a workspace signed in
@@ -701,28 +917,24 @@ pub fn button_use<'a>(
     if let Some(url) = &button.url {
         return ButtonUse::Link(url);
     }
-    if sign_in != SignInKind::Session {
-        return ButtonUse::NotHere(NotHere::NeedsSession);
-    }
-    let (Some(bot_id), Some(block_id), Some(action_id)) = (
-        message.bot_id.as_ref(),
+    match press_target(
+        sign_in,
+        message,
         button.block_id.as_ref(),
         button.action_id.as_ref(),
-    ) else {
-        return ButtonUse::NotHere(NotHere::NoApp);
-    };
-    if message.ts.is_local() {
-        return ButtonUse::NotHere(NotHere::NoApp);
+    ) {
+        Ok((bot_id, block_id, action_id)) => ButtonUse::Press(Press {
+            channel: channel.to_owned(),
+            ts: message.ts.clone(),
+            bot_id,
+            block_id,
+            action_id,
+            text: button.text.clone(),
+            value: button.value.clone(),
+            kind: PressKind::Button,
+        }),
+        Err(why) => ButtonUse::NotHere(why),
     }
-    ButtonUse::Press(Press {
-        channel: channel.to_owned(),
-        ts: message.ts.clone(),
-        bot_id: bot_id.clone(),
-        block_id: block_id.clone(),
-        action_id: action_id.clone(),
-        text: button.text.clone(),
-        value: button.value.clone(),
-    })
 }
 
 /// What a Block Kit section shows on its right.
@@ -734,6 +946,10 @@ pub enum Accessory {
     },
     /// Boxed: a button is far larger than a picture.
     Button(Box<Button>),
+    /// A select, an overflow menu or radio buttons.
+    Menu(Box<Menu>),
+    /// An element only Slack itself can use here.
+    Unusable(Unusable),
 }
 
 /// One piece of a Block Kit context line.
@@ -767,7 +983,8 @@ pub enum KitBlock {
         /// back, so it takes its place before it has loaded.
         size: Option<[f32; 2]>,
     },
-    Actions(Vec<Button>),
+    /// Buttons, menus and what only Slack can use, in a row.
+    Actions(Vec<KitElement>),
     /// What people type, as Slack laid it out: the message's `text` says
     /// the same in mrkdwn, but these say for certain what is an emoji, a
     /// mention or a style.
@@ -1227,12 +1444,16 @@ pub enum Action {
         name: String,
     },
     OpenUrl(String),
-    /// Presses an app's interactive button. When the app asked for a
-    /// `confirm` dialog, this asks first, unless `confirmed`.
+    /// Presses an app's interactive button, or sends a menu choice. When
+    /// the app asked for a `confirm` dialog, this asks first, unless
+    /// `confirmed`; `link` (an overflow choice's) opens only once it goes
+    /// ahead (see [`press_step`]).
     PressButton {
-        press: Press,
+        /// Boxed: a press is far larger than most actions.
+        press: Box<Press>,
         confirm: Option<Confirm>,
         confirmed: bool,
+        link: Option<String>,
     },
     /// Opens a message in Slack itself (the browser or Slack's app), for
     /// what only works there; `thread` is its parent for a reply.
@@ -1387,6 +1608,7 @@ mod tests {
                 action_id: "approve".into(),
                 text: "Approve".into(),
                 value: Some("1288".into()),
+                kind: PressKind::Button,
             })
         );
         assert_eq!(
@@ -1421,6 +1643,107 @@ mod tests {
         );
         assert_eq!(SignInKind::of(true), SignInKind::Session);
         assert_eq!(SignInKind::of(false), SignInKind::App);
+    }
+
+    #[test]
+    fn menu_choices_go_only_from_a_browser_session() {
+        let posted = Message {
+            bot_id: Some("B10".into()),
+            ..message("1790171970.000100")
+        };
+        let beta = MenuChoice {
+            text: "Beta".into(),
+            value: "beta".into(),
+            ..MenuChoice::default()
+        };
+        let select = Menu {
+            kind: MenuKind::Select,
+            action_id: Some("channel".into()),
+            block_id: Some("rollout".into()),
+            placeholder: Some("Pick a channel".into()),
+            groups: vec![ChoiceGroup {
+                label: None,
+                choices: vec![beta.clone()],
+            }],
+            initial: None,
+            confirm: None,
+        };
+        let press =
+            menu_use(SignInKind::Session, "C05", &posted, &select).expect("a session can choose");
+        assert_eq!(
+            press.choosing(&beta),
+            Press {
+                channel: "C05".into(),
+                ts: Ts::new("1790171970.000100"),
+                bot_id: "B10".into(),
+                block_id: "rollout".into(),
+                action_id: "channel".into(),
+                text: "Beta".into(),
+                value: Some("beta".into()),
+                kind: PressKind::Select {
+                    placeholder: Some("Pick a channel".into()),
+                },
+            }
+        );
+        assert!(
+            press.same_control(&press.choosing(&beta)),
+            "busy whatever is chosen"
+        );
+        assert_eq!(
+            menu_use(SignInKind::App, "C05", &posted, &select),
+            Err(NotHere::NeedsSession)
+        );
+        let overflow = Menu {
+            kind: MenuKind::Overflow,
+            action_id: None,
+            ..select.clone()
+        };
+        assert_eq!(
+            menu_use(SignInKind::Session, "C05", &posted, &overflow),
+            Err(NotHere::NoApp),
+            "no action id, nothing for the app to tell apart"
+        );
+        let radio = Menu {
+            kind: MenuKind::Radio,
+            ..select.clone()
+        };
+        assert_eq!(
+            menu_use(SignInKind::Session, "C05", &posted, &radio).map(|p| p.kind),
+            Ok(PressKind::Radio)
+        );
+        let local = Message {
+            ts: Ts::new("local-1"),
+            ..posted.clone()
+        };
+        assert_eq!(
+            menu_use(SignInKind::Session, "C05", &local, &select),
+            Err(NotHere::NoApp),
+            "a message not yet on Slack has nothing to answer"
+        );
+    }
+
+    #[test]
+    fn a_link_with_a_question_opens_only_once_answered_yes() {
+        let confirm = Confirm::default();
+        let link = Some("https://example.com/plan");
+        assert_eq!(
+            press_step(Some(&confirm), false, link),
+            PressStep::Ask,
+            "nothing opens before the answer; backing out ends here"
+        );
+        assert_eq!(
+            press_step(Some(&confirm), true, link),
+            PressStep::Go { open: link }
+        );
+        assert_eq!(
+            press_step(None, false, link),
+            PressStep::Go { open: link },
+            "without a question, at once"
+        );
+        assert_eq!(
+            press_step(Some(&confirm), true, None),
+            PressStep::Go { open: None }
+        );
     }
 
     #[test]

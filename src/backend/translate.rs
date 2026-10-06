@@ -18,6 +18,42 @@ pub(super) enum Translated {
     RefreshSections,
     /// Your notification preferences changed in another Slack client.
     RefreshPrefs,
+    /// The custom emoji changed in a way not told: fetch them all again.
+    RefreshEmoji,
+}
+
+/// What an `emoji_changed` event says changed, by its `subtype`. None for
+/// a subtype Slack has not described or that lacks its fields: then the
+/// whole list is fetched again, as Slack's docs ask.
+fn emoji_change(event: &Value) -> Option<crate::emoji::EmojiChange> {
+    use crate::emoji::EmojiChange;
+    let text = |key: &str| {
+        str_of(event, key)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    match str_of(event, "subtype")? {
+        "add" => Some(EmojiChange::Added {
+            name: text("name")?,
+            value: text("value")?,
+        }),
+        "remove" => {
+            let names: Vec<String> = event
+                .get("names")?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
+            (!names.is_empty()).then_some(EmojiChange::Removed(names))
+        }
+        "rename" => Some(EmojiChange::Renamed {
+            old: text("old_name")?,
+            new: text("new_name")?,
+            value: text("value"),
+        }),
+        _ => None,
+    }
 }
 
 pub(super) fn str_of<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -185,6 +221,12 @@ pub(super) fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> 
                 out.push(Translated::RefreshPrefs);
             }
         }
+        // A custom emoji added, removed or renamed anywhere, so it shows
+        // here without a restart.
+        "emoji_changed" => out.push(match emoji_change(event) {
+            Some(change) => Translated::Event(Event::EmojiChanged { team, change }),
+            None => Translated::RefreshEmoji,
+        }),
         // Your own Do Not Disturb changed, here or in another client.
         "dnd_updated" => {
             if let Some(dnd) = super::desktop::dnd_event(event) {
@@ -421,6 +463,93 @@ mod tests {
         assert!(
             events(r#"{"type":"channel_created","channel":{"id":"C5","name":"x"}}"#).is_empty()
         );
+    }
+
+    #[test]
+    fn emoji_added_elsewhere_arrive_with_their_picture_or_alias() {
+        use crate::emoji::EmojiChange;
+        let added = events(
+            r#"{"type":"emoji_changed","subtype":"add","name":"picard_facepalm",
+                "value":"https://my.slack.com/emoji/picard_facepalm/db8e287430eaa459.gif",
+                "event_ts":"1361482916.000004"}"#,
+        );
+        assert!(matches!(
+            &added[..],
+            [Translated::Event(Event::EmojiChanged { team, change: EmojiChange::Added { name, value } })]
+                if team == "T1" && name == "picard_facepalm"
+                    && value == "https://my.slack.com/emoji/picard_facepalm/db8e287430eaa459.gif"
+        ));
+        let alias = events(
+            r#"{"type":"emoji_changed","subtype":"add","name":"facepalm","value":"alias:picard_facepalm"}"#,
+        );
+        assert!(matches!(
+            &alias[..],
+            [Translated::Event(Event::EmojiChanged { change: EmojiChange::Added { value, .. }, .. })]
+                if value == "alias:picard_facepalm"
+        ));
+        assert!(
+            matches!(
+                &events(r#"{"type":"emoji_changed","subtype":"add","name":"x"}"#)[..],
+                [Translated::RefreshEmoji]
+            ),
+            "without a value, the list is fetched again"
+        );
+    }
+
+    #[test]
+    fn emoji_removed_elsewhere_go_by_name() {
+        use crate::emoji::EmojiChange;
+        let removed = events(
+            r#"{"type":"emoji_changed","subtype":"remove","names":["picard_facepalm","shipit"],
+                "event_ts":"1361482916.000004"}"#,
+        );
+        assert!(matches!(
+            &removed[..],
+            [Translated::Event(Event::EmojiChanged { change: EmojiChange::Removed(names), .. })]
+                if names == &["picard_facepalm", "shipit"]
+        ));
+        assert!(matches!(
+            &events(r#"{"type":"emoji_changed","subtype":"remove","names":[]}"#)[..],
+            [Translated::RefreshEmoji]
+        ));
+    }
+
+    #[test]
+    fn emoji_renamed_elsewhere_keep_their_picture() {
+        use crate::emoji::EmojiChange;
+        let renamed = events(
+            r#"{"type":"emoji_changed","subtype":"rename","old_name":"grin","new_name":"cheese-grin",
+                "value":"https://my.slack.com/emoji/picard_facepalm/db8e287430eaa459.gif",
+                "event_ts":"1361482916.000004"}"#,
+        );
+        assert!(matches!(
+            &renamed[..],
+            [Translated::Event(Event::EmojiChanged { change: EmojiChange::Renamed { old, new, value: Some(_) }, .. })]
+                if old == "grin" && new == "cheese-grin"
+        ));
+        let bare = events(
+            r#"{"type":"emoji_changed","subtype":"rename","old_name":"grin","new_name":"cheese-grin"}"#,
+        );
+        assert!(matches!(
+            &bare[..],
+            [Translated::Event(Event::EmojiChanged {
+                change: EmojiChange::Renamed { value: None, .. },
+                ..
+            })]
+        ));
+    }
+
+    #[test]
+    fn other_emoji_changes_fetch_the_list_again() {
+        for event in [
+            r#"{"type":"emoji_changed","event_ts":"1361482916.000004"}"#,
+            r#"{"type":"emoji_changed","subtype":"recolor","name":"x"}"#,
+        ] {
+            assert!(
+                matches!(&events(event)[..], [Translated::RefreshEmoji]),
+                "{event}"
+            );
+        }
     }
 
     #[test]

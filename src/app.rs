@@ -247,7 +247,7 @@ pub struct App {
     pub confirm_delete: Option<(String, Ts)>,
     /// A button press waiting for the app's own "Are you sure?" to be
     /// answered, with the dialog the app asked for.
-    pub confirm_press: Option<(crate::model::Press, crate::model::Confirm)>,
+    pub confirm_press: Option<(crate::model::Press, crate::model::Confirm, Option<String>)>,
     /// Your file waiting for "Delete?" to be answered: its id and name.
     pub confirm_delete_file: Option<(String, String)>,
     /// The "Add emoji" dialog, when open.
@@ -1189,7 +1189,8 @@ impl App {
                 press,
                 confirm,
                 confirmed,
-            } => self.press_button(press, confirm, confirmed),
+                link,
+            } => self.press_button(*press, confirm, confirmed, link),
             Action::OpenInSlack {
                 channel,
                 ts,
@@ -1619,26 +1620,38 @@ impl App {
         true
     }
 
-    /// Presses an app's button in the open workspace, after its own
-    /// question when it has one. A press already on its way is not sent
-    /// again: the app would get it twice.
+    /// Presses an app's button, or sends a choice from its menu, in the
+    /// open workspace, after its own question when it has one. While a
+    /// press of the same button or menu is on its way, no other is sent:
+    /// the app would get both.
     fn press_button(
         &mut self,
         press: crate::model::Press,
         confirm: Option<crate::model::Confirm>,
         confirmed: bool,
+        link: Option<String>,
     ) {
-        if let Some(confirm) = confirm.filter(|_| !confirmed) {
-            self.focus_overlay = true;
-            self.confirm_press = Some((press, confirm));
-            return;
+        use crate::model::PressStep;
+        match crate::model::press_step(confirm.as_ref(), confirmed, link.as_deref()) {
+            PressStep::Ask => {
+                if let Some(confirm) = confirm {
+                    self.focus_overlay = true;
+                    self.confirm_press = Some((press, confirm, link));
+                }
+                return;
+            }
+            PressStep::Go { open } => {
+                if let Some(url) = open {
+                    self.open_url(url);
+                }
+            }
         }
         let Some(team) = self.active_team() else {
             return;
         };
         let fresh = self
             .workspace_mut(&team)
-            .is_some_and(|w| w.pressing.insert(press.clone()));
+            .is_some_and(|w| !w.is_pressing(&press) && w.pressing.insert(press.clone()));
         if fresh {
             self.backend.send(Command::PressButton { team, press });
         }

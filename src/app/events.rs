@@ -68,20 +68,34 @@ impl App {
                 press,
                 result,
             } => {
+                use crate::model::PressKind;
                 if let Some(workspace) = self.workspace_mut(&team) {
                     workspace.pressing.remove(&press);
+                    // A select or radio buttons keep showing what was
+                    // chosen; an overflow menu is only a list of actions.
+                    if result.is_ok()
+                        && matches!(press.kind, PressKind::Select { .. } | PressKind::Radio)
+                    {
+                        workspace.choose(press.clone());
+                    }
                 }
                 // Taken: the app answers by changing the message, or by
                 // opening a form, which only Slack itself can show.
                 if let Err(error) = result {
                     let label = crate::mrkdwn::unescape(&press.text);
-                    self.toast(
+                    let error = error.message();
+                    let message = if press.kind == PressKind::Button {
                         tf(
                             "Could not press {button}: {error}",
-                            &[("button", &label), ("error", &error.message())],
-                        ),
-                        true,
-                    );
+                            &[("button", &label), ("error", &error)],
+                        )
+                    } else {
+                        tf(
+                            "Could not choose {choice}: {error}",
+                            &[("choice", &label), ("error", &error)],
+                        )
+                    };
+                    self.toast(message, true);
                 }
             }
             Event::Notice(notice) => self.toast(notice.message(), false),
@@ -140,6 +154,11 @@ impl App {
             } => {
                 if let Some(workspace) = self.workspace_mut(&team) {
                     workspace.emoji_arrived(emoji, can_add);
+                }
+            }
+            Event::EmojiChanged { team, change } => {
+                if let Some(workspace) = self.workspace_mut(&team) {
+                    workspace.emoji_changed(&change);
                 }
             }
             Event::EmojiAdded { team, name, result } => self.emoji_added(&team, name, result),

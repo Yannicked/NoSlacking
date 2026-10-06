@@ -670,6 +670,12 @@ pub enum Event {
         emoji: HashMap<String, String>,
         can_add: bool,
     },
+    /// A custom emoji was added, removed or renamed, here or elsewhere
+    /// (`emoji_changed`).
+    EmojiChanged {
+        team: String,
+        change: crate::emoji::EmojiChange,
+    },
     /// Slack answered [`Command::AddEmoji`].
     EmojiAdded {
         team: String,

@@ -86,9 +86,12 @@ pub struct WorkspaceState {
     /// Messages fetched to quote under links to them, which are not
     /// loaded in any list here.
     pub quotes: crate::quotes::Cache,
-    /// Button presses sent and not yet answered, which show as busy and
-    /// cannot be pressed again meanwhile.
+    /// Button presses and menu choices sent and not yet answered, which
+    /// show as busy and cannot be used again meanwhile.
     pub pressing: HashSet<crate::model::Press>,
+    /// The choices Slack took from selects and radio buttons, by the press
+    /// that made them (see [`WorkspaceState::chosen`]).
+    chosen: Vec<crate::model::Press>,
     /// Files you deleted that Slack has not answered for yet: hidden
     /// everywhere, and shown again if Slack refuses.
     deleting_files: HashSet<String>,
@@ -154,9 +157,33 @@ impl WorkspaceState {
             suppressed: HashSet::new(),
             quotes: crate::quotes::Cache::default(),
             pressing: HashSet::new(),
+            chosen: Vec::new(),
             deleting_files: HashSet::new(),
             gone_files: HashSet::new(),
         }
+    }
+
+    /// Whether a press of the same button or menu as `press` is on its
+    /// way.
+    pub fn is_pressing(&self, press: &crate::model::Press) -> bool {
+        self.pressing.iter().any(|p| p.same_control(press))
+    }
+
+    /// The value last chosen here from the select or radio buttons that
+    /// `press` is on, once Slack took it. The app usually answers by
+    /// changing the message, but one that does not still shows the choice,
+    /// as Slack's own client does.
+    pub fn chosen(&self, press: &crate::model::Press) -> Option<&str> {
+        self.chosen
+            .iter()
+            .find(|p| p.same_control(press))
+            .and_then(|p| p.value.as_deref())
+    }
+
+    /// Notes the choice `press` made, which Slack took.
+    pub fn choose(&mut self, press: crate::model::Press) {
+        self.chosen.retain(|p| !p.same_control(&press));
+        self.chosen.push(press);
     }
 
     /// Whether file `id` still shows: not deleted, here or in Slack. A
@@ -1405,6 +1432,28 @@ impl WorkspaceState {
         self.added_emoji.insert(name, url);
     }
 
+    /// A custom emoji was added, removed or renamed, here or elsewhere.
+    /// One added here and waiting for Slack's list follows the change too,
+    /// so a later list does not bring back what is gone.
+    pub(super) fn emoji_changed(&mut self, change: &crate::emoji::EmojiChange) {
+        use crate::emoji::EmojiChange;
+        self.emoji.apply(change);
+        match change {
+            // Slack has it now.
+            EmojiChange::Added { name, .. } => {
+                self.added_emoji.remove(name);
+            }
+            EmojiChange::Removed(names) => {
+                for name in names {
+                    self.added_emoji.remove(name);
+                }
+            }
+            EmojiChange::Renamed { old, .. } => {
+                self.added_emoji.remove(old);
+            }
+        }
+    }
+
     /// You deleted file `id`: it is hidden at once, wherever it shows,
     /// until Slack answers ([`Self::file_delete_settled`]).
     pub(super) fn hide_file(&mut self, id: &str) {
@@ -2015,6 +2064,26 @@ mod tests {
             "Slack's word is final after that"
         );
         assert!(!w.can_add_emoji);
+    }
+
+    #[test]
+    fn an_emoji_removed_elsewhere_does_not_come_back_from_the_wait_for_slack() {
+        use crate::emoji::EmojiChange;
+        let mut w = workspace();
+        w.emoji_added("shipit".into(), "bytes://new/shipit.png".into());
+        w.emoji_changed(&EmojiChange::Removed(vec!["shipit".into()]));
+        assert!(!w.emoji.contains("shipit"));
+        // A list from before the removal reached Slack's list.
+        w.emoji_arrived(HashMap::new(), true);
+        assert!(!w.emoji.contains("shipit"), "not kept as waiting any more");
+        w.emoji_changed(&EmojiChange::Added {
+            name: "parrot".into(),
+            value: "https://x/parrot.gif".into(),
+        });
+        assert_eq!(
+            w.emoji.resolve("parrot"),
+            crate::emoji::Resolved::Image("https://x/parrot.gif".into())
+        );
     }
 
     /// A workspace with a parent in C1 and two replies loaded in its thread.

@@ -4,11 +4,12 @@
 use egui::{CornerRadius, Margin, RichText, Sense, Stroke, Vec2};
 
 use super::Row;
+use super::choices::{kit_menu, kit_unusable};
 use super::files::{fit_within, placeholder, play_badge, shows};
 use crate::i18n::t;
 use crate::model::{
-    Accessory, Action, Attachment, Button, ButtonUse, ContextItem, Field, KitBlock, Message,
-    NotHere,
+    Accessory, Action, Attachment, Button, ButtonUse, ContextItem, Field, KitBlock, KitElement,
+    Message, NotHere,
 };
 use crate::theme;
 use crate::ui::rich::{self, Rich};
@@ -381,9 +382,10 @@ fn kit_button(
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             if response.clicked() {
                 actions.push(Action::PressButton {
-                    press,
+                    press: Box::new(press),
                     confirm: button.confirm.clone(),
                     confirmed: false,
+                    link: None,
                 });
             }
             false
@@ -401,7 +403,7 @@ fn kit_button(
     }
 }
 
-/// A quiet "Open in Slack" beside buttons that only work there.
+/// A quiet "Open in Slack" beside buttons and menus that only work there.
 fn open_in_slack(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<Action>) {
     if message.ts.is_local() {
         return;
@@ -423,7 +425,7 @@ fn open_in_slack(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &
 }
 
 /// Block Kit: headers, sections with fields and accessories, context lines,
-/// dividers, images and link buttons.
+/// dividers, images, buttons and menus.
 pub(super) fn blocks_view(
     ui: &mut egui::Ui,
     row: &Row<'_>,
@@ -450,11 +452,19 @@ pub(super) fn blocks_view(
                     fields,
                     accessory,
                 } => {
+                    // A picture's width; a menu, wider, takes what its
+                    // label needs, up to a third of the card.
                     const SIDE: f32 = 72.0;
                     let width = ui.available_width();
                     ui.horizontal_top(|ui| {
+                        let side = match accessory {
+                            Some(Accessory::Menu(_) | Accessory::Unusable(_)) => {
+                                (width / 3.0).clamp(SIDE, 220.0)
+                            }
+                            _ => SIDE,
+                        };
                         let content = if accessory.is_some() {
-                            (width - SIDE - 16.0).max(120.0)
+                            (width - side - 16.0).max(120.0)
                         } else {
                             width
                         };
@@ -488,6 +498,20 @@ pub(super) fn blocks_view(
                             Some(Accessory::Button(button)) => {
                                 ui.vertical(|ui| {
                                     if kit_button(ui, row, message, button, actions) {
+                                        open_in_slack(ui, row, message, actions);
+                                    }
+                                });
+                            }
+                            Some(Accessory::Menu(menu)) => {
+                                ui.vertical(|ui| {
+                                    if kit_menu(ui, row, message, menu, actions) {
+                                        open_in_slack(ui, row, message, actions);
+                                    }
+                                });
+                            }
+                            Some(Accessory::Unusable(element)) => {
+                                ui.vertical(|ui| {
+                                    if kit_unusable(ui, row, element) {
                                         open_in_slack(ui, row, message, actions);
                                     }
                                 });
@@ -563,12 +587,18 @@ pub(super) fn blocks_view(
                         });
                     }
                 }
-                KitBlock::Actions(buttons) => {
+                KitBlock::Actions(elements) => {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         let mut not_here = false;
-                        for button in buttons {
-                            not_here |= kit_button(ui, row, message, button, actions);
+                        for element in elements {
+                            not_here |= match element {
+                                KitElement::Button(button) => {
+                                    kit_button(ui, row, message, button, actions)
+                                }
+                                KitElement::Menu(menu) => kit_menu(ui, row, message, menu, actions),
+                                KitElement::Unusable(element) => kit_unusable(ui, row, element),
+                            };
                         }
                         if not_here {
                             open_in_slack(ui, row, message, actions);

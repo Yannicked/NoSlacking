@@ -2423,3 +2423,39 @@ msgstr "Je Slack-apps openen"
 
 msgid "Slack says the permissions are invalid? Sign in with those of the older manifest"
 msgstr "Zegt Slack dat de toestemmingen ongeldig zijn? Meld je aan met die van het oudere manifest"
+
+# An app's drop-down in its message, with nothing chosen.
+msgid "Select an item"
+msgstr "Kies een item"
+
+msgid "Could not choose {choice}: {error}"
+msgstr "Kon {choice} niet kiezen: {error}"
+
+# The "⋯" menu an app puts in its message.
+msgid "More options"
+msgstr "Meer opties"
+
+msgid "Slack lets only its own apps and browser sign-ins use an app's menus. Open the message in Slack to use it."
+msgstr "Slack laat alleen zijn eigen apps en browseraanmeldingen de menu's van een app gebruiken. Open het bericht in Slack om het te gebruiken."
+
+msgid "This menu works only in Slack itself."
+msgstr "Dit menu werkt alleen in Slack zelf."
+
+# An app's date picker, select or form field, which works only in Slack.
+msgid "Only Slack itself can use this here. Open the message in Slack to use it."
+msgstr "Alleen Slack zelf kan dit hier gebruiken. Open het bericht in Slack om het te gebruiken."
+
+msgid "Pick a date"
+msgstr "Kies een datum"
+
+msgid "Pick a time"
+msgstr "Kies een tijd"
+
+msgid "Pick a date and time"
+msgstr "Kies een datum en tijd"
+
+msgid "Checkboxes"
+msgstr "Selectievakjes"
+
+msgid "A form field"
+msgstr "Een formulierveld"
