@@ -2377,3 +2377,30 @@ msgstr[1] "nog {count} regels"
 
 msgid "More in the file"
 msgstr "Meer in het bestand"
+
+msgid "Your Slack app was made from an older manifest, so it is asked only for the permissions it has. Update it to unlock Do Not Disturb, @group mentions and bookmark editing."
+msgstr "Je Slack-app is gemaakt vanuit een ouder manifest, dus vragen we alleen de toestemmingen die hij heeft. Werk hem bij om Niet storen, @groep-vermeldingen en het bewerken van bladwijzers te gebruiken."
+
+msgid "Do Not Disturb from Slack"
+msgstr "Niet storen vanuit Slack"
+
+msgid "snoozing in Slack"
+msgstr "sluimeren in Slack"
+
+msgid "@group mentions"
+msgstr "@groep-vermeldingen"
+
+msgid "bookmark editing"
+msgstr "bladwijzers bewerken"
+
+msgid "Your Slack app was made from an older manifest, so it lacks the permissions for: {features}."
+msgstr "Je Slack-app is gemaakt vanuit een ouder manifest en mist daardoor de toestemmingen voor: {features}."
+
+msgid "To unlock them, open your app on api.slack.com/apps, go to App Manifest, paste the new manifest and save, reinstall the app when Slack asks, then sign in again here."
+msgstr "Open je app op api.slack.com/apps, ga naar App Manifest, plak het nieuwe manifest en sla op, installeer de app opnieuw als Slack daarom vraagt en meld je hier opnieuw aan."
+
+msgid "Open your Slack apps"
+msgstr "Je Slack-apps openen"
+
+msgid "Slack says the permissions are invalid? Sign in with those of the older manifest"
+msgstr "Zegt Slack dat de toestemmingen ongeldig zijn? Meld je aan met die van het oudere manifest"

@@ -8,6 +8,7 @@ use crate::app::{App, WorkspaceState};
 use crate::convos::{Action as Convos, ChannelData, Details, Field, Loaded, Tab};
 use crate::i18n::{t, tf};
 use crate::model::{Action, Conversation, ConversationKind};
+use crate::scopes::Feature;
 use crate::theme::{self, Icon, Palette};
 
 /// The height of a person or a file in the lists.
@@ -74,7 +75,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     Tab::Members => members(ui, &palette, workspace, conversation, data, actions),
                     Tab::Files => files(ui, &palette, workspace, conversation, data, actions),
                     Tab::Pins => pins(ui, &palette, workspace, conversation, data, actions),
-                    Tab::Bookmarks => bookmarks(ui, &palette, conversation, data, actions),
+                    Tab::Bookmarks => {
+                        let editable = workspace.info.can(Feature::EditBookmarks);
+                        bookmarks(ui, &palette, conversation, data, editable, actions);
+                    }
                 });
         });
 }
@@ -668,12 +672,15 @@ fn pins(
 }
 
 /// The links saved at the top of the conversation; a click opens one, and
-/// each has a menu to edit or remove it. "Add a bookmark" adds one.
+/// each has a menu to edit or remove it. "Add a bookmark" adds one. A
+/// sign-in without `bookmarks:write` (an app made from an older manifest)
+/// is not `editable`: it only lists them.
 fn bookmarks(
     ui: &mut egui::Ui,
     palette: &Palette,
     conversation: &Conversation,
     data: &ChannelData,
+    editable: bool,
     actions: &mut Vec<Action>,
 ) {
     let Some(bookmarks) = loaded(
@@ -686,7 +693,7 @@ fn bookmarks(
     ) else {
         return;
     };
-    if !conversation.archived {
+    if editable && !conversation.archived {
         let add = egui::Button::image_and_text(
             Icon::Plus.image(palette.text, 14.0),
             RichText::new(t("Add a bookmark"))
@@ -714,7 +721,7 @@ fn bookmarks(
                 let (rect, row) =
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW), Sense::click());
                 // Not saved yet, it has no id Slack would know to change.
-                let menu = !bookmark.is_local() && !conversation.archived;
+                let menu = editable && !bookmark.is_local() && !conversation.archived;
                 if row.hovered() {
                     ui.painter().rect_filled(
                         rect,

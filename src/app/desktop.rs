@@ -554,6 +554,7 @@ mod tests {
             icon: None,
             user_id: "U1".into(),
             sign_in: Default::default(),
+            scopes: None,
         });
         let mut two = WorkspaceState::new(crate::model::Workspace {
             team_id: "T2".into(),
@@ -605,6 +606,7 @@ mod tests {
             icon: None,
             user_id: "U1".into(),
             sign_in: Default::default(),
+            scopes: None,
         });
         let mut c = crate::model::Conversation {
             id: "C1".into(),
@@ -640,6 +642,7 @@ mod tests {
             icon: None,
             user_id: "U1".into(),
             sign_in: Default::default(),
+            scopes: None,
         });
         w.groups.push(crate::model::UserGroup {
             id: "S1".into(),

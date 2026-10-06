@@ -388,6 +388,7 @@ impl Worker {
                         icon: meta.icon,
                         user_id: meta.user_id,
                         sign_in: Default::default(),
+                        scopes: meta.scopes,
                     };
                     self.add_team(workspace, token);
                     continue;
@@ -467,6 +468,12 @@ impl Worker {
         let session = client.token().is_session();
         // The token decides it, whatever the saved details said.
         workspace.sign_in = crate::model::SignInKind::of(session);
+        // What Slack granted, until its answers say otherwise; a session
+        // has no list to keep.
+        if session {
+            workspace.scopes = None;
+        }
+        client.set_scopes(workspace.scopes.clone());
         self.sink.send(Event::WorkspaceReady(workspace.clone()));
         let boot = self.spawn_boot(&client, &workspace, &sink, false);
         let replaced = self.teams.insert(
@@ -672,7 +679,11 @@ impl Worker {
     fn command(&mut self, command: Command) {
         match command {
             Command::SaveApp(app) => self.save_app(app),
-            Command::StartSignIn { redirect, port } => self.start_sign_in(redirect, port),
+            Command::StartSignIn {
+                redirect,
+                port,
+                request,
+            } => self.start_sign_in(redirect, port, request),
             Command::CancelSignIn => self.cancel_sign_in(),
             Command::Callback(url) => self.callback(url),
             Command::PasteToken(token) => self.paste_token(token),
@@ -1417,7 +1428,13 @@ impl Worker {
                         sink.send(Event::KeyringError(error.into()));
                     }
                     let client = Client::new(http, signed.token.clone());
-                    let meta = workspace_details(&client, &signed.team_id, &signed.user_id).await;
+                    let mut meta =
+                        workspace_details(&client, &signed.team_id, &signed.user_id).await;
+                    // The OAuth answer's list, or else the one Slack's
+                    // answers to the calls just made carried.
+                    if signed.scopes.is_some() {
+                        meta.scopes = signed.scopes;
+                    }
                     let _ = internal.send(Internal::TeamAdded {
                         meta,
                         token: signed.token,
@@ -1899,6 +1916,7 @@ mod tests {
             icon: None,
             user_id: "U1".into(),
             sign_in: Default::default(),
+            scopes: None,
         };
         worker.teams.insert(
             id.to_owned(),
@@ -2030,6 +2048,7 @@ mod tests {
             domain: String::new(),
             icon: None,
             user_id: "U1".into(),
+            scopes: None,
         };
         worker.internal(Internal::Loaded {
             app: Ok(None),
@@ -2270,6 +2289,7 @@ mod tests {
             icon: None,
             user_id: "U1".into(),
             sign_in: Default::default(),
+            scopes: None,
         }));
         let events: Vec<Event> = events.try_iter().collect();
         assert!(

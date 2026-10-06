@@ -1076,9 +1076,9 @@ fn change_bookmarks(app: &mut App, team: &str, channel: &str, change: &BookmarkC
 
 /// Why a bookmark change was taken back, in words.
 fn bookmark_failure(change: &BookmarkChange, error: &Why) -> String {
-    // The bundled manifest does not ask for `bookmarks:write` (adding it
-    // would break apps made from the older one), so a sign-in through your
-    // own Slack app lacks it unless you added it yourself: say which.
+    // An app made from the first manifest lacks `bookmarks:write`; the
+    // interface hides the controls once it knows, and says which
+    // permission is missing when it did not know yet.
     if *error == Why::MissingPermission {
         return crate::i18n::t("Changing bookmarks needs the bookmarks:write permission, which your Slack app does not have.").into_owned();
     }
@@ -1507,6 +1507,7 @@ mod tests {
             icon: None,
             user_id: "U0".into(),
             sign_in: Default::default(),
+            scopes: None,
         });
         for user in people() {
             workspace.users.insert(user.id.clone(), user);
@@ -1534,6 +1535,7 @@ mod tests {
             icon: None,
             user_id: "U0".into(),
             sign_in: Default::default(),
+            scopes: None,
         });
         workspace.conversations.push(Conversation {
             id: "D1".into(),
@@ -1569,6 +1571,7 @@ mod tests {
             icon: None,
             user_id: "U0".into(),
             sign_in: Default::default(),
+            scopes: None,
         });
         let message = Message {
             ts: Ts::new("1.0"),
@@ -1661,6 +1664,7 @@ mod tests {
             icon: None,
             user_id: "U0".into(),
             sign_in: Default::default(),
+            scopes: None,
         });
         workspace.conversations.push(Conversation {
             id: "C1".into(),
@@ -1938,6 +1942,7 @@ mod tests {
             icon: None,
             user_id: "U0".into(),
             sign_in: Default::default(),
+            scopes: None,
         });
         workspace.conversations.push(Conversation {
             id: "C1".into(),

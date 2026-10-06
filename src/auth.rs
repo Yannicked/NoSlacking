@@ -24,6 +24,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::credentials::AppCredentials;
 use crate::failure::Failure;
+use crate::scopes::{Request, Scopes};
 use crate::settings::Redirect;
 use crate::slack::{SlackError, Token, client, types};
 
@@ -40,10 +41,9 @@ const SCHEMES: [&str; 2] = [SCHEME, SLACK_SCHEME];
 pub const SCHEME_REDIRECT: &str = "noslacking://oauth/callback";
 
 /// Everything NoSlacking reads and does, as you. Keep in step with
-/// `slack-app-manifest.json`. `dnd:*`, `usergroups:read` and
-/// `bookmarks:write` are left out on purpose: asking for a scope the app
-/// lacks fails the sign-in, which would break apps made from an older
-/// manifest. Those features work when the app has them anyway.
+/// `slack-app-manifest.json` (a test checks). The last four came with
+/// manifest version 2 ([`crate::scopes::NEWER`]); an app made from the
+/// first one is asked for the rest only (see [`crate::scopes::Request`]).
 pub const USER_SCOPES: &[&str] = &[
     "channels:history",
     "channels:read",
@@ -74,6 +74,10 @@ pub const USER_SCOPES: &[&str] = &[
     "users:write",
     "reminders:read",
     "reminders:write",
+    "dnd:read",
+    "dnd:write",
+    "usergroups:read",
+    "bookmarks:write",
 ];
 
 /// The redirect URL of the loopback listener. It says `localhost` rather
@@ -96,6 +100,11 @@ pub struct Flow {
     pub verifier: String,
     pub redirect_uri: String,
     pub url: String,
+    /// How Slack sends the browser back, to start again the same way.
+    pub redirect: Redirect,
+    pub port: u16,
+    /// Which scopes the URL asks for.
+    pub request: Request,
 }
 
 /// Leaves out the PKCE verifier and the state, which together finish the
@@ -104,6 +113,7 @@ impl std::fmt::Debug for Flow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Flow")
             .field("redirect_uri", &self.redirect_uri)
+            .field("request", &self.request)
             .finish_non_exhaustive()
     }
 }
@@ -115,7 +125,7 @@ fn random_token(bytes: usize) -> String {
 }
 
 impl Flow {
-    pub fn start(app: &AppCredentials, redirect: Redirect, port: u16) -> Self {
+    pub fn start(app: &AppCredentials, redirect: Redirect, port: u16, request: Request) -> Self {
         let state = random_token(24);
         let verifier = random_token(48);
         let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -127,7 +137,7 @@ impl Flow {
         let url = format!(
             "https://slack.com/oauth/v2/authorize?client_id={}&user_scope={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256",
             urlencoding::encode(app.client_id.trim()),
-            urlencoding::encode(&USER_SCOPES.join(",")),
+            urlencoding::encode(&request.scopes().join(",")),
             urlencoding::encode(&redirect_uri),
             urlencoding::encode(&state),
             urlencoding::encode(&challenge),
@@ -137,6 +147,9 @@ impl Flow {
             verifier,
             redirect_uri,
             url,
+            redirect,
+            port,
+            request,
         }
     }
 }
@@ -195,6 +208,9 @@ pub struct SignedIn {
     pub team_id: String,
     pub user_id: String,
     pub token: Token,
+    /// The user scopes Slack granted, for an OAuth sign-in; `None` when
+    /// the answer did not say, or for a session.
+    pub scopes: Option<Scopes>,
 }
 
 pub async fn exchange(
@@ -219,12 +235,22 @@ pub async fn exchange(
     let access: types::OauthAccess = client::decode(&bytes)?;
     let team_id = access.team.id.clone();
     let user_id = access.authed_user.id.clone();
+    let scopes = granted(&access);
     let token = client::token_from(access).ok_or(SlackError::NoUserToken)?;
     Ok(SignedIn {
         team_id,
         user_id,
         token,
+        scopes,
     })
+}
+
+/// The user scopes an `oauth.v2.access` answer grants. Slack documents
+/// them under `authed_user`: "If you requested scopes for a user token,
+/// you'll find them with a user access token under the authed_user
+/// property." Grants add up: a second sign-in keeps what the first got.
+pub fn granted(access: &types::OauthAccess) -> Option<Scopes> {
+    Some(Scopes::parse(&access.authed_user.scope)).filter(|scopes| !scopes.is_empty())
 }
 
 const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>NoSlacking</title>\
@@ -612,21 +638,28 @@ mod tests {
 
     #[test]
     fn the_authorize_url_asks_for_user_scopes_only() {
-        let flow = Flow::start(&app(), Redirect::Scheme, 0);
+        let flow = Flow::start(&app(), Redirect::Scheme, 0, Request::Full);
         assert!(
             flow.url
                 .starts_with("https://slack.com/oauth/v2/authorize?client_id=123.456&")
         );
         assert!(flow.url.contains("user_scope=channels%3Ahistory%2C"));
+        assert!(flow.url.contains("%2Cdnd%3Aread%2C"));
         assert!(!flow.url.contains("&scope="));
         assert!(
             flow.url
                 .contains("redirect_uri=noslacking%3A%2F%2Foauth%2Fcallback")
         );
         assert!(flow.url.contains("code_challenge_method=S256"));
-        assert_ne!(flow.state, Flow::start(&app(), Redirect::Scheme, 0).state);
-        let loopback = Flow::start(&app(), Redirect::Loopback, 53682);
+        assert_ne!(
+            flow.state,
+            Flow::start(&app(), Redirect::Scheme, 0, Request::Full).state
+        );
+        let loopback = Flow::start(&app(), Redirect::Loopback, 53682, Request::Older);
         assert_eq!(loopback.redirect_uri, "http://localhost:53682/callback");
+        // An older app is not asked for what its manifest lacks.
+        assert!(!loopback.url.contains("dnd%3Aread"));
+        assert!(loopback.url.contains("reminders%3Awrite"));
         assert!(
             loopback
                 .url

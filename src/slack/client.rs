@@ -14,6 +14,7 @@ use serde::de::DeserializeOwned;
 use tokio::sync::Semaphore;
 
 use super::types;
+use crate::scopes::Scopes;
 
 pub const API: &str = "https://slack.com/api/";
 const MAX_IN_FLIGHT: usize = 6;
@@ -204,6 +205,8 @@ struct Shared {
     app: Mutex<Option<OauthApp>>,
     on_refresh: Mutex<Option<OnRefresh>>,
     limit: Semaphore,
+    /// The scopes Slack last said the token has (an app's token only).
+    scopes: Mutex<Option<Scopes>>,
 }
 
 /// One workspace's API access.
@@ -262,6 +265,7 @@ impl Client {
                 app: Mutex::new(None),
                 on_refresh: Mutex::new(None),
                 limit: Semaphore::new(MAX_IN_FLIGHT),
+                scopes: Mutex::new(None),
             }),
             base: API.to_owned(),
         }
@@ -302,6 +306,37 @@ impl Client {
 
     pub fn token(&self) -> Token {
         lock(&self.shared.token).clone()
+    }
+
+    /// The scopes this token has, as recorded at sign-in or as Slack's
+    /// last answer said; `None` for a session or when not known.
+    pub fn scopes(&self) -> Option<Scopes> {
+        lock(&self.shared.scopes).clone()
+    }
+
+    /// Starts from the scopes recorded for this sign-in.
+    pub fn set_scopes(&self, scopes: Option<Scopes>) {
+        *lock(&self.shared.scopes) = scopes;
+    }
+
+    /// Whether this sign-in may call a method that needs `scope`, so a
+    /// call Slack would refuse with `missing_scope` is not made at all.
+    pub fn may(&self, scope: &str) -> bool {
+        crate::scopes::allows(self.scopes().as_ref(), self.token().is_session(), scope)
+    }
+
+    /// Keeps the list an answer's `x-oauth-scopes` header gives. Slack
+    /// documents it: "a x-oauth-scopes HTTP header will be returned with
+    /// every response indicating which scopes the calling token currently
+    /// has". A session's token has no such list worth keeping.
+    fn note_scopes(&self, header: Option<&reqwest::header::HeaderValue>) {
+        let Some(scopes) = scopes_header(header) else {
+            return;
+        };
+        if self.token().is_session() {
+            return;
+        }
+        *lock(&self.shared.scopes) = Some(scopes);
     }
 
     fn cookie(&self) -> Option<String> {
@@ -437,6 +472,7 @@ impl Client {
                 tokio::time::sleep(backoff(attempt)).await;
                 continue;
             }
+            self.note_scopes(response.headers().get("x-oauth-scopes"));
             let bytes = response.bytes().await?;
             drop(permit);
             return answer(status, &bytes);
@@ -796,6 +832,12 @@ pub async fn refresh_token(
     token_from(access).ok_or_else(|| SlackError::Decode("no user token in refresh".into()))
 }
 
+/// The scopes an `x-oauth-scopes` header lists, if it lists any.
+pub fn scopes_header(header: Option<&reqwest::header::HeaderValue>) -> Option<Scopes> {
+    let scopes = Scopes::parse(header?.to_str().ok()?);
+    (!scopes.is_empty()).then_some(scopes)
+}
+
 /// The user token in an `oauth.v2.access` answer.
 pub fn token_from(access: types::OauthAccess) -> Option<Token> {
     let now = now();
@@ -883,6 +925,17 @@ mod tests {
             answer::<serde_json::Value>(200, html),
             Err(SlackError::Decode(_))
         ));
+    }
+
+    #[test]
+    fn the_scopes_header_lists_what_the_token_has() {
+        use reqwest::header::HeaderValue;
+        let header = HeaderValue::from_static("identify,chat:write, dnd:read");
+        let scopes = scopes_header(Some(&header)).expect("listed");
+        assert!(scopes.has("chat:write") && scopes.has("dnd:read"));
+        assert!(!scopes.has("dnd:write"));
+        assert_eq!(scopes_header(Some(&HeaderValue::from_static(""))), None);
+        assert_eq!(scopes_header(None), None);
     }
 
     #[test]

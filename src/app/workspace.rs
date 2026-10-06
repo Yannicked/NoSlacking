@@ -1905,6 +1905,7 @@ mod tests {
             icon: None,
             user_id: "U1".into(),
             sign_in: Default::default(),
+            scopes: None,
         })
     }
 

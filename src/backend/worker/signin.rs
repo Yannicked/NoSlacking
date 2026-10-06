@@ -12,6 +12,7 @@ use crate::backend::api::failure;
 use crate::backend::{Event, SignIn};
 use crate::credentials::AppCredentials;
 use crate::failure::{Doing, Failure, Problem};
+use crate::scopes::Request;
 use crate::settings::Redirect;
 use crate::slack::magic::TeamResult;
 use crate::slack::{Client, Token, types};
@@ -70,6 +71,7 @@ impl Worker {
                     team_id: signed.team_id,
                     user_id: signed.user_id,
                     token: signed.token,
+                    scopes: None,
                 })
                 .map_err(|e| failure(&e));
             let _ = internal.send(Internal::SignedIn(result));
@@ -143,6 +145,7 @@ impl Worker {
                                     team_id: session.team_id,
                                     user_id: session.user_id,
                                     token: session.token,
+                                    scopes: None,
                                 })
                                 .map_err(|e| failure(&e));
                             match result {
@@ -181,7 +184,7 @@ impl Worker {
         });
     }
 
-    pub(super) fn start_sign_in(&mut self, redirect: Redirect, port: u16) {
+    pub(super) fn start_sign_in(&mut self, redirect: Redirect, port: u16, request: Request) {
         let Some(app) = self.app.clone().filter(AppCredentials::can_sign_in) else {
             self.sink
                 .send(Event::SignIn(SignIn::Failed(Failure::NoClientId)));
@@ -191,7 +194,7 @@ impl Worker {
         if let Some(previous) = &previous {
             previous.abort();
         }
-        let flow = Flow::start(&app, redirect, port);
+        let flow = Flow::start(&app, redirect, port, request);
         match redirect {
             Redirect::Scheme => {
                 if let Err(error) = auth::register_scheme() {
@@ -265,6 +268,17 @@ impl Worker {
         };
         let code = match auth::parse_callback(&url, &flow.state) {
             Ok(code) => code,
+            // Slack would not authorize the newer scopes: the app was made
+            // from an older manifest. Ask again for what it has, once.
+            Err(Failure::Refused(error))
+                if let Some(older) = flow.request.after_refusal(&error) =>
+            {
+                log::info!("Slack refused the scopes ({error}); asking for the older set");
+                self.flow = None;
+                self.sink.send(Event::OlderApp);
+                self.start_sign_in(flow.redirect, flow.port, older);
+                return;
+            }
             Err(error) => {
                 self.sink.send(Event::SignIn(SignIn::Failed(error)));
                 return;
@@ -371,5 +385,7 @@ async fn validate(http: &reqwest::Client, token: Token) -> Result<SignedIn, Fail
         team_id: test.team_id,
         user_id: test.user_id,
         token,
+        // Slack's answer said which scopes the token has.
+        scopes: client.scopes(),
     })
 }

@@ -8,6 +8,7 @@ use crate::backend::Socket;
 use crate::credentials::AppCredentials;
 use crate::i18n::{Locale, t, tf};
 use crate::model::Action;
+use crate::scopes::Feature;
 use crate::settings::{Appearance, Density, Redirect};
 use crate::theme::{self, Palette};
 
@@ -346,7 +347,13 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     super::hooks::settings_group(app, ui, palette);
 
     group(ui, palette, &t("Workspaces"), |ui| {
-        let workspaces: Vec<(String, String, Option<crate::failure::Failure>)> = app
+        type Row = (
+            String,
+            String,
+            Option<crate::failure::Failure>,
+            Vec<Feature>,
+        );
+        let workspaces: Vec<Row> = app
             .workspaces
             .iter()
             .map(|w| {
@@ -354,16 +361,21 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                     w.info.team_id.clone(),
                     w.info.name.clone(),
                     w.signed_out.clone(),
+                    w.info.lacking(),
                 )
             })
             .collect();
-        for (team, name, signed_out) in workspaces {
+        for (team, name, signed_out, lacking) in workspaces {
             let detail = signed_out.map(|f| f.message()).unwrap_or_default();
             row(ui, palette, &name, &detail, |ui, _| {
                 if theme::secondary_button(ui, palette, &t("Sign out")).clicked() {
                     app.actions.push(Action::SignOut(team.clone()));
                 }
             });
+            if !lacking.is_empty() {
+                super::login::older_app_note(ui, palette, &lacking, &mut app.actions);
+                ui.add_space(6.0);
+            }
         }
         if theme::primary_button(ui, palette, &t("Add a workspace")).clicked() {
             app.actions.push(Action::AddWorkspace);

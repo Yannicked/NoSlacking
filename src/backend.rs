@@ -38,10 +38,11 @@ use crate::sidebar::SidebarCall;
 pub enum Command {
     /// Saves the Slack app's credentials and restarts Socket Mode with them.
     SaveApp(AppCredentials),
-    /// Starts OAuth in the browser.
+    /// Starts OAuth in the browser, asking for `request`'s scopes.
     StartSignIn {
         redirect: Redirect,
         port: u16,
+        request: crate::scopes::Request,
     },
     CancelSignIn,
     /// A redirect URL handed over by another launch.
@@ -286,10 +287,15 @@ impl std::fmt::Debug for Command {
         use crate::redact::REDACTED;
         match self {
             Self::SaveApp(app) => f.debug_tuple("SaveApp").field(app).finish(),
-            Self::StartSignIn { redirect, port } => f
+            Self::StartSignIn {
+                redirect,
+                port,
+                request,
+            } => f
                 .debug_struct("StartSignIn")
                 .field("redirect", redirect)
                 .field("port", port)
+                .field("request", request)
                 .finish(),
             Self::CancelSignIn => f.write_str("CancelSignIn"),
             Self::Callback(_) => f.debug_tuple("Callback").field(&REDACTED).finish(),
@@ -610,6 +616,10 @@ pub enum Event {
     AppLoaded(Option<AppCredentials>),
     /// The keyring failed to read or save a secret.
     KeyringError(crate::failure::Keyring),
+    /// Slack would not authorize your Slack app with the newer scopes, so
+    /// it was made from an older manifest; the sign-in starts again with
+    /// the older set.
+    OlderApp,
     SignIn(SignIn),
     /// A workspace is signed in (and these are its current details).
     WorkspaceReady(Workspace),
