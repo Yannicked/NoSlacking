@@ -112,6 +112,9 @@ md-5 = { version = "0.11", default-features = false, optional = true }
 # TURN over TLS: the same rustls (with ring) and system roots reqwest uses.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
+# str0m and its DTLS log through tracing; with this they reach the app's
+# log too, so a probe run can show ICE and DTLS (NOSLACKING_LOG=str0m=debug).
+tracing = { version = "0.1.44", default-features = false, features = ["log", "std"], optional = true }
 
 # The file viewer (src/viewer.rs): spreadsheets (MIT, pure Rust; only its
 # XML readers are used), CSV and TSV (Unlicense/MIT), and zip listings.
@@ -212,7 +215,7 @@ bundled-emoji = []
 demo = []
 # Listening to huddles (src/huddle_audio.rs): a spike, off until it is
 # proven against Slack. Adds `noslacking --huddle-probe`.
-huddle-audio = ["audio", "dep:prost", "dep:str0m", "dep:aws-lc-sys", "dep:opus-decoder", "dep:hmac", "dep:md-5", "dep:tokio-rustls", "dep:rustls-native-certs", "tokio/signal"]
+huddle-audio = ["audio", "dep:prost", "dep:str0m", "dep:aws-lc-sys", "dep:opus-decoder", "dep:hmac", "dep:md-5", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:tracing", "tokio/signal"]
 # Colours code blocks that name their language (```` ```rust ````). Our own
 # small lexer, a few kilobytes; turn it off for plain code blocks.
 highlight = []
