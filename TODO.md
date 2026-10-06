@@ -765,17 +765,23 @@ engineering, as for the rest of the session sign-in.
         The release binary grows from 46.3 to 52.7 MB (Linux, x86-64).
       - Try it: `cargo run --release --features huddle-audio --
         --huddle-probe TEAM CHANNEL [--seconds 30]
-        [--huddle-region us-east-1]`, with the browser sign-in saved for
-        TEAM. It joins (and so starts one, if none is going on: use a
+        [--huddle-region REGION]`, with the browser sign-in saved for
+        TEAM. Without `--huddle-region` the region `rooms.join` is asked
+        for is the nearest one AWS names at
+        `nearest-media-region.l.chime.aws` (the SDK demo's
+        `getNearestMediaRegion`; no Slack credentials, 2 s at most,
+        validated, kept for the run), else `us-east-1`; the log says
+        which and why. It joins (and so starts one, if none is going on: use a
         quiet channel or a DM), plays for N seconds, leaves (also on
         Ctrl+C), and ends with a summary and "probe: OK" or "probe:
         FAILED at <step>". More detail: `--verbose`, and
         `NOSLACKING_LOG=noslacking=debug,str0m=debug,dimpl=debug,info` for
         ICE and DTLS. The log is also in the state folder's
         `noslacking.log`.
-      - Open questions, for the probe to answer: what `regions` takes
-        (HuddleFM passes its config's media region; `us-east-1` is a
-        guess); whether `free_willy`'s keys are Chime's PascalCase (read
+      - Open questions, for the probe to answer: whether `regions` takes
+        one Chime region name, as asked here (HuddleFM passes its config's
+        media region; the nearest region is AWS's own answer, but whether
+        Slack wants that or a list is unknown); whether `free_willy`'s keys are Chime's PascalCase (read
         in any case here); whether `rooms.leave` exists (the probe calls
         it with `channel_id` and `room_id`, a guess, and logs the answer;
         HuddleFM only sends Chime's LEAVE); whether Chime takes `str0m`'s

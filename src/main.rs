@@ -46,10 +46,11 @@ struct Cli {
     #[arg(long, value_name = "N", default_value_t = 30)]
     seconds: u64,
 
-    /// The media region the huddle probe asks Slack for.
+    /// The media region the huddle probe asks Slack for. Without it, the
+    /// nearest is asked of AWS, falling back to us-east-1.
     #[cfg(feature = "huddle-audio")]
-    #[arg(long, value_name = "REGION", default_value = noslacking::huddle_audio::join::DEFAULT_REGION)]
-    huddle_region: String,
+    #[arg(long, value_name = "REGION")]
+    huddle_region: Option<String>,
 
     /// Run against a pretend Slack, offline, with sample data.
     #[cfg(feature = "demo")]

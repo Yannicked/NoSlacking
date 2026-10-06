@@ -14,9 +14,9 @@
 
 use serde_json::Value;
 
-/// The media region asked for when none is given: Chime's first, in
-/// North America. Slack picks the meeting's actual region; the answer
-/// says which.
+/// The media region asked for when none is given and the nearest is not
+/// known (see [`super::region`]): Chime's first, in North America. Slack
+/// picks the meeting's actual region; the answer says which.
 pub const DEFAULT_REGION: &str = "us-east-1";
 
 /// What `rooms.join` takes to join the huddle in `channel`, as HuddleFM

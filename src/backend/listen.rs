@@ -106,7 +106,8 @@ async fn run(
             return;
         }
     };
-    let joined = match join::join(&client, &channel, join::DEFAULT_REGION).await {
+    let region = crate::huddle_audio::region::for_join(None).await;
+    let joined = match join::join(&client, &channel, &region).await {
         Ok(joined) => joined,
         Err(error) => {
             log::warn!("huddle audio: {error}");

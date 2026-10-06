@@ -25,8 +25,9 @@ pub struct Options {
     pub channel: String,
     /// How long to listen.
     pub seconds: u64,
-    /// The media region `rooms.join` is asked for.
-    pub region: String,
+    /// The media region `rooms.join` is asked for, if given; otherwise
+    /// the nearest is looked up (see [`super::region`]).
+    pub region: Option<String>,
     /// The app's settings file, for its proxy setting.
     pub settings: PathBuf,
 }
@@ -78,14 +79,14 @@ pub fn verdict(outcome: &Result<(), (Step, String)>, audio_frames: u64) -> (Stri
 /// Runs the probe; returns the process's exit code.
 pub fn run(options: &Options) -> i32 {
     log::info!(
-        "probe: NoSlacking {} on {}/{}; team {}, channel {}, {} s, region {}",
+        "probe: NoSlacking {} on {}/{}; team {}, channel {}, {} s, region asked: {}",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
         options.team,
         options.channel,
         options.seconds,
-        options.region
+        options.region.as_deref().unwrap_or("none")
     );
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -163,12 +164,12 @@ async fn probe(
         }
     };
 
+    let region = super::region::for_join(options.region.as_deref()).await;
     log::info!(
-        "slack: rooms.join in {} (regions {})",
-        options.channel,
-        options.region
+        "slack: rooms.join in {} (regions {region})",
+        options.channel
     );
-    let joined = match join::join(&client, &options.channel, &options.region).await {
+    let joined = match join::join(&client, &options.channel, &region).await {
         Ok(joined) => joined,
         Err(JoinFailure::Slack(error)) => {
             return (Err((Step::SlackJoin, error.to_string())), 0);
