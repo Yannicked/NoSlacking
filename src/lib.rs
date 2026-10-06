@@ -47,6 +47,7 @@ pub mod share;
 pub mod sidebar;
 pub mod single_instance;
 pub mod slack;
+pub mod slack_links;
 pub mod slash;
 pub mod spell;
 pub mod theme;

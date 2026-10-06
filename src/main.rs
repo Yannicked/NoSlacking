@@ -27,6 +27,12 @@ struct Cli {
     #[arg(long)]
     verbose: bool,
 
+    /// Give slack:// links back to whatever had them before, if a browser
+    /// sign-in left them with NoSlacking, and quit. Every start does this
+    /// too.
+    #[arg(long)]
+    release_slack_links: bool,
+
     /// Run against a pretend Slack, offline, with sample data.
     #[cfg(feature = "demo")]
     #[arg(long)]
@@ -156,6 +162,10 @@ fn main() -> eframe::Result<()> {
     if let Err(error) = folders {
         log::error!("could not create the app's folders: {error}");
     }
+    if cli.release_slack_links {
+        release_slack_links(&dirs.state);
+        return Ok(());
+    }
 
     let waker = Waker::default();
     let (requests, incoming) = mpsc::channel::<Request>();
@@ -179,9 +189,18 @@ fn main() -> eframe::Result<()> {
                 }
                 // Be the handler for noslacking:// links, so an OAuth
                 // sign-in comes back here by itself. slack:// stays with
-                // the official app until a browser sign-in needs it. Off
-                // the main thread: it runs xdg-mime or reg.exe.
-                std::thread::spawn(|| {
+                // the official app until a browser sign-in needs it, so
+                // a claim a crash (or an older version) left goes back
+                // first. Off the main thread: it runs xdg-mime or reg.exe.
+                let state = dirs.state.clone();
+                std::thread::spawn(move || {
+                    match noslacking::slack_links::release_at_start(&state) {
+                        Ok(true) => log::info!("gave back the slack:// links a sign-in left"),
+                        Ok(false) => {}
+                        Err(error) => {
+                            log::warn!("could not give the slack:// links back: {error}");
+                        }
+                    }
                     if let Err(error) = noslacking::auth::register_scheme() {
                         log::warn!("could not register as the noslacking:// link handler: {error}");
                     }
@@ -197,6 +216,7 @@ fn main() -> eframe::Result<()> {
 
     theme::install_emoji(demo);
     let settings = settings::Settings::load(&dirs.settings_file());
+    let state = dirs.state.clone();
     #[cfg(feature = "demo")]
     let settings = if demo {
         settings::Settings {
@@ -216,7 +236,7 @@ fn main() -> eframe::Result<()> {
     let options = native_options(&cli);
     #[cfg(feature = "demo")]
     let demo_setup = DemoSetup::from(&cli);
-    fastframe_shell::Shell::new(app, &waker)
+    let ran = fastframe_shell::Shell::new(app, &waker)
         // On macOS the tray item answers only while AppKit's loop runs.
         .idle(fastframe_tray::idle)
         .start_hidden(cli.hidden)
@@ -237,7 +257,31 @@ fn main() -> eframe::Result<()> {
                     }))
                 }),
             )
-        })
+        });
+    // A browser sign-in still waiting when the app quits will not finish:
+    // its slack:// links go back. The window is gone by now.
+    if !demo {
+        match noslacking::slack_links::release(&state) {
+            Ok(true) => log::info!("gave the slack:// links back"),
+            Ok(false) => {}
+            Err(error) => log::warn!("could not give the slack:// links back: {error}"),
+        }
+    }
+    ran
+}
+
+/// `--release-slack-links`: gives the links back and says how it went.
+#[expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "the answer to a command typed in a terminal"
+)]
+fn release_slack_links(state: &std::path::Path) {
+    match noslacking::slack_links::release_at_start(state) {
+        Ok(true) => println!("Gave slack:// links back."),
+        Ok(false) => println!("NoSlacking does not hold slack:// links; nothing to give back."),
+        Err(error) => eprintln!("Could not give slack:// links back: {error}"),
+    }
 }
 
 fn native_options(cli: &Cli) -> eframe::NativeOptions {

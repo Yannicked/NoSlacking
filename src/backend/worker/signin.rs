@@ -40,6 +40,7 @@ impl Worker {
     }
 
     pub(super) fn cancel_sign_in(&mut self) {
+        self.end_browser_sign_in();
         self.flow = None;
         if let Some(listener) = self.listener.take() {
             listener.abort();
@@ -59,14 +60,20 @@ impl Worker {
     /// Opens Slack's sign-in page in the browser and starts
     /// accepting the link it hands back.
     pub(super) fn start_browser_sign_in(&mut self) {
-        self.browser_sign_in = Some(std::time::Instant::now());
-        // The page ends with a slack:// link, so NoSlacking takes those
-        // over now, and only now: at start-up they stay with the official
-        // app. Before the browser opens, so the link cannot come back
-        // first; off the runtime, since it runs xdg-mime or reg.exe.
+        let started = std::time::Instant::now();
+        self.browser_sign_in = Some(started);
+        // The page ends with a slack:// link, so NoSlacking borrows those
+        // now, and only now: the rest of the time they stay with the
+        // official app. Before the browser opens, so the link cannot come
+        // back first; off the runtime, since it runs xdg-mime or reg.exe.
         let sink = self.sink.clone();
-        tokio::spawn(async move {
-            let claimed = tokio::task::spawn_blocking(auth::claim_slack_links)
+        let state = self.dirs.state.clone();
+        let previous = self.claiming.take();
+        self.claiming = Some(tokio::spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            let claimed = tokio::task::spawn_blocking(move || crate::slack_links::claim(&state))
                 .await
                 .unwrap_or_else(|error| Err(error.to_string()));
             if let Err(error) = claimed {
@@ -76,6 +83,37 @@ impl Worker {
             if let Err(error) = open::that_detached(crate::slack::magic::SIGN_IN_URL) {
                 log::warn!("could not open the browser: {error}");
                 sink.send(Event::SignIn(SignIn::Failed(Failure::NoBrowser)));
+            }
+        }));
+        // The links go back when the wait is over, if nothing came first.
+        let internal = self.internal.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(BROWSER_SIGN_IN_WINDOW).await;
+            let _ = internal.send(Internal::BrowserSignInOver(started));
+        });
+    }
+
+    /// Stops waiting for the browser sign-in's link, if one was awaited,
+    /// and gives the `slack://` links back to whatever had them before:
+    /// the link came, was pasted, the sign-in was cancelled or it ran out
+    /// of time. Nothing after that needs them.
+    pub(super) fn end_browser_sign_in(&mut self) {
+        if self.browser_sign_in.take().is_none() {
+            return;
+        }
+        let state = self.dirs.state.clone();
+        let claiming = self.claiming.take();
+        tokio::spawn(async move {
+            if let Some(claiming) = claiming {
+                let _ = claiming.await;
+            }
+            let released = tokio::task::spawn_blocking(move || crate::slack_links::release(&state))
+                .await
+                .unwrap_or_else(|error| Err(error.to_string()));
+            match released {
+                Ok(true) => log::info!("gave the slack:// links back"),
+                Ok(false) => {}
+                Err(error) => log::warn!("could not give the slack:// links back: {error}"),
             }
         });
     }
@@ -96,6 +134,9 @@ impl Worker {
                 .send(Event::SignIn(SignIn::Failed(Failure::NotASignInLink)));
             return;
         };
+        // Handed over or pasted, the link is here: the sign-in finishes
+        // without the browser, so the slack:// links can go back now.
+        self.end_browser_sign_in();
         let internal = self.internal.clone();
         let sink = self.sink.clone();
         self.sink.send(Event::SignIn(SignIn::Exchanging));
@@ -226,7 +267,6 @@ impl Worker {
             // Only the link of a sign-in the user started here counts; any
             // other slack:// link handed over is not a sign-in for us.
             if self.browser_sign_in_pending() && crate::slack::magic::parse_link(&url).is_some() {
-                self.browser_sign_in = None;
                 self.sign_in_link(&url);
             } else if let Some(link) = crate::links::parse_deep(&url).filter(|link| {
                 link.team

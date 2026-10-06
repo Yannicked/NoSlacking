@@ -81,6 +81,9 @@ enum Internal {
         event: crate::slack::rtm::RtmEvent,
     },
     SignInListenerFailed(String),
+    /// The browser sign-in started at this moment has had its
+    /// [`BROWSER_SIGN_IN_WINDOW`].
+    BrowserSignInOver(std::time::Instant),
     /// These people and apps could not be fetched for a passing reason;
     /// the next request for them should try again.
     FetchFailed {
@@ -225,6 +228,9 @@ pub struct Worker {
     /// by the desktop is used. Any other time such a link is not ours to act
     /// on, so it is ignored.
     browser_sign_in: Option<std::time::Instant>,
+    /// The task borrowing the `slack://` links for the browser sign-in,
+    /// which giving them back waits for, so it cannot come first.
+    claiming: Option<tokio::task::JoinHandle<()>>,
     listener: Option<tokio::task::JoinHandle<()>>,
     /// The Socket Mode connection, which serves every workspace signed in
     /// through the app.
@@ -267,6 +273,7 @@ impl Worker {
             teams: HashMap::new(),
             flow: None,
             browser_sign_in: None,
+            claiming: None,
             listener: None,
             socket: None,
             rtm: HashMap::new(),
@@ -1433,6 +1440,12 @@ impl Worker {
                 }
             }
             Internal::Callback(url) => self.callback(url),
+            Internal::BrowserSignInOver(started) => {
+                if self.browser_sign_in == Some(started) {
+                    log::info!("the browser sign-in ran out of time");
+                    self.end_browser_sign_in();
+                }
+            }
             Internal::SignInListenerFailed(error) => {
                 self.sink
                     .send(Event::SignIn(SignIn::Failed(Failure::NoListener(error))));
@@ -2155,6 +2168,31 @@ mod tests {
         worker.command(Command::Callback("slack://channel?team=T1&id=C1".into()));
         assert!(events.try_iter().next().is_none());
         assert!(worker.browser_sign_in_pending());
+    }
+
+    #[tokio::test]
+    async fn the_browser_sign_in_ends_on_a_cancel_or_its_time() {
+        // Ending one gives the slack:// links back; nothing here claimed
+        // them, so that finds nothing to do and touches nothing.
+        let (mut worker, _events) = worker();
+        worker.waiting = None;
+        let started = std::time::Instant::now();
+        worker.browser_sign_in = Some(started);
+        // A pasted link that is no sign-in link keeps the wait going.
+        worker.command(Command::SignInLink("slack://channel?team=T1".into()));
+        assert!(worker.browser_sign_in_pending());
+        // An earlier sign-in's time running out is not this one's.
+        let earlier = started
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("a moment earlier");
+        worker.internal(Internal::BrowserSignInOver(earlier));
+        assert!(worker.browser_sign_in_pending());
+        worker.internal(Internal::BrowserSignInOver(started));
+        assert!(!worker.browser_sign_in_pending());
+
+        worker.browser_sign_in = Some(std::time::Instant::now());
+        worker.command(Command::CancelSignIn);
+        assert!(worker.browser_sign_in.is_none());
     }
 
     #[tokio::test]
