@@ -23,6 +23,7 @@
 #![warn(missing_docs)]
 
 pub mod chime;
+pub mod dtls;
 pub mod jitter;
 pub mod join;
 pub mod media;

@@ -14,6 +14,10 @@ cargo run                 # the real app
 cargo run --features demo # a pretend Slack, offline
 ```
 
+`--all-features` includes `huddle-audio`, whose DTLS is OpenSSL's: on
+Linux it needs its headers too (`libssl-dev`, or `openssl-devel`); macOS
+and Windows build OpenSSL from source, which needs Perl.
+
 ## Before a pull request
 
 ```
