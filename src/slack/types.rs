@@ -694,17 +694,7 @@ fn kit_button(block: &Value, value: &Value) -> Option<model::Button> {
     if value.get("type").and_then(Value::as_str) != Some("button") {
         return None;
     }
-    let label = |object: Option<&Value>| object.and_then(|o| kit_str(o, "text"));
-    let confirm = value
-        .get("confirm")
-        .filter(|c| c.is_object())
-        .map(|c| model::Confirm {
-            title: label(c.get("title")),
-            text: c.get("text").and_then(kit_text),
-            confirm: label(c.get("confirm")),
-            deny: label(c.get("deny")),
-            style: kit_str(c, "style"),
-        });
+    let confirm = kit_confirm(value);
     Some(model::Button {
         text: value
             .get("text")
@@ -724,9 +714,133 @@ fn kit_button(block: &Value, value: &Value) -> Option<model::Button> {
     })
 }
 
-/// Block Kit blocks, as far as a reader needs them. Inputs and other
-/// interactive elements other than buttons (selects, menus, pickers) are
-/// left out: pressing a button is the one interaction drawn here.
+/// The `confirm` dialog an element asks for, if any.
+fn kit_confirm(value: &Value) -> Option<model::Confirm> {
+    let label = |object: Option<&Value>| object.and_then(|o| kit_str(o, "text"));
+    value
+        .get("confirm")
+        .filter(|c| c.is_object())
+        .map(|c| model::Confirm {
+            title: label(c.get("title")),
+            text: c.get("text").and_then(kit_text),
+            confirm: label(c.get("confirm")),
+            deny: label(c.get("deny")),
+            style: kit_str(c, "style"),
+        })
+}
+
+/// One of a menu's choices (Slack's option object). One without a value
+/// could not be told apart from the others when chosen, and is left out.
+fn kit_choice(option: &Value) -> Option<model::MenuChoice> {
+    Some(model::MenuChoice {
+        text: option
+            .get("text")
+            .and_then(|t| t.get("text"))
+            .and_then(Value::as_str)?
+            .to_owned(),
+        value: option.get("value").and_then(Value::as_str)?.to_owned(),
+        description: option.get("description").and_then(kit_text),
+        url: kit_str(option, "url"),
+    })
+}
+
+/// The choices of a list of option objects.
+fn kit_choices(options: Option<&Value>) -> Vec<model::MenuChoice> {
+    options
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(kit_choice)
+        .collect()
+}
+
+/// A static select, an overflow menu or radio buttons in block `block`,
+/// with its choices, under their headings when the app grouped them.
+fn kit_menu(block: &Value, value: &Value) -> Option<model::Menu> {
+    let kind = match value.get("type").and_then(Value::as_str)? {
+        "static_select" => model::MenuKind::Select,
+        "overflow" => model::MenuKind::Overflow,
+        "radio_buttons" => model::MenuKind::Radio,
+        _ => return None,
+    };
+    let options = kit_choices(value.get("options"));
+    let groups = if options.is_empty() && kind == model::MenuKind::Select {
+        value
+            .get("option_groups")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|group| model::ChoiceGroup {
+                label: group.get("label").and_then(|l| kit_str(l, "text")),
+                choices: kit_choices(group.get("options")),
+            })
+            .filter(|group| !group.choices.is_empty())
+            .collect()
+    } else {
+        vec![model::ChoiceGroup {
+            label: None,
+            choices: options,
+        }]
+    };
+    Some(model::Menu {
+        kind,
+        action_id: kit_str(value, "action_id"),
+        block_id: kit_str(block, "block_id"),
+        placeholder: value.get("placeholder").and_then(|p| kit_str(p, "text")),
+        groups,
+        initial: value.get("initial_option").and_then(kit_choice),
+        confirm: kit_confirm(value),
+    })
+}
+
+/// An interactive element Slack lets only its own clients use here:
+/// selects whose choices come from the app or from Slack's lists of people
+/// and conversations, pickers, checkboxes and inputs. Shown by its
+/// placeholder, or by what it is.
+fn kit_unusable(value: &Value) -> Option<model::Unusable> {
+    let kind = value.get("type").and_then(Value::as_str)?;
+    let known = kind.ends_with("_select")
+        || matches!(
+            kind,
+            "checkboxes"
+                | "datepicker"
+                | "timepicker"
+                | "datetimepicker"
+                | "plain_text_input"
+                | "email_text_input"
+                | "url_text_input"
+                | "number_input"
+                | "rich_text_input"
+                | "file_input"
+                | "workflow_button"
+        );
+    known.then(|| model::Unusable {
+        kind: kind.to_owned(),
+        label: value
+            .get("placeholder")
+            .and_then(|p| kit_str(p, "text"))
+            .or_else(|| {
+                value
+                    .get("text")
+                    .and_then(|t| t.get("text"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            }),
+    })
+}
+
+/// One element of an `actions` block, or a section's accessory.
+fn kit_element(block: &Value, value: &Value) -> Option<model::KitElement> {
+    kit_button(block, value)
+        .map(model::KitElement::Button)
+        .or_else(|| kit_menu(block, value).map(model::KitElement::Menu))
+        .or_else(|| kit_unusable(value).map(model::KitElement::Unusable))
+}
+
+/// Block Kit blocks, as far as a reader needs them. Buttons, static
+/// selects, overflow menus and radio buttons can be used (see
+/// [`model::button_use`]); other interactive elements and inputs are shown
+/// as working only in Slack itself.
 pub fn kit_blocks(blocks: &[Value]) -> Vec<model::KitBlock> {
     use model::{Accessory, ContextItem, KitBlock};
     let mut out = Vec::new();
@@ -753,10 +867,11 @@ pub fn kit_blocks(blocks: &[Value]) -> Vec<model::KitBlock> {
                                 .unwrap_or("")
                                 .to_owned(),
                         }),
-                        Some("button") => {
-                            kit_button(block, a).map(|b| Accessory::Button(Box::new(b)))
-                        }
-                        _ => None,
+                        _ => kit_element(block, a).map(|element| match element {
+                            model::KitElement::Button(b) => Accessory::Button(Box::new(b)),
+                            model::KitElement::Menu(m) => Accessory::Menu(Box::new(m)),
+                            model::KitElement::Unusable(u) => Accessory::Unusable(u),
+                        }),
                     }
                 });
                 (text.is_some() || !fields.is_empty() || accessory.is_some()).then_some(
@@ -802,14 +917,37 @@ pub fn kit_blocks(blocks: &[Value]) -> Vec<model::KitBlock> {
                     size: size_of(block.get("image_width"), block.get("image_height")),
                 }),
             "actions" => {
-                let buttons: Vec<model::Button> = block
+                let elements: Vec<model::KitElement> = block
                     .get("elements")
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
-                    .filter_map(|element| kit_button(block, element))
+                    .filter_map(|element| kit_element(block, element))
                     .collect();
-                (!buttons.is_empty()).then_some(KitBlock::Actions(buttons))
+                (!elements.is_empty()).then_some(KitBlock::Actions(elements))
+            }
+            // A form field, which only Slack's own form can send: its label
+            // over the field, shown as working only there.
+            "input" => {
+                let element = block.get("element");
+                let field = element.and_then(|e| {
+                    kit_unusable(e).or_else(|| {
+                        Some(model::Unusable {
+                            kind: e.get("type").and_then(Value::as_str)?.to_owned(),
+                            label: e.get("placeholder").and_then(|p| kit_str(p, "text")),
+                        })
+                    })
+                });
+                field.map(|field| {
+                    out.extend(block.get("label").and_then(kit_text).map(|text| {
+                        KitBlock::Section {
+                            text: Some(format!("*{text}*")),
+                            fields: Vec::new(),
+                            accessory: None,
+                        }
+                    }));
+                    KitBlock::Actions(vec![model::KitElement::Unusable(field)])
+                })
             }
             "rich_text" => {
                 let blocks = super::rich::blocks(block);
@@ -2188,9 +2326,9 @@ mod tests {
         );
         assert_eq!(kit[3], KitBlock::Divider);
         assert!(
-            matches!(&kit[4], KitBlock::Actions(buttons) if buttons.len() == 1 && buttons[0].url.is_some())
+            matches!(&kit[4], KitBlock::Actions(elements) if elements.len() == 2 && matches!(&elements[0], model::KitElement::Button(b) if b.url.is_some()) && matches!(&elements[1], model::KitElement::Menu(_)))
         );
-        assert_eq!(kit.len(), 5, "inputs and selects are left out");
+        assert_eq!(kit.len(), 5, "an input with no field is left out");
         assert!(kit.iter().any(KitBlock::is_layout));
         let typed: Vec<Value> = serde_json::from_str(
             r#"[{"type":"rich_text","elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"hi"}]}]}]"#,
@@ -2200,6 +2338,203 @@ mod tests {
             !kit_blocks(&typed).iter().any(KitBlock::is_layout),
             "people's own messages keep their text"
         );
+    }
+
+    #[test]
+    fn static_selects_keep_their_choices_groups_and_initial_choice() {
+        use model::{Accessory, ChoiceGroup, KitBlock, KitElement, Menu, MenuChoice, MenuKind};
+        let message: Message = serde_json::from_str(
+            r#"{"type":"message","subtype":"bot_message","ts":"1790171950.000100","bot_id":"B10",
+                "text":"Where to?",
+                "blocks":[
+                  {"type":"section","block_id":"rollout","text":{"type":"mrkdwn","text":"Where to?"},
+                   "accessory":{"type":"static_select","action_id":"channel",
+                     "placeholder":{"type":"plain_text","text":"Pick a channel","emoji":true},
+                     "option_groups":[
+                       {"label":{"type":"plain_text","text":"Customers"},"options":[
+                         {"text":{"type":"plain_text","text":"Stable"},"value":"stable"},
+                         {"text":{"type":"plain_text","text":"Beta"},"value":"beta",
+                          "description":{"type":"plain_text","text":"2,000 workspaces"}}]},
+                       {"label":{"type":"plain_text","text":"Empty"},"options":[]}]}},
+                  {"type":"actions","block_id":"more","elements":[
+                    {"type":"static_select","action_id":"notify",
+                     "initial_option":{"text":{"type":"plain_text","text":"On failure"},"value":"failure"},
+                     "options":[
+                       {"text":{"type":"plain_text","text":"Everyone"},"value":"everyone"},
+                       {"text":{"type":"plain_text","text":"On failure"},"value":"failure"},
+                       {"text":{"type":"plain_text","text":"No value"}}],
+                     "confirm":{"title":{"type":"plain_text","text":"Sure?"}}}]}]}"#,
+        )
+        .expect("parses");
+        let message = message.into_model().expect("a message");
+        let KitBlock::Section {
+            accessory: Some(Accessory::Menu(select)),
+            ..
+        } = &message.blocks[0]
+        else {
+            panic!("a section with a select: {:?}", message.blocks[0]);
+        };
+        assert_eq!(
+            **select,
+            Menu {
+                kind: MenuKind::Select,
+                action_id: Some("channel".into()),
+                block_id: Some("rollout".into()),
+                placeholder: Some("Pick a channel".into()),
+                groups: vec![ChoiceGroup {
+                    label: Some("Customers".into()),
+                    choices: vec![
+                        MenuChoice {
+                            text: "Stable".into(),
+                            value: "stable".into(),
+                            ..MenuChoice::default()
+                        },
+                        MenuChoice {
+                            text: "Beta".into(),
+                            value: "beta".into(),
+                            description: Some("2,000 workspaces".into()),
+                            url: None,
+                        },
+                    ],
+                }],
+                initial: None,
+                confirm: None,
+            },
+            "an empty group is left out"
+        );
+        let KitBlock::Actions(elements) = &message.blocks[1] else {
+            panic!("an actions block: {:?}", message.blocks[1]);
+        };
+        let KitElement::Menu(notify) = &elements[0] else {
+            panic!("a select: {:?}", elements[0]);
+        };
+        assert_eq!(notify.block_id.as_deref(), Some("more"));
+        assert_eq!(notify.groups.len(), 1);
+        assert_eq!(notify.groups[0].label, None);
+        let values: Vec<&str> = notify.choices().map(|c| c.value.as_str()).collect();
+        assert_eq!(values, ["everyone", "failure"], "a choice needs a value");
+        assert_eq!(
+            notify.initial.as_ref().map(|c| c.value.as_str()),
+            Some("failure")
+        );
+        assert_eq!(
+            notify.choice("failure").map(|c| c.text.as_str()),
+            Some("On failure")
+        );
+        assert_eq!(
+            notify.confirm.as_ref().and_then(|c| c.title.as_deref()),
+            Some("Sure?")
+        );
+    }
+
+    #[test]
+    fn overflow_menus_and_radio_buttons_are_menus_too() {
+        use model::{Accessory, KitBlock, KitElement, MenuKind};
+        let message: Message = serde_json::from_str(
+            r#"{"type":"message","subtype":"bot_message","ts":"1790171950.000100","bot_id":"B10",
+                "text":"Rollout",
+                "blocks":[
+                  {"type":"section","block_id":"s","text":{"type":"mrkdwn","text":"Rollout"},
+                   "accessory":{"type":"overflow","action_id":"more","options":[
+                     {"text":{"type":"plain_text","text":"Plan"},"value":"plan","url":"https://example.com/plan"},
+                     {"text":{"type":"plain_text","text":"Pause"},"value":"pause"}]}},
+                  {"type":"actions","block_id":"a","elements":[
+                    {"type":"radio_buttons","action_id":"speed",
+                     "initial_option":{"text":{"type":"mrkdwn","text":"*Slow*"},"value":"slow"},
+                     "options":[
+                       {"text":{"type":"mrkdwn","text":"*Slow*"},"value":"slow"},
+                       {"text":{"type":"mrkdwn","text":"*Fast*"},"value":"fast"}]},
+                    {"type":"button","action_id":"go","text":{"type":"plain_text","text":"Go"}}]}]}"#,
+        )
+        .expect("parses");
+        let message = message.into_model().expect("a message");
+        let KitBlock::Section {
+            accessory: Some(Accessory::Menu(overflow)),
+            ..
+        } = &message.blocks[0]
+        else {
+            panic!("a section with an overflow menu: {:?}", message.blocks[0]);
+        };
+        assert_eq!(overflow.kind, MenuKind::Overflow);
+        assert_eq!(overflow.block_id.as_deref(), Some("s"));
+        let urls: Vec<Option<&str>> = overflow.choices().map(|c| c.url.as_deref()).collect();
+        assert_eq!(urls, [Some("https://example.com/plan"), None]);
+        let KitBlock::Actions(elements) = &message.blocks[1] else {
+            panic!("an actions block: {:?}", message.blocks[1]);
+        };
+        let KitElement::Menu(radio) = &elements[0] else {
+            panic!("radio buttons: {:?}", elements[0]);
+        };
+        assert_eq!(radio.kind, MenuKind::Radio);
+        assert_eq!(radio.choices().count(), 2);
+        assert_eq!(
+            radio.initial.as_ref().map(|c| c.value.as_str()),
+            Some("slow")
+        );
+        assert!(
+            matches!(&elements[1], KitElement::Button(b) if b.action_id.as_deref() == Some("go")),
+            "buttons keep their place beside menus"
+        );
+    }
+
+    #[test]
+    fn elements_only_slack_can_use_are_shown_as_such() {
+        use model::{Accessory, KitBlock, KitElement, Unusable};
+        let message: Message = serde_json::from_str(
+            r#"{"type":"message","subtype":"bot_message","ts":"1790171950.000100","bot_id":"B10",
+                "text":"Pick",
+                "blocks":[
+                  {"type":"section","block_id":"s","text":{"type":"mrkdwn","text":"Who?"},
+                   "accessory":{"type":"users_select","action_id":"who",
+                     "placeholder":{"type":"plain_text","text":"Pick someone"}}},
+                  {"type":"actions","block_id":"a","elements":[
+                    {"type":"external_select","action_id":"search","min_query_length":2},
+                    {"type":"datepicker","action_id":"when","placeholder":{"type":"plain_text","text":"When?"}},
+                    {"type":"checkboxes","action_id":"tick","options":[
+                      {"text":{"type":"plain_text","text":"A"},"value":"a"}]},
+                    {"type":"made_up_element","action_id":"x"}]},
+                  {"type":"input","block_id":"i","label":{"type":"plain_text","text":"Reason"},
+                   "element":{"type":"plain_text_input","action_id":"reason"}}]}"#,
+        )
+        .expect("parses");
+        let message = message.into_model().expect("a message");
+        assert!(matches!(
+            &message.blocks[0],
+            KitBlock::Section { accessory: Some(Accessory::Unusable(Unusable { kind, label })), .. }
+                if kind == "users_select" && label.as_deref() == Some("Pick someone")
+        ));
+        let KitBlock::Actions(elements) = &message.blocks[1] else {
+            panic!("an actions block: {:?}", message.blocks[1]);
+        };
+        let kinds: Vec<(&str, Option<&str>)> = elements
+            .iter()
+            .map(|element| match element {
+                KitElement::Unusable(u) => (u.kind.as_str(), u.label.as_deref()),
+                other => panic!("only usable in Slack: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("external_select", None),
+                ("datepicker", Some("When?")),
+                ("checkboxes", None),
+            ],
+            "what is not Block Kit at all is left out"
+        );
+        assert_eq!(
+            message.blocks[2],
+            KitBlock::Section {
+                text: Some("*Reason*".into()),
+                fields: Vec::new(),
+                accessory: None,
+            },
+            "a form field's label"
+        );
+        assert!(matches!(
+            &message.blocks[3],
+            KitBlock::Actions(field) if matches!(&field[..], [KitElement::Unusable(u)] if u.kind == "plain_text_input")
+        ));
     }
 
     #[test]
@@ -2233,11 +2568,18 @@ mod tests {
         };
         assert_eq!(details.block_id.as_deref(), Some("ask"), "the section's id");
         assert_eq!(details.action_id.as_deref(), Some("details"));
-        let KitBlock::Actions(buttons) = &message.blocks[1] else {
+        let KitBlock::Actions(elements) = &message.blocks[1] else {
             panic!("an actions block: {:?}", message.blocks[1]);
         };
+        let buttons: Vec<&Button> = elements
+            .iter()
+            .filter_map(|element| match element {
+                model::KitElement::Button(button) => Some(button),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            buttons[0],
+            *buttons[0],
             Button {
                 text: "Approve".into(),
                 url: None,

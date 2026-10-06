@@ -1605,9 +1605,10 @@ impl App {
         true
     }
 
-    /// Presses an app's button in the open workspace, after its own
-    /// question when it has one. A press already on its way is not sent
-    /// again: the app would get it twice.
+    /// Presses an app's button, or sends a choice from its menu, in the
+    /// open workspace, after its own question when it has one. While a
+    /// press of the same button or menu is on its way, no other is sent:
+    /// the app would get both.
     fn press_button(
         &mut self,
         press: crate::model::Press,
@@ -1624,7 +1625,7 @@ impl App {
         };
         let fresh = self
             .workspace_mut(&team)
-            .is_some_and(|w| w.pressing.insert(press.clone()));
+            .is_some_and(|w| !w.is_pressing(&press) && w.pressing.insert(press.clone()));
         if fresh {
             self.backend.send(Command::PressButton { team, press });
         }

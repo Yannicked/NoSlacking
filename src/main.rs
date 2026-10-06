@@ -456,6 +456,9 @@ struct DemoSetup {
     /// Whether to press the deploy bot's Approve button in #deploys once it
     /// has arrived, which asks the app's question first.
     approve: bool,
+    /// Whether to open the rollout bot's select in #deploys once it has
+    /// arrived, to show its choices.
+    open_select: bool,
 }
 
 #[cfg(feature = "demo")]
@@ -502,6 +505,7 @@ impl DemoSetup {
             share: None,
             commented: false,
             approve: false,
+            open_select: false,
         }
     }
 
@@ -555,9 +559,12 @@ impl DemoSetup {
                 &Ts::new(format!("{}.000100", noslacking::demo::APPROVAL)),
             )
         {
-            use noslacking::model::{ButtonUse, KitBlock, button_use};
+            use noslacking::model::{ButtonUse, KitBlock, KitElement, button_use};
             let pressed = message.blocks.iter().find_map(|block| match block {
-                KitBlock::Actions(buttons) => buttons.first(),
+                KitBlock::Actions(elements) => match elements.first() {
+                    Some(KitElement::Button(button)) => Some(button),
+                    _ => None,
+                },
                 _ => None,
             });
             if let Some(button) = pressed
@@ -673,8 +680,13 @@ impl DemoSetup {
                 app.actions.push(Action::OpenConversation("C05".into()));
                 self.approve = true;
             }
+            // The rollout bot's select in #deploys, open on its choices.
+            Some("menus") => {
+                app.actions.push(Action::OpenConversation("C05".into()));
+                self.open_select = true;
+            }
             // #deploys in the workspace signed in by OAuth, where app
-            // buttons only work in Slack.
+            // buttons and menus only work in Slack.
             Some("deploys-oauth") => {
                 app.actions.push(Action::SelectWorkspace("TDEMO2".into()));
                 app.actions.push(Action::OpenConversation("C05".into()));
@@ -854,6 +866,26 @@ impl DemoSetup {
 
     fn after_frame(&mut self, ctx: &egui::Context, app: &mut App) {
         self.film(ctx, app);
+        if self.open_select
+            && let Some(workspace) = app.active_workspace()
+            && let Some(message) = workspace.find_message(
+                "C05",
+                &noslacking::model::Ts::new(format!("{}.000100", noslacking::demo::ROLLOUT)),
+            )
+        {
+            use noslacking::model::{Accessory, KitBlock};
+            let select = message.blocks.iter().find_map(|block| match block {
+                KitBlock::Section {
+                    accessory: Some(Accessory::Menu(menu)),
+                    ..
+                } => Some(menu),
+                _ => None,
+            });
+            if let Some(select) = select {
+                egui::Popup::open_id(ctx, select.popup_id("C05", &message.ts, false));
+            }
+            self.open_select = false;
+        }
         let Some(path) = self.shot.clone() else {
             return;
         };

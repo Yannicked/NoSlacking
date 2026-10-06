@@ -11,6 +11,7 @@ use crate::settings::Density;
 use crate::theme::{self, Icon, Palette};
 
 mod cards;
+mod choices;
 mod files;
 mod menu;
 mod quote;

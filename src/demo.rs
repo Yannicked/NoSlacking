@@ -455,6 +455,87 @@ fn deploy_approval(answer: Option<&str>) -> Message {
     ))
 }
 
+/// When the rollout bot asks where a release goes.
+pub const ROLLOUT: u64 = NOW - 30;
+
+/// A rollout with an app's menus: a select of release channels in groups,
+/// an overflow menu (one choice a link, one asking first) and a select
+/// that already has a choice. Once something is `chosen` (its value and
+/// label), the app shows it as made, with a `note` of what it did, as
+/// such apps answer.
+fn rollout(chosen: Option<(&str, &str)>, note: Option<&str>) -> Message {
+    let initial = chosen
+        .map(|(value, text)| {
+            format!(
+                r##","initial_option":{{"text":{{"type":"plain_text","text":"{text}"}},"value":"{value}"}}"##
+            )
+        })
+        .unwrap_or_default();
+    let note = note
+        .map(|note| {
+            format!(r##",{{"type":"context","elements":[{{"type":"mrkdwn","text":"{note}"}}]}}"##)
+        })
+        .unwrap_or_default();
+    from_json(&format!(
+        r##"{{"type":"message","subtype":"bot_message","ts":"{ROLLOUT}.000100","bot_id":"B10","username":"Rollout Bot",
+        "text":"Where should 2026.10.1 go first?",
+        "blocks":[
+          {{"type":"section","block_id":"rollout","text":{{"type":"mrkdwn","text":"*Where should 2026.10.1 go first?*\nThe rollout starts as soon as you pick."}},
+            "accessory":{{"type":"static_select","action_id":"channel",
+              "placeholder":{{"type":"plain_text","text":"Pick a channel"}}{initial},
+              "option_groups":[
+                {{"label":{{"type":"plain_text","text":"Customers"}},"options":[
+                  {{"text":{{"type":"plain_text","text":"Stable"}},"value":"stable"}},
+                  {{"text":{{"type":"plain_text","text":"Beta"}},"value":"beta",
+                    "description":{{"type":"plain_text","text":"About 2,000 workspaces"}}}}]}},
+                {{"label":{{"type":"plain_text","text":"Internal"}},"options":[
+                  {{"text":{{"type":"plain_text","text":"Canary"}},"value":"canary"}},
+                  {{"text":{{"type":"plain_text","text":"Staff only"}},"value":"staff"}}]}}]}}}},
+          {{"type":"actions","block_id":"rollout-more","elements":[
+            {{"type":"static_select","action_id":"notify",
+              "initial_option":{{"text":{{"type":"plain_text","text":"Notify on failure"}},"value":"failure"}},
+              "options":[
+                {{"text":{{"type":"plain_text","text":"Notify everyone"}},"value":"everyone"}},
+                {{"text":{{"type":"plain_text","text":"Notify on failure"}},"value":"failure"}},
+                {{"text":{{"type":"plain_text","text":"Notify nobody"}},"value":"nobody"}}]}},
+            {{"type":"overflow","action_id":"more","options":[
+              {{"text":{{"type":"plain_text","text":"View the rollout plan"}},"value":"plan","url":"https://example.com/rollout"}},
+              {{"text":{{"type":"plain_text","text":"Pause the rollout"}},"value":"pause"}},
+              {{"text":{{"type":"plain_text","text":"Roll back"}},"value":"rollback"}}],
+              "confirm":{{"title":{{"type":"plain_text","text":"Are you sure?"}},
+                "text":{{"type":"mrkdwn","text":"The rollout bot acts on this at once."}},
+                "confirm":{{"type":"plain_text","text":"Go ahead"}},
+                "deny":{{"type":"plain_text","text":"Cancel"}}}}}},
+            {{"type":"datepicker","action_id":"when","placeholder":{{"type":"plain_text","text":"Schedule it"}}}}]}}{note}
+        ]}}"##
+    ))
+}
+
+/// What the rollout bot does with a choice from its menus: the message it
+/// changes to, if any.
+fn rollout_answer(press: &crate::model::Press) -> Option<Message> {
+    let value = press.value.as_deref().unwrap_or_default();
+    match press.action_id.as_str() {
+        "channel" => Some(rollout(
+            Some((value, press.text.as_str())),
+            Some(&format!(
+                ":rocket: Rolling out to *{}*, picked by you",
+                press.text
+            )),
+        )),
+        "notify" => Some(rollout(
+            None,
+            Some(&format!(":bell: {}, set by you", press.text)),
+        )),
+        "more" => match value {
+            "pause" => Some(rollout(None, Some(":pause_button: Rollout paused by you"))),
+            "rollback" => Some(rollout(None, Some(":rewind: Rolled back by you"))),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// A chart an app posted as a Block Kit image whose size Slack did not
 /// give, as older messages have it.
 fn block_kit_chart() -> Message {
@@ -677,6 +758,7 @@ fn history(channel: &str) -> Vec<Message> {
             glitchtip_alert(),
             block_kit_release(),
             deploy_approval(None),
+            rollout(None, None),
             block_kit_chart(),
         ],
         "D01" => vec![
@@ -1355,16 +1437,16 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                 command,
                 result: Ok(None),
             }),
-            // The deploy bot takes a moment, then answers the press as such
-            // apps do: by changing its message.
+            // The deploy and rollout bots take a moment, then answer the
+            // press or choice as such apps do: by changing their message.
             Command::PressButton { team, press } => {
                 let sink = sink.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(LATENCY * 3).await;
                     let answer = match press.action_id.as_str() {
-                        "approve" => Some("Approved"),
-                        "reject" => Some("Rejected"),
-                        _ => None,
+                        "approve" => Some(deploy_approval(Some("Approved"))),
+                        "reject" => Some(deploy_approval(Some("Rejected"))),
+                        _ => rollout_answer(&press),
                     };
                     let channel = press.channel.clone();
                     sink.send(Event::Pressed {
@@ -1372,11 +1454,11 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                         press,
                         result: Ok(()),
                     });
-                    if answer.is_some() {
+                    if let Some(message) = answer {
                         sink.send(Event::Message {
                             team,
                             channel,
-                            message: deploy_approval(answer),
+                            message,
                             changed: true,
                         });
                     }

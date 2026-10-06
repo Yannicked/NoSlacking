@@ -552,8 +552,21 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       (`backend/blocks.rs`), asking the app's `confirm` question first;
       OAuth sign-ins show them as not pressable with "Open in Slack".
       Still open: test against a real workspace and keep the answer as a
-      fixture; static selects and overflow menus; forms an app opens in
-      answer (`views.open`), which only Slack itself shows.
+      fixture; forms an app opens in answer (`views.open`), which only
+      Slack itself shows.
+- [x] **Static selects, overflow menus and radio buttons** in app
+      messages, in sections and `actions` blocks. *A choice goes through
+      `blocks.actions` like a press, with `selected_option` (`text`,
+      `value`), a select's `placeholder`, and `state` for selects and
+      radio buttons, as emacs-slack, slack-user-cli and rho send it.
+      Option groups, initial choices, descriptions, `confirm`, busy state
+      and a failure toast; an overflow choice with a `url` opens it on any
+      sign-in. OAuth sign-ins show them disabled with "Open in Slack".
+      Selects fed by the app (`external_select`), user, channel and
+      conversation selects, checkboxes, pickers and inputs show as working
+      only in Slack. Not yet tried against a real workspace: the payload
+      comes from those clients, not a capture of our own. Option text is
+      always sent as `plain_text`, though radio buttons may use mrkdwn.*
 - [x] **Add and edit bookmarks** (`bookmarks.add`, `bookmarks.edit`,
       `bookmarks.remove`); today they can only be listed. *Sessions can;
       your-own-app sign-ins only if the app has `bookmarks:write`, which
