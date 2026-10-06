@@ -396,11 +396,25 @@ fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Result<(), St
             .collect::<String>(),
     );
     let current = std::fs::read_to_string(&file).unwrap_or_default();
-    if current != entry {
+    let unchanged = current == entry;
+    if !unchanged {
         std::fs::write(&file, entry).map_err(|e| e.to_string())?;
-        let _ = std::process::Command::new("update-desktop-database")
-            .arg(&applications)
-            .status();
+        let _ = quietly(std::process::Command::new("update-desktop-database").arg(&applications));
+    }
+    // Every start would otherwise run xdg-mime, which on KDE Plasma 6 prints
+    // "qtpaths: command not found" (it looks for Qt 5's tool) even though
+    // its generic fallback saves the default fine.
+    let list = directories::BaseDirs::new()
+        .map(|dirs| dirs.config_dir().join("mimeapps.list"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    let desktop = format!("{APP_ID}.desktop");
+    if unchanged
+        && schemes
+            .iter()
+            .all(|scheme| defaults_to(&list, &format!("x-scheme-handler/{scheme}"), &desktop))
+    {
+        return Ok(());
     }
     let mut args = vec!["default".to_owned(), format!("{APP_ID}.desktop")];
     args.extend(
@@ -408,9 +422,7 @@ fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Result<(), St
             .iter()
             .map(|scheme| format!("x-scheme-handler/{scheme}")),
     );
-    std::process::Command::new("xdg-mime")
-        .args(&args)
-        .status()
+    quietly(std::process::Command::new("xdg-mime").args(&args))
         .map_err(|e| format!("xdg-mime: {e}"))
         .and_then(|status| {
             if status.success() {
@@ -419,6 +431,36 @@ fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Result<(), St
                 Err("xdg-mime could not register the link handler".into())
             }
         })
+}
+
+/// Runs a desktop tool with what it prints kept out of the terminal: its
+/// complaints go to the log, where a failure is looked into.
+#[cfg(target_os = "linux")]
+fn quietly(command: &mut std::process::Command) -> std::io::Result<std::process::ExitStatus> {
+    let output = command.stdin(std::process::Stdio::null()).output()?;
+    let said = String::from_utf8_lossy(&output.stderr);
+    if !said.trim().is_empty() {
+        log::debug!("{:?} said: {}", command.get_program(), said.trim());
+    }
+    Ok(output.status)
+}
+
+/// Whether `list`, a `mimeapps.list`, makes `desktop` the default for
+/// `mime`: the first application named under `[Default Applications]`.
+#[cfg(target_os = "linux")]
+fn defaults_to(list: &str, mime: &str, desktop: &str) -> bool {
+    let mut defaults = false;
+    for line in list.lines().map(str::trim) {
+        if line.starts_with('[') {
+            defaults = line == "[Default Applications]";
+        } else if defaults
+            && let Some((key, apps)) = line.split_once('=')
+            && key.trim() == mime
+        {
+            return apps.split(';').next().map(str::trim) == Some(desktop);
+        }
+    }
+    false
 }
 
 /// The app's icons as the icon theme wants them, under the user's data
@@ -458,10 +500,11 @@ fn install_icons(data: &std::path::Path) -> Result<(), String> {
     if wrote {
         // GTK desktops read a cache when there is one; a missing tool or
         // index only means they look the icon up without it.
-        let _ = std::process::Command::new("gtk-update-icon-cache")
-            .args(["--quiet", "--ignore-theme-index"])
-            .arg(data.join("icons/hicolor"))
-            .status();
+        let _ = quietly(
+            std::process::Command::new("gtk-update-icon-cache")
+                .args(["--quiet", "--ignore-theme-index"])
+                .arg(data.join("icons/hicolor")),
+        );
     }
     Ok(())
 }
@@ -508,6 +551,32 @@ fn register_scheme_for(_exe: &std::path::Path, _schemes: &[&str]) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_handler_already_set_is_read_from_mimeapps_list() {
+        let list = "[Added Associations]\nx-scheme-handler/slack=other.desktop;\n\n\
+                    [Default Applications]\n\
+                    x-scheme-handler/slack=cloud.yannick.NoSlacking.desktop;other.desktop\n\
+                    x-scheme-handler/http = firefox.desktop\n";
+        let ours = "cloud.yannick.NoSlacking.desktop";
+        assert!(defaults_to(list, "x-scheme-handler/slack", ours));
+        assert!(
+            !defaults_to(list, "x-scheme-handler/http", ours),
+            "another app's"
+        );
+        assert!(
+            !defaults_to(list, "x-scheme-handler/noslacking", ours),
+            "not set"
+        );
+        let added_only =
+            "[Added Associations]\nx-scheme-handler/slack=cloud.yannick.NoSlacking.desktop;\n";
+        assert!(
+            !defaults_to(added_only, "x-scheme-handler/slack", ours),
+            "not the default"
+        );
+        assert!(!defaults_to("", "x-scheme-handler/slack", ours));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
