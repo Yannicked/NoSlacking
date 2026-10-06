@@ -1444,6 +1444,9 @@ pub enum Action {
         name: String,
     },
     OpenUrl(String),
+    /// Plays, pauses, seeks or stops a sound in the app (see
+    /// [`crate::audio`]).
+    Audio(crate::audio::Request),
     /// Presses an app's interactive button, or sends a menu choice. When
     /// the app asked for a `confirm` dialog, this asks first, unless
     /// `confirmed`; `link` (an overflow choice's) opens only once it goes

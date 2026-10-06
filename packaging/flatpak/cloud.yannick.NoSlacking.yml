@@ -16,6 +16,9 @@ finish-args:
   - --device=dri
   # Slack itself.
   - --share=network
+  # Voice clips and sound files played in the app (through the runtime's
+  # ALSA, which talks to PulseAudio or PipeWire's stand-in for it).
+  - --socket=pulseaudio
   # Desktop notifications, and the keyring that holds the tokens.
   - --talk-name=org.freedesktop.Notifications
   - --talk-name=org.freedesktop.secrets

@@ -8,7 +8,7 @@
 
 use egui::{CornerRadius, Rect, RichText, Sense, Stroke, Vec2};
 
-use super::{PLACEHOLDER, Row};
+use super::{PLACEHOLDER, Row, player};
 use crate::i18n::{t, tf, tn};
 use crate::model::{Action, File, Media, Message, More, TextPreview};
 use crate::theme::{self, Icon, Palette};
@@ -132,9 +132,9 @@ pub(super) fn file_view(
         still(ui, file, uri, deletable, actions);
     }
     let rect = if is_voice(file) {
-        voice_card(ui, palette, file, actions)
+        voice_card(ui, palette, team, file, actions)
     } else if file.media().is_some() {
-        media_card(ui, palette, file, actions)
+        media_card(ui, palette, team, file, actions)
     } else if let Some(preview) = &file.preview {
         text_card(ui, palette, file, preview, actions)
     } else {
@@ -537,11 +537,12 @@ fn preview_language(file: &File) -> Option<&'static crate::highlight::Language> 
 }
 
 /// A voice clip: a play button, its waveform and length, and the start of
-/// what was said when Slack wrote it down. It plays in the system's
-/// player, as other sounds do.
+/// what was said when Slack wrote it down. It plays in the app (see
+/// `player`): the waveform fills in as it plays and a click on it seeks.
 fn voice_card(
     ui: &mut egui::Ui,
     palette: &Palette,
+    team: &str,
     file: &File,
     actions: &mut Vec<Action>,
 ) -> Rect {
@@ -550,23 +551,36 @@ fn voice_card(
         rect.min + Vec2::splat(PAD),
         Vec2::new(rect.width() - PAD * 2.0, ICON),
     );
-    let tip = tf("Play {name}", &[("name", &file.name)]);
+    let now = player::now(ui, team, file);
+    let tip = player::tip(file, now.as_ref());
     let play = Rect::from_min_size(row.min, Vec2::splat(ICON));
-    play_button(ui, palette, play, response.hovered());
+    player::button(ui, palette, play, response.hovered(), now.as_ref());
     let button = Rect::from_center_size(
         egui::pos2(row.right() - BUTTON / 2.0, row.center().y),
         Vec2::splat(BUTTON),
     );
     let mut right = button.left() - 8.0;
-    if let Some(ms) = file.duration_ms {
-        let galley = ui.painter().layout_no_wrap(
-            crate::model::duration_text(ms),
-            theme::regular(12.0),
-            palette.secondary,
-        );
-        right -= galley.size().x;
+    // Measured as the widest the time can get, so the waveform keeps its
+    // width as the seconds tick.
+    if let Some(text) = player::time(now.as_ref(), file.duration_ms) {
+        let widest = ui
+            .painter()
+            .layout_no_wrap(
+                text.replace(|c: char| c.is_ascii_digit(), "0"),
+                theme::regular(12.0),
+                palette.secondary,
+            )
+            .size()
+            .x;
+        let galley = ui
+            .painter()
+            .layout_no_wrap(text, theme::regular(12.0), palette.secondary);
+        right -= widest;
         ui.painter().galley(
-            egui::pos2(right, row.center().y - galley.size().y / 2.0),
+            egui::pos2(
+                right + widest - galley.size().x,
+                row.center().y - galley.size().y / 2.0,
+            ),
             galley,
             palette.secondary,
         );
@@ -574,7 +588,15 @@ fn voice_card(
     }
     let left = play.right() + 10.0;
     let bars = wave_bars(&file.wave, bar_count(right - left));
-    let color = palette.accent.gamma_multiply(0.85);
+    let played = player::progress(now.as_ref()).map_or(0, |fraction| {
+        crate::audio::played_bars(bars.len(), fraction)
+    });
+    let (done, ahead) = if now.is_some() {
+        (palette.accent, palette.accent.gamma_multiply(0.35))
+    } else {
+        let idle = palette.accent.gamma_multiply(0.85);
+        (idle, idle)
+    };
     for (i, level) in bars.iter().enumerate() {
         let height = (level * (ICON - 8.0)).max(2.0);
         let x = left + i as f32 * BAR_STEP;
@@ -582,8 +604,10 @@ fn voice_card(
             egui::pos2(x + BAR / 2.0, row.center().y),
             Vec2::new(BAR, height),
         );
+        let color = if i < played { done } else { ahead };
         ui.painter().rect_filled(bar, CornerRadius::same(1), color);
     }
+    let wave = Rect::from_x_y_ranges(left..=right.max(left), row.y_range());
     if let Some(transcript) = &file.transcript {
         let galley = one_line(
             ui,
@@ -602,15 +626,23 @@ fn voice_card(
         actions.push(action);
     }
     theme::describe(&response, egui::WidgetType::Button, &tip);
-    if response
+    let response = response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(t("Play in your media player"))
-        .clicked()
-        && let Some((url, name)) = file.player()
-    {
-        actions.push(Action::OpenFile { url, name });
+        .on_hover_text(&tip);
+    if response.clicked() {
+        play_clicked(&response, file, wave, actions);
     }
     rect
+}
+
+/// A click on a sound's card: play, pause or seek in the app, or open it
+/// in the system's player when there is nothing the app could play.
+fn play_clicked(response: &egui::Response, file: &File, seek: Rect, actions: &mut Vec<Action>) {
+    if let Some(track) = crate::audio::Track::of(file) {
+        player::clicked(response, track, seek, actions);
+    } else if let Some((url, name)) = file.player() {
+        actions.push(Action::OpenFile { url, name });
+    }
 }
 
 /// How many waveform bars fit in `width`.
@@ -643,21 +675,6 @@ pub(super) fn wave_bars(samples: &[u8], bars: usize) -> Vec<f32> {
             f32::from(peak.min(100)) / 100.0
         })
         .collect()
-}
-
-/// A round play button filling `rect`.
-fn play_button(ui: &egui::Ui, palette: &Palette, rect: Rect, hovered: bool) {
-    let fill = if hovered {
-        palette.accent
-    } else {
-        palette.accent.gamma_multiply(0.85)
-    };
-    ui.painter()
-        .circle_filled(rect.center(), rect.width() / 2.0, fill);
-    Icon::Play.image(palette.on_accent, 18.0).paint_at(
-        ui,
-        Rect::from_center_size(rect.center() + Vec2::new(1.5, 0.0), Vec2::splat(18.0)),
-    );
 }
 
 /// Tells the message's right-click menu that `file` is under the pointer.
@@ -831,11 +848,14 @@ fn file_detail(file: &File) -> String {
     detail
 }
 
-/// A video or sound: a play button that opens it in the system's player,
-/// its name, and a download button. Returns where the card is.
+/// A video or sound: a play button, its name, and a download button. A
+/// video opens in the system's player; a sound plays in the app, with a
+/// bar to follow and seek it while it is in hand. Returns where the card
+/// is.
 fn media_card(
     ui: &mut egui::Ui,
     palette: &Palette,
+    team: &str,
     file: &File,
     actions: &mut Vec<Action>,
 ) -> Rect {
@@ -844,36 +864,72 @@ fn media_card(
         rect.min + Vec2::splat(PAD),
         Vec2::new(rect.width() - PAD * 2.0, ICON),
     );
+    let sound = file.media() == Some(Media::Audio);
+    let now = player::now(ui, team, file).filter(|_| sound);
     let play = Rect::from_min_size(row.min, Vec2::splat(ICON));
-    play_button(ui, palette, play, response.hovered());
+    player::button(ui, palette, play, response.hovered(), now.as_ref());
     let button = Rect::from_center_size(
         egui::pos2(row.right() - BUTTON / 2.0, row.center().y),
         Vec2::splat(BUTTON),
     );
-    name_and_detail(
-        ui,
-        palette,
-        file,
-        play.right() + 10.0,
-        button.left() - 8.0,
-        row.top(),
-    );
+    let (left, right) = (play.right() + 10.0, button.left() - 8.0);
+    let mut seek = Rect::NOTHING;
+    match (
+        player::progress(now.as_ref()),
+        player::time(now.as_ref(), file.duration_ms),
+    ) {
+        (Some(fraction), Some(time)) => {
+            let name = one_line(
+                ui,
+                &file.name,
+                theme::semibold(14.0),
+                palette.text,
+                right - left,
+            );
+            let name_top = row.top() + 1.0;
+            let below = name_top + name.size().y;
+            ui.painter()
+                .galley(egui::pos2(left, name_top), name, palette.text);
+            let time = ui
+                .painter()
+                .layout_no_wrap(time, theme::regular(12.0), palette.secondary);
+            let y = (below + row.bottom()) / 2.0;
+            let bar_right = right - time.size().x - 10.0;
+            ui.painter().galley(
+                egui::pos2(right - time.size().x, y - time.size().y / 2.0),
+                time,
+                palette.secondary,
+            );
+            player::bar(ui, palette, left, bar_right, y, fraction);
+            seek = Rect::from_x_y_ranges(left..=bar_right.max(left), below..=row.bottom());
+        }
+        _ => name_and_detail(ui, palette, file, left, right, row.top()),
+    }
     if card_button(ui, palette, button, Icon::Download, &t("Download")).clicked()
         && let Some(action) = download(file)
     {
         actions.push(action);
     }
-    theme::describe(
-        &response,
-        egui::WidgetType::Button,
-        &tf("Play {name}", &[("name", &file.name)]),
-    );
-    if response
+    let tip = if sound {
+        player::tip(file, now.as_ref())
+    } else {
+        tf("Play {name}", &[("name", &file.name)])
+    };
+    theme::describe(&response, egui::WidgetType::Button, &tip);
+    let hover = if sound {
+        tip.clone()
+    } else {
+        t("Play in your media player").into_owned()
+    };
+    let response = response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(t("Play in your media player"))
-        .clicked()
-        && let Some((url, name)) = file.player()
-    {
+        .on_hover_text(hover);
+    if !response.clicked() {
+        return rect;
+    }
+    if sound {
+        play_clicked(&response, file, seek, actions);
+    } else if let Some((url, name)) = file.player() {
         actions.push(Action::OpenFile { url, name });
     }
     rect
@@ -1032,9 +1088,9 @@ mod tests {
             let heights = drawn_heights(3, |ui| {
                 let mut actions = Vec::new();
                 if is_voice(&file) {
-                    voice_card(ui, &palette, &file, &mut actions)
+                    voice_card(ui, &palette, "T1", &file, &mut actions)
                 } else if file.media().is_some() {
-                    media_card(ui, &palette, &file, &mut actions)
+                    media_card(ui, &palette, "T1", &file, &mut actions)
                 } else if let Some(preview) = &file.preview {
                     text_card(ui, &palette, &file, preview, &mut actions)
                 } else {

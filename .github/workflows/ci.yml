@@ -32,7 +32,7 @@ jobs:
       - name: GUI build dependencies and packaging validators
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake desktop-file-utils appstream
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev cmake desktop-file-utils appstream
       - name: Desktop entry
         run: desktop-file-validate packaging/applications/cloud.yannick.NoSlacking.desktop
       # The project has no public homepage yet; drop the override once
@@ -67,7 +67,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev cmake
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Linux is linted in `quality`; the macOS and Windows `cfg` code
       # (keyring stores, single instance, the URL scheme) only here.
@@ -105,7 +105,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake xvfb xauth libgl1-mesa-dri libegl-mesa0 libxkbcommon-x11-0
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev cmake xvfb xauth libgl1-mesa-dri libegl-mesa0 libxkbcommon-x11-0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Demo build
         run: cargo build --locked --features demo

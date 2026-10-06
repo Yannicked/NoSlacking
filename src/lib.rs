@@ -5,6 +5,7 @@
 //! talk through commands and events only.
 
 pub mod app;
+pub mod audio;
 pub mod auth;
 pub mod autostart;
 pub mod backend;

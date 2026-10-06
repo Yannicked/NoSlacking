@@ -14,6 +14,7 @@ mod cards;
 mod choices;
 mod files;
 mod menu;
+mod player;
 mod quote;
 
 use cards::{attachment_media, attachment_view, blocks_view, kit_image_size};
