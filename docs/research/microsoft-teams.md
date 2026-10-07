@@ -317,8 +317,9 @@ middle tier with a token for
 token. It names personal people with `fetchShortProfile` and the work
 people in personal chats with `fetchFederated`, and yourself with
 `/beta/users/me`. Its chat token comes from `api/auth/v2.0/authz/consumer`.
-Whether the consumer device-code client may have the middle tier scope is
-what `--teams-probe` now tests.
+`--teams-probe` showed the consumer device-code client may have it, and
+the groups service's scope too (2026-10-07): the middle tier answers
+`fetchShortProfile` with that token, where it refused every other.
 
 ### 6.2 Audio and video calls
 

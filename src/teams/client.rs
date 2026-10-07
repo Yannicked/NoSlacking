@@ -756,7 +756,7 @@ impl TeamsClient {
         let mut found = Vec::new();
         for (path, mris) in [
             (
-                "fetchShortProfile?isMailAddress=false&canBeSmtpAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true&includeDisabledAccounts=true",
+                "fetchShortProfile?isMailAddress=false&enableGuest=true&skypeTeamsInfo=true&canBeSmtpAddress=false&includeIBBarredUsers=false&includeDisabledAccounts=false&ggEnabled=true",
                 personal,
             ),
             (
