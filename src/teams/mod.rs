@@ -4,6 +4,7 @@
 //! and HTML message translation for interacting with Microsoft Teams.
 
 pub mod auth;
+pub mod calling;
 pub mod client;
 pub mod html;
 pub mod probe;

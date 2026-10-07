@@ -1211,3 +1211,11 @@ WebSocket frames) before the code that depends on it is written:
    standard TURN client.
 10. **What `progress` carries** for an outgoing call (the callback was
     given in file 000 but nothing arrived on it during ringing).
+
+**Found since:** the TURN servers are in the Skype client configuration,
+`GET https://config.teams.microsoft.com/config/v1/Skype/1415_1.0.0.0`
+(personal web client, Europe): `Turn = {"addresses":
+["gateway-eu.az.relay.teams.cloud.microsoft"], "realm": "rtcmedia",
+"udpPort": 3478, "tcpPort": 443, "tlsPort": 443}`, with the credentials
+from `trap/tokens`. The same file names a `DedicatedRelay`
+(`dr-eu.skype-cr.akadns.net`, ports 50000–50007), not needed to start.
