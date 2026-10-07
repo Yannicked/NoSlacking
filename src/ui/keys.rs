@@ -78,7 +78,11 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
             .push(Action::Huddle(crate::huddles::Action::Leave));
     }
     let search = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::F));
-    if search && !app.workspaces.is_empty() {
+    // Ctrl+F is left alone where the service has no search.
+    let searchable = app
+        .active_workspace()
+        .is_some_and(|w| w.info.offers(crate::model::Ability::Search));
+    if search && searchable {
         if app.search.open {
             app.search.open = false;
         } else if !overlay {

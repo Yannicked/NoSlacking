@@ -5,7 +5,7 @@ use egui::{Align, CornerRadius, Layout, Margin, Sense, Stroke, UiBuilder, Vec2};
 
 use super::{Row, more_id, plain_text, row_id};
 use crate::i18n::{t, tf};
-use crate::model::{Action, Message};
+use crate::model::{Ability, Action, Message};
 use crate::theme::{self, Icon};
 use crate::ui::rich::{self, Rich};
 
@@ -21,16 +21,27 @@ pub(super) fn toolbar(
     actions: &mut Vec<Action>,
 ) {
     let palette = row.palette;
-    let quick: std::sync::Arc<Vec<String>> = ui
-        .data(|d| d.get_temp(crate::ui::quick_reactions_id()))
-        .unwrap_or_default();
-    let mut buttons = 4 + usize::from(!row.in_thread);
-    if me {
-        buttons += 2;
+    let offers = |ability| row.workspace.info.offers(ability);
+    let reacts = offers(Ability::Reactions);
+    let reply = !row.in_thread && offers(Ability::Threads);
+    let edit = me && offers(Ability::Edit);
+    let quick: std::sync::Arc<Vec<String>> = if reacts {
+        ui.data(|d| d.get_temp(crate::ui::quick_reactions_id()))
+            .unwrap_or_default()
+    } else {
+        Default::default()
+    };
+    let mut buttons = 3 + usize::from(reacts) + usize::from(reply) + usize::from(me);
+    if edit {
+        buttons += 1;
     }
     // Two quick reactions fit the bar as it was first measured; each more
-    // takes a cell.
-    let extra = quick.len().saturating_sub(2) as f32 * 28.0;
+    // takes a cell, and without reactions their room goes too.
+    let extra = if reacts {
+        quick.len().saturating_sub(2) as f32 * 28.0
+    } else {
+        -2.0 * 28.0
+    };
     let width = buttons as f32 * 30.0 + 28.0 + 8.0 + extra;
     let bar = egui::Rect::from_min_size(
         egui::pos2(rect.right() - width - 16.0, rect.top() + 2.0),
@@ -88,14 +99,16 @@ pub(super) fn toolbar(
                 });
             }
         }
-        if theme::icon_button(ui, palette, Icon::SmilePlus, 16.0, &t("Add reaction (R)")).clicked()
+        if reacts
+            && theme::icon_button(ui, palette, Icon::SmilePlus, 16.0, &t("Add reaction (R)"))
+                .clicked()
         {
             actions.push(Action::PickReaction {
                 channel: row.channel.to_owned(),
                 ts: message.ts.clone(),
             });
         }
-        if !row.in_thread
+        if reply
             && theme::icon_button(
                 ui,
                 palette,
@@ -121,7 +134,9 @@ pub(super) fn toolbar(
             .id(more_id(row.channel, &message.ts, row.in_thread))
             .show(|ui| more_menu(ui, row, message, actions));
         if me {
-            if theme::icon_button(ui, palette, Icon::Pencil, 16.0, &t("Edit message (E)")).clicked()
+            if edit
+                && theme::icon_button(ui, palette, Icon::Pencil, 16.0, &t("Edit message (E)"))
+                    .clicked()
             {
                 let channel = row.channel.to_owned();
                 let ts = message.ts.clone();
@@ -168,6 +183,8 @@ pub(super) fn context_menu(
         ui.data_mut(|d| d.insert_temp(target_id, target));
     }
     let target: Option<Target> = ui.data(|d| d.get_temp(target_id)).flatten();
+    let offers = |ability| row.workspace.info.offers(ability);
+    let files = offers(Ability::Files);
     egui::Popup::new(
         id,
         ui.ctx().clone(),
@@ -230,7 +247,7 @@ pub(super) fn context_menu(
                     actions.push(Action::OpenUrl(page.clone()));
                     ui.close();
                 }
-                if *deletable {
+                if *deletable && files {
                     crate::ui::context::delete_file_item(ui, file, name, actions);
                 }
                 ui.separator();
@@ -250,21 +267,21 @@ pub(super) fn context_menu(
                     });
                     ui.close();
                 }
-                if *deletable {
+                if *deletable && files {
                     crate::ui::context::delete_file_item(ui, file, name, actions);
                 }
                 ui.separator();
             }
             None => {}
         }
-        if ui.button(t("Add reaction")).clicked() {
+        if offers(Ability::Reactions) && ui.button(t("Add reaction")).clicked() {
             actions.push(Action::PickReaction {
                 channel: row.channel.to_owned(),
                 ts: message.ts.clone(),
             });
             ui.close();
         }
-        if !row.in_thread && ui.button(t("Reply in thread")).clicked() {
+        if !row.in_thread && offers(Ability::Threads) && ui.button(t("Reply in thread")).clicked() {
             actions.push(Action::OpenThread {
                 channel: row.channel.to_owned(),
                 ts: message
@@ -281,7 +298,7 @@ pub(super) fn context_menu(
         more_menu(ui, row, message, actions);
         if me {
             ui.separator();
-            if ui.button(t("Edit message")).clicked() {
+            if offers(Ability::Edit) && ui.button(t("Edit message")).clicked() {
                 let channel = row.channel.to_owned();
                 let ts = message.ts.clone();
                 actions.push(if row.in_thread {
@@ -305,13 +322,14 @@ pub(super) fn context_menu(
 /// What a message's "More" menu offers: what is used less often than the
 /// toolbar's own buttons.
 fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<Action>) {
+    let offers = |ability| row.workspace.info.offers(ability);
     let saved = crate::ui::views::is_saved(ui, row.channel, &message.ts);
     let save = if saved {
         t("Remove from Later")
     } else {
         t("Save for later")
     };
-    if ui.button(save).clicked() {
+    if offers(Ability::Later) && ui.button(save).clicked() {
         actions.push(Action::Views(crate::views::Action::Save {
             channel: row.channel.to_owned(),
             ts: message.ts.clone(),
@@ -320,20 +338,20 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
         ui.close();
     }
     // A message still on its way has no link for the reminder to carry.
-    if !message.ts.is_local() {
+    if !message.ts.is_local() && offers(Ability::Reminders) {
         remind_menu(ui, row, message, actions);
     }
     // Slack keeps a thread's read state apart from the conversation's
     // (`subscriptions.thread.mark`, for its own apps only), so this is for
     // the conversation's own list.
-    if !row.in_thread && ui.button(t("Mark unread")).clicked() {
+    if !row.in_thread && offers(Ability::MarkUnread) && ui.button(t("Mark unread")).clicked() {
         actions.push(Action::MarkUnread {
             channel: row.channel.to_owned(),
             ts: message.ts.clone(),
         });
         ui.close();
     }
-    if ui.button(t("Copy link")).clicked() {
+    if offers(Ability::Links) && ui.button(t("Copy link")).clicked() {
         actions.push(Action::CopyLink {
             channel: row.channel.to_owned(),
             ts: message.ts.clone(),
@@ -343,7 +361,7 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
     }
     // For what only works in Slack itself, such as an app's buttons with
     // an OAuth sign-in.
-    if !message.ts.is_local() && ui.button(t("Open in Slack")).clicked() {
+    if !message.ts.is_local() && offers(Ability::Cards) && ui.button(t("Open in Slack")).clicked() {
         actions.push(Action::OpenInSlack {
             channel: row.channel.to_owned(),
             ts: message.ts.clone(),
@@ -352,7 +370,8 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
         ui.close();
     }
     // A message still on its way has no link to share yet.
-    if !message.ts.is_local() && ui.button(t("Share message…")).clicked() {
+    if !message.ts.is_local() && offers(Ability::Share) && ui.button(t("Share message…")).clicked()
+    {
         actions.push(Action::Share {
             channel: row.channel.to_owned(),
             ts: message.ts.clone(),
@@ -365,7 +384,7 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
     } else {
         t("Pin to the conversation")
     };
-    if ui.button(pin).clicked() {
+    if offers(Ability::Pins) && ui.button(pin).clicked() {
         actions.push(Action::Convos(crate::convos::Action::Pin {
             channel: row.channel.to_owned(),
             ts: message.ts.clone(),

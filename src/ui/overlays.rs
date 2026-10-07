@@ -6,7 +6,7 @@ use egui::{CornerRadius, Key, Margin, Modifiers, RichText, Sense, Stroke, Vec2};
 
 use crate::app::{App, PickerTarget};
 use crate::i18n::t;
-use crate::model::{Action, ConversationKind};
+use crate::model::{Ability, Action, ConversationKind};
 use crate::theme::{self, Icon};
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
@@ -601,6 +601,7 @@ fn picker(app: &mut App, ctx: &egui::Context) {
     let mut close = false;
     let mut add = false;
     let can_add = workspace.can_add_emoji;
+    let reacts = workspace.info.offers(Ability::Reactions);
     let needle = query.trim().to_lowercase();
     // What matches the query, kept until the query or the custom emoji
     // change: filtering and sorting about 1,900 emoji on every frame was
@@ -766,7 +767,9 @@ fn picker(app: &mut App, ctx: &egui::Context) {
     if let Some(name) = chosen {
         match target {
             PickerTarget::Reaction { channel, ts } => {
-                app.actions.push(Action::React { channel, ts, name });
+                if reacts {
+                    app.actions.push(Action::React { channel, ts, name });
+                }
             }
             PickerTarget::Draft(key) => {
                 let draft = app.drafts.edit(key);

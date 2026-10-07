@@ -183,7 +183,10 @@ impl Service {
                 | Ability::Reminders
                 | Ability::Scheduled
                 | Ability::Views
-                | Ability::Cards => false,
+                | Ability::Cards
+                | Ability::Details
+                | Ability::Links
+                | Ability::Share => false,
             },
         }
     }
@@ -236,6 +239,12 @@ pub enum Ability {
     Views,
     /// Pressing buttons in Block Kit cards and opening them in Slack.
     Cards,
+    /// A conversation's details panel: about, members and files.
+    Details,
+    /// Copying a link to a message.
+    Links,
+    /// Sharing a message to another conversation.
+    Share,
 }
 
 /// A signed-in workspace.

@@ -9,7 +9,7 @@ use super::rows;
 use crate::app::{App, WorkspaceState};
 use crate::failure::Failure;
 use crate::i18n::{t, tf, tn};
-use crate::model::{Action, ConversationKind, Message, Ts};
+use crate::model::{Ability, Action, ConversationKind, Message, Ts, Workspace};
 use crate::theme::{self, Icon, Palette};
 use crate::views::{Action as Views, Activity, State, TeamViews, View};
 
@@ -60,6 +60,24 @@ fn count(view: View, workspace: &WorkspaceState, views: Option<&TeamViews>) -> u
     }
 }
 
+/// The views `workspace` has, in the sidebar's order: none where its
+/// service has no views, and Threads, Later and Scheduled only where it
+/// has threads, saving for later and scheduling.
+pub fn offered(workspace: &Workspace) -> Vec<View> {
+    if !workspace.offers(Ability::Views) {
+        return Vec::new();
+    }
+    View::ALL
+        .into_iter()
+        .filter(|view| match view {
+            View::Threads => workspace.offers(Ability::Threads),
+            View::Later => workspace.offers(Ability::Later),
+            View::Scheduled => workspace.offers(Ability::Scheduled),
+            View::Activity | View::Unreads => true,
+        })
+        .collect()
+}
+
 /// The views' rows at the top of the conversation list.
 pub fn entries(
     ui: &mut egui::Ui,
@@ -68,9 +86,14 @@ pub fn entries(
     state: &State,
     actions: &mut Vec<Action>,
 ) {
+    let offered = offered(&workspace.info);
+    // No rows, and no rule under them either.
+    if offered.is_empty() {
+        return;
+    }
     ui.add_space(6.0);
     let views = state.team(&workspace.info.team_id);
-    for view in View::ALL {
+    for view in offered {
         let selected = state.open == Some(view);
         let count = count(view, workspace, views);
         let (outer, response) =
@@ -174,9 +197,13 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
     if app.overlay_open() || app.workspaces.is_empty() {
         return;
     }
+    let Some(workspace) = app.active_workspace() else {
+        return;
+    };
+    let offered = offered(&workspace.info);
     let shift = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
     let pressed = ctx.input_mut(|input| {
-        View::ALL
+        offered
             .into_iter()
             .find(|view| shortcut(*view).is_some_and(|key| input.consume_key(shift, key)))
     });
@@ -202,6 +229,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let Some(view) = app.views.open else {
         return;
     };
+    // A view left open from a workspace that has it closes in one that
+    // does not.
+    if !app
+        .active_workspace()
+        .is_some_and(|w| offered(&w.info).contains(&view))
+    {
+        app.actions.push(Action::Views(Views::Close));
+        return;
+    }
     egui::CentralPanel::default()
         .frame(egui::Frame::new().fill(palette.window))
         .show(ui, |ui| {
@@ -1459,5 +1495,32 @@ pub fn dialog(app: &mut App, ctx: &egui::Context) {
         app.actions.push(Action::Views(Views::CloseSchedule));
     } else if confirm {
         app.actions.push(Action::Views(Views::ConfirmSchedule));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workspace(service: crate::model::Service) -> Workspace {
+        Workspace {
+            service,
+            team_id: "T1".into(),
+            name: "Acme".into(),
+            domain: "acme".into(),
+            icon: None,
+            user_id: "U1".into(),
+            sign_in: Default::default(),
+            scopes: None,
+        }
+    }
+
+    #[test]
+    fn slack_has_every_view_and_teams_none() {
+        assert_eq!(
+            offered(&workspace(crate::model::Service::Slack)),
+            View::ALL.to_vec()
+        );
+        assert!(offered(&workspace(crate::model::Service::Teams)).is_empty());
     }
 }

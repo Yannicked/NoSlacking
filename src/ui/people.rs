@@ -5,7 +5,7 @@ use egui::{Color32, Margin, Rect, RichText, Stroke, Vec2};
 
 use crate::app::App;
 use crate::i18n::t;
-use crate::model::Action;
+use crate::model::{Ability, Action};
 use crate::people::{self, Presence};
 use crate::theme::{self, Palette};
 
@@ -128,40 +128,43 @@ pub fn me_button(
         if let Some(status) = &status {
             ui.label(RichText::new(status).color(palette.secondary));
         }
-        ui.separator();
-        let edit = if status.is_some() {
-            t("Edit status…")
-        } else {
-            t("Set a status…")
-        };
-        if ui.button(edit).clicked() {
-            actions.push(Action::People(people::Action::EditStatus));
-            ui.close();
-        }
-        if status.is_some() && ui.button(t("Clear status")).clicked() {
-            actions.push(clear());
-            ui.close();
-        }
-        let away = presence == Some(Presence::Away);
-        let toggle = if away {
-            t("Set yourself as active")
-        } else {
-            t("Set yourself as away")
-        };
-        if ui.button(toggle).clicked() {
-            actions.push(Action::People(people::Action::SetAway(!away)));
-            ui.close();
-        }
-        let mut always = stay_active;
-        if ui
-            .checkbox(&mut always, t("Always show as active"))
-            .on_hover_text(t(
-                "While NoSlacking is connected, even when you are not using it. Browser sign-ins only.",
-            ))
-            .changed()
-        {
-            actions.push(Action::People(people::Action::StayActive(always)));
-            ui.close();
+        // Status and away are Slack's; elsewhere the menu only shows who you are.
+        if workspace.info.offers(Ability::Status) {
+            ui.separator();
+            let edit = if status.is_some() {
+                t("Edit status…")
+            } else {
+                t("Set a status…")
+            };
+            if ui.button(edit).clicked() {
+                actions.push(Action::People(people::Action::EditStatus));
+                ui.close();
+            }
+            if status.is_some() && ui.button(t("Clear status")).clicked() {
+                actions.push(clear());
+                ui.close();
+            }
+            let away = presence == Some(Presence::Away);
+            let toggle = if away {
+                t("Set yourself as active")
+            } else {
+                t("Set yourself as away")
+            };
+            if ui.button(toggle).clicked() {
+                actions.push(Action::People(people::Action::SetAway(!away)));
+                ui.close();
+            }
+            let mut always = stay_active;
+            if ui
+                .checkbox(&mut always, t("Always show as active"))
+                .on_hover_text(t(
+                    "While NoSlacking is connected, even when you are not using it. Browser sign-ins only.",
+                ))
+                .changed()
+            {
+                actions.push(Action::People(people::Action::StayActive(always)));
+                ui.close();
+            }
         }
         ui.separator();
         if ui.button(t("View profile")).clicked() {
@@ -526,7 +529,8 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
             let workspace = app
                 .workspaces
                 .iter()
-                .find(|w| w.info.team_id == invite.team)?;
+                .find(|w| w.info.team_id == invite.team)
+                .filter(|w| w.info.offers(Ability::Huddles))?;
             let place = workspace
                 .conversation(&invite.channel)
                 .filter(|c| !c.kind.is_dm())
@@ -547,6 +551,9 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
             ))
         })
         .collect();
+    if cards.is_empty() {
+        return;
+    }
     let mut answers = Vec::new();
     egui::Area::new(egui::Id::new("huddle-invites"))
         .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-16.0, 64.0))

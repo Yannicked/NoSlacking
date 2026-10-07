@@ -11,13 +11,21 @@ use egui::{CornerRadius, Key, Margin, Modifiers, RichText, Sense, Vec2};
 use crate::app::{App, Page};
 use crate::convos::{Action as Convos, BookmarkProblem, MAX_NAME, MAX_PEOPLE, NameProblem};
 use crate::i18n::{t, tf};
-use crate::model::{Action, Conversation, ConversationKind};
+use crate::model::{Ability, Action, Conversation, ConversationKind};
 use crate::theme::{self, Icon};
 
 /// The shortcuts for these dialogs, while the main page shows and nothing
 /// covers it.
 pub fn keys(app: &mut App, ctx: &egui::Context) {
     if app.page != Page::Main || app.overlay_open() || app.workspaces.is_empty() {
+        return;
+    }
+    // Where the service has no channels to browse or conversations to
+    // start, the keys are left alone.
+    if !app
+        .active_workspace()
+        .is_some_and(|w| w.info.offers(Ability::Channels))
+    {
         return;
     }
     let (compose, browse) = ctx.input_mut(|i| {

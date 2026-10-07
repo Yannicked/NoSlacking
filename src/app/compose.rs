@@ -68,7 +68,11 @@ impl App {
             return;
         }
         let mut text = text;
-        if let Some((command, args)) = crate::slash::parse(&text) {
+        // Where slash commands are not offered, "/…" goes as it was typed.
+        let commands = self
+            .active_workspace()
+            .is_some_and(|w| w.info.offers(crate::model::Ability::SlashCommands));
+        if let Some((command, args)) = crate::slash::parse(&text).filter(|_| commands) {
             match command.as_str() {
                 // Plain messages in the end, sent as any other.
                 "shrug" => text = crate::slash::shrug(args),

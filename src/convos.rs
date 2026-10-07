@@ -1185,6 +1185,16 @@ pub fn set_pinned(
 /// Opens the details panel on `tab`, in place of a thread, and asks for
 /// what the tab shows unless it is loaded already.
 fn details(app: &mut App, team: String, channel: String, tab: Tab) {
+    // Everything the panel shows comes from Slack; for a service without
+    // it, every tab would only say so.
+    let offered = app
+        .workspaces
+        .iter()
+        .find(|w| w.info.team_id == team)
+        .is_some_and(|w| w.info.offers(crate::model::Ability::Details));
+    if !offered {
+        return;
+    }
     app.thread = None;
     let editing = app
         .convos

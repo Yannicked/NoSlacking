@@ -683,8 +683,8 @@ impl Worker {
         self.start_teams(workspace, client, (sink, gate));
     }
 
-    /// Starts (or starts again) a Teams workspace's lists and live
-    /// connection, replacing whatever ran for it before.
+    /// Starts a Teams workspace's lists and live connection, replacing
+    /// whatever ran for it before.
     #[cfg(feature = "teams")]
     fn start_teams(
         &mut self,
@@ -693,15 +693,7 @@ impl Worker {
         gated: (Sink, Gate),
     ) {
         let generation = self.generation();
-        let internal = self.internal.clone();
-        let team = workspace.team_id.clone();
-        let report: super::teams::Report = Arc::new(move |status| {
-            let _ = internal.send(Internal::Trouter {
-                team: team.clone(),
-                generation,
-                status,
-            });
-        });
+        let report = self.trouter_report(&workspace.team_id, generation);
         let session =
             super::teams::Session::start(workspace.clone(), client, gated, generation, report);
         if let Some(old) = self
@@ -711,6 +703,20 @@ impl Worker {
             old.shut();
         }
         self.report_socket();
+    }
+
+    /// Where the Trouter task started as `generation` for `team` reports.
+    #[cfg(feature = "teams")]
+    fn trouter_report(&self, team: &str, generation: u64) -> super::teams::Report {
+        let internal = self.internal.clone();
+        let team = team.to_owned();
+        Arc::new(move |status| {
+            let _ = internal.send(Internal::Trouter {
+                team: team.clone(),
+                generation,
+                status,
+            });
+        })
     }
 
     /// Starts a workspace's start-up work; see [`boot`] for `retry`.
@@ -1548,24 +1554,24 @@ impl Worker {
         self.restart_teams();
     }
 
-    /// Starts every Teams workspace again on its current client: lists it
-    /// afresh and reconnects Trouter, through the proxy as now set.
+    /// Starts every Teams workspace again: lists it afresh and reconnects
+    /// Trouter, through the proxy as now set.
     #[cfg(feature = "teams")]
     fn restart_teams(&mut self) {
-        let sessions: Vec<(Workspace, crate::teams::client::TeamsClient)> = self
+        let ids: Vec<String> = self
             .workspaces
-            .values()
-            .filter_map(|backend| match backend {
-                Backend::Teams(session) => {
-                    Some((session.workspace.clone(), session.client.clone()))
-                }
-                Backend::Slack(_) => None,
-            })
+            .iter()
+            .filter(|(_, backend)| matches!(backend, Backend::Teams(_)))
+            .map(|(id, _)| id.clone())
             .collect();
-        for (workspace, client) in sessions {
-            let gated = self.sink.gated();
-            self.start_teams(workspace, client, gated);
+        for id in ids {
+            let generation = self.generation();
+            let report = self.trouter_report(&id, generation);
+            if let Some(Backend::Teams(session)) = self.workspaces.get_mut(&id) {
+                session.restart(generation, report);
+            }
         }
+        self.report_socket();
     }
 
     /// Calls a method for its effect, reporting failures (except `ignore`d

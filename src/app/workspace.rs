@@ -1432,7 +1432,9 @@ impl WorkspaceState {
             emoji.insert(name.clone(), url.clone());
         }
         self.emoji = EmojiSet::new(emoji);
-        self.can_add_emoji = can_add;
+        // Only where the service takes custom emoji at all, whatever the
+        // worker says it could add.
+        self.can_add_emoji = can_add && self.info.offers(crate::model::Ability::CustomEmoji);
     }
 
     /// You added custom emoji `name`: it shows at once, from `url` (the
@@ -2074,6 +2076,14 @@ mod tests {
             !w.emoji.contains("shipit"),
             "Slack's word is final after that"
         );
+        assert!(!w.can_add_emoji);
+    }
+
+    #[test]
+    fn a_teams_workspace_never_offers_adding_emoji() {
+        let mut w = workspace();
+        w.info.service = crate::model::Service::Teams;
+        w.emoji_arrived(HashMap::new(), true);
         assert!(!w.can_add_emoji);
     }
 

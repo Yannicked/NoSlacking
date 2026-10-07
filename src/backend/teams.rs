@@ -3,7 +3,7 @@
 //!
 //! The worker routes by workspace (see `worker::Backend`); everything here
 //! is the Teams side of that `match`, shaped like the Slack functions in
-//! [`super::fetch`] so a worker arm is one call. Like them, these report
+//! `backend::fetch` so a worker arm is one call. Like them, these report
 //! to the workspace's gated sink and never hold the worker.
 
 use std::sync::Arc;
@@ -93,6 +93,27 @@ impl Session {
             generation,
             status: Socket::Connecting,
         }
+    }
+
+    /// Starts the lists and live connection again, on the same client and
+    /// sink: the client's renewals report through that sink, so it has to
+    /// stay open. Reports from the old connection carry the old
+    /// generation and are ignored.
+    pub fn restart(&mut self, generation: u64, report: Report) {
+        self.boot.abort();
+        self.trouter.abort();
+        let team = self.workspace.team_id.clone();
+        self.boot =
+            tokio::spawn(boot(self.client.clone(), team.clone(), self.sink.clone())).abort_handle();
+        self.trouter = tokio::spawn(trouter(
+            team,
+            self.client.clone(),
+            self.sink.clone(),
+            report,
+        ))
+        .abort_handle();
+        self.generation = generation;
+        self.status = Socket::Connecting;
     }
 
     /// Stops everything still running for this workspace.

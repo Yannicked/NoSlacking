@@ -31,7 +31,11 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         actions,
         ..
     } = app;
-    let Some(workspace) = crate::app::active_in(workspaces, settings) else {
+    // Left open from a workspace that searches, it closes in one that
+    // does not.
+    let Some(workspace) = crate::app::active_in(workspaces, settings)
+        .filter(|w| w.info.offers(crate::model::Ability::Search))
+    else {
         search.open = false;
         return;
     };

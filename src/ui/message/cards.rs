@@ -435,6 +435,7 @@ pub(super) fn blocks_view(
 ) {
     let palette = row.palette;
     let team = &row.workspace.info.team_id;
+    let cards = row.workspace.info.offers(crate::model::Ability::Cards);
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
         for block in blocks {
@@ -455,6 +456,11 @@ pub(super) fn blocks_view(
                     // A picture's width; a menu, wider, takes what its
                     // label needs, up to a third of the card.
                     const SIDE: f32 = 72.0;
+                    // An app's controls only where the service has them;
+                    // a picture shows anywhere.
+                    let accessory = accessory
+                        .as_ref()
+                        .filter(|a| cards || matches!(a, Accessory::Image { .. }));
                     let width = ui.available_width();
                     ui.horizontal_top(|ui| {
                         let side = match accessory {
@@ -587,6 +593,8 @@ pub(super) fn blocks_view(
                         });
                     }
                 }
+                // Without cards there is nothing to press here.
+                KitBlock::Actions(_) if !cards => {}
                 KitBlock::Actions(elements) => {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;

@@ -7,7 +7,7 @@ use egui::{CornerRadius, Margin, RichText, Sense, Stroke, Vec2};
 use crate::app::{App, WorkspaceState};
 use crate::convos::{Action as Convos, ChannelData, Details, Field, Loaded, Tab};
 use crate::i18n::{t, tf};
-use crate::model::{Action, Conversation, ConversationKind};
+use crate::model::{Ability, Action, Conversation, ConversationKind, Workspace};
 use crate::scopes::Feature;
 use crate::theme::{self, Icon, Palette};
 
@@ -39,6 +39,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         convos.details = None;
         return;
     };
+    // A tab the workspace's service has no use for opens as About.
+    if !shown(&workspace.info, details.tab) {
+        details.tab = Tab::About;
+    }
     let team = workspace.info.team_id.clone();
     let empty = ChannelData::default();
     let data = convos
@@ -59,7 +63,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 Stroke::new(1.0, palette.outline),
             );
             header(ui, &palette, workspace, conversation, actions);
-            tabs(ui, &palette, details, conversation, actions);
+            tabs(
+                ui,
+                &palette,
+                &workspace.info,
+                details,
+                conversation,
+                actions,
+            );
             egui::Frame::new()
                 .inner_margin(Margin::symmetric(16, 10))
                 .show(ui, |ui| match details.tab {
@@ -134,9 +145,20 @@ fn header(
         });
 }
 
+/// Whether the details panel shows `tab` for `workspace`: pins and
+/// bookmarks only where its service has them.
+fn shown(workspace: &Workspace, tab: Tab) -> bool {
+    match tab {
+        Tab::Pins => workspace.offers(Ability::Pins),
+        Tab::Bookmarks => workspace.offers(Ability::Bookmarks),
+        Tab::About | Tab::Members | Tab::Files => true,
+    }
+}
+
 fn tabs(
     ui: &mut egui::Ui,
     palette: &Palette,
+    workspace: &Workspace,
     details: &Details,
     conversation: &Conversation,
     actions: &mut Vec<Action>,
@@ -161,6 +183,9 @@ fn tabs(
                     (Tab::Bookmarks, t("Bookmarks").into_owned()),
                     (Tab::Files, t("Files").into_owned()),
                 ] {
+                    if !shown(workspace, tab) {
+                        continue;
+                    }
                     let text = RichText::new(label).font(theme::medium(13.5)).color(
                         if details.tab == tab {
                             palette.text
@@ -210,6 +235,7 @@ fn about(
                         field,
                         label: &label,
                         text,
+                        editable: workspace.info.offers(Ability::Describe),
                     };
                     describable(ui, palette, conversation, details, described, actions);
                     ui.add_space(12.0);
@@ -265,6 +291,8 @@ struct Described<'a> {
     label: &'a str,
     /// What it says now.
     text: &'a str,
+    /// Whether the workspace's service lets it be changed here.
+    editable: bool,
 }
 
 /// A topic or description, with "Edit" to change it in place.
@@ -276,11 +304,17 @@ fn describable(
     described: Described<'_>,
     actions: &mut Vec<Action>,
 ) {
-    let Described { field, label, text } = described;
+    let Described {
+        field,
+        label,
+        text,
+        editable,
+    } = described;
     ui.horizontal(|ui| {
         super::section_label(ui, palette, label);
         let editing = details.editing.as_ref().is_some_and(|e| e.field == field);
-        if !editing
+        if editable
+            && !editing
             && ui
                 .link(RichText::new(t("Edit")).font(theme::regular(12.5)))
                 .clicked()
@@ -488,7 +522,8 @@ fn files(
         .show_rows(ui, ROW + 4.0, files.len(), |ui, range| {
             for shared in &files[range] {
                 let file = &shared.file;
-                let deletable = file.deletable_by(&workspace.info.user_id);
+                let deletable = file.deletable_by(&workspace.info.user_id)
+                    && workspace.info.offers(Ability::Files);
                 let (rect, row) = ui.allocate_exact_size(
                     Vec2::new(ui.available_width(), ROW + 4.0),
                     Sense::click(),

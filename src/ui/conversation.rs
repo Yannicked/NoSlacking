@@ -9,7 +9,7 @@ use super::rows;
 use crate::app::App;
 use crate::backend::Socket;
 use crate::i18n::{t, tf};
-use crate::model::{Action, ConversationKind, Ts};
+use crate::model::{Ability, Action, ConversationKind, Ts};
 use crate::theme::{self, Icon};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -31,7 +31,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 empty(ui, app, &text);
                 return;
             };
-            composer::drop_target(ui, &palette, None, true, &mut app.actions);
+            if app
+                .active_workspace()
+                .is_some_and(|w| w.info.offers(Ability::Files))
+            {
+                composer::drop_target(ui, &palette, None, true, &mut app.actions);
+            }
             header(app, ui, &channel);
             footer(app, ui, &team, &channel);
             messages(app, ui, &team, &channel);
@@ -66,6 +71,8 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
     let Some(conversation) = workspace.conversation(channel) else {
         return;
     };
+    // What this workspace's service can do: the rest stays out of the header.
+    let offers = |ability| workspace.info.offers(ability);
     let popped_out = popouts
         .iter()
         .any(|p| p.team == workspace.info.team_id && p.channel == conversation.id);
@@ -139,7 +146,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                     && let Some(user) = &conversation.user
                 {
                     actions.push(Action::OpenProfile(user.clone()));
-                } else if name.clicked() {
+                } else if name.clicked() && offers(Ability::Details) {
                     actions.push(super::browse::details(&conversation.id, crate::convos::Tab::About));
                 }
                 if !conversation.topic.is_empty() {
@@ -156,7 +163,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                 }
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     let tip = tf("Search ({shortcut})", &[("shortcut", &super::keys::command("F"))]);
-                    if theme::icon_button(ui, &palette, Icon::Search, 17.0, &tip).clicked() {
+                    if offers(Ability::Search) && theme::icon_button(ui, &palette, Icon::Search, 17.0, &tip).clicked() {
                         actions.push(Action::OpenSearch);
                     }
                     if !popped_out
@@ -165,14 +172,19 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                         actions.push(Action::PopOut(conversation.id.clone()));
                     }
                     if conversation.kind != ConversationKind::Direct
+                        && offers(Ability::Details)
                         && theme::icon_button(ui, &palette, Icon::Info, 17.0, &t("Details")).clicked()
                     {
                         actions.push(super::browse::details(&conversation.id, crate::convos::Tab::About));
                     }
-                    if theme::icon_button(ui, &palette, Icon::Bookmark, 16.0, &t("Bookmarks")).clicked() {
+                    if offers(Ability::Bookmarks)
+                        && theme::icon_button(ui, &palette, Icon::Bookmark, 16.0, &t("Bookmarks")).clicked()
+                    {
                         actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Bookmarks));
                     }
-                    if theme::icon_button(ui, &palette, Icon::Pin, 16.0, &t("Pinned messages")).clicked() {
+                    if offers(Ability::Pins)
+                        && theme::icon_button(ui, &palette, Icon::Pin, 16.0, &t("Pinned messages")).clicked()
+                    {
                         actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Pins));
                     }
                     match socket {
@@ -214,9 +226,12 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                                 .sense(egui::Sense::click()),
                             )
                             .on_hover_cursor(egui::CursorIcon::PointingHand);
-                        if count.clicked() {
+                        if count.clicked() && offers(Ability::Details) {
                             actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Members));
                         }
+                    }
+                    if !offers(Ability::Huddles) {
+                        return;
                     }
                     #[cfg(feature = "huddle-audio")]
                     super::people::huddle_button(

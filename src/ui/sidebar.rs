@@ -4,7 +4,7 @@ use egui::{CornerRadius, Margin, RichText, Sense, Stroke, Vec2};
 
 use crate::app::{App, Page, WorkspaceState};
 use crate::i18n::{t, tf, tn};
-use crate::model::{Action, Conversation, ConversationKind, SectionKind, SidebarSection};
+use crate::model::{Ability, Action, Conversation, ConversationKind, SectionKind, SidebarSection};
 use crate::sidebar::{self, SidebarEdit};
 use crate::theme::{self, Icon, Palette};
 
@@ -241,8 +241,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         // of pushing them past the edge.
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = HEADER_GAP;
-                            super::browse::header_buttons(ui, &palette, actions);
+                            if workspace.info.offers(Ability::Channels) {
+                                super::browse::header_buttons(ui, &palette, actions);
+                            }
                             if workspace.sections.is_some()
+                                && workspace.info.offers(Ability::Sections)
                                 && theme::icon_button(
                                     ui,
                                     &palette,
@@ -661,13 +664,15 @@ fn section_view(
     if response.clicked() {
         ui.data_mut(|d| d.insert_persisted(open_id(&workspace.info.team_id, key), !open));
     }
-    if let (Some(id), Some(sections)) = (&section.id, workspace.sections.as_deref()) {
+    if let (Some(id), Some(sections)) = (&section.id, workspace.sections.as_deref())
+        && workspace.info.offers(Ability::Sections)
+    {
         section_menu(&response, id, section.kind, sections, actions);
     }
     // A "+" at the end of the Direct messages line, as in Slack's client:
     // the quickest way to a new conversation with someone is where your
     // conversations with people are. It opens the New message dialog.
-    if section.kind == SectionKind::DirectMessages {
+    if section.kind == SectionKind::DirectMessages && workspace.info.offers(Ability::Channels) {
         let plus = egui::Rect::from_center_size(
             egui::pos2(rect.right() - 18.0, rect.center().y),
             Vec2::splat(24.0),
@@ -786,7 +791,11 @@ fn row_menu(
     section: &sidebar::Shown<'_>,
     actions: &mut Vec<Action>,
 ) {
-    let Some(sections) = workspace.sections.as_deref() else {
+    let Some(sections) = workspace
+        .sections
+        .as_deref()
+        .filter(|_| workspace.info.offers(Ability::Sections))
+    else {
         // Without Slack's sections there is nothing to move or star.
         response.context_menu(|ui| {
             window_items(ui, conversation, actions);

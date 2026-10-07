@@ -7,7 +7,7 @@ use egui::{CornerRadius, Key, Margin, Modifiers, RichText, Sense, Stroke, Vec2};
 use super::format::{self, Format};
 use crate::app::{Draft, Upload, WorkspaceState};
 use crate::i18n::{t, tf};
-use crate::model::{Action, Ts};
+use crate::model::{Ability, Action, Ts};
 use crate::theme::{self, Icon, Palette};
 
 mod spelling;
@@ -249,6 +249,10 @@ fn suggestions(workspace: &WorkspaceState, word: &str) -> Vec<Suggestion> {
 
 fn suggest(people: &People, workspace: &WorkspaceState, word: &str) -> Vec<Suggestion> {
     if let Some(typed) = word.strip_prefix('/') {
+        // Where slash commands are not offered, "/" is only a character.
+        if !workspace.info.offers(Ability::SlashCommands) {
+            return Vec::new();
+        }
         return crate::slash::matching(typed)
             .map(Suggestion::Command)
             .collect();
@@ -411,6 +415,8 @@ pub fn show(
     let mut accept = None;
     let mut send = false;
     let mut format = None;
+    let offers = |ability| composer.workspace.info.offers(ability);
+    let files = offers(Ability::Files);
     if focused {
         ui.input_mut(|input| {
             format = format_shortcut(input);
@@ -424,7 +430,7 @@ pub fn show(
                         if modifiers.command
                 )
             });
-            if pasted {
+            if pasted && files {
                 actions.push(Action::PasteImage {
                     thread: composer.thread.clone(),
                 });
@@ -435,6 +441,9 @@ pub fn show(
                 let egui::Event::Paste(text) = event else {
                     return true;
                 };
+                if !files {
+                    return true;
+                }
                 match crate::paste::pasted_files(text) {
                     Some(paths) => {
                         for path in paths {
@@ -481,6 +490,7 @@ pub fn show(
             }
             if draft.text.is_empty()
                 && composer.thread.is_none()
+                && offers(Ability::Edit)
                 && take(input, Key::ArrowUp, Modifiers::NONE)
             {
                 actions.push(Action::EditLast);
@@ -615,7 +625,9 @@ pub fn show(
         });
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            if theme::icon_button(ui, palette, Icon::Paperclip, 17.0, &t("Upload a file")).clicked()
+            if files
+                && theme::icon_button(ui, palette, Icon::Paperclip, 17.0, &t("Upload a file"))
+                    .clicked()
             {
                 actions.push(Action::PickUpload {
                     thread: composer.thread.clone(),
@@ -725,16 +737,19 @@ pub fn show(
                     send = true;
                 }
                 // Sending later, from a menu beside the button.
-                let later = theme::icon_button(ui, palette, Icon::Clock, 15.0, &t("Send later"));
-                egui::Popup::menu(&later).show(|ui| {
-                    super::views::send_later_menu(
-                        ui,
-                        palette,
-                        ready,
-                        composer.thread.as_ref(),
-                        actions,
-                    );
-                });
+                if offers(Ability::Scheduled) {
+                    let later =
+                        theme::icon_button(ui, palette, Icon::Clock, 15.0, &t("Send later"));
+                    egui::Popup::menu(&later).show(|ui| {
+                        super::views::send_later_menu(
+                            ui,
+                            palette,
+                            ready,
+                            composer.thread.as_ref(),
+                            actions,
+                        );
+                    });
+                }
             });
         });
     });
@@ -1355,6 +1370,14 @@ mod tests {
         assert_eq!(labels(&suggestions(&w, "/st")), ["/status"]);
         assert_eq!(suggestions(&w, "/").len(), crate::slash::KNOWN.len());
         assert!(suggestions(&w, "/zz").is_empty());
+    }
+
+    #[test]
+    fn a_teams_workspace_suggests_no_slash_commands() {
+        let mut w = workspace();
+        w.info.service = crate::model::Service::Teams;
+        assert!(suggestions(&w, "/").is_empty());
+        assert!(suggestions(&w, "/st").is_empty());
     }
 
     #[test]
