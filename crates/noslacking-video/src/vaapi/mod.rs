@@ -3,9 +3,13 @@
 //! others, intel-media-driver for Intel). Decoding goes through libva's
 //! stateless interface: [`crate::h264`] works out what each picture
 //! needs; this fills in libva's parameter buffers, decodes into a surface
-//! and reads the picture back as I420. Encoding is [`encoder`]'s.
+//! and reads the picture back as I420. Encoding is [`encoder`]'s; a
+//! shared screen's frames reach it through [`share`] (dma-bufs imported,
+//! RGB converted by video processing).
 
 pub mod encoder;
+pub mod share;
+pub mod synthetic;
 #[allow(unsafe_code)]
 pub mod va;
 
@@ -145,6 +149,17 @@ impl Backend for Vaapi {
         let encoder =
             encoder::VaapiEncoder::new(&self.display, support, (width, height), fps, bitrate)?;
         Ok(Box::new(encoder))
+    }
+
+    fn share_gpu(&self) -> Option<crate::share::GpuOpener> {
+        self.encode?;
+        Some(std::sync::Arc::new(|| match share::GpuShare::open() {
+            Ok(gpu) => Some(Box::new(gpu) as Box<dyn crate::share::Gpu>),
+            Err(why) => {
+                eprintln!("noslacking-video: share: no GPU encoder ({why})");
+                None
+            }
+        }))
     }
 
     fn open_decoder(

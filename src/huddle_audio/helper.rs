@@ -723,7 +723,17 @@ pub(crate) mod pretend {
                     let mut input = std::io::BufReader::new(from_app);
                     let mut output = BufWriter::new(to_app);
                     let mut backend = noslacking_video::backend::Nothing::new("none: a test");
-                    let _ = noslacking_video::server::serve(&mut input, &mut output, &mut backend);
+                    // Only the test screen, and a few pretend sources:
+                    // no test captures a real one.
+                    let mut screens = noslacking_video::capture::Pretend {
+                        sources: pretend::sources(),
+                    };
+                    let _ = noslacking_video::server::serve(
+                        &mut input,
+                        &mut output,
+                        &mut backend,
+                        &mut screens,
+                    );
                 })?;
             Ok(Link {
                 input: Box::new(to_helper),
@@ -731,6 +741,23 @@ pub(crate) mod pretend {
                 stop: Box::new(|| {}),
             })
         }
+    }
+
+    /// The screens and windows the helper on a thread offers to share,
+    /// all of them the test screen.
+    pub fn sources() -> Vec<ipc::Source> {
+        vec![
+            ipc::Source {
+                id: "pretend:1".into(),
+                name: "A pretend screen".into(),
+                kind: ipc::SourceKind::Screen,
+            },
+            ipc::Source {
+                id: "pretend:2".into(),
+                name: "A pretend window".into(),
+                kind: ipc::SourceKind::Window,
+            },
+        ]
     }
 
     /// What the pretend helper does with a request.

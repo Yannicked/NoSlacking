@@ -10,7 +10,8 @@
 //! other systems, and where VA-API has no H.264 decoder, it reports no
 //! hardware and decodes everything in software. It also encodes the
 //! app's camera on the GPU when it can (the app encodes in software
-//! itself otherwise).
+//! itself otherwise), and captures and encodes the screen the user
+//! shares ([`capture`], [`share`]): the app gets only the H.264 to send.
 //!
 //! Why a separate process: the platform APIs are C, so calling them
 //! takes `unsafe` code the app forbids, and a GPU driver or a decoder
@@ -19,6 +20,7 @@
 //! app restarts a few times and then shows no video without.
 
 pub mod backend;
+pub mod capture;
 pub mod fake;
 #[cfg(target_os = "linux")]
 pub mod h264;
@@ -27,8 +29,10 @@ pub mod nal;
 #[allow(unsafe_code)]
 pub mod pipe;
 pub mod server;
+pub mod share;
 pub mod shrink;
 pub mod software;
+pub mod software_encoder;
 #[cfg(target_os = "linux")]
 pub mod vaapi;
 

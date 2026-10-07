@@ -3793,14 +3793,21 @@ dependencies = [
 name = "noslacking-video"
 version = "0.1.0"
 dependencies = [
+ "ashpd",
  "cros-codecs",
+ "futures-lite",
  "libc",
  "libloading",
  "noslacking-video-ipc",
+ "objc2-core-graphics",
+ "pipewire",
  "rusty_h264-common",
  "rusty_h264-decoder",
  "rusty_h264-encoder",
  "sha2",
+ "x11rb",
+ "xcap",
+ "yuv",
 ]
 
 [[package]]

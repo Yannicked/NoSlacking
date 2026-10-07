@@ -19,6 +19,7 @@ use std::rc::Rc;
 use libloading::Library;
 
 pub mod enc;
+pub mod prime;
 
 /// `VAStatus`: 0 is success.
 type Status = c_int;
@@ -41,6 +42,10 @@ pub const ENTRYPOINT_VIDEO_PROC: i32 = 10;
 const PROC_COLOR_STANDARD_BT601: u32 = 1;
 /// `VA_SOURCE_RANGE_REDUCED`: studio range.
 const SOURCE_RANGE_REDUCED: u8 = 1;
+/// `VA_SOURCE_RANGE_FULL`: what a screen's RGB is.
+const SOURCE_RANGE_FULL: u8 = 2;
+/// `VAProcColorStandardSRGB`: a screen's RGB.
+const PROC_COLOR_STANDARD_SRGB: u32 = 8;
 /// `VA_FILTER_SCALING_DEFAULT`.
 const FILTER_SCALING_DEFAULT: u32 = 0;
 /// `VAConfigAttribRTFormat`.
@@ -174,15 +179,33 @@ impl ProcPipelineParameterBuffer {
     /// `region` of `surface` scaled into all of the target (`output`),
     /// BT.601 studio range in and out, so nothing but the size changes.
     fn scale(surface: u32, region: &Rectangle, output: &Rectangle) -> Self {
+        Self::convert(surface, region, output, false)
+    }
+
+    /// `region` of `surface` scaled into `output` of the target, which is
+    /// BT.601 studio range; the source is too, or full-range sRGB if
+    /// `rgb` (a shared screen), which the GPU converts.
+    fn convert(surface: u32, region: &Rectangle, output: &Rectangle, rgb: bool) -> Self {
         let colour = ProcColorProperties {
             color_range: SOURCE_RANGE_REDUCED,
             ..ProcColorProperties::default()
+        };
+        let (input_standard, input_colour) = if rgb {
+            (
+                PROC_COLOR_STANDARD_SRGB,
+                ProcColorProperties {
+                    color_range: SOURCE_RANGE_FULL,
+                    ..ProcColorProperties::default()
+                },
+            )
+        } else {
+            (PROC_COLOR_STANDARD_BT601, colour)
         };
         Self {
             surface,
             pad0: 0,
             surface_region: region,
-            surface_color_standard: PROC_COLOR_STANDARD_BT601,
+            surface_color_standard: input_standard,
             pad1: 0,
             output_region: output,
             output_background_color: 0xff00_0000,
@@ -205,7 +228,7 @@ impl ProcPipelineParameterBuffer {
             num_additional_outputs: 0,
             input_surface_flag: 0,
             output_surface_flag: 0,
-            input_color_properties: colour,
+            input_color_properties: input_colour,
             output_color_properties: colour,
             processing_mode: 0,
             output_hdr_metadata: std::ptr::null(),
@@ -662,6 +685,10 @@ struct Functions {
     destroy_image: unsafe extern "C" fn(RawDisplay, u32) -> Status,
     map_buffer: unsafe extern "C" fn(RawDisplay, u32, *mut *mut c_void) -> Status,
     unmap_buffer: unsafe extern "C" fn(RawDisplay, u32) -> Status,
+    /// `vaExportSurfaceHandle` (libva 2.1 and on; only the benchmark's
+    /// pretend screen needs it, so an older libva still loads).
+    export_surface_handle:
+        Option<unsafe extern "C" fn(RawDisplay, u32, u32, u32, *mut c_void) -> Status>,
 }
 
 /// The loaded libraries and their functions. The function pointers stay
@@ -720,6 +747,11 @@ impl Libva {
             destroy_image: symbol!(libva, "vaDestroyImage"),
             map_buffer: symbol!(libva, "vaMapBuffer"),
             unmap_buffer: symbol!(libva, "vaUnmapBuffer"),
+            // SAFETY: as `symbol!`: vaExportSurfaceHandle's signature
+            // from va.h, the pointer kept next to its library.
+            export_surface_handle: unsafe { libva.get(b"vaExportSurfaceHandle\0") }
+                .ok()
+                .map(|symbol| *symbol),
         };
         Ok(Self {
             functions,
@@ -1235,6 +1267,38 @@ impl Scaler {
             &[(BufferType::ProcPipelineParameter, parameters.bytes())],
         )?;
         Ok(target)
+    }
+
+    /// Scales and converts all of `source` (`source_size`, packed RGB if
+    /// `rgb`, else NV12) into the top left `size` of `target`, an NV12
+    /// surface at least that large, and waits until it is done.
+    pub fn blit(
+        &mut self,
+        source: u32,
+        source_size: (u32, u32),
+        rgb: bool,
+        target: u32,
+        size: (u32, u32),
+    ) -> Result<(), String> {
+        let side = |n: u32| u16::try_from(n).map_err(|e| e.to_string());
+        let from = Rectangle {
+            x: 0,
+            y: 0,
+            width: side(source_size.0)?,
+            height: side(source_size.1)?,
+        };
+        let to = Rectangle {
+            x: 0,
+            y: 0,
+            width: side(size.0)?,
+            height: side(size.1)?,
+        };
+        // As in `scale`: the rectangles outlive the render.
+        let parameters = ProcPipelineParameterBuffer::convert(source, &from, &to, rgb);
+        self.context.render(
+            target,
+            &[(BufferType::ProcPipelineParameter, parameters.bytes())],
+        )
     }
 }
 
