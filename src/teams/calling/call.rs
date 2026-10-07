@@ -49,7 +49,8 @@ pub enum CallEvent {
     },
 }
 
-/// Calls `callee` (an MRI, `8:live:…` or `8:orgid:…`) with `audio`, and
+/// Calls `callee` (an MRI, `8:live:…` or `8:orgid:…`, or the id the
+/// interface knows a person by, `live:…` or an object id) with `audio`, and
 /// runs the call until it ends. Every step is told through `tell`;
 /// `control` steers it. Needs the account's live connection up: the
 /// call's callbacks name it.
@@ -60,6 +61,8 @@ pub async fn outgoing(
     control: mpsc::UnboundedReceiver<Control>,
     tell: impl Fn(CallEvent) + Send,
 ) {
+    // Teams rings only a full MRI; the interface's ids drop the `8:`.
+    let callee = crate::teams::client::user_mri(&callee);
     let mut counts = media::Counts::default();
     let result = run(&client, &callee, audio, control, &tell, &mut counts).await;
     if let Err(error) = &result {
