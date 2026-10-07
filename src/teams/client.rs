@@ -1180,8 +1180,25 @@ impl TeamsClient {
                 .await
                 .map_err(|e| Failure::Network(e.without_url().to_string()))?
         };
+        // What went wrong with a picture, by its kind only: its address
+        // names people.
+        let kind = if url.contains("/profilepicturev2") {
+            "a person's picture"
+        } else {
+            "a picture"
+        };
         if !resp.status().is_success() {
+            log::info!("Teams refused {kind}: HTTP {}", resp.status().as_u16());
             return Err(Failure::Http(resp.status().as_u16()));
+        }
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        if !content_type.starts_with("image/") {
+            log::info!("Teams sent {kind} that is not one: {content_type:?}");
         }
         if resp.content_length().is_some_and(|len| len > max as u64) {
             return Err(Failure::TooLarge);

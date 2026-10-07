@@ -702,6 +702,15 @@ async fn name_yourself(client: &TeamsClient, mut workspace: Workspace, sink: &Si
             // Messages name you by your MRI (`live:yourname`), the
             // sign-in by your `live:.cid.…`: you are both, and your
             // picture is asked by the MRI, as the web client asks it.
+            log::info!(
+                "your Teams profile: {} photo address; messages name you {} the sign-in",
+                if me.image_uri.is_some() { "a" } else { "no" },
+                if me.id == workspace.user_id {
+                    "as"
+                } else {
+                    "otherwise than"
+                },
+            );
             client.remember_photos(std::slice::from_ref(&me));
             let mut you = translate_user(&me);
             if let Some(base) = client.credentials().middle_tier_url() {
