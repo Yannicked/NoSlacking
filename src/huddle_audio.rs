@@ -29,7 +29,9 @@
 //! stream (Stage 0). With the `huddle-video` feature (Stage 1) the app
 //! watches screen shares: only the share the call window shows is
 //! received, `decode` turns its H.264 into pictures and `screen` runs
-//! that on a thread of its own, keeping only the newest picture.
+//! that on a thread of its own, keeping only the newest picture. Stage 2
+//! adds camera tiles: `cameras` chooses whose and at which layer,
+//! `gallery` decodes them on one more thread, the newest per tile.
 //!
 //! Secrets: the join token and the TURN password never reach the log; the
 //! types holding them print `<redacted>`. Chime's URLs are logged by host
@@ -38,11 +40,14 @@
 #![warn(missing_docs)]
 
 pub mod bitstream;
+pub mod cameras;
 pub mod chime;
 #[cfg(feature = "huddle-video")]
 pub mod decode;
 pub mod dtls;
 pub mod encoder;
+#[cfg(feature = "huddle-video")]
+pub mod gallery;
 pub mod jitter;
 pub mod join;
 pub mod media;
