@@ -135,6 +135,30 @@ struct Call {
     accepted: bool,
     /// Whether the media is up.
     connected: bool,
+    /// Where and how often to say the call leg is still here, once
+    /// picked up.
+    keep_alive: Option<KeepAlive>,
+}
+
+/// The call leg's keep-alive: its link, and when it is next due.
+struct KeepAlive {
+    call_leg: String,
+    every: Duration,
+    next: tokio::time::Instant,
+}
+
+/// How long before Teams' keep-alive interval runs out to send one: at
+/// nine tenths of it, as the web client does.
+fn keep_alive_every(interval_secs: u64) -> Duration {
+    Duration::from_secs(interval_secs.max(1)) * 9 / 10
+}
+
+/// Waits until the keep-alive is due; never while there is none.
+async fn keep_alive_due(keep_alive: Option<&KeepAlive>) {
+    match keep_alive {
+        Some(keep_alive) => tokio::time::sleep_until(keep_alive.next).await,
+        None => std::future::pending().await,
+    }
 }
 
 impl Call {
@@ -144,6 +168,7 @@ impl Call {
             conversation: None,
             accepted: false,
             connected: false,
+            keep_alive: None,
         }
     }
 
@@ -200,6 +225,7 @@ impl Call {
                         return Ok(());
                     }
                 },
+                () = keep_alive_due(self.keep_alive.as_ref()) => self.send_keep_alive().await,
                 () = &mut ringing, if !self.accepted => {
                     log::info!("Teams call: nobody answered");
                     session.stop();
@@ -226,6 +252,22 @@ impl Call {
             Push::Acceptance(acceptance) => {
                 log::info!("Teams call: picked up");
                 self.accepted = true;
+                if let Some(url) = &acceptance.links.acknowledgement
+                    && let Err(error) = self.api.acknowledge_acceptance(url).await
+                {
+                    log::warn!("Teams call: the pickup was not acknowledged: {error:?}");
+                }
+                if let (Some(call_leg), Some(interval)) = (
+                    acceptance.links.call_leg.clone(),
+                    acceptance.call_keep_alive_interval,
+                ) {
+                    let every = keep_alive_every(interval);
+                    self.keep_alive = Some(KeepAlive {
+                        call_leg,
+                        every,
+                        next: tokio::time::Instant::now() + every,
+                    });
+                }
                 if let Some(content) = &acceptance.media_content {
                     apply(session, &content.blob);
                 }
@@ -278,6 +320,18 @@ impl Call {
             Push::Other(name) => log::debug!("Teams call: push {name} not acted on"),
         }
         None
+    }
+
+    /// Says the call leg is still here, and when to say it next.
+    async fn send_keep_alive(&mut self) {
+        let Some(keep_alive) = self.keep_alive.as_mut() else {
+            return;
+        };
+        keep_alive.next = tokio::time::Instant::now() + keep_alive.every;
+        let call_leg = keep_alive.call_leg.clone();
+        if let Err(error) = self.api.keep_alive(&call_leg).await {
+            log::warn!("Teams call: keep-alive refused: {error:?}");
+        }
     }
 
     async fn mute(&self, session: &MediaSession, muted: bool) {
@@ -338,4 +392,15 @@ fn media_failure(failure: media::Failure) -> Failure {
         media::Stage::Connect => "the media did not connect".into(),
         media::Stage::Media => "the connection broke".into(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_keep_alive_goes_a_little_before_it_runs_out() {
+        assert_eq!(keep_alive_every(2700), Duration::from_secs(2430));
+        assert!(keep_alive_every(0) > Duration::ZERO);
+    }
 }

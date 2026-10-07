@@ -211,6 +211,29 @@ pub fn renegotiation_answer(
     }
 }
 
+/// The callbacks the web client hands over when it acknowledges a
+/// pickup: where the far end may renegotiate, transfer and so on.
+const ACKNOWLEDGED_EVENTS: &[&str] = &[
+    "mediaRenegotiation",
+    "transfer",
+    "replacement",
+    "balanceUpdate",
+    "retargetCompletion",
+    "controlVideoStreaming",
+    "updateMediaDescriptions",
+];
+
+/// Our acknowledgement of the far end picking up, posted to the
+/// acceptance's `acknowledgement` link. Without it Teams takes the call as
+/// never set up and drops it a while into the talking.
+pub fn acceptance_acknowledgement(callbacks: &Callbacks) -> serde_json::Value {
+    serde_json::json!({
+        "callAcceptanceAcknowledgement": {
+            "links": callbacks.links(Scope::Call, ACKNOWLEDGED_EVENTS),
+        }
+    })
+}
+
 /// Our mute state, numbered `sequence` (C.3).
 pub fn endpoint_state(me: &Participant, sequence: u64, muted: bool) -> UpdateEndpointState {
     UpdateEndpointState {
@@ -383,6 +406,29 @@ impl CallApi {
         )
         .await
         .map(drop)
+    }
+
+    /// Acknowledges the far end picking up, at the acceptance's
+    /// `acknowledgement` link, as the web client does on every pickup.
+    pub async fn acknowledge_acceptance(&self, url: &str) -> Result<(), Failure> {
+        let body = acceptance_acknowledgement(&self.callbacks);
+        self.send(
+            reqwest::Method::POST,
+            url,
+            Some(body),
+            "acknowledge the pickup",
+        )
+        .await
+        .map(drop)
+    }
+
+    /// Tells Teams the call leg is still here, at its `callLeg` link; due
+    /// a little before each `callKeepAliveInterval` runs out.
+    pub async fn keep_alive(&self, call_leg: &str) -> Result<(), Failure> {
+        let body = serde_json::json!({ "callParticipantUpdate": {} });
+        self.send(reqwest::Method::POST, call_leg, Some(body), "keep the call")
+            .await
+            .map(drop)
     }
 
     /// Says whether we are muted, at the conversation's
@@ -644,6 +690,18 @@ pub async fn relay_servers(client: &TeamsClient) -> RelayServers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pickup_is_acknowledged_with_our_links() {
+        let callbacks = Callbacks::new("https://trouter.example/v4/f/ID1/", "AGENT");
+        let body = acceptance_acknowledgement(&callbacks);
+        let links = &body["callAcceptanceAcknowledgement"]["links"];
+        for event in ACKNOWLEDGED_EVENTS {
+            let link = links[*event].as_str().expect("a link for each event");
+            assert!(link.contains("/callAgent/AGENT/"), "{link}");
+            assert!(link.contains(&format!("/call/{event}")), "{link}");
+        }
+    }
     use crate::teams::calling::links::read_push_path;
 
     const SURL: &str = "https://trouter.example:3443/v4/f/ID1/";

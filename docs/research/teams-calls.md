@@ -352,8 +352,18 @@ second answer; with the direct API (§F) we read the new directions and
 change the media in place. Stage 1 can also ignore the mediaAnswer's SDP
 and start the peer on the acceptance, at the cost of a slower start.
 
-`callKeepAliveInterval: 2700` is in seconds (45 minutes); what keeps the
-leg alive after that was not recorded (§G).
+`callKeepAliveInterval: 2700` is in seconds (45 minutes). The web
+client's code (`scheduleKeepAlives`) POSTs `{"callParticipantUpdate":{}}`
+to `callAcceptance.links.callLeg` every nine tenths of it.
+
+The caller must also acknowledge the pickup: the web client POSTs
+`{"callAcceptanceAcknowledgement":{"links":{…}}}` to
+`callAcceptance.links.acknowledgement` (`_sendCallAcceptanceAcknowledgement`),
+the links being fresh callbacks for `mediaRenegotiation`, `transfer`,
+`replacement`, `balanceUpdate`, `retargetCompletion`,
+`controlVideoStreaming` and `updateMediaDescriptions`. Without it the
+audio flows, but the far end gives up on the call a while in ("couldn't
+complete call" on the phone).
 
 ### A.4 `PUT {conversationController}/updateEndpointMetadata` (files 003, 044)
 
