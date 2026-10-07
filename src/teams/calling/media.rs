@@ -21,7 +21,7 @@
 //! candidates, the fingerprint, and the DTLS role from `a=setup`
 //! ([`dtls_active`]). The far end's SDP names no SSRC that str0m could
 //! use and its RTP carries no `mid` extension, so the far end's audio
-//! SSRC is learnt from its first RTP packet ([`rtp_ssrc`]) and str0m told
+//! SSRC is learnt from its first RTP packet (`rtp_ssrc`) and str0m told
 //! to expect it.
 //!
 //! The DTLS is OpenSSL's, as for huddles ([`crate::huddle_audio::dtls`]):
@@ -108,6 +108,38 @@ pub struct Relay {
     pub username: String,
     /// The TURN password. Secret.
     pub password: String,
+}
+
+impl Relay {
+    /// The relay from what [`super::api::relay_servers`] and
+    /// [`super::api::relay_credentials`] fetch; the credentials' realm
+    /// wins, being the one the server will name. A port of 0 is taken as
+    /// none.
+    pub fn new(
+        servers: &super::api::RelayServers,
+        credentials: super::api::RelayCredentials,
+    ) -> Self {
+        let port = |p: u16| (p != 0).then_some(p);
+        Self {
+            servers: servers
+                .hosts
+                .iter()
+                .map(|host| RelayServer {
+                    host: host.clone(),
+                    udp_port: port(servers.udp_port),
+                    tcp_port: port(servers.tcp_port),
+                    tls_port: port(servers.tls_port),
+                })
+                .collect(),
+            realm: if credentials.realm.is_empty() {
+                servers.realm.clone()
+            } else {
+                credentials.realm
+            },
+            username: credentials.username,
+            password: credentials.password,
+        }
+    }
 }
 
 impl std::fmt::Debug for Relay {
@@ -1873,6 +1905,27 @@ mod tests {
         let shown = format!("{relay:?}");
         assert!(!shown.contains("secret"), "{shown}");
         assert!(shown.contains("rtcmedia"));
+    }
+
+    #[test]
+    fn the_relay_is_built_from_what_the_api_fetches() {
+        let servers = super::super::api::RelayServers::default();
+        let relay = Relay::new(
+            &servers,
+            super::super::api::RelayCredentials {
+                realm: String::new(),
+                username: "u".into(),
+                password: "p".into(),
+                expires: None,
+            },
+        );
+        assert_eq!(relay.servers.len(), servers.hosts.len());
+        assert_eq!(relay.servers[0].udp_port, Some(servers.udp_port));
+        assert_eq!(
+            relay.realm, servers.realm,
+            "the configuration's, when unsaid"
+        );
+        assert_eq!(relay.username, "u");
     }
 
     #[test]
