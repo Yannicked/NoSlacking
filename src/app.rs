@@ -21,6 +21,8 @@ use crate::settings::{Appearance, Settings};
 use crate::theme::{self, Catalog, Palette};
 
 mod audio;
+#[cfg(feature = "huddle-video")]
+mod call;
 mod compose;
 mod desktop;
 mod drafts;
