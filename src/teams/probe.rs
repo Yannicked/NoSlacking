@@ -202,16 +202,31 @@ async fn probe(settings: &std::path::Path) -> Reached {
     hosts.push("https://msgapi.teams.live.com".to_owned());
     let mut reached = Reached::SkypeToken;
     let mut first_chat = None;
+    let mut first_group: Option<(String, Value)> = None;
     for host in &hosts {
         match chats(&http, host, &skype.token).await {
             Ok(list) => {
                 log::info!("chat list: OK at {host}: {} conversations", list.len());
-                for id in list.iter().take(5) {
-                    log::info!("chat list: a conversation of kind {}", id_kind(id));
+                let id_of =
+                    |c: &Value| c.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
+                for chat in list.iter().take(5) {
+                    log::info!(
+                        "chat list: a conversation of kind {}",
+                        id_kind(&id_of(chat))
+                    );
                 }
                 reached = Reached::ChatList;
                 if first_chat.is_none() {
-                    first_chat = list.into_iter().next().map(|id| (host.clone(), id));
+                    first_chat = list.first().map(|c| (host.clone(), id_of(c)));
+                }
+                if first_group.is_none() {
+                    first_group = list
+                        .iter()
+                        .find(|c| {
+                            let id = id_of(c);
+                            id.ends_with("@thread.v2") && !id.starts_with("19:uni01_")
+                        })
+                        .map(|c| (host.clone(), c.clone()));
                 }
             }
             Err(why) => log::warn!("chat list: refused at {host}: {why}"),
@@ -228,6 +243,11 @@ async fn probe(settings: &std::path::Path) -> Reached {
             }
             Err(why) => log::warn!("messages: refused at {host}: {why}"),
         }
+    }
+
+    // 4b. Names for a group chat without a topic.
+    if let Some((host, group)) = &first_group {
+        names(&http, host, group, &skype, &access).await;
     }
 
     // 5. Live updates.
@@ -501,18 +521,134 @@ fn shape(value: &Value) -> String {
     }
 }
 
-async fn chats(http: &reqwest::Client, host: &str, skype: &str) -> Result<Vec<String>, String> {
+async fn chats(http: &reqwest::Client, host: &str, skype: &str) -> Result<Vec<Value>, String> {
     let url = format!("{host}/v1/users/ME/conversations?view=mychats&pageSize=20");
     let body = get_skype(http, &url, skype).await?;
     Ok(body
         .get("conversations")
         .and_then(Value::as_array)
-        .map(|list| {
-            list.iter()
-                .filter_map(|c| c.get("id").and_then(Value::as_str).map(str::to_owned))
-                .collect()
-        })
+        .cloned()
         .unwrap_or_default())
+}
+
+/// Where a group chat's names could come from: the chat list's own entry,
+/// the thread's record, and the people service with each way of signing
+/// the request. Logs shapes and counts, never a name.
+async fn names(
+    http: &reqwest::Client,
+    host: &str,
+    group: &Value,
+    skype: &Skype,
+    access: &[(&str, String)],
+) {
+    log::info!("names: a group chat's list entry: {}", shape(group));
+    let id = group.get("id").and_then(Value::as_str).unwrap_or("");
+    let id = percent_encoding::utf8_percent_encode(id, percent_encoding::NON_ALPHANUMERIC);
+    let url = format!("{host}/v1/threads/{id}?view=msnp24Equivalent");
+    let members: Vec<String> = match get_skype(http, &url, &skype.token).await {
+        Ok(thread) => {
+            log::info!("names: the thread record: {}", shape(&thread));
+            thread
+                .get("members")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        Err(why) => {
+            log::warn!("names: the thread record was refused: {why}");
+            Vec::new()
+        }
+    };
+    log::info!(
+        "names: {} members, of kinds {}",
+        members.len(),
+        members
+            .iter()
+            .map(|m| mri_kind(m))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if members.is_empty() {
+        return;
+    }
+    let Some(middle) = skype.region_gtms.get("middleTier").and_then(Value::as_str) else {
+        log::warn!("names: no middle tier in regionGtms");
+        return;
+    };
+    let url = format!(
+        "{}/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true",
+        middle.trim_end_matches('/')
+    );
+    let access = access.first().map(|(_, t)| t.as_str()).unwrap_or("");
+    for (how, bearer, skype_headers, consumer) in [
+        ("access token", Some(access), false, false),
+        ("access token, consumer headers", Some(access), false, true),
+        (
+            "access and skype tokens, consumer headers",
+            Some(access),
+            true,
+            true,
+        ),
+        ("skype token only, consumer headers", None, true, true),
+        (
+            "skype token as bearer, consumer headers",
+            Some(skype.token.as_str()),
+            false,
+            true,
+        ),
+    ] {
+        let mut request = http.post(&url).json(&members);
+        if let Some(bearer) = bearer {
+            request = request.bearer_auth(bearer);
+        }
+        if skype_headers {
+            request = request
+                .header("X-Skypetoken", &skype.token)
+                .header("Authentication", format!("skypetoken={}", skype.token));
+        }
+        if consumer {
+            request = super::auth::consumer_headers(request);
+        }
+        match request.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                if status.is_success() {
+                    let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                    let named = body
+                        .get("value")
+                        .and_then(Value::as_array)
+                        .map_or(0, |list| {
+                            list.iter()
+                                .filter(|p| {
+                                    p.get("displayName")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|n| !n.trim().is_empty())
+                                })
+                                .count()
+                        });
+                    log::info!(
+                        "names: fetchShortProfile OK with {how}: {named} of {} named; {}",
+                        members.len(),
+                        shape(&body)
+                    );
+                } else {
+                    log::warn!(
+                        "names: fetchShortProfile refused with {how}: HTTP {status} {}",
+                        super::auth::error_code(&text)
+                    );
+                }
+            }
+            Err(error) => log::warn!(
+                "names: fetchShortProfile with {how}: {}",
+                error.without_url()
+            ),
+        }
+    }
 }
 
 async fn messages(
