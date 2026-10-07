@@ -250,6 +250,26 @@ mod tests {
     /// Opus's shortest silence: a 20 ms CELT frame with nothing in it.
     const SILENT_FRAME: [u8; 3] = [0xF8, 0xFF, 0xFE];
 
+    /// A 20 ms CELT frame (found by feeding opus-decoder noise) whose
+    /// band has 16 short blocks: the one that overflowed opus-decoder's
+    /// u8 collapse mask on the device's thread in debug builds.
+    const SIXTEEN_BLOCKS: [u8; 55] = [
+        0xf8, 0x75, 0xd5, 0x48, 0x6a, 0x8c, 0xcf, 0xb8, 0x7d, 0xb1, 0xd2, 0x3b, 0x43, 0x7d, 0x6b,
+        0x6b, 0x17, 0xc1, 0x14, 0xfe, 0x7d, 0xa5, 0xae, 0x93, 0x56, 0x58, 0xc4, 0x69, 0xd1, 0x30,
+        0xda, 0x3f, 0x75, 0xab, 0x8e, 0xab, 0x1c, 0x2c, 0x0e, 0xf2, 0xe7, 0xe0, 0x6b, 0xf5, 0x08,
+        0x84, 0x7d, 0x51, 0x67, 0xf9, 0x16, 0x30, 0x90, 0x1d, 0x29,
+    ];
+
+    #[test]
+    fn a_frame_with_sixteen_short_blocks_decodes() {
+        // Cargo.toml turns opus-decoder's overflow checks off for this;
+        // with them on, this panics in src/celt/vq.rs.
+        let mut decoder = opus_decoder::OpusDecoder::new(CLOCK, 2).expect("a decoder");
+        let mut out = vec![0.0; decoder.max_frame_size_per_channel() * 2];
+        let decoded = decoder.decode_float(&SIXTEEN_BLOCKS, &mut out, false);
+        assert_eq!(decoded.ok(), Some(960));
+    }
+
     #[test]
     fn frames_decode_to_twenty_milliseconds_each() {
         let shared = Arc::new(Shared::default());

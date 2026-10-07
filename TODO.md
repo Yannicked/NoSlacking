@@ -900,6 +900,65 @@ engineering, as for the rest of the session sign-in.
       - Not done: choosing the input device (the system's default for
         now), a level meter, reconnects, a microphone that fails while
         open (it logs and goes quiet; mute and unmute again).
+- [ ] **File upstream: opus-decoder's collapse mask overflows.** A real
+      huddle stopped playing in a debug build: opus-decoder panicked on
+      the sound device's thread. We turn its overflow checks off in
+      `Cargo.toml` (`[profile.dev.package.opus-decoder]`); drop that once
+      a fixed release is out. To file at
+      <https://github.com/TadeuszWolfGang/Rusopus/issues>:
+
+      > **`extract_collapse_mask` overflows its `u8` with 16 short blocks
+      > (attempt to shift left with overflow, celt/vq.rs:118)**
+      >
+      > opus-decoder 0.1.1, `src/celt/vq.rs`:
+      >
+      > ```rust
+      > fn extract_collapse_mask(iy: &[i32], n: usize, b: usize) -> u8 {
+      >     ...
+      >     let mut mask = 0u8;
+      >     for i in 0..b {
+      >         ...
+      >         if nonzero != 0 {
+      >             mask |= 1 << i; // line 118
+      > ```
+      >
+      > `b` can be 16: a transient 20 ms CELT frame has 8 short blocks,
+      > and a negative `tf_change` doubles them once more (the
+      > `time_divide` step before `quant_partition_mono`, undone later by
+      > `post_tf_collapse_mask`). With overflow checks on
+      > (any debug build) `1 << i` panics for `i >= 8`:
+      >
+      > ```
+      > thread 'cpal_alsa_out' panicked at
+      > opus-decoder-0.1.1/src/celt/vq.rs:118:21:
+      > attempt to shift left with overflow
+      > ```
+      >
+      > libopus keeps this mask in an `unsigned` (`celt/vq.c`,
+      > `static unsigned extract_collapse_mask(int *iy, int N, int B)`,
+      > and `alg_unquant` returns `unsigned`); the bits above 8 are folded
+      > down by `quant_band`'s `cm |= cm >> B` after the time-divide
+      > Haar steps, and only the final mask is stored as `unsigned char`.
+      > This crate's `post_tf_collapse_mask` already works on a `u32`, so
+      > the fix is to make `AlgUnquantResult::collapse_mask` and
+      > `extract_collapse_mask` `u32` (the `as u32` at bands.rs:1301 then
+      > goes).
+      >
+      > Reproduce: decode this 55-byte packet with
+      > `OpusDecoder::new(48_000, 2)` and `decode_float(.., false)` in a
+      > debug build:
+      >
+      > ```
+      > f8 75 d5 48 6a 8c cf b8 7d b1 d2 3b 43 7d 6b 6b 17 c1 14 fe 7d
+      > a5 ae 93 56 58 c4 69 d1 30 da 3f 75 ab 8e ab 1c 2c 0e f2 e7 e0
+      > 6b f5 08 84 7d 51 67 f9 16 30 90 1d 29
+      > ```
+      >
+      > About 1.4% of random 20 ms CELT packets hit it. In release builds
+      > the shift wraps to bit `i % 8`; after the fold that gives the same
+      > final mask, so the output matched a `u32` build bit for bit over
+      > 20,000 random packets. The panic is the only harm, but it takes
+      > down the audio thread of whatever is decoding.
 
 ## Research notes
 
