@@ -521,6 +521,9 @@ pub async fn open(client: TeamsClient, team: String, me: String, users: Vec<Stri
 /// from the middle tier by the person's MRI, fetched with the workspace's
 /// own sign-in (see [`crate::images`]).
 fn people_event(client: &TeamsClient, team: &str, mut users: Vec<crate::model::User>) -> Event {
+    // Someone whose profile had no name would be named by their id, over
+    // a name their messages gave: leave them as they were.
+    users.retain(|user| user.display_name != user.id);
     if let Some(base) = client.credentials().middle_tier_url() {
         for user in users.iter_mut().filter(|u| u.avatar.is_none()) {
             user.avatar = Some(crate::images::authed(team, &avatar_url(base, &user.id)));

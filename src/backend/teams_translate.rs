@@ -525,7 +525,14 @@ pub fn translate_message(msg: &types::Message) -> Option<Message> {
         (None, None)
     } else {
         let user = msg.from.as_deref().and_then(clean_teams_user_id);
-        let username = msg.im_display_name.clone().filter(|n| !n.trim().is_empty());
+        // `username` is Slack's name for an app posting under a name of
+        // its own, which the interface marks APP. A person is named
+        // through the people the history reports instead; the name the
+        // message carries stands in only when there is no one to name.
+        let username = match user {
+            Some(_) => None,
+            None => msg.im_display_name.clone().filter(|n| !n.trim().is_empty()),
+        };
         (user, username)
     };
 
@@ -588,7 +595,8 @@ pub fn translate_user(user: &types::UserDetails) -> User {
         real_name: display_name.clone(),
         display_name,
         avatar: None,
-        is_bot: false,
+        // Bots are `28:` MRIs; people `8:`.
+        is_bot: user.id.starts_with("28:"),
         deleted: false,
         title: String::new(),
         status_text: String::new(),
@@ -742,7 +750,8 @@ mod tests {
 
         let msg = translate_message(&teams_msg).expect("a message");
         assert_eq!(msg.user.as_deref(), Some("alice-id"));
-        assert_eq!(msg.username.as_deref(), Some("Alice"));
+        // A person is named through the people list, not as an app is.
+        assert_eq!(msg.username, None);
         assert_eq!(msg.text, "Hello team");
         assert!(msg.rich_text().is_some());
         assert_eq!(msg.reactions.len(), 1);
