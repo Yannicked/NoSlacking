@@ -121,6 +121,35 @@ fn media_host(url: &str) -> Option<String> {
     (media || avatar).then_some(host)
 }
 
+/// Logs how a lookup went: how many were asked about and named, and the
+/// kinds (not the ids) of those left unnamed, which say which service
+/// does not know them.
+fn log_lookup(ids: &[String], found: &[UserDetails]) {
+    let named = |id: &String| {
+        found.iter().any(|f| {
+            &f.id == id
+                && f.display_name
+                    .as_deref()
+                    .is_some_and(|n| !n.trim().is_empty())
+        })
+    };
+    let mut unnamed: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for id in ids.iter().filter(|id| !named(id)) {
+        let mri = user_mri(id);
+        let kind = match mri.split(':').collect::<Vec<_>>().as_slice() {
+            ["8", kind, ..] => format!("8:{kind}"),
+            [kind, ..] => (*kind).to_owned(),
+            [] => "?".to_owned(),
+        };
+        *unnamed.entry(kind).or_default() += 1;
+    }
+    log::info!(
+        "Teams people lookup: {} asked, {} named; unnamed: {unnamed:?}",
+        ids.len(),
+        ids.len() - unnamed.values().sum::<usize>()
+    );
+}
+
 /// Whether a picture's host turned its sign-in down, so another way of
 /// signing in is worth a try.
 fn is_refusal(status: reqwest::StatusCode) -> bool {
@@ -813,6 +842,14 @@ impl TeamsClient {
     /// that fails. People neither knows, such as guests from elsewhere,
     /// are left out.
     pub async fn get_users(&self, ids: &[String]) -> Result<Vec<UserDetails>, Failure> {
+        let found = self.look_people_up(ids).await;
+        if let Ok(found) = &found {
+            log_lookup(ids, found);
+        }
+        found
+    }
+
+    async fn look_people_up(&self, ids: &[String]) -> Result<Vec<UserDetails>, Failure> {
         if self.credentials().account == Account::Personal {
             return self.personal_profiles(ids).await;
         }
