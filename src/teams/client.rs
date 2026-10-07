@@ -322,6 +322,8 @@ pub struct TeamsClient {
     reporting: Arc<std::sync::atomic::AtomicBool>,
     /// Your name, as messages sent from here carry it, once known.
     own_name: Arc<RwLock<Option<String>>>,
+    /// The people already looked up (see [`Self::not_yet_asked`]).
+    asked: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// The cookies that let pictures be fetched (avatars; pictures in
     /// messages where the token header is not taken), by the host that
     /// set them.
@@ -347,6 +349,7 @@ impl TeamsClient {
             on_refresh: None,
             reporting: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             own_name: Arc::new(RwLock::new(None)),
+            asked: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             media_cookies: Arc::new(RwLock::new(std::collections::HashMap::new())),
             cookie_asked: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -361,6 +364,18 @@ impl TeamsClient {
     {
         self.on_refresh = Some(Arc::new(move |result| Box::pin(save(result))));
         self
+    }
+
+    /// Of `ids`, those not looked up before, now marked as asked: the
+    /// people met in reactions and system lines are looked up once each,
+    /// however often they appear.
+    pub fn not_yet_asked(&self, ids: impl IntoIterator<Item = String>) -> Vec<String> {
+        let Ok(mut asked) = self.asked.lock() else {
+            return Vec::new();
+        };
+        ids.into_iter()
+            .filter(|id| asked.insert(id.clone()))
+            .collect()
     }
 
     /// Your name, once known (see [`Self::set_own_name`]).
@@ -1310,10 +1325,20 @@ impl TeamsClient {
             .trim_end_matches('/')
             .to_owned();
         let skype = creds.skype_token.unwrap_or_default();
-        let (work, personal): (Vec<String>, Vec<String>) = ids
+        // Each kind to the service that takes it: one MRI it does not
+        // take fails its whole request ("No valid Mris found"). Meeting
+        // guests and bots have no profile here.
+        let mris: Vec<String> = ids.iter().map(|id| user_mri(id)).collect();
+        let personal: Vec<String> = mris
             .iter()
-            .map(|id| user_mri(id))
-            .partition(|mri| mri.starts_with("8:orgid:"));
+            .filter(|mri| mri.starts_with("8:live:"))
+            .cloned()
+            .collect();
+        let work: Vec<String> = mris
+            .iter()
+            .filter(|mri| mri.starts_with("8:orgid:"))
+            .cloned()
+            .collect();
         let mut found = Vec::new();
         for (path, mris) in [
             (
@@ -1337,8 +1362,10 @@ impl TeamsClient {
                         )
                     })
                     .await?;
+                // A batch refused is these people unnamed, not everyone.
                 if !resp.status().is_success() {
-                    return Err(refused(resp, "look people up").await);
+                    let _ = refused(resp, "look people up").await;
+                    continue;
                 }
                 let page: ShortProfiles = resp
                     .json()

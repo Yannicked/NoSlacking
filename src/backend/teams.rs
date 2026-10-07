@@ -387,13 +387,17 @@ pub async fn history(
     match client.get_messages(&channel, cursor.as_deref(), PAGE).await {
         Ok(page) => {
             let senders = senders(&page.messages);
+            let named: std::collections::HashSet<String> =
+                senders.iter().map(|u| u.id.clone()).collect();
             if !senders.is_empty() {
                 sink.send(people_event(&client, &team, senders));
             }
+            let translated: Vec<_> = page.messages.iter().filter_map(translate_message).collect();
+            name_the_rest(&client, &team, &translated, &named, &sink);
             sink.send(Event::History {
                 team,
                 channel,
-                messages: page.messages.iter().filter_map(translate_message).collect(),
+                messages: translated,
                 has_more: page.older.is_some(),
                 cursor: page.older,
                 older,
@@ -515,6 +519,47 @@ pub async fn open(client: TeamsClient, team: String, me: String, users: Vec<Stri
         team,
         event: crate::convos::Event::Opened { channel: chat },
     });
+}
+
+/// Looks up, in the background, the people `messages` name without
+/// having written them: who reacted, and who a system line mentions
+/// (`<@id>`). The interface asks only about authors, which a Teams
+/// history names itself; these it would show as ids. `named` are known
+/// already; each person is asked about once (see
+/// [`TeamsClient::not_yet_asked`]).
+fn name_the_rest(
+    client: &TeamsClient,
+    team: &str,
+    messages: &[crate::model::Message],
+    named: &std::collections::HashSet<String>,
+    sink: &Sink,
+) {
+    let mentioned = messages.iter().flat_map(|m| {
+        m.reactions
+            .iter()
+            .flat_map(|r| r.users.iter().cloned())
+            .chain(mentions(&m.text))
+    });
+    let ids = client.not_yet_asked(mentioned.filter(|id| !named.contains(id)));
+    if ids.is_empty() {
+        return;
+    }
+    tokio::spawn(fetch_users(
+        client.clone(),
+        team.to_owned(),
+        ids,
+        sink.clone(),
+    ));
+}
+
+/// The people a message's text mentions as `<@id>`, as system lines do.
+fn mentions(text: &str) -> Vec<String> {
+    text.split("<@")
+        .skip(1)
+        .filter_map(|rest| rest.split_once('>'))
+        .map(|(id, _)| id.split('|').next().unwrap_or(id).to_owned())
+        .filter(|id| !id.is_empty())
+        .collect()
 }
 
 /// People for the interface, each with their picture: Teams serves it
@@ -948,6 +993,13 @@ fn live_message(
     let Some(translated) = translate_message(message) else {
         return;
     };
+    name_the_rest(
+        client,
+        team,
+        std::slice::from_ref(&translated),
+        &Default::default(),
+        sink,
+    );
     if message.properties.as_ref().is_some_and(|p| p.is_deleted()) {
         sink.send(Event::Deleted {
             team: team.to_owned(),
@@ -1043,6 +1095,24 @@ mod tests {
             Some("Ann +1")
         );
         assert_eq!(group_name(&ids(&["x", "y"]), &names), None);
+    }
+
+    #[test]
+    fn system_lines_name_their_people() {
+        assert_eq!(
+            mentions("<@a-1> added <@live:.cid.2> and <@b|Bob>"),
+            ["a-1", "live:.cid.2", "b"]
+        );
+        assert!(mentions("no one here").is_empty());
+    }
+
+    #[tokio::test]
+    async fn each_person_is_asked_about_once() {
+        let client = TeamsClient::new(TeamsCredentials::default());
+        let first = client.not_yet_asked(["a".to_owned(), "b".to_owned()]);
+        let again = client.not_yet_asked(["b".to_owned(), "c".to_owned()]);
+        assert_eq!(first, ["a", "b"]);
+        assert_eq!(again, ["c"]);
     }
 
     #[test]
