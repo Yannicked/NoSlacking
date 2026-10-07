@@ -546,11 +546,14 @@ pub struct RelayServers {
 }
 
 impl Default for RelayServers {
-    /// The servers the European personal web client was configured with
-    /// (recorded), for when the configuration cannot be read.
+    /// Microsoft's global relay name, which DNS answers with the nearest
+    /// region's relays, for when the configuration names none: it names
+    /// them only for some sign-ins (the recorded European web client got
+    /// `gateway-eu.az.relay.teams.cloud.microsoft`; a request without the
+    /// user's ids gets no relay block at all).
     fn default() -> Self {
         Self {
-            hosts: vec!["gateway-eu.az.relay.teams.cloud.microsoft".to_owned()],
+            hosts: vec!["worldaz.relay.teams.microsoft.com".to_owned()],
             realm: "rtcmedia".to_owned(),
             udp_port: 3478,
             tcp_port: 443,
@@ -626,7 +629,7 @@ pub async fn relay_servers(client: &TeamsClient) -> RelayServers {
     match answer.await.map(|config| read_relay_servers(&config)) {
         Ok(Some(servers)) => servers,
         Ok(None) => {
-            log::warn!("the Skype configuration names no relay servers; using the known ones");
+            log::info!("the Skype configuration names no relay servers; using the global ones");
             RelayServers::default()
         }
         Err(error) => {
