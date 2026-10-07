@@ -168,6 +168,10 @@ pub struct Message {
     pub properties: Option<MessageProperties>,
     #[serde(default, rename = "conversationId")]
     pub conversation_id: Option<String>,
+    /// The sender's own id for the message, which the echo of a message
+    /// sent from here carries back.
+    #[serde(default, rename = "clientmessageid")]
+    pub client_message_id: Option<String>,
 }
 
 /// Message properties carrying reactions, edits, and deletions.
@@ -228,14 +232,32 @@ pub struct ConversationsResponse {
     pub conversations: Vec<Conversation>,
 }
 
-/// Response from `/users/ME/conversations/{id}/messages`.
+/// Response from `/users/ME/conversations/{id}/messages`, newest first.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessagesResponse {
     #[serde(default)]
     pub messages: Vec<Message>,
+    #[serde(default, rename = "_metadata")]
+    pub metadata: Option<MessagesMetadata>,
 }
 
-/// Response from `/api/csa/api/v2/teams/users/me`.
+/// Paging for a messages page.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessagesMetadata {
+    /// The URL of the page of older messages, if there are any.
+    #[serde(default, rename = "backwardLink")]
+    pub backward_link: Option<String>,
+}
+
+/// The answer to posting a message: when the server took it, in epoch
+/// milliseconds, which is also the new message's id.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostedMessage {
+    #[serde(default, rename = "OriginalArrivalTime")]
+    pub original_arrival_time: Option<u64>,
+}
+
+/// Response from `/api/csa/api/v1/teams/users/me`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamsResponse {
     #[serde(default)]

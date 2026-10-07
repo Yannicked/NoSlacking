@@ -5,21 +5,45 @@
 
 use std::sync::{Arc, RwLock};
 
+use futures_util::future::BoxFuture;
+
 use crate::failure::Failure;
-use crate::teams::auth::TeamsCredentials;
+use crate::teams::auth::{RESOURCE_CSA, TeamsCredentials, now_secs};
 use crate::teams::types::{
-    Conversation, ConversationsResponse, Message, MessagesResponse, Team, TeamsResponse,
-    UserDetails,
+    Conversation, ConversationsResponse, Message, MessagesResponse, PostedMessage, Team,
+    TeamsResponse, UserDetails,
 };
 
-type TokenCallback = Arc<dyn Fn(TeamsCredentials) + Send + Sync>;
+/// The teams-and-channels list of the chat service aggregator (CSA).
+const TEAMS_URL: &str = "https://teams.microsoft.com/api/csa/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true";
+
+/// What a refresh hands to whoever keeps the credentials: the renewed
+/// credentials, or why they could not be renewed.
+type OnRefresh =
+    Arc<dyn Fn(Result<TeamsCredentials, Failure>) -> BoxFuture<'static, ()> + Send + Sync>;
+
+/// A page of a conversation's history, oldest first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HistoryPage {
+    pub messages: Vec<Message>,
+    /// Where the page before this one is, if there is one.
+    pub older: Option<String>,
+}
 
 /// Authenticated client for Microsoft Teams APIs.
 #[derive(Clone)]
 pub struct TeamsClient {
     http: reqwest::Client,
     credentials: Arc<RwLock<TeamsCredentials>>,
-    on_token_refreshed: Arc<RwLock<Option<TokenCallback>>>,
+    /// Held across a refresh and the save that follows it. Two requests
+    /// refused at once then refresh once: Microsoft rotates refresh tokens,
+    /// so the second would spend one already used, and two saves racing
+    /// could leave the older token in the keyring.
+    refreshing: Arc<tokio::sync::Mutex<()>>,
+    on_refresh: Option<OnRefresh>,
+    /// Cleared on sign-out, so a refresh still running does not save its
+    /// token back after the sign-in was deleted.
+    reporting: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for TeamsClient {
@@ -34,18 +58,28 @@ impl TeamsClient {
         Self {
             http: crate::slack::net::api(),
             credentials: Arc::new(RwLock::new(credentials)),
-            on_token_refreshed: Arc::new(RwLock::new(None)),
+            refreshing: Arc::new(tokio::sync::Mutex::new(())),
+            on_refresh: None,
+            reporting: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 
-    /// Sets a callback invoked whenever credentials are automatically refreshed.
-    pub fn set_on_token_refreshed<F>(&self, callback: F)
+    /// Calls `save` after every refresh, while still holding the refresh
+    /// lock, so saves happen in the order the tokens were issued.
+    pub fn with_save<F, Fut>(mut self, save: F) -> Self
     where
-        F: Fn(TeamsCredentials) + Send + Sync + 'static,
+        F: Fn(Result<TeamsCredentials, Failure>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
     {
-        if let Ok(mut lock) = self.on_token_refreshed.write() {
-            *lock = Some(Arc::new(callback));
-        }
+        self.on_refresh = Some(Arc::new(move |result| Box::pin(save(result))));
+        self
+    }
+
+    /// Stops handing refreshes to the save callback, for good: the
+    /// workspace signed out.
+    pub fn stop_reporting(&self) {
+        self.reporting
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Updates the credentials (e.g. after a token refresh).
@@ -63,37 +97,91 @@ impl TeamsClient {
             .unwrap_or_default()
     }
 
-    /// Checks if access token or SkypeToken is expired/missing and refreshes if needed.
-    pub async fn ensure_fresh_tokens(&self) -> Result<TeamsCredentials, Failure> {
-        let creds = self.credentials();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        if !creds.is_expired(now) && creds.skype_token.is_some() {
-            return Ok(creds);
+    /// Renews the credentials with `renew`, unless `stale` says the ones
+    /// held now no longer need it: another task may have renewed them
+    /// while this one waited for the lock.
+    async fn refresh_if<R, Fut>(
+        &self,
+        stale: impl Fn(&TeamsCredentials) -> bool,
+        renew: R,
+    ) -> Result<TeamsCredentials, Failure>
+    where
+        R: FnOnce(reqwest::Client, TeamsCredentials) -> Fut,
+        Fut: std::future::Future<Output = Result<TeamsCredentials, Failure>>,
+    {
+        let _held = self.refreshing.lock().await;
+        let current = self.credentials();
+        if !stale(&current) {
+            return Ok(current);
         }
-
-        self.force_refresh().await
+        let result = renew(self.http.clone(), current).await;
+        if let Ok(renewed) = &result {
+            self.update_credentials(renewed.clone());
+        }
+        if let Some(on_refresh) = &self.on_refresh
+            && self.reporting.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            on_refresh(result.clone()).await;
+        }
+        result
     }
 
-    /// Forces a refresh of credentials and invokes the save callback.
-    pub async fn force_refresh(&self) -> Result<TeamsCredentials, Failure> {
-        let current = self.credentials();
-        let refreshed = crate::teams::auth::refresh_credentials(&self.http, &current).await?;
-        self.update_credentials(refreshed.clone());
+    /// Renews the skype token, unless it is no longer the one `used`.
+    async fn renew_skype(&self, used: Option<&str>) -> Result<TeamsCredentials, Failure> {
+        self.refresh_if(
+            |creds| creds.skype_token.as_deref().is_none_or(|t| Some(t) == used),
+            |http, creds| async move { crate::teams::auth::refresh_credentials(&http, &creds).await },
+        )
+        .await
+    }
 
-        let callback = self
-            .on_token_refreshed
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone());
-        if let Some(cb) = callback {
-            cb(refreshed.clone());
+    /// Checks if access token or SkypeToken is expired/missing and refreshes if needed.
+    pub async fn ensure_fresh_tokens(&self) -> Result<TeamsCredentials, Failure> {
+        let stale = |creds: &TeamsCredentials| {
+            creds.is_expired(now_secs()) || creds.skype_token.as_deref().is_none_or(str::is_empty)
+        };
+        let creds = self.credentials();
+        if !stale(&creds) {
+            return Ok(creds);
         }
+        self.refresh_if(stale, |http, creds| async move {
+            crate::teams::auth::refresh_credentials(&http, &creds).await
+        })
+        .await
+    }
 
-        Ok(refreshed)
+    /// Renews the skype token after the one `used` was refused.
+    pub async fn force_refresh(&self, used: &str) -> Result<TeamsCredentials, Failure> {
+        self.renew_skype(Some(used)).await
+    }
+
+    /// A bearer token for the chat service aggregator, minted from the
+    /// refresh token when there is none or `refused` was turned down.
+    async fn csa_token(&self, refused: Option<&str>) -> Result<String, Failure> {
+        let usable = |creds: &TeamsCredentials| {
+            creds
+                .fresh_csa_token(now_secs())
+                .filter(|token| Some(*token) != refused)
+                .map(str::to_owned)
+        };
+        if let Some(token) = usable(&self.credentials()) {
+            return Ok(token);
+        }
+        let creds = self
+            .refresh_if(
+                |creds| usable(creds).is_none(),
+                |http, creds| async move {
+                    let minted = crate::teams::auth::redeem(&http, &creds, RESOURCE_CSA).await?;
+                    Ok(TeamsCredentials {
+                        csa_token: Some(minted.access_token),
+                        csa_expires_at: minted.expires_in.map(|s| now_secs() + s),
+                        refresh_token: minted.refresh_token.or(creds.refresh_token.clone()),
+                        ..creds
+                    })
+                },
+            )
+            .await?;
+        creds.csa_token.ok_or(Failure::SignedOut)
     }
 
     /// Executes an HTTP request with automatic token refresh on HTTP 401.
@@ -101,46 +189,21 @@ impl TeamsClient {
     where
         F: Fn(&reqwest::Client, &str) -> reqwest::RequestBuilder,
     {
-        let mut token = self.skype_token()?;
+        let token = self.skype_token()?;
         let resp = make_request(&self.http, &token)
             .send()
             .await
-            .map_err(|e| Failure::Network(e.to_string()))?;
+            .map_err(|e| Failure::Network(e.without_url().to_string()))?;
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             log::info!("Teams API returned 401 Unauthorized, refreshing token...");
-            if let Ok(new_creds) = self.force_refresh().await
+            if let Ok(new_creds) = self.force_refresh(&token).await
                 && let Some(new_token) = new_creds.skype_token
             {
-                token = new_token;
-                return make_request(&self.http, &token)
+                return make_request(&self.http, &new_token)
                     .send()
                     .await
-                    .map_err(|e| Failure::Network(e.to_string()));
-            }
-        }
-        Ok(resp)
-    }
-
-    /// Executes a Bearer-authed request with automatic token refresh on HTTP 401.
-    async fn authed_bearer_request<F>(&self, make_request: F) -> Result<reqwest::Response, Failure>
-    where
-        F: Fn(&reqwest::Client, &str) -> reqwest::RequestBuilder,
-    {
-        let mut token = self.access_token()?;
-        let resp = make_request(&self.http, &token)
-            .send()
-            .await
-            .map_err(|e| Failure::Network(e.to_string()))?;
-
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            log::info!("Teams Bearer API returned 401 Unauthorized, refreshing token...");
-            if let Ok(new_creds) = self.force_refresh().await {
-                token = new_creds.access_token;
-                return make_request(&self.http, &token)
-                    .send()
-                    .await
-                    .map_err(|e| Failure::Network(e.to_string()));
+                    .map_err(|e| Failure::Network(e.without_url().to_string()));
             }
         }
         Ok(resp)
@@ -154,64 +217,29 @@ impl TeamsClient {
             .ok_or(Failure::NoSavedSignIn)
     }
 
-    fn access_token(&self) -> Result<String, Failure> {
-        let creds = self.credentials();
-        if creds.access_token.is_empty() {
-            Err(Failure::NoSavedSignIn)
-        } else {
-            Ok(creds.access_token)
-        }
-    }
-
     fn chat_service_url(&self) -> String {
-        self.credentials().chat_service_url().to_owned()
-    }
-
-    fn chatsvcagg_url(&self) -> String {
-        self.credentials().chatsvcagg_url().to_owned()
+        self.credentials()
+            .chat_service_url()
+            .trim_end_matches('/')
+            .to_owned()
     }
 
     /// Fetches recent conversations (chats and channel threads).
     pub async fn get_conversations(&self, limit: usize) -> Result<Vec<Conversation>, Failure> {
-        // Strategy 1: chatsvcagg
-        let base = self.chatsvcagg_url();
         let url = format!(
-            "{}/api/v2/users/ME/conversations?view=mychats&pageSize={}",
-            base, limit
+            "{}/v1/users/ME/conversations?view=mychats&pageSize={}",
+            self.chat_service_url(),
+            limit
         );
-
         let resp = self
             .authed_skype_request(|http, token| {
                 http.get(&url)
                     .header("Authentication", format!("skypetoken={}", token))
             })
-            .await;
-
-        if let Ok(r) = resp
-            && r.status().is_success()
-            && let Ok(data) = r.json::<ConversationsResponse>().await
-        {
-            return Ok(data.conversations);
-        }
-
-        // Strategy 2: regional chat service
-        let base = self.chat_service_url();
-        let fallback_url = format!(
-            "{}/v1/users/ME/conversations?view=mychats&pageSize={}",
-            base, limit
-        );
-
-        let resp = self
-            .authed_skype_request(|http, token| {
-                http.get(&fallback_url)
-                    .header("Authentication", format!("skypetoken={}", token))
-            })
             .await?;
-
         if !resp.status().is_success() {
             return Err(Failure::Http(resp.status().as_u16()));
         }
-
         let data: ConversationsResponse = resp
             .json()
             .await
@@ -219,13 +247,24 @@ impl TeamsClient {
         Ok(data.conversations)
     }
 
-    /// Reads messages from a conversation.
-    pub async fn get_messages(&self, chat_id: &str, limit: usize) -> Result<Vec<Message>, Failure> {
+    /// Reads a page of a conversation's messages: the newest, or the one
+    /// at `older`, a link an earlier page gave.
+    pub async fn get_messages(
+        &self,
+        chat_id: &str,
+        older: Option<&str>,
+        limit: usize,
+    ) -> Result<HistoryPage, Failure> {
         let base = self.chat_service_url();
-        let url = format!(
-            "{}/v1/users/ME/conversations/{}/messages?pageSize={}",
-            base, chat_id, limit
-        );
+        let url = match older {
+            Some(link) => older_link(&base, link)?.to_owned(),
+            None => format!(
+                "{}/v1/users/ME/conversations/{}/messages?pageSize={}",
+                base,
+                percent_encoding::utf8_percent_encode(chat_id, percent_encoding::NON_ALPHANUMERIC),
+                limit
+            ),
+        };
 
         let resp = self
             .authed_skype_request(|http, token| {
@@ -242,29 +281,28 @@ impl TeamsClient {
             .json()
             .await
             .map_err(|e| Failure::Unexpected(e.to_string()))?;
-        let messages = data
-            .messages
-            .into_iter()
-            .filter(|m| {
-                !m.message_type
-                    .as_deref()
-                    .is_some_and(|t| t.starts_with("Control/"))
-                    && !m.properties.as_ref().is_some_and(|p| p.is_deleted())
-            })
-            .collect();
-        Ok(messages)
+        Ok(history_page(data))
     }
 
-    /// Sends an HTML message to a conversation.
-    pub async fn send_message(&self, chat_id: &str, html_content: &str) -> Result<String, Failure> {
+    /// Sends an HTML message to a conversation, answering with its id
+    /// when the server gave one.
+    pub async fn send_message(
+        &self,
+        chat_id: &str,
+        html_content: &str,
+        client_message_id: Option<&str>,
+    ) -> Result<Option<String>, Failure> {
         let base = self.chat_service_url();
         let url = format!("{}/v1/users/ME/conversations/{}/messages", base, chat_id);
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "content": html_content,
             "messagetype": "RichText/Html",
             "contenttype": "text"
         });
+        if let Some(id) = client_message_id {
+            body["clientmessageid"] = id.into();
+        }
 
         let resp = self
             .authed_skype_request(|http, token| {
@@ -278,11 +316,8 @@ impl TeamsClient {
             return Err(Failure::Http(resp.status().as_u16()));
         }
 
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| Failure::Unexpected(e.to_string()))?;
-        Ok(text)
+        let posted: PostedMessage = resp.json().await.unwrap_or_default();
+        Ok(posted.original_arrival_time.map(|ms| ms.to_string()))
     }
 
     /// Deletes a message (soft-delete).
@@ -338,17 +373,30 @@ impl TeamsClient {
         }
     }
 
-    /// Fetches joined teams and channels via CSA endpoint.
+    /// Fetches joined teams and channels from the chat service aggregator,
+    /// which wants a bearer token of its own audience.
     pub async fn get_teams(&self) -> Result<Vec<Team>, Failure> {
-        let url = "https://teams.microsoft.com/api/csa/api/v2/teams/users/me";
-
-        let resp = self
-            .authed_skype_request(|http, token| {
-                http.get(url)
-                    .bearer_auth(token)
-                    .header("x-ms-client-version", "1416/1.0.0.2024050301")
-            })
-            .await?;
+        let send = |token: String| {
+            let mut request = self
+                .http
+                .get(TEAMS_URL)
+                .bearer_auth(token)
+                .header("x-ms-client-version", "1416/1.0.0.2024050301");
+            if let Some(skype) = self.credentials().skype_token {
+                request = request.header("X-Skypetoken", skype);
+            }
+            request.send()
+        };
+        let token = self.csa_token(None).await?;
+        let mut resp = send(token.clone())
+            .await
+            .map_err(|e| Failure::Network(e.without_url().to_string()))?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            log::info!("teams list refused the CSA token, minting another");
+            resp = send(self.csa_token(Some(&token)).await?)
+                .await
+                .map_err(|e| Failure::Network(e.without_url().to_string()))?;
+        }
 
         if !resp.status().is_success() {
             return Err(Failure::Http(resp.status().as_u16()));
@@ -394,68 +442,176 @@ impl TeamsClient {
         })
     }
 
-    /// Fetches the current user profile, preferring the token claims over Graph API.
-    pub async fn get_me(&self) -> Result<UserDetails, Failure> {
-        if let Some(user) = self.user_from_token() {
-            return Ok(user);
-        }
-
-        let url = "https://graph.microsoft.com/v1.0/me";
-
-        let resp = self
-            .authed_bearer_request(|http, token| http.get(url).bearer_auth(token))
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(Failure::Http(resp.status().as_u16()));
-        }
-
-        let user: UserDetails = resp
-            .json()
-            .await
-            .map_err(|e| Failure::Unexpected(e.to_string()))?;
-        Ok(user)
+    /// The current user, from the access token's claims: the Teams
+    /// tokens are not good for Microsoft Graph's `/me`.
+    pub fn get_me(&self) -> Result<UserDetails, Failure> {
+        self.user_from_token()
+            .ok_or_else(|| Failure::Unexpected("no user in the Teams token".into()))
     }
+}
+
+/// `link` if it is a page of the chat service at `base`: the skype token
+/// goes with it, so a link elsewhere is refused rather than followed.
+fn older_link<'a>(base: &str, link: &'a str) -> Result<&'a str, Failure> {
+    let inside = link
+        .strip_prefix(base)
+        .is_some_and(|rest| rest.starts_with('/'));
+    if inside {
+        Ok(link)
+    } else {
+        Err(Failure::Unexpected(
+            "older messages link is not on the chat service".into(),
+        ))
+    }
+}
+
+/// A messages answer as a page: control messages and deleted ones left
+/// out, oldest first (Teams gives newest first), and the older page's link
+/// only when there is something before this one.
+fn history_page(data: MessagesResponse) -> HistoryPage {
+    let older = data
+        .metadata
+        .and_then(|meta| meta.backward_link)
+        .filter(|link| !link.is_empty() && !data.messages.is_empty());
+    let mut messages: Vec<Message> = data
+        .messages
+        .into_iter()
+        .filter(|m| {
+            !m.message_type
+                .as_deref()
+                .is_some_and(|t| t.starts_with("Control/"))
+                && !m.properties.as_ref().is_some_and(|p| p.is_deleted())
+        })
+        .collect();
+    messages.reverse();
+    HistoryPage { messages, older }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
-    #[test]
-    fn updates_credentials_and_triggers_callback() {
-        let creds = TeamsCredentials {
-            access_token: "init-token".into(),
+    fn creds(skype: &str) -> TeamsCredentials {
+        TeamsCredentials {
+            access_token: "aad".into(),
             refresh_token: Some("rt".into()),
-            skype_token: Some("init-skype".into()),
-            expires_at: Some(999999999),
-            tenant_id: Some("test-tenant".into()),
-            region_gtms: None,
-        };
-        let client = TeamsClient::new(creds);
-        assert_eq!(client.credentials().access_token, "init-token");
+            skype_token: Some(skype.into()),
+            ..TeamsCredentials::default()
+        }
+    }
 
-        let called = Arc::new(AtomicBool::new(false));
-        let called_clone = called.clone();
-        client.set_on_token_refreshed(move |new_creds| {
-            if new_creds.access_token == "new-token" {
-                called_clone.store(true, Ordering::SeqCst);
+    #[tokio::test]
+    async fn two_refused_requests_refresh_once() {
+        let saved = Arc::new(AtomicUsize::new(0));
+        let counted = saved.clone();
+        let client = TeamsClient::new(creds("old")).with_save(move |result| {
+            let counted = counted.clone();
+            async move {
+                if result.is_ok() {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                }
             }
         });
+        let renewals = Arc::new(AtomicUsize::new(0));
+        let renew = |renewals: Arc<AtomicUsize>| {
+            move |_http, creds: TeamsCredentials| async move {
+                renewals.fetch_add(1, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                Ok(TeamsCredentials {
+                    skype_token: Some("new".into()),
+                    refresh_token: Some("rt2".into()),
+                    ..creds
+                })
+            }
+        };
+        // Both were refused while holding "old".
+        let stale = |c: &TeamsCredentials| c.skype_token.as_deref() == Some("old");
+        let (a, b) = tokio::join!(
+            client.refresh_if(stale, renew(renewals.clone())),
+            client.refresh_if(stale, renew(renewals.clone())),
+        );
+        assert_eq!(a.expect("renewed").skype_token.as_deref(), Some("new"));
+        assert_eq!(b.expect("renewed").skype_token.as_deref(), Some("new"));
+        assert_eq!(renewals.load(Ordering::SeqCst), 1);
+        assert_eq!(saved.load(Ordering::SeqCst), 1);
+        assert_eq!(client.credentials().refresh_token.as_deref(), Some("rt2"));
+    }
 
-        let mut updated = client.credentials();
-        updated.access_token = "new-token".into();
-        client.update_credentials(updated.clone());
-        assert_eq!(client.credentials().access_token, "new-token");
+    #[tokio::test]
+    async fn a_failed_refresh_is_reported_and_keeps_the_credentials() {
+        let reported = Arc::new(std::sync::Mutex::new(None));
+        let seen = reported.clone();
+        let client = TeamsClient::new(creds("old")).with_save(move |result| {
+            if let Ok(mut seen) = seen.lock() {
+                *seen = Some(result.err());
+            }
+            async {}
+        });
+        let result = client
+            .refresh_if(|_| true, |_, _| async { Err(Failure::SignedOut) })
+            .await;
+        assert_eq!(result, Err(Failure::SignedOut));
+        assert_eq!(client.credentials().skype_token.as_deref(), Some("old"));
+        let reported = reported.lock().map(|r| r.clone()).ok().flatten();
+        assert_eq!(reported, Some(Some(Failure::SignedOut)));
+    }
 
-        // Manually test callback dispatch
-        if let Ok(guard) = client.on_token_refreshed.read()
-            && let Some(ref cb) = *guard
-        {
-            cb(updated);
+    #[tokio::test]
+    async fn a_signed_out_client_saves_nothing() {
+        let saved = Arc::new(AtomicUsize::new(0));
+        let counted = saved.clone();
+        let client = TeamsClient::new(creds("old")).with_save(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            async {}
+        });
+        client.stop_reporting();
+        let renewed = client
+            .refresh_if(|_| true, |_, creds| async move { Ok(creds) })
+            .await;
+        assert!(renewed.is_ok());
+        assert_eq!(saved.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn older_pages_must_be_on_the_chat_service() {
+        let base = "https://emea.ng.msg.teams.microsoft.com";
+        let good = "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/x/messages?syncState=a";
+        assert_eq!(older_link(base, good), Ok(good));
+        for bad in [
+            "https://evil.example/v1/messages",
+            "https://emea.ng.msg.teams.microsoft.com.evil.example/v1",
+            "",
+        ] {
+            assert!(older_link(base, bad).is_err(), "{bad}");
         }
-        assert!(called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_history_page_is_oldest_first_with_its_older_link() {
+        let json = r#"{
+            "messages": [
+                {"id": "3", "messagetype": "RichText/Html", "content": "c"},
+                {"id": "2", "messagetype": "Control/Typing", "content": ""},
+                {"id": "1", "messagetype": "Text", "content": "a"}
+            ],
+            "_metadata": {"backwardLink": "https://chat/v1/older"}
+        }"#;
+        let page = history_page(serde_json::from_str(json).expect("valid page"));
+        let ids: Vec<&str> = page.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["1", "3"]);
+        assert_eq!(page.older.as_deref(), Some("https://chat/v1/older"));
+
+        let empty = r#"{"messages": [], "_metadata": {"backwardLink": "https://chat/v1/older"}}"#;
+        let page = history_page(serde_json::from_str(empty).expect("valid page"));
+        assert_eq!(page.older, None);
+    }
+
+    #[test]
+    fn a_posted_message_gives_its_id() {
+        let posted: PostedMessage =
+            serde_json::from_str(r#"{"OriginalArrivalTime": 1700000000123}"#).expect("valid");
+        assert_eq!(posted.original_arrival_time, Some(1700000000123));
     }
 }

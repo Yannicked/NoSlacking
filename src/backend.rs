@@ -18,7 +18,9 @@ pub mod listen;
 pub mod people;
 mod poll;
 mod search;
+#[cfg(feature = "teams")]
 pub mod teams;
+#[cfg(feature = "teams")]
 pub mod teams_translate;
 mod translate;
 pub mod views;

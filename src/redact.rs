@@ -1,8 +1,9 @@
-//! Keeps Slack's secrets out of the log and the panic log.
+//! Keeps Slack's and Microsoft's secrets out of the log and the panic log.
 //!
-//! Tokens carry a recognisable prefix (`xoxp-`, `xoxc-`, the `xoxd-`
-//! cookie, …), and real-time socket URLs carry a ticket that works like a
-//! password. A whitespace-separated word holding either is replaced. The
+//! Slack's tokens carry a recognisable prefix (`xoxp-`, `xoxc-`, the
+//! `xoxd-` cookie, …); Microsoft's access and skype tokens are JWTs, whose
+//! JSON header always encodes to `eyJ`; and real-time socket URLs carry a
+//! ticket or signature (`sig=`) that works like a password. A whitespace-separated word holding either is replaced. The
 //! OAuth client secret has no prefix, so the types holding it print it as
 //! `<redacted>` instead (see their `Debug` impls).
 
@@ -22,7 +23,24 @@ const PREFIXES: [&str; 10] = [
 
 /// Whether `word` holds a token or a socket URL.
 pub fn is_secret(word: &str) -> bool {
-    PREFIXES.iter().any(|prefix| word.contains(prefix)) || word.contains("wss://")
+    PREFIXES.iter().any(|prefix| word.contains(prefix))
+        || word.contains("wss://")
+        || word.contains("sig=")
+        || holds_jwt(word)
+}
+
+/// Whether `word` holds a JWT: `eyJ` (a JSON header, base64url) followed
+/// by two more dot-separated parts. Requiring the dots keeps words that
+/// merely contain `eyJ` readable.
+fn holds_jwt(word: &str) -> bool {
+    word.match_indices("eyJ").any(|(at, _)| {
+        let rest = &word[at..];
+        let token = rest
+            .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+            .next()
+            .unwrap_or_default();
+        token.split('.').filter(|part| !part.is_empty()).count() >= 2 && token.len() > 20
+    })
 }
 
 /// `message` with every secret word replaced, or `None` when it has none
@@ -66,6 +84,9 @@ mod tests {
             "z-app-T0123-abc",
             "slack://login-v2?0.host=acme.slack.com&0.tokens=z-app-T01-abc_z-app-T02-def",
             "wss://wss-primary.slack.com/link/?ticket=abc",
+            "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJvaWQiOiIxIn0.c2ln",
+            "skypetoken=eyJhbGciOiJSUzI1NiIsImtpZCI6IjEifQ.eyJza3lwZWlkIjoiMSJ9.sig",
+            "https://pub-ent-euwe-01-t.trouter.teams.microsoft.com/v4/f/x?sr=a&sig=abc%2B",
         ] {
             let redacted = tokens(&format!("failed with {secret} today")).expect("redacted");
             assert!(!redacted.contains(secret), "{secret}");
@@ -83,6 +104,15 @@ mod tests {
             let redacted = tokens(message).expect("redacted");
             assert!(!redacted.contains("xox"), "{redacted}");
         }
+        let header = r#"{"Authentication":"skypetoken=eyJhbGciOiJSUzI1NiJ9.eyJhIjoxfQ.c2ln"}"#;
+        let redacted = tokens(header).expect("redacted");
+        assert!(!redacted.contains("eyJhbGci"), "{redacted}");
+    }
+
+    #[test]
+    fn words_that_only_contain_eyj_pass() {
+        assert_eq!(tokens("the key eyJ is a prefix"), None);
+        assert_eq!(tokens("eyJabc.def"), None);
     }
 
     #[test]

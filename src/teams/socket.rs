@@ -220,7 +220,7 @@ pub async fn negotiate_trouter(
         .header("X-Skypetoken", skype_token)
         .send()
         .await
-        .map_err(|e| crate::failure::Failure::Network(e.to_string()))?;
+        .map_err(|e| crate::failure::Failure::Network(e.without_url().to_string()))?;
 
     if !resp.status().is_success() {
         return Err(crate::failure::Failure::Http(resp.status().as_u16()));
@@ -245,7 +245,7 @@ pub async fn obtain_session_id(
         .header("X-Skypetoken", skype_token)
         .send()
         .await
-        .map_err(|e| crate::failure::Failure::Network(e.to_string()))?;
+        .map_err(|e| crate::failure::Failure::Network(e.without_url().to_string()))?;
 
     if !resp.status().is_success() {
         return Err(crate::failure::Failure::Http(resp.status().as_u16()));
@@ -312,7 +312,7 @@ pub async fn register_endpoint(
             .json(&payload)
             .send()
             .await
-            .map_err(|e| crate::failure::Failure::Network(e.to_string()))?;
+            .map_err(|e| crate::failure::Failure::Network(e.without_url().to_string()))?;
 
         if !resp.status().is_success() {
             log::warn!(

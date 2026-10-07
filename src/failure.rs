@@ -134,6 +134,8 @@ pub enum Failure {
     NeedsSession,
     /// `/invite` with nobody named.
     NoInvitee,
+    /// The workspace's service (Microsoft Teams) cannot do this here yet.
+    Unsupported,
     /// The manual proxy's URL cannot be used.
     BadProxy,
     /// Listening to a huddle failed at this step; the technical detail
@@ -289,6 +291,7 @@ impl Failure {
             Self::NoUserToken => t("Slack sent no user token; check the app's user scopes."),
             Self::NeedsSession => t("it only works when you sign in with your browser"),
             Self::NoInvitee => t("name someone to invite with @"),
+            Self::Unsupported => t("Microsoft Teams workspaces cannot do that here yet"),
             Self::BadProxy => t("the proxy URL cannot be used; check it in Settings"),
             #[cfg(feature = "huddle-audio")]
             Self::Huddle(trouble) => match trouble {
@@ -574,6 +577,7 @@ mod tests {
             Failure::NoUserToken,
             Failure::NeedsSession,
             Failure::NoInvitee,
+            Failure::Unsupported,
             Failure::BadProxy,
             #[cfg(feature = "huddle-audio")]
             Failure::Huddle(HuddleTrouble::NoSound),

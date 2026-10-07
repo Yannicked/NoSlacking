@@ -10,8 +10,10 @@ use super::{BROWSER_SIGN_IN_WINDOW, Internal, Worker};
 use crate::auth::{self, Flow, SignedIn};
 use crate::backend::api::failure;
 use crate::backend::{Event, SignIn};
-use crate::credentials::AppCredentials;
+use crate::credentials::{AppCredentials, Credentials};
 use crate::failure::{Doing, Failure, Problem};
+#[cfg(feature = "teams")]
+use crate::model::Workspace;
 use crate::scopes::Request;
 use crate::settings::Redirect;
 use crate::slack::magic::TeamResult;
@@ -32,7 +34,7 @@ impl Worker {
         // their token and refresh lock, which every clone shares, so a
         // refresh in flight cannot race a second one.
         let oauth = app.oauth();
-        for team in self.teams.values() {
+        for (_, team) in self.slack_teams() {
             team.client.set_app(oauth.clone());
         }
         self.app = Some(app);
@@ -271,7 +273,7 @@ impl Worker {
             } else if let Some(link) = crate::links::parse_deep(&url).filter(|link| {
                 link.team
                     .as_ref()
-                    .is_some_and(|t| self.teams.contains_key(t))
+                    .is_some_and(|t| self.workspaces.contains_key(t))
             }) {
                 // A link to a conversation of a workspace signed in here.
                 self.sink.send(Event::DeepLink(link));
@@ -332,30 +334,55 @@ impl Worker {
     }
 
     pub(super) fn sign_out(&mut self, team: &str) {
-        if let Some(removed) = self.teams_sessions.remove(team) {
-            removed.shut();
-            let credentials = self.credentials.clone();
-            let team_str = team.to_owned();
-            tokio::spawn(async move {
-                if let Err(error) = credentials.delete_teams_token(&team_str).await {
-                    log::warn!("could not delete teams token: {error}");
-                }
-            });
-            self.sink.send(Event::SignedOut {
-                team: team.to_owned(),
-                reason: None,
-            });
-            return;
-        }
         #[cfg(feature = "huddle-audio")]
         self.huddle_audio.signed_out(team);
         self.stop_rtm(team);
         self.people.forget(team);
-        if let Some(removed) = self.teams.remove(team) {
-            // Before SignedOut goes out: nothing from a task still running
-            // for this workspace can follow it and bring the workspace back.
+        let removed = self.workspaces.remove(team);
+        // Before SignedOut goes out: nothing from a task still running for
+        // this workspace can follow it and bring the workspace back.
+        if let Some(removed) = &removed {
             removed.shut();
-            let credentials = self.credentials.clone();
+        }
+        match removed {
+            Some(super::Backend::Slack(removed)) => {
+                Self::forget_slack(&self.credentials, team, removed);
+            }
+            #[cfg(feature = "teams")]
+            Some(super::Backend::Teams(removed)) => {
+                removed.client.stop_reporting();
+                let credentials = self.credentials.clone();
+                let team = team.to_owned();
+                tokio::spawn(async move {
+                    if let Err(error) = credentials.delete_teams_token(&team).await {
+                        log::warn!("could not delete the Teams token: {error}");
+                    }
+                });
+            }
+            None => {}
+        }
+        self.images.remove_client(team);
+        // Nothing read in the workspace stays on disk after signing out.
+        self.cache.wipe(team);
+        self.remove_plain_cache(team);
+        // A later sign-in to the same workspace fetches everyone afresh.
+        self.users_requested.retain(|(t, _)| t != team);
+        self.bots_requested.retain(|(t, _)| t != team);
+        self.sink.send(Event::SignedOut {
+            team: team.to_owned(),
+            reason: None,
+        });
+        if self.slack_teams().next().is_none() {
+            self.restart_socket();
+        }
+        self.report_socket();
+    }
+
+    /// Deletes a Slack sign-in from the keyring, and revokes it when it is
+    /// the app's own.
+    fn forget_slack(credentials: &Credentials, team: &str, removed: super::Team) {
+        {
+            let credentials = credentials.clone();
             let team = team.to_owned();
             // A session token belongs to the browser login; revoking it would
             // sign the browser out too, so only OAuth tokens are revoked.
@@ -377,157 +404,53 @@ impl Worker {
                 }
             });
         }
-        self.images.remove_client(team);
-        // Nothing read in the workspace stays on disk after signing out.
-        self.cache.wipe(team);
-        self.remove_plain_cache(team);
-        // A later sign-in to the same workspace fetches everyone afresh.
-        self.users_requested.retain(|(t, _)| t != team);
-        self.bots_requested.retain(|(t, _)| t != team);
-        self.sink.send(Event::SignedOut {
-            team: team.to_owned(),
-            reason: None,
-        });
-        if self.teams.is_empty() {
-            self.restart_socket();
-        }
-        self.report_socket();
     }
 
-    /// Starts Microsoft Teams Device Code authentication.
+    /// Starts signing in to Microsoft Teams with a device code (see
+    /// [`super::super::teams::sign_in`]); the answer comes back through
+    /// `Internal::TeamsSignedIn`.
+    #[cfg(feature = "teams")]
     pub(super) fn start_teams_sign_in(&mut self, tenant: Option<String>) {
-        let http = crate::slack::net::api();
         let sink = self.sink.clone();
         let internal = self.internal.clone();
         tokio::spawn(async move {
-            let tenant_ref = tenant.as_deref();
-            match crate::teams::auth::start_device_code_flow(&http, tenant_ref).await {
-                Ok(device_resp) => {
-                    let user_code = device_resp.user_code.clone();
-                    let verification_uri = device_resp.verification_uri.clone();
-                    let message = device_resp.message.clone();
+            let result = super::super::teams::sign_in(tenant, sink).await;
+            let _ = internal.send(Internal::TeamsSignedIn(result));
+        });
+    }
 
-                    sink.send(Event::SignIn(SignIn::TeamsDeviceCode {
-                        user_code,
-                        verification_uri: verification_uri.clone(),
-                        message,
-                    }));
+    /// Without Teams in the build there is nothing to sign in to.
+    #[cfg(not(feature = "teams"))]
+    pub(super) fn start_teams_sign_in(&mut self, _tenant: Option<String>) {
+        self.sink
+            .send(Event::SignIn(SignIn::Failed(Failure::Unsupported)));
+    }
 
-                    let _ = open::that_detached(&verification_uri);
-
-                    match crate::teams::auth::poll_device_code_token(
-                        &http,
-                        &device_resp.device_code,
-                        device_resp.interval,
-                        device_resp.expires_in,
-                        tenant_ref,
-                    )
-                    .await
-                    {
-                        Ok(token_resp) => {
-                            sink.send(Event::SignIn(SignIn::Exchanging));
-
-                            let claims =
-                                crate::teams::auth::parse_jwt_claims(&token_resp.access_token);
-                            if let Some(ref c) = claims {
-                                log::info!(
-                                    "Teams token acquired: tid={}, oid={}, upn={}",
-                                    c.get("tid").and_then(|v| v.as_str()).unwrap_or("?"),
-                                    c.get("oid").and_then(|v| v.as_str()).unwrap_or("?"),
-                                    c.get("upn")
-                                        .or_else(|| c.get("preferred_username"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("?")
-                                );
-                            }
-
-                            match crate::teams::auth::exchange_skype_token(
-                                &http,
-                                &token_resp.access_token,
-                                false,
-                            )
-                            .await
-                            {
-                                Ok(authz) => {
-                                    let now_sec = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_secs())
-                                        .unwrap_or(0);
-                                    let tenant_id = tenant
-                                        .clone()
-                                        .or_else(|| {
-                                            claims.as_ref().and_then(|c| {
-                                                c.get("tid")
-                                                    .and_then(|t| t.as_str())
-                                                    .map(String::from)
-                                            })
-                                        })
-                                        .or_else(|| {
-                                            Some(crate::teams::auth::DEFAULT_TENANT.to_string())
-                                        });
-                                    let creds = crate::teams::auth::TeamsCredentials {
-                                        access_token: token_resp.access_token,
-                                        refresh_token: token_resp.refresh_token,
-                                        skype_token: authz
-                                            .tokens
-                                            .as_ref()
-                                            .and_then(|t| t.skype_token.clone()),
-                                        expires_at: token_resp.expires_in.map(|exp| now_sec + exp),
-                                        tenant_id,
-                                        region_gtms: authz.region_gtms,
-                                    };
-
-                                    let client =
-                                        crate::teams::client::TeamsClient::new(creds.clone());
-                                    match client.get_me().await {
-                                        Ok(me) => {
-                                            let team_id = format!("teams_{}", me.id);
-                                            let name = me
-                                                .display_name
-                                                .clone()
-                                                .unwrap_or_else(|| "Microsoft Teams".into());
-                                            let workspace = crate::model::Workspace {
-                                                service: crate::model::Service::Teams,
-                                                team_id: team_id.clone(),
-                                                name: name.clone(),
-                                                domain: "teams.microsoft.com".into(),
-                                                icon: None,
-                                                user_id: me.id.clone(),
-                                                sign_in: Default::default(),
-                                                scopes: None,
-                                            };
-                                            let _ = internal.send(Internal::TeamsAdded {
-                                                meta: workspace,
-                                                creds,
-                                            });
-                                            sink.send(Event::SignIn(SignIn::Done(name)));
-                                        }
-                                        Err(err) => {
-                                            log::error!(
-                                                "failed to fetch Teams user profile: {err:?}"
-                                            );
-                                            sink.send(Event::SignIn(SignIn::Failed(err)));
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    log::error!("exchange_skype_token failed: {err:?}");
-                                    sink.send(Event::SignIn(SignIn::Failed(err)));
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            log::error!("poll_device_code_token failed: {err:?}");
-                            sink.send(Event::SignIn(SignIn::Failed(err)));
-                        }
-                    }
-                }
-                Err(err) => {
-                    log::error!("start_device_code_flow failed: {err:?}");
-                    sink.send(Event::SignIn(SignIn::Failed(err)));
-                }
+    /// Saves and starts a Teams workspace once its sign-in went through.
+    #[cfg(feature = "teams")]
+    pub(super) fn teams_signed_in(
+        &mut self,
+        result: Result<(Workspace, crate::teams::auth::TeamsCredentials), Failure>,
+    ) {
+        let (workspace, creds) = match result {
+            Ok(signed_in) => signed_in,
+            Err(error) => {
+                log::warn!("Teams sign-in failed: {error:?}");
+                self.sink.send(Event::SignIn(SignIn::Failed(error)));
+                return;
+            }
+        };
+        let credentials = self.credentials.clone();
+        let team = workspace.team_id.clone();
+        let saved = creds.clone();
+        tokio::spawn(async move {
+            if let Err(error) = credentials.save_teams_token(&team, &saved).await {
+                log::warn!("could not store the Teams token: {error}");
             }
         });
+        let name = workspace.name.clone();
+        self.add_teams(workspace, creds);
+        self.sink.send(Event::SignIn(SignIn::Done(name)));
     }
 }
 

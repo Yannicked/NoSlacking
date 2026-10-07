@@ -163,8 +163,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             session_card(app, ui, &palette);
                             keyring_note(app, ui, &palette);
                             ui.add_space(28.0);
-                            teams_card(app, ui, &palette);
-                            ui.add_space(28.0);
+                            #[cfg(feature = "teams")]
+                            {
+                                teams_card(app, ui, &palette);
+                                ui.add_space(28.0);
+                            }
                             app_card(app, ui, &palette);
                             ui.add_space(48.0);
                         });
@@ -215,6 +218,8 @@ fn busy(app: &App) -> bool {
     )
 }
 
+/// Signing in to Microsoft Teams, in builds with the `teams` feature.
+#[cfg(feature = "teams")]
 fn teams_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     card(palette).show(ui, |ui| {
         ui.set_width(ui.available_width());

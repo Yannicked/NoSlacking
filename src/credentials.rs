@@ -272,6 +272,7 @@ impl Credentials {
         self.run(move |store| store.delete(&key)).await
     }
 
+    #[cfg(feature = "teams")]
     /// Loads Microsoft Teams credentials for a workspace or tenant.
     pub async fn load_teams_token(
         &self,
@@ -280,6 +281,7 @@ impl Credentials {
         self.read_json(format!("teams:{team}")).await
     }
 
+    #[cfg(feature = "teams")]
     /// Saves Microsoft Teams credentials for a workspace or tenant.
     pub async fn save_teams_token(
         &self,
@@ -289,6 +291,7 @@ impl Credentials {
         self.write_json(format!("teams:{team}"), creds).await
     }
 
+    #[cfg(feature = "teams")]
     /// Deletes Microsoft Teams credentials for a workspace or tenant.
     pub async fn delete_teams_token(&self, team: &str) -> Result<(), Error> {
         let key = format!("teams:{team}");
@@ -324,13 +327,19 @@ mod tests {
         credentials.delete_token("T1").await.expect("deletes");
         assert_eq!(credentials.load_token("T1").await, Ok(None));
 
+        #[cfg(feature = "teams")]
+        teams_round_trip(&credentials).await;
+    }
+
+    #[cfg(feature = "teams")]
+    async fn teams_round_trip(credentials: &Credentials) {
         let teams_creds = crate::teams::auth::TeamsCredentials {
             access_token: "teams_access".into(),
             refresh_token: Some("teams_refresh".into()),
             skype_token: Some("skype_tok".into()),
             expires_at: Some(1800000000),
             tenant_id: Some("tenant-1".into()),
-            region_gtms: None,
+            ..Default::default()
         };
         credentials
             .save_teams_token("tenant-1", &teams_creds)

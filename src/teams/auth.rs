@@ -22,6 +22,10 @@ pub const DEFAULT_TENANT: &str = "common";
 /// The Skype Spaces audience resource required for Teams chat APIs.
 pub const RESOURCE_SPACES: &str = "https://api.spaces.skype.com";
 
+/// The chat service aggregator's audience: the teams-and-channels list
+/// (CSA) takes only a bearer token minted for it, not the skype token.
+pub const RESOURCE_CSA: &str = "https://chatsvcagg.teams.microsoft.com";
+
 /// Teams token authorization service for work accounts.
 pub const AUTHZ_URL_WORK: &str = "https://teams.microsoft.com/api/authsvc/v1.0/authz";
 
@@ -48,6 +52,13 @@ pub struct TeamsCredentials {
     /// Regional routing endpoints returned by authsvc.
     #[serde(default)]
     pub region_gtms: Option<serde_json::Value>,
+    /// Azure AD access token for the chat service aggregator
+    /// ([`RESOURCE_CSA`]), minted when the teams list is first wanted.
+    #[serde(default)]
+    pub csa_token: Option<String>,
+    /// Unix timestamp (seconds) when `csa_token` expires.
+    #[serde(default)]
+    pub csa_expires_at: Option<u64>,
 }
 
 impl std::fmt::Debug for TeamsCredentials {
@@ -64,6 +75,11 @@ impl std::fmt::Debug for TeamsCredentials {
             )
             .field("expires_at", &self.expires_at)
             .field("tenant_id", &self.tenant_id)
+            .field(
+                "csa_token",
+                &self.csa_token.as_ref().map(|_| crate::redact::REDACTED),
+            )
+            .field("csa_expires_at", &self.csa_expires_at)
             .finish()
     }
 }
@@ -75,18 +91,13 @@ impl TeamsCredentials {
         refresh_token: Option<String>,
         expires_in_secs: Option<u64>,
     ) -> Self {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let expires_at = expires_in_secs.map(|s| now + s);
+        let expires_at = expires_in_secs.map(|s| now_secs() + s);
         Self {
             access_token,
             refresh_token,
-            skype_token: None,
             expires_at,
             tenant_id: Some(DEFAULT_TENANT.to_owned()),
-            region_gtms: None,
+            ..Self::default()
         }
     }
 
@@ -96,6 +107,14 @@ impl TeamsCredentials {
             Some(exp) => now_secs + 300 >= exp,
             None => false,
         }
+    }
+
+    /// The CSA token, while it has more than five minutes left.
+    pub fn fresh_csa_token(&self, now_secs: u64) -> Option<&str> {
+        let fresh = self.csa_expires_at.is_some_and(|exp| now_secs + 300 < exp);
+        self.csa_token
+            .as_deref()
+            .filter(|token| fresh && !token.is_empty())
     }
 
     /// The base chat service URL from `region_gtms`, falling back to default.
@@ -185,6 +204,28 @@ pub fn token_url(tenant: &str) -> String {
     )
 }
 
+/// Seconds since the Unix epoch, for token expiry.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// The error code of a refused answer, which is safe to log. The body
+/// itself is not: it can echo what was sent, tokens included.
+pub fn error_code(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            ["error", "errorCode", "code"]
+                .iter()
+                .find_map(|key| value.get(*key).and_then(|code| code.as_str()))
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "(none)".to_owned())
+}
+
 /// Initiates the Azure AD device code authentication flow.
 pub async fn start_device_code_flow(
     http: &reqwest::Client,
@@ -198,7 +239,7 @@ pub async fn start_device_code_flow(
         .form(&params)
         .send()
         .await
-        .map_err(|e| Failure::Network(e.to_string()))?;
+        .map_err(|e| Failure::Network(e.without_url().to_string()))?;
 
     let status = resp.status();
     let body = resp
@@ -207,7 +248,10 @@ pub async fn start_device_code_flow(
         .map_err(|e| Failure::Unexpected(e.to_string()))?;
 
     if !status.is_success() {
-        log::error!("start_device_code_flow failed: HTTP {status} — {body}");
+        log::error!(
+            "start_device_code_flow failed: HTTP {status} ({})",
+            error_code(&body)
+        );
         return Err(Failure::Http(status.as_u16()));
     }
 
@@ -249,7 +293,7 @@ pub async fn poll_device_code_token(
             .form(&params)
             .send()
             .await
-            .map_err(|e| Failure::Network(e.to_string()))?;
+            .map_err(|e| Failure::Network(e.without_url().to_string()))?;
 
         let status = resp.status();
         let body = resp
@@ -283,13 +327,13 @@ pub async fn poll_device_code_token(
                     return Err(Failure::SignedOut);
                 }
                 _ => {
-                    log::warn!("poll_device_code_token error: {err_code} — {body}");
+                    log::warn!("poll_device_code_token error: {err_code}");
                     return Err(Failure::Unexpected(err_code.to_string()));
                 }
             }
         }
 
-        log::error!("poll_device_code_token HTTP {status} — {body}");
+        log::error!("poll_device_code_token HTTP {status}");
         return Err(Failure::Http(status.as_u16()));
     }
 }
@@ -314,13 +358,13 @@ pub async fn exchange_skype_token(
         .header("Content-Length", "0")
         .send()
         .await
-        .map_err(|e| Failure::Network(e.to_string()))?;
+        .map_err(|e| Failure::Network(e.without_url().to_string()))?;
 
     let status = resp.status();
     let body = resp
         .text()
         .await
-        .map_err(|e| Failure::Network(e.to_string()))?;
+        .map_err(|e| Failure::Network(e.without_url().to_string()))?;
 
     if status.is_success() {
         let authz: AuthzResponse =
@@ -328,7 +372,10 @@ pub async fn exchange_skype_token(
         return Ok(authz);
     }
 
-    log::warn!("authsvc token exchange failed at {primary_url}: HTTP {status} — {body}");
+    log::warn!(
+        "authsvc token exchange failed at {primary_url}: HTTP {status} ({})",
+        error_code(&body)
+    );
 
     // If the primary endpoint failed with 401 or 403, try the fallback endpoint
     // in case a consumer/personal Microsoft account was used or vice versa.
@@ -345,13 +392,13 @@ pub async fn exchange_skype_token(
         .header("Content-Length", "0")
         .send()
         .await
-        .map_err(|e| Failure::Network(e.to_string()))?;
+        .map_err(|e| Failure::Network(e.without_url().to_string()))?;
 
     let fallback_status = fallback_resp.status();
     let fallback_body = fallback_resp
         .text()
         .await
-        .map_err(|e| Failure::Network(e.to_string()))?;
+        .map_err(|e| Failure::Network(e.without_url().to_string()))?;
 
     if fallback_status.is_success() {
         let authz: AuthzResponse =
@@ -360,7 +407,8 @@ pub async fn exchange_skype_token(
     }
 
     log::error!(
-        "fallback authsvc exchange failed at {fallback_url}: HTTP {fallback_status} — {fallback_body}"
+        "fallback authsvc exchange failed at {fallback_url}: HTTP {fallback_status} ({})",
+        error_code(&fallback_body)
     );
     Err(Failure::Http(status.as_u16()))
 }
@@ -378,16 +426,60 @@ pub fn parse_jwt_claims(jwt: &str) -> Option<serde_json::Value> {
     serde_json::from_slice(&decoded).ok()
 }
 
-/// Refreshes the Azure AD access token using the stored `refresh_token`,
-/// then exchanges it for a new SkypeToken and regional routing endpoints.
+/// Trades the refresh token for an access token to `resource`. Microsoft
+/// may rotate the refresh token as it answers, so the caller keeps the one
+/// returned (see [`crate::teams::client::TeamsClient`], which runs one
+/// redemption at a time).
+pub async fn redeem(
+    http: &reqwest::Client,
+    creds: &TeamsCredentials,
+    resource: &str,
+) -> Result<TokenResponse, Failure> {
+    let refresh_token = creds
+        .refresh_token
+        .as_deref()
+        .filter(|t| !t.is_empty())
+        .ok_or(Failure::SignedOut)?;
+    let tenant = creds.tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
+    let scope = format!("{resource}/.default offline_access");
+    log::info!("redeeming the Teams refresh token for {resource} in tenant {tenant}");
+    let params = [
+        ("client_id", TEAMS_CLIENT_ID),
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("scope", &scope),
+    ];
+    let resp = http
+        .post(token_url(tenant))
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| Failure::Network(e.without_url().to_string()))?;
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| Failure::Unexpected(e.to_string()))?;
+    if !status.is_success() {
+        let code = error_code(&body);
+        log::warn!("Azure AD token refresh failed: HTTP {status} ({code})");
+        // The refresh token was revoked or ran out: only signing in again helps.
+        return Err(if code == "invalid_grant" {
+            Failure::SignedOut
+        } else {
+            Failure::Http(status.as_u16())
+        });
+    }
+    serde_json::from_str(&body).map_err(|e| Failure::Unexpected(e.to_string()))
+}
+
+/// Renews the SkypeToken: from the current Azure AD access token while it
+/// is fresh, else from a new one bought with the refresh token.
 pub async fn refresh_credentials(
     http: &reqwest::Client,
     creds: &TeamsCredentials,
 ) -> Result<TeamsCredentials, Failure> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = now_secs();
 
     // 1. If access token is still fresh, try exchanging for Skype token first
     if !creds.is_expired(now) && !creds.access_token.is_empty() {
@@ -406,51 +498,8 @@ pub async fn refresh_credentials(
     }
 
     // 2. Otherwise refresh AAD access token using refresh_token
-    let refresh_token = creds
-        .refresh_token
-        .as_deref()
-        .filter(|t| !t.is_empty())
-        .ok_or(Failure::SignedOut)?;
-
+    let token_resp = redeem(http, creds, RESOURCE_SPACES).await?;
     let tenant = creds.tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
-    let url = token_url(tenant);
-    let scope = format!("{RESOURCE_SPACES}/.default offline_access");
-
-    log::info!("refreshing Azure AD access token for tenant {tenant}...");
-
-    let params = [
-        ("client_id", TEAMS_CLIENT_ID),
-        ("grant_type", "refresh_token"),
-        ("refresh_token", refresh_token),
-        ("scope", &scope),
-    ];
-
-    let resp = http
-        .post(&url)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| Failure::Network(e.to_string()))?;
-
-    let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| Failure::Unexpected(e.to_string()))?;
-
-    if !status.is_success() {
-        log::warn!("Azure AD token refresh failed: HTTP {status} — {body}");
-        return Err(Failure::Http(status.as_u16()));
-    }
-
-    let token_resp: TokenResponse =
-        serde_json::from_str(&body).map_err(|e| Failure::Unexpected(e.to_string()))?;
-
-    let expires_at = token_resp.expires_in.map(|s| now + s);
-    let new_refresh_token = token_resp
-        .refresh_token
-        .or_else(|| creds.refresh_token.clone());
-
     let is_consumer = tenant == "consumers"
         || tenant == "personal"
         || parse_jwt_claims(&token_resp.access_token)
@@ -464,18 +513,17 @@ pub async fn refresh_credentials(
 
     let authz = exchange_skype_token(http, &token_resp.access_token, is_consumer).await?;
 
-    let skype_token = authz.tokens.and_then(|t| t.skype_token);
-    let region_gtms = authz.region_gtms.or_else(|| creds.region_gtms.clone());
-
     log::info!("Teams credentials successfully refreshed");
 
     Ok(TeamsCredentials {
         access_token: token_resp.access_token,
-        refresh_token: new_refresh_token,
-        skype_token,
-        expires_at,
-        tenant_id: creds.tenant_id.clone(),
-        region_gtms,
+        refresh_token: token_resp
+            .refresh_token
+            .or_else(|| creds.refresh_token.clone()),
+        skype_token: authz.tokens.and_then(|t| t.skype_token),
+        expires_at: token_resp.expires_in.map(|s| now + s),
+        region_gtms: authz.region_gtms.or_else(|| creds.region_gtms.clone()),
+        ..creds.clone()
     })
 }
 
@@ -550,12 +598,14 @@ mod tests {
             skype_token: Some("secret-skype".into()),
             expires_at: Some(123456789),
             tenant_id: Some("org".into()),
-            region_gtms: None,
+            csa_token: Some("secret-csa".into()),
+            ..TeamsCredentials::default()
         };
         let debug_str = format!("{creds:?}");
         assert!(!debug_str.contains("secret-access"));
         assert!(!debug_str.contains("secret-refresh"));
         assert!(!debug_str.contains("secret-skype"));
+        assert!(!debug_str.contains("secret-csa"));
         assert!(debug_str.contains("<redacted>"));
     }
 
@@ -586,6 +636,29 @@ mod tests {
         // Expires in 400s: not expired yet
         creds.expires_at = Some(1400);
         assert!(!creds.is_expired(now));
+    }
+
+    #[test]
+    fn a_csa_token_is_used_only_while_fresh() {
+        let mut creds = TeamsCredentials {
+            csa_token: Some("csa".into()),
+            csa_expires_at: Some(1400),
+            ..TeamsCredentials::default()
+        };
+        assert_eq!(creds.fresh_csa_token(1000), Some("csa"));
+        creds.csa_expires_at = Some(1100);
+        assert_eq!(creds.fresh_csa_token(1000), None);
+        creds.csa_expires_at = None;
+        assert_eq!(creds.fresh_csa_token(1000), None);
+    }
+
+    #[test]
+    fn error_codes_leave_the_rest_of_the_body_out() {
+        let body =
+            r#"{"error":"invalid_grant","error_description":"AADSTS70000 token eyJabc.def.ghi"}"#;
+        assert_eq!(error_code(body), "invalid_grant");
+        assert_eq!(error_code(r#"{"errorCode":"Forbidden"}"#), "Forbidden");
+        assert_eq!(error_code("<html>"), "(none)");
     }
 
     #[tokio::test]

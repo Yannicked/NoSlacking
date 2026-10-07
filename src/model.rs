@@ -154,6 +154,88 @@ impl Service {
             Self::Teams => "Microsoft Teams",
         }
     }
+
+    /// Whether workspaces of this service can do `ability` here. Slack
+    /// does everything; Teams only reads, sends, deletes and marks read so
+    /// far, so the interface leaves the rest out rather than offer what
+    /// would only fail.
+    pub fn offers(self, ability: Ability) -> bool {
+        match self {
+            Self::Slack => true,
+            Self::Teams => match ability {
+                Ability::Huddles
+                | Ability::CustomEmoji
+                | Ability::Reactions
+                | Ability::Edit
+                | Ability::Threads
+                | Ability::Files
+                | Ability::Pins
+                | Ability::Later
+                | Ability::Bookmarks
+                | Ability::Channels
+                | Ability::Describe
+                | Ability::Sections
+                | Ability::SlashCommands
+                | Ability::Snooze
+                | Ability::Status
+                | Ability::Search
+                | Ability::MarkUnread
+                | Ability::Reminders
+                | Ability::Scheduled
+                | Ability::Views
+                | Ability::Cards => false,
+            },
+        }
+    }
+}
+
+/// Something a workspace may or may not be able to do, by its service
+/// (see [`Service::offers`]). Not to be confused with
+/// [`crate::scopes::Feature`], which is what a Slack sign-in was granted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Ability {
+    /// Starting, joining and listening to huddles.
+    Huddles,
+    /// Adding custom emoji.
+    CustomEmoji,
+    /// Adding and removing reactions.
+    Reactions,
+    /// Editing your messages.
+    Edit,
+    /// Replying in threads.
+    Threads,
+    /// Uploading and deleting files.
+    Files,
+    /// Pinning messages and the pinned list.
+    Pins,
+    /// Saving messages for later.
+    Later,
+    /// A conversation's bookmarks.
+    Bookmarks,
+    /// Browsing, creating, joining and leaving channels.
+    Channels,
+    /// Renaming a conversation and setting its topic.
+    Describe,
+    /// Editing sidebar sections.
+    Sections,
+    /// Slash commands.
+    SlashCommands,
+    /// Snoozing notifications (Do Not Disturb).
+    Snooze,
+    /// Setting your status and being away.
+    Status,
+    /// Searching messages.
+    Search,
+    /// Marking a message unread.
+    MarkUnread,
+    /// Reminders about messages.
+    Reminders,
+    /// Scheduling messages to send later.
+    Scheduled,
+    /// The Activity, Unreads, Threads, Later and Scheduled views.
+    Views,
+    /// Pressing buttons in Block Kit cards and opening them in Slack.
+    Cards,
 }
 
 /// A signed-in workspace.
@@ -183,6 +265,11 @@ impl Workspace {
     /// Whether this workspace is backed by Slack.
     pub fn is_slack(&self) -> bool {
         self.service == Service::Slack
+    }
+
+    /// Whether this workspace's service can do `ability` here.
+    pub fn offers(&self, ability: Ability) -> bool {
+        self.service.offers(ability)
     }
 
     /// Whether this sign-in may use `feature`: always for a session, and

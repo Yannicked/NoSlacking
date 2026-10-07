@@ -302,7 +302,7 @@ pub fn translate_message(msg: &types::Message) -> Message {
         delivery: Delivery::Sent,
         broadcast: false,
         pinned: false,
-        client_msg_id: None,
+        client_msg_id: msg.client_message_id.clone(),
         subscribed: None,
     }
 }
