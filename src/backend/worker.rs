@@ -1186,6 +1186,7 @@ impl Worker {
                     local: outgoing.local,
                     client_msg_id: outgoing.client_msg_id,
                     me: session.workspace.user_id.clone(),
+                    me_name: super::teams::own_name(&session.workspace),
                 };
                 tokio::spawn(super::teams::send(
                     session.client.clone(),
@@ -1228,11 +1229,16 @@ impl Worker {
             }
             #[cfg(feature = "teams")]
             Some(Backend::Teams(session)) => {
+                let me = crate::teams::client::Author {
+                    id: session.workspace.user_id.clone(),
+                    name: super::teams::own_name(&session.workspace),
+                };
                 tokio::spawn(super::teams::change(
                     session.client.clone(),
                     team,
                     channel,
                     change,
+                    me,
                     session.sink.clone(),
                 ));
             }
@@ -2420,7 +2426,7 @@ mod tests {
 
     #[cfg(feature = "teams")]
     #[tokio::test]
-    async fn a_teams_edit_is_refused_so_it_is_undone() {
+    async fn a_failed_teams_edit_is_settled_so_it_is_undone() {
         let (mut worker, events) = worker();
         teams(&mut worker, "teams_me");
         worker.command(Command::Edit {
@@ -2433,7 +2439,8 @@ mod tests {
         match next_event(&events).await {
             Some(Event::Settled { team, result, .. }) => {
                 assert_eq!(team, "teams_me");
-                assert_eq!(result, Err(Failure::Unsupported));
+                // Signed in with no skype token: refused before any request.
+                assert_eq!(result, Err(Failure::NoSavedSignIn));
             }
             other => panic!("expected Settled, got {other:?}"),
         }

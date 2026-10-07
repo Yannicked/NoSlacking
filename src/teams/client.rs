@@ -17,6 +17,49 @@ use crate::teams::types::{
     TeamsResponse, UserDetails,
 };
 
+/// Who a message is from, as the chat service's message bodies name them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Author {
+    /// The id messages name you by (`live:…` or an object id).
+    pub id: String,
+    /// Your name, which Teams shows with the message, if known.
+    pub name: Option<String>,
+}
+
+/// A message as the Teams web client sends it, less what each call adds.
+fn message_body(chat_id: &str, html_content: &str, me: &Author) -> serde_json::Value {
+    let mri = user_mri(&me.id);
+    serde_json::json!({
+        "type": "Message",
+        "conversationid": chat_id,
+        "from": mri,
+        "fromUserId": mri,
+        "content": html_content,
+        "messagetype": "RichText/Html",
+        "contenttype": "Text",
+        "imdisplayname": me.name.clone().unwrap_or_default(),
+        "amsreferences": [],
+        "properties": {
+            "importance": "",
+            "subject": "",
+            "title": "",
+            "cards": "[]",
+            "links": "[]",
+            "mentions": "[]",
+            "files": "[]",
+            "formatVariant": "TEAMS"
+        }
+    })
+}
+
+/// Now, in epoch milliseconds, as Teams stamps reactions and edits.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
 /// The chat service's `clientmessageid` for one of ours: the service
 /// wants digits, where ours is a UUID, so it is the UUID's first 64 bits
 /// as a number. The same UUID always gives the same number.
@@ -467,14 +510,11 @@ impl TeamsClient {
         chat_id: &str,
         html_content: &str,
         client_message_id: Option<&str>,
+        me: &Author,
     ) -> Result<Option<String>, Failure> {
         let url = format!("{}/messages", self.conversation_url(chat_id));
 
-        let mut body = serde_json::json!({
-            "content": html_content,
-            "messagetype": "RichText/Html",
-            "contenttype": "text"
-        });
+        let mut body = message_body(chat_id, html_content, me);
         if let Some(id) = client_message_id {
             body["clientmessageid"] = numeric_message_id(id).into();
         }
@@ -493,6 +533,70 @@ impl TeamsClient {
 
         let posted: PostedMessage = resp.json().await.unwrap_or_default();
         Ok(posted.original_arrival_time.map(|ms| ms.to_string()))
+    }
+
+    /// Replaces a message's text, as the Teams web client edits: the
+    /// message again with its new content and the time of the edit.
+    pub async fn edit_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        html_content: &str,
+        me: &Author,
+    ) -> Result<(), Failure> {
+        let url = format!("{}/messages/{}", self.conversation_url(chat_id), message_id);
+        let mut body = message_body(chat_id, html_content, me);
+        body["id"] = message_id.into();
+        body["properties"]["edittime"] = now_millis().into();
+        let resp = self
+            .authed_skype_request(|http, token| {
+                http.put(&url)
+                    .header("Authentication", format!("skypetoken={}", token))
+                    .json(&body)
+            })
+            .await?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(refused(resp, "edit").await)
+        }
+    }
+
+    /// Adds (or takes back) your reaction `key` (`like`, `heart`, …).
+    pub async fn react(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        key: &str,
+        add: bool,
+    ) -> Result<(), Failure> {
+        let url = format!(
+            "{}/messages/{}/properties?name=emotions",
+            self.conversation_url(chat_id),
+            message_id
+        );
+        let body = if add {
+            serde_json::json!({ "emotions": { "key": key, "value": now_millis() } })
+        } else {
+            serde_json::json!({ "emotions": { "key": key } })
+        };
+        let resp = self
+            .authed_skype_request(|http, token| {
+                let request = if add {
+                    http.put(&url)
+                } else {
+                    http.delete(&url)
+                };
+                request
+                    .header("Authentication", format!("skypetoken={}", token))
+                    .json(&body)
+            })
+            .await?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(refused(resp, if add { "react" } else { "take a reaction back" }).await)
+        }
     }
 
     /// Deletes a message (soft-delete).
@@ -1004,6 +1108,21 @@ mod tests {
             ..TeamsCredentials::default()
         });
         assert_eq!(client.get_teams().await, Ok(Vec::new()));
+    }
+
+    #[test]
+    fn messages_go_out_as_the_web_client_sends_them() {
+        let me = Author {
+            id: "live:.cid.4a5b".into(),
+            name: Some("Yan".into()),
+        };
+        let body = message_body("19:x@thread.v2", "<p>hi</p>", &me);
+        assert_eq!(body["from"], "8:live:.cid.4a5b");
+        assert_eq!(body["imdisplayname"], "Yan");
+        assert_eq!(body["messagetype"], "RichText/Html");
+        assert_eq!(body["properties"]["formatVariant"], "TEAMS");
+        let nameless = message_body("19:x@thread.v2", "<p>hi</p>", &Author::default());
+        assert_eq!(nameless["imdisplayname"], "");
     }
 
     #[test]

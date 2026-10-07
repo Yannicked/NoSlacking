@@ -13,8 +13,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use super::teams_translate::{
-    clean_teams_user_id, other_in_pair, teams_id_to_ts, translate_conversation, translate_message,
-    translate_team, translate_user, ts_to_teams_id,
+    clean_teams_user_id, other_in_pair, reaction_key, teams_id_to_ts, translate_conversation,
+    translate_message, translate_team, translate_user, ts_to_teams_id,
 };
 use super::{Change, Event, Gate, SignIn, Sink, Socket};
 use crate::credentials::Credentials;
@@ -458,13 +458,40 @@ pub struct Post {
     pub client_msg_id: Option<String>,
     /// Your own user id, as the posted message's author.
     pub me: String,
+    /// Your name, which Teams shows with the message, if known.
+    pub me_name: Option<String>,
 }
+
+impl Post {
+    fn author(&self) -> crate::teams::client::Author {
+        crate::teams::client::Author {
+            id: self.me.clone(),
+            name: self.me_name.clone(),
+        }
+    }
+}
+
+/// Your name in a Teams workspace, if the workspace's name is it: a
+/// personal sign-in whose name could not be found is called after the
+/// service instead, which is no one's name.
+pub fn own_name(workspace: &Workspace) -> Option<String> {
+    let fallbacks = [Service::Teams.name(), PERSONAL_FALLBACK];
+    (!fallbacks.contains(&workspace.name.as_str())).then(|| workspace.name.clone())
+}
+
+/// What a personal workspace is called when your name is not known.
+const PERSONAL_FALLBACK: &str = "Teams (personal)";
 
 /// Posts a message; the answer settles the interface's optimistic copy.
 pub async fn send(client: TeamsClient, post: Post, sink: Sink) {
     let html = crate::teams::html::text_to_teams_html(&post.text);
     let result = client
-        .send_message(&post.channel, &html, post.client_msg_id.as_deref())
+        .send_message(
+            &post.channel,
+            &html,
+            post.client_msg_id.as_deref(),
+            &post.author(),
+        )
         .await
         .and_then(|id| posted(id, &post, html));
     sink.send(Event::Sent {
@@ -500,19 +527,29 @@ fn now() -> Ts {
     teams_id_to_ts(&millis.to_string())
 }
 
-/// Carries out a change to a message. Teams takes deletions here so far;
-/// the interface offers nothing else for a Teams workspace, and anything
-/// else that arrives is refused so its optimistic copy is undone.
+/// Carries out an edit, delete or reaction the interface already shows,
+/// and settles it either way.
 pub async fn change(
     client: TeamsClient,
     team: String,
     channel: String,
     change: Change,
+    me: crate::teams::client::Author,
     sink: Sink,
 ) {
     let result = match &change {
         Change::Delete { ts, .. } => client.delete_message(&channel, &ts_to_teams_id(ts)).await,
-        Change::Edit { .. } | Change::React { .. } => Err(Failure::Unsupported),
+        Change::Edit { ts, text, .. } => {
+            let html = crate::teams::html::text_to_teams_html(text);
+            client
+                .edit_message(&channel, &ts_to_teams_id(ts), &html, &me)
+                .await
+        }
+        Change::React { ts, name, added } => {
+            client
+                .react(&channel, &ts_to_teams_id(ts), reaction_key(name), *added)
+                .await
+        }
     };
     sink.send(Event::Settled {
         team,
@@ -607,7 +644,7 @@ pub async fn sign_in(
         team_id: workspace_id(&me.id),
         name: me.display_name.clone().unwrap_or_else(|| match account {
             auth::Account::Work => Service::Teams.name().to_owned(),
-            auth::Account::Personal => "Teams (personal)".to_owned(),
+            auth::Account::Personal => PERSONAL_FALLBACK.to_owned(),
         }),
         domain: match account {
             auth::Account::Work => "teams.microsoft.com",
@@ -781,6 +818,7 @@ mod tests {
             local: Ts::new("1.000000"),
             client_msg_id: client_msg_id.map(str::to_owned),
             me: "me".into(),
+            me_name: None,
         }
     }
 

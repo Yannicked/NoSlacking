@@ -156,17 +156,17 @@ impl Service {
     }
 
     /// Whether workspaces of this service can do `ability` here. Slack
-    /// does everything; Teams only reads, sends, deletes and marks read so
-    /// far, so the interface leaves the rest out rather than offer what
-    /// would only fail.
+    /// does everything; Teams reads, sends, edits, deletes, reacts and
+    /// marks read so far, so the interface leaves the rest out rather than
+    /// offer what would only fail.
     pub fn offers(self, ability: Ability) -> bool {
         match self {
             Self::Slack => true,
             Self::Teams => match ability {
+                // Seen in recordings of the Teams web client and built.
+                Ability::Reactions | Ability::Edit => true,
                 Ability::Huddles
                 | Ability::CustomEmoji
-                | Ability::Reactions
-                | Ability::Edit
                 | Ability::Threads
                 | Ability::Files
                 | Ability::Pins

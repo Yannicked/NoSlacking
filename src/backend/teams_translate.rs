@@ -565,6 +565,21 @@ pub fn translate_team(team: &types::Team) -> (SidebarSection, Vec<Conversation>)
     (section, conversations)
 }
 
+/// The Teams key of a reaction by the name the interface knows it by:
+/// the reverse of how reactions are read, so a reaction sent from
+/// here reads back as itself.
+pub fn reaction_key(name: &str) -> &str {
+    match name {
+        "thumbsup" | "+1" => "like",
+        "heart" => "heart",
+        "joy" => "laugh",
+        "open_mouth" => "surprised",
+        "cry" => "sad",
+        "rage" => "angry",
+        other => other,
+    }
+}
+
 fn map_emotion_to_reaction_name(key: &str) -> String {
     match key {
         "like" => "thumbsup".into(),
@@ -580,6 +595,22 @@ fn map_emotion_to_reaction_name(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reactions_round_trip_through_their_teams_keys() {
+        for name in [
+            "thumbsup",
+            "heart",
+            "joy",
+            "open_mouth",
+            "cry",
+            "rage",
+            "tada",
+        ] {
+            assert_eq!(map_emotion_to_reaction_name(reaction_key(name)), name);
+        }
+        assert_eq!(reaction_key("+1"), "like");
+    }
 
     #[test]
     fn timestamp_lossless_round_trip() {

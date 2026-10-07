@@ -67,6 +67,12 @@ pub fn strip_tags(html: &str) -> String {
         } else if c == '>' {
             in_tag = false;
             let tag_lower = tag_buf.trim().to_ascii_lowercase();
+            // An emoji is an image whose `alt` is the emoji itself.
+            if tag_lower.starts_with("img")
+                && let Some(alt) = emoji_alt(&tag_buf)
+            {
+                out.push_str(&alt);
+            }
             let is_block_end = tag_lower.starts_with("/p")
                 || tag_lower.starts_with("/div")
                 || tag_lower.starts_with("/li")
@@ -227,6 +233,11 @@ pub fn html_to_blocks(html: &str) -> Vec<Block> {
                     "br" => {
                         current_inlines.push(Inline::Newline);
                     }
+                    "img" => {
+                        if let Some(alt) = emoji_alt(&tag) {
+                            current_inlines.push(Inline::Text(alt, style));
+                        }
+                    }
                     _ => {}
                 }
                 continue;
@@ -270,6 +281,17 @@ pub fn html_to_blocks(html: &str) -> Vec<Block> {
     }
 
     blocks
+}
+
+/// The emoji an `<img>` stands for: Teams writes emoji as images of the
+/// Emoji type whose `alt` is the character itself.
+fn emoji_alt(tag: &str) -> Option<String> {
+    if !tag.contains("schema.skype.com/Emoji") {
+        return None;
+    }
+    extract_attribute(tag, "alt")
+        .map(|alt| unescape_html(&alt))
+        .filter(|alt| !alt.is_empty())
 }
 
 fn flush_inlines(blocks: &mut Vec<Block>, inlines: &mut Vec<Inline>, in_quote: bool) {
@@ -405,5 +427,26 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert!(matches!(&blocks[0], Block::Quote(_)));
         assert_eq!(blocks[1], Block::Preformatted("fn main() {}".into()));
+    }
+
+    #[test]
+    fn emoji_images_read_as_their_emoji() {
+        let html = r#"<p>so <img itemscope="" itemtype="http://schema.skype.com/Emoji" itemid="sad" src="https://statics.teams.cdn.office.net/x" title="Sad" alt="🙁" style="width:20px"> today</p>"#;
+        assert_eq!(strip_tags(html), "so 🙁 today");
+        let blocks = html_to_blocks(html);
+        let text: String = match blocks.first() {
+            Some(Block::Paragraph(inlines)) => inlines
+                .iter()
+                .filter_map(|i| match i {
+                    Inline::Text(t, _) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect(),
+            other => panic!("expected a paragraph, got {other:?}"),
+        };
+        assert_eq!(text, "so 🙁 today");
+        // A picture is not an emoji: nothing stands in for it here.
+        let picture = r#"<p><img itemtype="http://schema.skype.com/AMSImage" alt="image" src="https://x"></p>"#;
+        assert_eq!(strip_tags(picture), "");
     }
 }
