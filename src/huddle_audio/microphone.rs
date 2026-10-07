@@ -224,6 +224,16 @@ pub struct Running {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+impl Running {
+    /// A thread told to stop through `stop`, joined when this is dropped.
+    pub fn new(stop: Arc<AtomicBool>, thread: std::thread::JoinHandle<()>) -> Self {
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
 impl Drop for Running {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
