@@ -1096,6 +1096,11 @@ engineering, as for the rest of the session sign-in.
           Linux only; decoding more mature than encoding).
         - Direct platform APIs in the helper: VA-API, VideoToolbox, Media
           Foundation (`unsafe` bindings, one back end each).
+        **Chosen (2026-10-07): the platform APIs directly, in the
+        helper** — VA-API on Linux, VideoToolbox on macOS, Media
+        Foundation (or D3D11 video) on Windows — rather than GStreamer
+        or cros-codecs: no large runtime to ship, and each back end
+        small and under our control.
         Start with decoding 1080p shares on one platform, keep the
         pure-Rust path as the default and the fallback, and keep
         software encoding unless quality and keyframe control hold up
