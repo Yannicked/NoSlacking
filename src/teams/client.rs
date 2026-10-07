@@ -8,11 +8,21 @@ use std::sync::{Arc, RwLock};
 use futures_util::future::BoxFuture;
 
 use crate::failure::Failure;
-use crate::teams::auth::{RESOURCE_CSA, TeamsCredentials, now_secs};
+use crate::teams::auth::{AudienceToken, RESOURCE_CSA, RESOURCE_GRAPH, TeamsCredentials, now_secs};
 use crate::teams::types::{
     Conversation, ConversationsResponse, Message, MessagesResponse, PostedMessage, Team,
     TeamsResponse, UserDetails,
 };
+
+/// Graph's lookup of directory objects by id.
+const GRAPH_BY_IDS: &str = "https://graph.microsoft.com/v1.0/directoryObjects/getByIds";
+
+/// What [`GRAPH_BY_IDS`] answers.
+#[derive(serde::Deserialize)]
+struct GraphUsers {
+    #[serde(default)]
+    value: Vec<UserDetails>,
+}
 
 /// The teams-and-channels list of the chat service aggregator (CSA).
 const TEAMS_URL: &str = "https://teams.microsoft.com/api/csa/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true";
@@ -155,33 +165,60 @@ impl TeamsClient {
         self.renew_skype(Some(used)).await
     }
 
-    /// A bearer token for the chat service aggregator, minted from the
-    /// refresh token when there is none or `refused` was turned down.
-    async fn csa_token(&self, refused: Option<&str>) -> Result<String, Failure> {
+    /// A bearer token for `audience`, minted from the refresh token when
+    /// there is none or `refused` was turned down.
+    async fn token_for(&self, audience: &str, refused: Option<&str>) -> Result<String, Failure> {
         let usable = |creds: &TeamsCredentials| {
             creds
-                .fresh_csa_token(now_secs())
+                .fresh_token_for(audience, now_secs())
                 .filter(|token| Some(*token) != refused)
                 .map(str::to_owned)
         };
         if let Some(token) = usable(&self.credentials()) {
             return Ok(token);
         }
+        let audience = audience.to_owned();
         let creds = self
             .refresh_if(
                 |creds| usable(creds).is_none(),
-                |http, creds| async move {
-                    let minted = crate::teams::auth::redeem(&http, &creds, RESOURCE_CSA).await?;
-                    Ok(TeamsCredentials {
-                        csa_token: Some(minted.access_token),
-                        csa_expires_at: minted.expires_in.map(|s| now_secs() + s),
-                        refresh_token: minted.refresh_token.or(creds.refresh_token.clone()),
-                        ..creds
-                    })
+                |http, mut creds| async move {
+                    let minted = crate::teams::auth::redeem(&http, &creds, &audience).await?;
+                    if let Some(rotated) = minted.refresh_token {
+                        creds.refresh_token = Some(rotated);
+                    }
+                    creds.audiences.insert(
+                        audience,
+                        AudienceToken {
+                            token: minted.access_token,
+                            expires_at: minted.expires_in.map(|s| now_secs() + s),
+                        },
+                    );
+                    Ok(creds)
                 },
             )
             .await?;
-        creds.csa_token.ok_or(Failure::SignedOut)
+        usable(&creds).ok_or(Failure::SignedOut)
+    }
+
+    /// Sends a bearer-authed request for `audience`, minting a fresh token
+    /// once if the first is refused.
+    async fn bearer<F>(&self, audience: &str, make_request: F) -> Result<reqwest::Response, Failure>
+    where
+        F: Fn(&reqwest::Client, &str) -> reqwest::RequestBuilder,
+    {
+        let mut refused = None;
+        loop {
+            let token = self.token_for(audience, refused.as_deref()).await?;
+            let resp = make_request(&self.http, &token)
+                .send()
+                .await
+                .map_err(|e| Failure::Network(e.without_url().to_string()))?;
+            if resp.status() != reqwest::StatusCode::UNAUTHORIZED || refused.is_some() {
+                return Ok(resp);
+            }
+            log::info!("{audience} refused its token, minting another");
+            refused = Some(token);
+        }
     }
 
     /// Executes an HTTP request with automatic token refresh on HTTP 401.
@@ -376,37 +413,51 @@ impl TeamsClient {
     /// Fetches joined teams and channels from the chat service aggregator,
     /// which wants a bearer token of its own audience.
     pub async fn get_teams(&self) -> Result<Vec<Team>, Failure> {
-        let send = |token: String| {
-            let mut request = self
-                .http
-                .get(TEAMS_URL)
-                .bearer_auth(token)
-                .header("x-ms-client-version", "1416/1.0.0.2024050301");
-            if let Some(skype) = self.credentials().skype_token {
-                request = request.header("X-Skypetoken", skype);
-            }
-            request.send()
-        };
-        let token = self.csa_token(None).await?;
-        let mut resp = send(token.clone())
-            .await
-            .map_err(|e| Failure::Network(e.without_url().to_string()))?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            log::info!("teams list refused the CSA token, minting another");
-            resp = send(self.csa_token(Some(&token)).await?)
-                .await
-                .map_err(|e| Failure::Network(e.without_url().to_string()))?;
-        }
-
+        let skype = self.credentials().skype_token;
+        let resp = self
+            .bearer(RESOURCE_CSA, |http, token| {
+                let request = http
+                    .get(TEAMS_URL)
+                    .bearer_auth(token)
+                    .header("x-ms-client-version", "1416/1.0.0.2024050301");
+                match &skype {
+                    Some(skype) => request.header("X-Skypetoken", skype),
+                    None => request,
+                }
+            })
+            .await?;
         if !resp.status().is_success() {
             return Err(Failure::Http(resp.status().as_u16()));
         }
-
         let data: TeamsResponse = resp
             .json()
             .await
             .map_err(|e| Failure::Unexpected(e.to_string()))?;
         Ok(data.teams)
+    }
+
+    /// Looks people up by their directory (object) ids through Microsoft
+    /// Graph, a thousand at most per call. People Graph does not know here,
+    /// such as guests from elsewhere, are left out.
+    pub async fn get_users(&self, ids: &[String]) -> Result<Vec<UserDetails>, Failure> {
+        let mut found = Vec::new();
+        for batch in ids.chunks(1000) {
+            let body = serde_json::json!({ "ids": batch, "types": ["user"] });
+            let resp = self
+                .bearer(RESOURCE_GRAPH, |http, token| {
+                    http.post(GRAPH_BY_IDS).bearer_auth(token).json(&body)
+                })
+                .await?;
+            if !resp.status().is_success() {
+                return Err(Failure::Http(resp.status().as_u16()));
+            }
+            let page: GraphUsers = resp
+                .json()
+                .await
+                .map_err(|e| Failure::Unexpected(e.to_string()))?;
+            found.extend(page.value);
+        }
+        Ok(found)
     }
 
     /// Extracts user profile information from the JWT token claims if available.

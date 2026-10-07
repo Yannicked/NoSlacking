@@ -13,8 +13,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use super::teams_translate::{
-    teams_id_to_ts, translate_conversation, translate_message, translate_team, translate_user,
-    ts_to_teams_id,
+    clean_teams_user_id, teams_id_to_ts, translate_conversation, translate_message, translate_team,
+    translate_user, ts_to_teams_id,
 };
 use super::{Change, Event, Gate, SignIn, Sink, Socket};
 use crate::credentials::Credentials;
@@ -210,20 +210,68 @@ pub async fn history(
 ) {
     let older = cursor.is_some();
     match client.get_messages(&channel, cursor.as_deref(), PAGE).await {
-        Ok(page) => sink.send(Event::History {
-            team,
-            channel,
-            messages: page.messages.iter().map(translate_message).collect(),
-            has_more: page.older.is_some(),
-            cursor: page.older,
-            older,
-            polled: false,
-        }),
+        Ok(page) => {
+            let senders = senders(&page.messages);
+            if !senders.is_empty() {
+                sink.send(Event::Users {
+                    team: team.clone(),
+                    users: senders,
+                });
+            }
+            sink.send(Event::History {
+                team,
+                channel,
+                messages: page.messages.iter().filter_map(translate_message).collect(),
+                has_more: page.older.is_some(),
+                cursor: page.older,
+                older,
+                polled: false,
+            });
+        }
         Err(error) => sink.send(Event::HistoryFailed {
             team,
             channel,
             error,
         }),
+    }
+}
+
+/// The people who wrote `messages`, by the name each message carries:
+/// Teams sends no user list with history, and this names most authors
+/// without a lookup.
+fn senders(messages: &[crate::teams::types::Message]) -> Vec<crate::model::User> {
+    let mut seen = std::collections::HashSet::new();
+    messages
+        .iter()
+        .filter_map(|m| {
+            let id = m.from.as_deref().and_then(clean_teams_user_id)?;
+            let name = m.im_display_name.as_deref()?.trim();
+            (!name.is_empty() && seen.insert(id.clone())).then(|| {
+                translate_user(&crate::teams::types::UserDetails {
+                    id,
+                    display_name: Some(name.to_owned()),
+                    ..Default::default()
+                })
+            })
+        })
+        .collect()
+}
+
+/// Looks up the people the interface has no name for yet (who reacted,
+/// who was added) through Graph. A failure is logged and dropped: the
+/// interface then shows their id, as it did before, and asks again later.
+pub async fn fetch_users(client: TeamsClient, team: String, ids: Vec<String>, sink: Sink) {
+    match client.get_users(&ids).await {
+        Ok(found) => {
+            let users: Vec<_> = found.iter().map(translate_user).collect();
+            if !users.is_empty() {
+                sink.send(Event::Users { team, users });
+            }
+        }
+        Err(error) => log::warn!(
+            "could not look up {} people in {team}: {error:?}",
+            ids.len()
+        ),
     }
 }
 
@@ -245,7 +293,7 @@ pub async fn send(client: TeamsClient, post: Post, sink: Sink) {
     let result = client
         .send_message(&post.channel, &html, post.client_msg_id.as_deref())
         .await
-        .map(|id| posted(id, &post, html));
+        .and_then(|id| posted(id, &post, html));
     sink.send(Event::Sent {
         team: post.team,
         channel: post.channel,
@@ -257,7 +305,7 @@ pub async fn send(client: TeamsClient, post: Post, sink: Sink) {
 /// The message as posted: Teams answers with its id only, so the message
 /// is read back through the same translation as any other, which keeps
 /// it whole as the model grows.
-fn posted(id: Option<String>, post: &Post, html: String) -> crate::model::Message {
+fn posted(id: Option<String>, post: &Post, html: String) -> Result<crate::model::Message, Failure> {
     let id = id.unwrap_or_else(|| ts_to_teams_id(&now()));
     translate_message(&crate::teams::types::Message {
         id,
@@ -267,6 +315,7 @@ fn posted(id: Option<String>, post: &Post, html: String) -> crate::model::Messag
         client_message_id: post.client_msg_id.clone(),
         ..Default::default()
     })
+    .ok_or(Failure::NoMessage)
 }
 
 /// Now, as a message time stamp.
@@ -307,7 +356,7 @@ pub async fn mark(client: TeamsClient, team: String, channel: String, ts: Ts) {
         .await
     {
         // As for Slack's quiet marks: a failed one is retried by the next.
-        log::info!("could not mark {channel} read in {team}: {error:?}");
+        log::warn!("could not mark {channel} read in {team}: {error:?}");
     }
 }
 
@@ -484,7 +533,15 @@ async fn trouter_once(
 /// A message Trouter pushed: new, edited, or deleted.
 fn live_message(team: &str, message: &crate::teams::types::Message, sink: &Sink) {
     let channel = message.conversation_id.clone().unwrap_or_default();
-    let translated = translate_message(message);
+    if let [sender] = senders(std::slice::from_ref(message)).as_slice() {
+        sink.send(Event::Users {
+            team: team.to_owned(),
+            users: vec![sender.clone()],
+        });
+    }
+    let Some(translated) = translate_message(message) else {
+        return;
+    };
     if message.properties.as_ref().is_some_and(|p| p.is_deleted()) {
         sink.send(Event::Deleted {
             team: team.to_owned(),
@@ -522,7 +579,8 @@ mod tests {
             Some("1700000000123".into()),
             &post(Some("c-1")),
             "<p>hello</p>".into(),
-        );
+        )
+        .expect("a message");
         assert_eq!(message.ts, teams_id_to_ts("1700000000123"));
         assert_eq!(message.user.as_deref(), Some("me"));
         assert_eq!(message.client_msg_id.as_deref(), Some("c-1"));
@@ -531,9 +589,30 @@ mod tests {
 
     #[test]
     fn a_post_without_an_id_gets_a_time_of_its_own() {
-        let message = posted(None, &post(None), "<p>hi</p>".into());
+        let message = posted(None, &post(None), "<p>hi</p>".into()).expect("a message");
         assert_ne!(message.ts, Ts::new(""));
         assert_eq!(message.user.as_deref(), Some("me"));
+    }
+
+    #[test]
+    fn history_names_its_authors_once_each() {
+        let message = |from: &str, name: &str| crate::teams::types::Message {
+            id: "1".into(),
+            from: Some(from.into()),
+            im_display_name: Some(name.into()),
+            ..Default::default()
+        };
+        let users = senders(&[
+            message("8:orgid:a", "Alice"),
+            message("8:orgid:a", "Alice"),
+            message("8:orgid:b", " "),
+            message("19:x@thread.v2", "A thread"),
+        ]);
+        let names: Vec<(&str, &str)> = users
+            .iter()
+            .map(|u| (u.id.as_str(), u.display_name.as_str()))
+            .collect();
+        assert_eq!(names, [("a", "Alice")]);
     }
 
     #[test]

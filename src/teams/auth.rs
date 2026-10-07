@@ -26,6 +26,27 @@ pub const RESOURCE_SPACES: &str = "https://api.spaces.skype.com";
 /// (CSA) takes only a bearer token minted for it, not the skype token.
 pub const RESOURCE_CSA: &str = "https://chatsvcagg.teams.microsoft.com";
 
+/// Microsoft Graph's audience, for looking people up by id.
+pub const RESOURCE_GRAPH: &str = "https://graph.microsoft.com";
+
+/// An access token for one audience other than the chat service's.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudienceToken {
+    pub token: String,
+    /// Unix timestamp (seconds) when it expires.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
+}
+
+impl std::fmt::Debug for AudienceToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AudienceToken")
+            .field("token", &crate::redact::REDACTED)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 /// Teams token authorization service for work accounts.
 pub const AUTHZ_URL_WORK: &str = "https://teams.microsoft.com/api/authsvc/v1.0/authz";
 
@@ -52,13 +73,11 @@ pub struct TeamsCredentials {
     /// Regional routing endpoints returned by authsvc.
     #[serde(default)]
     pub region_gtms: Option<serde_json::Value>,
-    /// Azure AD access token for the chat service aggregator
-    /// ([`RESOURCE_CSA`]), minted when the teams list is first wanted.
+    /// Access tokens for other audiences, such as the chat service
+    /// aggregator ([`RESOURCE_CSA`]) or Graph ([`RESOURCE_GRAPH`]), by
+    /// audience, each minted when first wanted.
     #[serde(default)]
-    pub csa_token: Option<String>,
-    /// Unix timestamp (seconds) when `csa_token` expires.
-    #[serde(default)]
-    pub csa_expires_at: Option<u64>,
+    pub audiences: std::collections::BTreeMap<String, AudienceToken>,
 }
 
 impl std::fmt::Debug for TeamsCredentials {
@@ -75,11 +94,7 @@ impl std::fmt::Debug for TeamsCredentials {
             )
             .field("expires_at", &self.expires_at)
             .field("tenant_id", &self.tenant_id)
-            .field(
-                "csa_token",
-                &self.csa_token.as_ref().map(|_| crate::redact::REDACTED),
-            )
-            .field("csa_expires_at", &self.csa_expires_at)
+            .field("audiences", &self.audiences)
             .finish()
     }
 }
@@ -109,12 +124,11 @@ impl TeamsCredentials {
         }
     }
 
-    /// The CSA token, while it has more than five minutes left.
-    pub fn fresh_csa_token(&self, now_secs: u64) -> Option<&str> {
-        let fresh = self.csa_expires_at.is_some_and(|exp| now_secs + 300 < exp);
-        self.csa_token
-            .as_deref()
-            .filter(|token| fresh && !token.is_empty())
+    /// The token for `audience`, while it has more than five minutes left.
+    pub fn fresh_token_for(&self, audience: &str, now_secs: u64) -> Option<&str> {
+        let held = self.audiences.get(audience)?;
+        let fresh = held.expires_at.is_some_and(|exp| now_secs + 300 < exp);
+        Some(held.token.as_str()).filter(|token| fresh && !token.is_empty())
     }
 
     /// The base chat service URL from `region_gtms`, falling back to default.
@@ -598,7 +612,14 @@ mod tests {
             skype_token: Some("secret-skype".into()),
             expires_at: Some(123456789),
             tenant_id: Some("org".into()),
-            csa_token: Some("secret-csa".into()),
+            audiences: [(
+                RESOURCE_CSA.to_owned(),
+                AudienceToken {
+                    token: "secret-csa".into(),
+                    expires_at: None,
+                },
+            )]
+            .into(),
             ..TeamsCredentials::default()
         };
         let debug_str = format!("{creds:?}");
@@ -639,17 +660,25 @@ mod tests {
     }
 
     #[test]
-    fn a_csa_token_is_used_only_while_fresh() {
-        let mut creds = TeamsCredentials {
-            csa_token: Some("csa".into()),
-            csa_expires_at: Some(1400),
+    fn an_audience_token_is_used_only_while_fresh() {
+        let held = |expires_at| TeamsCredentials {
+            audiences: [(
+                RESOURCE_CSA.to_owned(),
+                AudienceToken {
+                    token: "csa".into(),
+                    expires_at,
+                },
+            )]
+            .into(),
             ..TeamsCredentials::default()
         };
-        assert_eq!(creds.fresh_csa_token(1000), Some("csa"));
-        creds.csa_expires_at = Some(1100);
-        assert_eq!(creds.fresh_csa_token(1000), None);
-        creds.csa_expires_at = None;
-        assert_eq!(creds.fresh_csa_token(1000), None);
+        assert_eq!(
+            held(Some(1400)).fresh_token_for(RESOURCE_CSA, 1000),
+            Some("csa")
+        );
+        assert_eq!(held(Some(1400)).fresh_token_for(RESOURCE_GRAPH, 1000), None);
+        assert_eq!(held(Some(1100)).fresh_token_for(RESOURCE_CSA, 1000), None);
+        assert_eq!(held(None).fresh_token_for(RESOURCE_CSA, 1000), None);
     }
 
     #[test]

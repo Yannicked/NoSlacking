@@ -22,7 +22,8 @@ pub struct UserDetails {
     pub user_principal_name: Option<String>,
     #[serde(default, rename = "displayName")]
     pub display_name: Option<String>,
-    #[serde(default)]
+    /// The address; Graph calls it `mail`.
+    #[serde(default, alias = "mail")]
     pub email: Option<String>,
 }
 
@@ -75,9 +76,29 @@ pub struct Conversation {
     pub thread_properties: Option<ThreadProperties>,
     #[serde(default, rename = "lastMessage")]
     pub last_message: Option<MessagePreview>,
+    #[serde(default)]
+    pub properties: Option<ConversationProperties>,
+}
+
+/// Your own state in a conversation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationProperties {
+    /// How far you have read: `{message id};{when, ms};{client message
+    /// id}`, as the read marker sets it.
+    #[serde(default, rename = "consumptionhorizon")]
+    pub consumption_horizon: Option<String>,
 }
 
 impl Conversation {
+    /// The id of the last message you have read here, if Teams knows.
+    pub fn last_read_id(&self) -> Option<&str> {
+        let horizon = self.properties.as_ref()?.consumption_horizon.as_deref()?;
+        horizon
+            .split(';')
+            .next()
+            .filter(|id| !id.is_empty() && *id != "0")
+    }
+
     /// The best display name for this conversation.
     pub fn display_name(&self) -> String {
         if let Some(props) = &self.thread_properties {

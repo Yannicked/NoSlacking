@@ -263,3 +263,57 @@ organisation can see and approve.
   approve it.
 - **Before any Teams code:** the multi-service worker refactor (4.3, step
   1) is useful on its own and lowers the risk for Slack users.
+
+---
+
+## 6. Since then (feat/teams, 2026-10-07)
+
+The chat route was built after all, behind the `teams` cargo feature, by
+signing in as Microsoft's Teams desktop client. Notes for the next steps.
+
+### 6.1 Personal accounts (Teams free)
+
+Feasible but unproven. What has to change:
+
+- Sign in with the consumer client id `8ec6bc83-69c8-4392-8f08-b3c986009232`
+  (tenant `consumers`), chosen *before* the device code: a first-party id
+  is bound to its audience, so detecting a personal account afterwards
+  (`tid` 9188040d-6c67-4c5b-b112-36a304b66dad) only works as a check.
+  Refreshes must use the same client id and scope.
+- The skype token comes from `https://teams.live.com/api/auth/v1.0/authz/consumer`.
+  ost asks for `https://api.spaces.skype.com/.default`; purple-teams, which
+  ships a personal build, asks for
+  `service::api.fl.spaces.skype.com::MBI_SSL openid profile offline_access`
+  and sends `X-MS-Client-Consumer-Type: teams4life`.
+- Personal access tokens may be opaque rather than JWTs, so who you are
+  should come from the skype token's `skypeid` claim; MRIs are
+  `8:live:…`, not `8:orgid:…`.
+- There are no teams or channels (no CSA); chats only. The chat-service
+  host and Trouter registration for consumers are unknown.
+- ost declares a personal configuration but never uses it.
+
+Next step: a spike against a real personal account.
+
+### 6.2 Audio and video calls
+
+ost (MIT) implements 1:1 and channel calls. Its flow: an IC3 token
+(`https://ic3.teams.office.com/.default`); Trouter registration of
+`NextGenCalling` / `DesktopNgc_2.5:SkypeNgc`; an SDP offer POSTed to the
+epconv service from `regionGtms`, with callbacks to Trouter URLs.
+
+The media is the Skype/Lync dialect, not WebRTC: SDES-SRTP (no DTLS), one
+ICE session per m-line, PCMU audio, `X-H264UC` video, and SDP compressed with
+a dictionary taken from Microsoft's binaries. str0m does DTLS-SRTP only,
+so the huddle stack's audio pipeline (capture, AEC, jitter buffer,
+speaker), TURN client, H.264 decode and call UI carry over, but the
+transport does not. Either write a small SDES/ICE/RTP stack (ost's is
+about 3k lines) or prove that Teams accepts the browser dialect (DTLS,
+BUNDLE, Opus) through str0m.
+
+Rough plan: a spike calling the Echo bot (3–5 days) to pick the
+transport; outgoing 1:1 audio (2 weeks); talking (1 week); incoming
+calls via Trouter (1–1.5 weeks); meetings (1–2 weeks); video receive
+(2–3 weeks); camera and screen share (4+ weeks). The risks are policy
+(it rests entirely on the first-party client id), protocol churn
+(scraped version strings and capability masks), and codecs (Microsoft's
+servers prefer SILK and X-H264UC).

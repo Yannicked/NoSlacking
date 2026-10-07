@@ -1633,6 +1633,18 @@ impl Worker {
     }
 
     fn fetch_users(&mut self, team: String, ids: Vec<String>) {
+        #[cfg(feature = "teams")]
+        if let Some(session) = self.teams_session(&team) {
+            let (client, sink) = (session.client.clone(), session.sink.clone());
+            let ids: Vec<String> = ids
+                .into_iter()
+                .filter(|id| self.users_requested.insert((team.clone(), id.clone())))
+                .collect();
+            if !ids.is_empty() {
+                tokio::spawn(super::teams::fetch_users(client, team, ids, sink));
+            }
+            return;
+        }
         let Some((client, sink)) = self.slack(&team) else {
             self.skipped("fetching people", &team);
             return;
