@@ -128,6 +128,13 @@ pub fn roster(
 ) -> Roster {
     let people = attendees
         .iter()
+        // A screen share joins as a second attendee of the same person,
+        // `…#content`, sending silence: it is not someone in the huddle.
+        .filter(|(_, attendee)| {
+            !attendee
+                .attendee_id
+                .ends_with(super::join::CONTENT_MODALITY)
+        })
         .map(|(&stream, attendee)| Person {
             user: attendee
                 .external_user_id
@@ -226,6 +233,21 @@ mod tests {
         // A frame without a volume says nothing of sound.
         voices.metadata(&metadata(&[(2, None)]), later);
         assert!(!voices.speaking(2, later));
+    }
+
+    /// A share's own attendee (ours or anyone's) is not a second person.
+    #[test]
+    fn a_screen_share_is_not_a_person() {
+        let attendees = BTreeMap::from([
+            (1, attendee("me", "T1-R1-U0", true)),
+            (2, attendee("me#content", "T1-R1-U0", false)),
+            (3, attendee("a3", "T1-R1-U3", false)),
+            (4, attendee("a3#content", "T1-R1-U3", false)),
+        ]);
+        let roster = roster(&attendees, "me", &Voices::default(), None, Instant::now());
+        let who: Vec<_> = roster.people.iter().map(|p| p.user.as_deref()).collect();
+        assert_eq!(who, [Some("U0"), Some("U3")]);
+        assert_eq!(roster.others(), 1);
     }
 
     #[test]

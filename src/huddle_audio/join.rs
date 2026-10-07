@@ -79,6 +79,44 @@ pub struct ChimeJoin {
     pub join_token: JoinToken,
 }
 
+/// What Chime's content share adds to an attendee's id and join token
+/// (the JS SDK's `ContentShareConstants.Modality`).
+pub const CONTENT_MODALITY: &str = "#content";
+
+impl ChimeJoin {
+    /// The attendee a screen share joins as: the same meeting, the same
+    /// person, with `#content` after the attendee id and the join token.
+    /// That is how the JS SDK's `DefaultContentShareController`
+    /// (`createContentShareMeetingSessionConfigure`, amazon-chime-sdk-js
+    /// `src/contentsharecontroller/DefaultContentShareController.ts`)
+    /// makes its second session:
+    ///
+    /// ```text
+    /// contentShareConfiguration.credentials.attendeeId =
+    ///   configuration.credentials.attendeeId + ContentShareConstants.Modality;
+    /// contentShareConfiguration.credentials.externalUserId = configuration.credentials.externalUserId;
+    /// contentShareConfiguration.credentials.joinToken =
+    ///   configuration.credentials.joinToken + ContentShareConstants.Modality;
+    /// ```
+    ///
+    /// with the meeting's URLs unchanged. A join that is already the
+    /// content attendee is returned as it is.
+    pub fn content(&self) -> Self {
+        if self.attendee_id.ends_with(CONTENT_MODALITY) {
+            return self.clone();
+        }
+        let mut token = self.join_token.expose().to_owned();
+        token.push_str(CONTENT_MODALITY);
+        let mut attendee = self.attendee_id.clone();
+        attendee.push_str(CONTENT_MODALITY);
+        Self {
+            attendee_id: attendee,
+            join_token: JoinToken::new(token),
+            ..self.clone()
+        }
+    }
+}
+
 /// Why a `rooms.join` answer could not be read.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum JoinError {
@@ -188,6 +226,28 @@ mod tests {
 
     fn answer() -> Value {
         serde_json::from_str(ANSWER).expect("the fixture is JSON")
+    }
+
+    /// The share's attendee is the JS SDK's: `#content` after the attendee
+    /// id and the join token, everything else the same, the token still
+    /// hidden from `Debug`.
+    #[test]
+    fn a_share_joins_as_the_content_attendee() {
+        let join = parse(&answer()).expect("a join");
+        let content = join.content();
+        assert_eq!(content.attendee_id, format!("{}#content", join.attendee_id));
+        assert_eq!(
+            content.join_token.expose(),
+            format!("{}#content", join.join_token.expose())
+        );
+        assert_eq!(content.signaling_url, join.signaling_url);
+        assert_eq!(content.audio_host_url, join.audio_host_url);
+        assert_eq!(content.meeting_id, join.meeting_id);
+        assert_eq!(content.external_user_id, join.external_user_id);
+        assert_eq!(content.call_id, join.call_id);
+        assert!(!format!("{content:?}").contains(join.join_token.expose()));
+        // Never twice.
+        assert_eq!(content.content(), content);
     }
 
     #[test]
