@@ -13,7 +13,6 @@ pub mod desktop;
 mod fetch;
 mod files;
 pub mod huddles;
-#[cfg(feature = "huddle-audio")]
 pub mod listen;
 pub mod people;
 mod poll;

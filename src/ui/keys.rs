@@ -12,7 +12,7 @@
 //! - Ctrl+, : settings
 //! - Ctrl+/ (⌘/): the keyboard shortcut sheet
 //! - Ctrl+= / Ctrl+- / Ctrl+0: zoom
-//! - Ctrl+Shift+H: leave the huddle being listened to (huddle audio)
+//! - Ctrl+Shift+H: leave the huddle being listened to
 //! - Esc: close the thread or the open overlay
 
 use egui::{Key, Modifiers};
@@ -70,7 +70,6 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
             app.actions.push(Action::ShowShortcuts);
         }
     }
-    #[cfg(feature = "huddle-audio")]
     if app.huddles.listening.is_some()
         && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::H))
     {

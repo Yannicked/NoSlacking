@@ -56,7 +56,6 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
         actions,
         socket,
         popouts,
-        #[cfg(feature = "huddle-audio")]
         huddles,
         ..
     } = app;
@@ -218,7 +217,6 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                             actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Members));
                         }
                     }
-                    #[cfg(feature = "huddle-audio")]
                     super::people::huddle_button(
                         ui,
                         &palette,
@@ -227,9 +225,6 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                         huddles.listening.as_ref(),
                         actions,
                     );
-                    #[cfg(not(feature = "huddle-audio"))]
-                    super::people::huddle_button(ui, &palette, workspace, &conversation.id, actions);
-                    #[cfg(feature = "huddle-audio")]
                     super::people::start_huddle_menu(
                         ui,
                         &palette,
@@ -238,9 +233,6 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                         huddles.listening.as_ref(),
                         actions,
                     );
-                    #[cfg(not(feature = "huddle-audio"))]
-                    super::people::start_huddle_menu(ui, &palette, workspace, &conversation.id, actions);
-                    #[cfg(feature = "huddle-audio")]
                     super::people::listen_button(
                         ui,
                         &palette,

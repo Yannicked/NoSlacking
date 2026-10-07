@@ -1,8 +1,7 @@
-//! The worker's side of listening to a huddle (the `huddle-audio`
-//! feature): one huddle at a time, joined through Slack, played through
-//! [`crate::huddle_audio`], left when asked, on sign-out, or when another
-//! starts. Its news goes to the interface as
-//! [`crate::people::Event::Listening`]; failures as a
+//! The worker's side of listening to a huddle: one huddle at a time,
+//! joined through Slack, played through [`crate::huddle_audio`], left
+//! when asked, on sign-out, or when another starts. Its news goes to the
+//! interface as [`crate::people::Event::Listening`]; failures as a
 //! [`Failure`], their technical detail only in the log.
 //!
 //! Joined muted. The microphone opens only when the interface unmutes

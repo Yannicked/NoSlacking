@@ -1,9 +1,8 @@
-//! Listening to a huddle, the app's side (the `huddle-audio` feature):
-//! one huddle at a time, shown in the call bar from joining until it is
-//! left, with who is in it and who speaks. Left when asked (the bar's
-//! Leave, the conversation header's, Ctrl+Shift+H), when everyone else
-//! has been gone a minute, on sign-out and on quit; when the huddle ends
-//! Chime closes it and the bar says so.
+//! Listening to a huddle, the app's side: one huddle at a time, shown in
+//! the call bar from joining until it is left, with who is in it and who
+//! speaks. Left when asked (the bar's Leave, the conversation header's,
+//! Ctrl+Shift+H), when everyone else has been gone a minute, on sign-out
+//! and on quit; when the huddle ends Chime closes it and the bar says so.
 //!
 //! With `huddle-video` the bar also says who shares their screen and
 //! offers Watch, which opens the call window on that share (see

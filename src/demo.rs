@@ -1250,7 +1250,6 @@ pub fn sharing() -> crate::huddles::Listening {
 /// Listening to the huddle in #design for 2 min 14 s: Ana speaking,
 /// Carla muted, and you, for the call bar's screenshot
 /// (`--demo-view listening`).
-#[cfg(feature = "huddle-audio")]
 pub fn listening() -> crate::huddles::Listening {
     use crate::huddles::{Person, Phase, Roster};
     let person = |user: &str, me, muted, speaking| Person {

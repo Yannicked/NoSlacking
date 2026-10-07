@@ -58,7 +58,6 @@ fn main() -> eframe::Result<()> {
         release_slack_links(&dirs.state);
         return Ok(());
     }
-    #[cfg(feature = "huddle-audio")]
     if let Some([team, channel]) = &cli.huddle_probe {
         let code =
             noslacking::huddle_audio::probe::run(&noslacking::huddle_audio::probe::Options {
@@ -77,7 +76,6 @@ fn main() -> eframe::Result<()> {
         std::process::exit(code);
     }
     // The same video logging in the app's own huddles, when asked.
-    #[cfg(feature = "huddle-audio")]
     if cli.video > 0 || cli.video_h264_only || cli.video_dump.is_some() {
         noslacking::huddle_audio::video::set_for_app(noslacking::huddle_audio::video::Options {
             streams: cli.video,
@@ -677,13 +675,11 @@ impl DemoSetup {
             // #design, with a huddle going on.
             Some("huddle") => app.actions.push(Action::OpenConversation("C03".into())),
             // Listening to #design's huddle: the call bar.
-            #[cfg(feature = "huddle-audio")]
             Some("listening") => {
                 app.huddles.listening = Some(noslacking::demo::listening());
                 app.actions.push(Action::OpenConversation("C03".into()));
             }
             // The same with your microphone live.
-            #[cfg(feature = "huddle-audio")]
             Some("talking") => {
                 app.huddles.listening = Some(noslacking::huddles::Listening {
                     mic: noslacking::huddle_mic::Mic::Live,

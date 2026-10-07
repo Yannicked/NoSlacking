@@ -119,7 +119,6 @@ impl Hub {
             | Command::CheckHuddle { .. } => {
                 log::debug!("{command:?} needs the workspace's client");
             }
-            #[cfg(feature = "huddle-audio")]
             Command::ListenHuddle { .. } | Command::LeaveHuddle | Command::MuteHuddle { .. } => {
                 log::debug!("{command:?} is the worker's");
             }
@@ -493,7 +492,6 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
         Command::Typing { .. } | Command::Active | Command::CheckHuddle { .. } => Vec::new(),
         // Listening plays nothing in the demo, but the call bar shows as
         // it would: joined, live, and who is in #design's huddle.
-        #[cfg(feature = "huddle-audio")]
         Command::ListenHuddle { channel } => {
             let roster = crate::demo::listening().roster;
             let states = vec![
@@ -523,7 +521,6 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
                 .collect()
         }
         // Left at once; the demo has one huddle to leave, in #design.
-        #[cfg(feature = "huddle-audio")]
         Command::LeaveHuddle => vec![Event::People {
             team: team.to_owned(),
             event: people::Event::Listening {
@@ -538,7 +535,6 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
             Vec::new()
         }
         // The demo has no microphone; it opens and closes as asked.
-        #[cfg(feature = "huddle-audio")]
         Command::MuteHuddle { muted } => vec![Event::People {
             team: team.to_owned(),
             event: people::Event::Microphone {

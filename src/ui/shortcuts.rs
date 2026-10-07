@@ -19,8 +19,6 @@ pub enum When {
     EnterSends,
     /// With "Enter sends" off.
     EnterNewLine,
-    /// In builds that listen to huddles (the `huddle-audio` feature).
-    HuddleAudio,
 }
 
 /// One line of the sheet.
@@ -147,14 +145,8 @@ pub const GROUPS: &[Group] = &[
         shortcuts: &[
             line("Keyboard shortcuts", &["Cmd+Slash"]),
             line("Settings", &["Cmd+Comma"]),
-            Shortcut {
-                when: When::HuddleAudio,
-                ..line("Leave the huddle", &["Cmd+Shift+H"])
-            },
-            Shortcut {
-                when: When::HuddleAudio,
-                ..line("Mute / unmute the microphone", &["Cmd+Shift+Space"])
-            },
+            line("Leave the huddle", &["Cmd+Shift+H"]),
+            line("Mute / unmute the microphone", &["Cmd+Shift+Space"]),
             Shortcut {
                 also: &["Cmd+Shift+Equals", "Cmd+Plus"],
                 ..line("Zoom in / out", &["Cmd+Equals", "Cmd+Minus"])
@@ -186,7 +178,6 @@ pub fn shown(group: &Group, enter_sends: bool) -> impl Iterator<Item = &Shortcut
         When::Always => true,
         When::EnterSends => enter_sends,
         When::EnterNewLine => !enter_sends,
-        When::HuddleAudio => cfg!(feature = "huddle-audio"),
     })
 }
 

@@ -238,14 +238,11 @@ pub enum Command {
     CheckHuddle { channel: String, room: String },
     /// Joins the huddle in `channel` and plays it, muted, leaving any
     /// other first (see [`crate::huddle_audio`]).
-    #[cfg(feature = "huddle-audio")]
     ListenHuddle { channel: String },
     /// Leaves the huddle being listened to.
-    #[cfg(feature = "huddle-audio")]
     LeaveHuddle,
     /// Mutes (closing the microphone) or unmutes (opening it) in the
     /// huddle being listened to.
-    #[cfg(feature = "huddle-audio")]
     MuteHuddle { muted: bool },
     /// Shows the share `share` (its key) in the call window, receiving
     /// it, or none, receiving no share at all.
@@ -345,13 +342,11 @@ pub enum Event {
     /// down never came.
     Reconnected,
     /// Where listening to the huddle in `channel` got to.
-    #[cfg(feature = "huddle-audio")]
     Listening {
         channel: String,
         state: crate::huddles::Listen,
     },
     /// What the microphone did in the huddle in `channel`.
-    #[cfg(feature = "huddle-audio")]
     Microphone {
         channel: String,
         news: crate::huddle_mic::MicNews,
@@ -793,9 +788,9 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
         | Event::HuddleRoom { .. }
         | Event::HuddleChecked { .. }
         | Event::InviteDeclined { .. }
-        | Event::Reconnected => {}
-        #[cfg(feature = "huddle-audio")]
-        Event::Listening { .. } | Event::Microphone { .. } => {}
+        | Event::Reconnected
+        | Event::Listening { .. }
+        | Event::Microphone { .. } => {}
     }
     if let Some((text, error)) = toast {
         app.toast(text, error);

@@ -1,6 +1,5 @@
-//! The call bar: the huddle being listened to (the `huddle-audio`
-//! feature), from joining until it is left, at the foot of the sidebar
-//! as Slack has it, and at the foot of the settings page, so it is on
+//! The call bar: the huddle being listened to, from joining until it is
+//! left, at the foot of the sidebar as Slack has it, and at the foot of the settings page, so it is on
 //! screen wherever you are.
 //!
 //! It names the huddle (a click opens its conversation), says whether it

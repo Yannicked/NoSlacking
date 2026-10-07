@@ -254,10 +254,7 @@ impl App {
                     };
                     crate::huddles::apply(self, action);
                     // Joined here: the call bar is in this window.
-                    #[cfg(feature = "huddle-audio")]
-                    {
-                        self.desktop.raise = true;
-                    }
+                    self.desktop.raise = true;
                 } else {
                     self.open_url(link);
                 }
