@@ -68,8 +68,22 @@ fn main() -> eframe::Result<()> {
                 region: cli.huddle_region.clone(),
                 settings: dirs.settings_file(),
                 send_tone: cli.send_tone,
+                video: noslacking::huddle_audio::video::Options {
+                    streams: cli.video,
+                    h264_only: cli.video_h264_only,
+                    dump: cli.video_dump.clone(),
+                },
             });
         std::process::exit(code);
+    }
+    // The same video logging in the app's own huddles, when asked.
+    #[cfg(feature = "huddle-audio")]
+    if cli.video > 0 || cli.video_h264_only || cli.video_dump.is_some() {
+        noslacking::huddle_audio::video::set_for_app(noslacking::huddle_audio::video::Options {
+            streams: cli.video,
+            h264_only: cli.video_h264_only,
+            dump: cli.video_dump.clone(),
+        });
     }
 
     let waker = Waker::default();
@@ -676,6 +690,27 @@ impl DemoSetup {
                     ..noslacking::demo::listening()
                 });
                 app.actions.push(Action::OpenConversation("C03".into()));
+            }
+            // Ana and Carla share their screens: the call bar's rows.
+            #[cfg(feature = "huddle-video")]
+            Some("sharing") => {
+                app.huddles.listening = Some(noslacking::demo::sharing());
+                app.actions.push(Action::OpenConversation("C03".into()));
+            }
+            // Ana's share open in the call window. eframe cannot take a
+            // screenshot of a window of its own, so it is drawn inside
+            // the main one here.
+            #[cfg(feature = "huddle-video")]
+            Some("call-window") => {
+                let listening = noslacking::demo::sharing();
+                let first = listening.shares.first().map(|s| s.key.clone());
+                app.huddles.listening = Some(listening);
+                app.huddles.picture.embed = true;
+                // #engineering behind it: #design would ring Bob's
+                // invitation over it.
+                app.actions.push(Action::OpenConversation("C02".into()));
+                app.actions
+                    .push(Action::Huddle(noslacking::huddles::Action::Watch(first)));
             }
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             // The deploy bot's Approve button pressed: its question.

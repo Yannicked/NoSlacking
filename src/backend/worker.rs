@@ -1907,6 +1907,11 @@ impl Worker {
                 self.huddle_audio.set_muted(muted);
                 return;
             }
+            #[cfg(feature = "huddle-video")]
+            crate::people::Command::WatchShare { share } => {
+                self.huddle_audio.watch_share(share);
+                return;
+            }
             other => other,
         };
         if let Some(command) = super::people::call(client, team.clone(), command, sink) {

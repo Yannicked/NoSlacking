@@ -5,6 +5,8 @@ mod add_emoji;
 mod browse;
 #[cfg(feature = "huddle-audio")]
 mod call_bar;
+#[cfg(feature = "huddle-video")]
+pub(crate) mod call_window;
 mod composer;
 mod context;
 mod conversation;
@@ -125,6 +127,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     views::dialog(app, ui.ctx());
     // Before the sweep, so what the pop-outs draw stays parsed.
     app.show_popouts(&ui.ctx().clone());
+    #[cfg(feature = "huddle-video")]
+    app.show_call_window(&ui.ctx().clone());
     rich::end_frame();
 }
 

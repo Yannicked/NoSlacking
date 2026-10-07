@@ -22,13 +22,25 @@
 //! back. Listening has been heard working against Slack, talking not yet;
 //! what was checked and what is next is in TODO.md.
 //!
+//! Video (docs/research/huddle-video.md): `video` reads INDEX and chooses
+//! streams, `watch` renegotiates `recvonly` m-lines for them and counts
+//! what arrives, `bitstream` reads just enough of H.264 and VP8 to name
+//! the codec, profile and size. The probe and `--video N` look at any
+//! stream (Stage 0). With the `huddle-video` feature (Stage 1) the app
+//! watches screen shares: only the share the call window shows is
+//! received, `decode` turns its H.264 into pictures and `screen` runs
+//! that on a thread of its own, keeping only the newest picture.
+//!
 //! Secrets: the join token and the TURN password never reach the log; the
 //! types holding them print `<redacted>`. Chime's URLs are logged by host
 //! only.
 
 #![warn(missing_docs)]
 
+pub mod bitstream;
 pub mod chime;
+#[cfg(feature = "huddle-video")]
+pub mod decode;
 pub mod dtls;
 pub mod encoder;
 pub mod jitter;
@@ -39,11 +51,15 @@ pub mod probe;
 pub mod processing;
 pub mod region;
 pub mod roster;
+#[cfg(feature = "huddle-video")]
+pub mod screen;
 pub mod sdp;
 pub mod signaling;
 pub mod speaker;
 pub mod turn;
 pub mod uplink;
+pub mod video;
+pub mod watch;
 
 /// The host of `url`, for the log: what a protocol mismatch needs to
 /// know, without the path or query a URL could carry a secret in.

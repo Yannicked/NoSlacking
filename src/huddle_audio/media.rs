@@ -42,6 +42,9 @@ use super::signaling::{Ending, Handshake, Incoming, Socket, Step, TurnCredential
 use super::speaker::Feed;
 use super::turn::{self, Server, Transport};
 use super::uplink::{Outbound, Outgoing, Stamp};
+use super::video;
+pub use super::watch::Viewer;
+use super::watch::{self, Watch};
 
 /// How long each step may take.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
@@ -127,6 +130,8 @@ pub struct Report {
     pub sent_bytes: u64,
     /// Frames of silence sent while muted.
     pub silent_frames: u64,
+    /// What the probe saw of video, when it looked.
+    pub video: Option<video::Summary>,
 }
 
 /// What a session sends besides silence: frames from the microphone, and
@@ -276,12 +281,15 @@ async fn open_relay(server: &Server, turn: &TurnCredentials) -> Result<Relay, St
 }
 
 /// The WebRTC peer, its one candidate the relay at `relayed` (reached
-/// from `local`): Opus, and VP8 and H.264 for the video m-line.
-fn new_peer(relayed: SocketAddr, local: SocketAddr) -> Result<Rtc, String> {
+/// from `local`): Opus, and VP8 (unless `h264_only`) and H.264 for the
+/// video m-lines. Chime answers what is offered and tells the senders
+/// the codecs every receiver takes, so leaving VP8 out asks them for
+/// H.264.
+fn new_peer(relayed: SocketAddr, local: SocketAddr, h264_only: bool) -> Result<Rtc, String> {
     let mut rtc = RtcConfig::new()
         .clear_codecs()
         .enable_opus(true, false)
-        .enable_vp8(true)
+        .enable_vp8(!h264_only)
         .enable_h264(true)
         .set_crypto_provider(Arc::new(dtls::provider()))
         // Brings Chime's RTCP receiver reports on what we send.
@@ -299,6 +307,9 @@ struct Offer {
     pending: SdpPendingOffer,
     mids: Mids,
     audio: Mid,
+    /// The inactive video m-line: the send line, the first of the video
+    /// slots.
+    video: Mid,
 }
 
 /// The offer: audio both ways (silence out, as a muted browser sends) and
@@ -313,7 +324,7 @@ fn make_offer(rtc: &mut Rtc) -> Option<Offer> {
         Some("audio".into()),
         None,
     );
-    api.add_media(MediaKind::Video, Direction::Inactive, None, None, None);
+    let video = api.add_media(MediaKind::Video, Direction::Inactive, None, None, None);
     let (offer, pending) = api.apply()?;
     let offer = offer.to_sdp_string();
     let mids = Mids::of_offer(&offer);
@@ -322,6 +333,7 @@ fn make_offer(rtc: &mut Rtc) -> Option<Offer> {
         pending,
         mids,
         audio,
+        video,
     })
 }
 
@@ -388,6 +400,11 @@ struct Session<'a> {
     /// Chime's head count, from the last INDEX.
     count: Option<u32>,
     report: Report,
+    /// What it follows of video: the probe's look, and the shares the
+    /// app watches.
+    video: Option<Watch>,
+    /// Which share the call window shows, as it changes.
+    watched: Option<tokio::sync::watch::Receiver<Option<String>>>,
     /// How it ended, once it has.
     over: Option<Result<(), Failure>>,
 }
@@ -584,7 +601,8 @@ impl Session<'_> {
         let Some(local) = self.relay.as_ref().map(|r| r.local) else {
             return;
         };
-        match new_peer(relayed, local) {
+        let h264_only = self.video.as_ref().is_some_and(Watch::h264_only);
+        match new_peer(relayed, local, h264_only) {
             Ok(rtc) => self.rtc = Some(rtc),
             Err(why) => {
                 self.over.get_or_insert(Err(failure(Stage::Relay, why)));
@@ -609,6 +627,9 @@ impl Session<'_> {
         self.audio = Some(made.audio);
         self.pending = Some(made.pending);
         self.mids = made.mids;
+        if let Some(watch) = &mut self.video {
+            watch.offered(made.video);
+        }
         let offer = made.sdp;
         log::info!("subscribe: offer {}", sdp::summary(&offer));
         let sub = chime::Subscribe {
@@ -616,14 +637,52 @@ impl Session<'_> {
             audio_host: self.join.audio_host_url.clone(),
             attendee_id: self.join.attendee_id.clone(),
             muted: self.muted,
+            receive_stream_ids: vec![0],
         };
         let steps = self.handshake.subscribe(&sub, now_ms());
+        Box::pin(self.carry(steps)).await;
+    }
+
+    /// Once live, a new offer and SUBSCRIBE when other video streams are
+    /// wanted than are received; audio goes on meanwhile.
+    async fn try_resubscribe(&mut self) {
+        use super::signaling::Phase;
+        let now = Instant::now();
+        if self.handshake.phase() != Phase::Live
+            || self.pending.is_some()
+            || self.leave_deadline.is_some()
+            || self.over.is_some()
+        {
+            return;
+        }
+        let (Some(watch), Some(rtc), Some(dtls_up)) =
+            (&mut self.video, &mut self.rtc, self.report.dtls_up)
+        else {
+            return;
+        };
+        let Some(made) = watch.reoffer(rtc, now, self.started + dtls_up, self.report.audio_frames)
+        else {
+            return;
+        };
+        self.pending = Some(made.pending);
+        self.mids = Mids::of_offer(&made.offer);
+        let offer = self.mids.offer_for_chime(&made.offer);
+        log::info!("subscribe: new offer {}", sdp::summary(&offer));
+        let sub = chime::Subscribe {
+            sdp_offer: offer,
+            audio_host: self.join.audio_host_url.clone(),
+            attendee_id: self.join.attendee_id.clone(),
+            muted: self.muted,
+            receive_stream_ids: made.receive_stream_ids,
+        };
+        let steps = self.handshake.resubscribe(&sub, now_ms());
         Box::pin(self.carry(steps)).await;
     }
 
     /// Takes Chime's answer.
     fn answer(&mut self, answer: &str) {
         log::info!("subscribe: answer {}", sdp::summary(answer));
+        let chime_answer = answer;
         let answer = self.mids.answer_from_chime(answer);
         let (Some(rtc), Some(pending)) = (&mut self.rtc, self.pending.take()) else {
             self.over
@@ -660,8 +719,15 @@ impl Session<'_> {
             let ips: Vec<_> = peers.iter().map(SocketAddr::ip).collect();
             relay.client.permit(&ips, Instant::now());
         }
-        self.connect_deadline = Some(Instant::now() + CONNECT_TIMEOUT);
         self.rtc_timeout = Some(Instant::now());
+        if self.report.dtls_up.is_some() {
+            // A re-SUBSCRIBE's answer: the connection is up already.
+            if let Some(watch) = &mut self.video {
+                watch.answered(chime_answer, &self.mids, Instant::now());
+            }
+            return;
+        }
+        self.connect_deadline = Some(Instant::now() + CONNECT_TIMEOUT);
     }
 
     /// Feeds `str0m` what a peer sent through the relay.
@@ -779,6 +845,9 @@ impl Session<'_> {
             }
             RtcEvent::MediaData(data) => {
                 if Some(data.mid) != self.audio {
+                    if let (Some(watch), Some(rtc)) = (&mut self.video, &mut self.rtc) {
+                        watch.media(rtc, &data, Instant::now());
+                    }
                     return;
                 }
                 if self.report.first_audio.is_none() {
@@ -872,7 +941,10 @@ impl Session<'_> {
         self.muted = muted;
         self.flowing = false;
         log::info!("media: {}", if muted { "muted" } else { "unmuted" });
-        if matches!(self.handshake.phase(), Phase::Subscribing | Phase::Live) {
+        if matches!(
+            self.handshake.phase(),
+            Phase::Subscribing | Phase::Live | Phase::Resubscribing
+        ) {
             self.send(&chime::audio_control(muted, now_ms())).await;
         }
     }
@@ -913,6 +985,11 @@ impl Session<'_> {
             self.next_ping,
             self.next_audio,
             Some(self.next_stats),
+            self.video.as_ref().and_then(|w| w.due(Instant::now())),
+            self.video
+                .as_ref()
+                .and_then(Watch::in_flight_since)
+                .map(|at| at + watch::ANSWER_WAIT),
         ]
         .into_iter()
         .flatten()
@@ -987,6 +1064,26 @@ impl Session<'_> {
         }
         // Speaking marks fade even when no frame comes to say so.
         self.tell_roster(now);
+        self.video_tick(now).await;
+    }
+
+    /// Video: keyframe requests, counts, a re-SUBSCRIBE given up or due.
+    async fn video_tick(&mut self, now: Instant) {
+        let Some(watch) = &mut self.video else {
+            return;
+        };
+        watch.tick(self.rtc.as_mut(), now, self.report.audio_frames);
+        if watch
+            .in_flight_since()
+            .is_some_and(|at| now >= at + watch::ANSWER_WAIT)
+        {
+            watch.abandon();
+            // The offer is dropped; `str0m` takes the next one fresh.
+            self.pending = None;
+            let steps = self.handshake.resubscribe_timed_out();
+            self.carry(steps).await;
+        }
+        self.try_resubscribe().await;
     }
 
     /// Tells who is in the huddle and speaking, if that changed.
@@ -1019,6 +1116,9 @@ impl Session<'_> {
         if let Some(count) = frame.index.as_ref().and_then(|i| i.num_participants) {
             self.count = Some(count);
         }
+        if let Some(watch) = &mut self.video {
+            watch.frame(frame, self.last_inbound);
+        }
         let name = chime::type_name(frame);
         *self.report.frames.entry(name).or_default() += 1;
         if quiet(frame) {
@@ -1029,6 +1129,9 @@ impl Session<'_> {
         let steps = self.handshake.on_frame(frame, now_ms());
         self.carry(steps).await;
         self.tell_roster(self.last_inbound);
+        if frame.index.is_some() {
+            self.try_resubscribe().await;
+        }
     }
 
     /// Starts leaving: LEAVE, then up to three seconds for LEAVE_ACK.
@@ -1086,6 +1189,29 @@ async fn next_frame(
     }
 }
 
+/// What a session does with video: the probe's or `--video`'s look at
+/// it, and the app's viewer of screen shares; neither, none at all.
+#[derive(Debug, Default)]
+pub struct Video {
+    /// The probe's options, or `--video`'s.
+    pub options: Option<video::Options>,
+    /// The call window's side, with `huddle-video`.
+    pub viewer: Option<Viewer>,
+}
+
+/// The share watched next, or never while nothing tells.
+async fn watched_change(
+    watched: &mut Option<tokio::sync::watch::Receiver<Option<String>>>,
+) -> Result<Option<String>, tokio::sync::watch::error::RecvError> {
+    match watched {
+        Some(watched) => {
+            watched.changed().await?;
+            Ok(watched.borrow_and_update().clone())
+        }
+        None => std::future::pending().await,
+    }
+}
+
 /// The mute state's next change, or never while there is none.
 async fn mute_change(
     muted: &mut Option<tokio::sync::watch::Receiver<bool>>,
@@ -1103,7 +1229,10 @@ async fn mute_change(
 /// session ends, feeding the audio to `feed`, telling `live` once the
 /// audio connection is up and `roster` who is in it whenever that
 /// changes; talks too, if given an `uplink` (otherwise muted
-/// throughout). Leaves cleanly either way.
+/// throughout). With `video` (the probe's, or `--video`'s), logs what
+/// Chime says of video and receives what it asks; with a `viewer`, tells
+/// who shares their screen and receives the share it watches (see
+/// [`super::watch`]). Leaves cleanly either way.
 pub async fn listen(
     join: &ChimeJoin,
     feed: Option<Feed>,
@@ -1111,6 +1240,7 @@ pub async fn listen(
     mut stop: tokio::sync::watch::Receiver<bool>,
     live: Option<tokio::sync::oneshot::Sender<()>>,
     roster: Option<tokio::sync::watch::Sender<Roster>>,
+    video: Video,
 ) -> (Report, Result<(), Failure>) {
     log::info!(
         "signaling: opening {} for attendee {}",
@@ -1144,6 +1274,10 @@ pub async fn listen(
         None => (None, None),
     };
     let muted = muted_rx.as_mut().is_none_or(|m| *m.borrow_and_update());
+    let Video { options, viewer } = video;
+    let watched = viewer.as_ref().map(|v| v.watched.clone());
+    let watch = (options.is_some() || viewer.is_some())
+        .then(|| Watch::new(options, viewer, &join.attendee_id));
     let mut session = Session {
         join,
         started,
@@ -1178,6 +1312,8 @@ pub async fn listen(
         voices: Voices::default(),
         count: None,
         report: Report::default(),
+        video: watch,
+        watched,
         over: None,
     };
     let steps = session.handshake.start(now_ms());
@@ -1235,6 +1371,16 @@ pub async fn listen(
                 // The microphone's side is gone: silence from here.
                 None => session.frames = None,
             },
+            watched = watched_change(&mut session.watched) => {
+                let key = watched.unwrap_or_else(|_| {
+                    session.watched = None;
+                    None
+                });
+                if let Some(watch) = &mut session.video {
+                    watch.set_watched(key);
+                }
+                session.try_resubscribe().await;
+            }
             muted = mute_change(&mut session.muted_rx) => match muted {
                 Ok(muted) => session.mute_changed(muted).await,
                 Err(_) => {
@@ -1259,6 +1405,7 @@ pub async fn listen(
     }
     session.close().await;
     let result = session.over.take().unwrap_or(Ok(()));
+    session.report.video = session.video.take().map(Watch::finish);
     (session.report, result)
 }
 
@@ -1273,7 +1420,7 @@ mod tests {
     fn our_offer_and_its_answer_go_both_ways() {
         let relayed: SocketAddr = "203.0.113.5:50000".parse().expect("an address");
         let local: SocketAddr = "192.168.1.2:40000".parse().expect("an address");
-        let mut ours = new_peer(relayed, local).expect("a peer");
+        let mut ours = new_peer(relayed, local, false).expect("a peer");
         let offer = make_offer(&mut ours).expect("an offer");
         assert!(offer.sdp.contains("o=mozilla-chrome "));
         assert!(offer.sdp.contains("a=mid:0\r\n") && offer.sdp.contains("a=mid:1\r\n"));
@@ -1301,6 +1448,29 @@ mod tests {
             )
             .expect("our peer takes the answer");
         assert!(ours.media(offer.audio).is_some());
+    }
+
+    /// `--video-h264-only` leaves VP8 out of the video m-line and keeps
+    /// all of `str0m`'s H.264 profiles; Opus is untouched.
+    #[test]
+    fn an_h264_only_offer_has_no_vp8() {
+        let relayed: SocketAddr = "203.0.113.5:50000".parse().expect("an address");
+        let local: SocketAddr = "192.168.1.2:40000".parse().expect("an address");
+        let both = make_offer(&mut new_peer(relayed, local, false).expect("a peer"))
+            .expect("an offer")
+            .sdp;
+        assert!(both.contains("VP8/90000") && both.contains("H264/90000"));
+        let h264 = make_offer(&mut new_peer(relayed, local, true).expect("a peer"))
+            .expect("an offer")
+            .sdp;
+        assert!(!h264.contains("VP8"), "{h264}");
+        assert!(h264.contains("opus/48000/2"));
+        for profile in ["42001f", "42e01f", "4d001f", "64001f"] {
+            assert!(
+                h264.contains(&format!("profile-level-id={profile}")),
+                "{profile}: {h264}"
+            );
+        }
     }
 
     /// What one side of the pretend call does with `str0m`'s output:
@@ -1358,7 +1528,7 @@ mod tests {
         ));
 
         // Offer, answer, as the session does.
-        let mut ours = new_peer(relayed, local).expect("a peer");
+        let mut ours = new_peer(relayed, local, false).expect("a peer");
         let offer = make_offer(&mut ours).expect("an offer");
         let mut chime = RtcConfig::new()
             .set_crypto_provider(Arc::new(dtls::provider()))
@@ -1489,8 +1659,12 @@ mod tests {
     /// on UDP and a `str0m` media server sending Opus, all driven by
     /// [`listen`] itself. We talk too, the probe's tone through the real
     /// encoder: the pretend media server decodes what we send, and the
-    /// signaling server hears the mute that ends it. Ignored by default:
-    /// it opens local sockets and runs for seconds.
+    /// signaling server hears the mute that ends it. Video as the probe
+    /// sees it: INDEX announces a screen share (and our own camera, never
+    /// taken), the session renegotiates a `recvonly` m-line and
+    /// re-SUBSCRIBEs for it, and the media server sends the H.264 fixture
+    /// on it, which is counted and read while the audio goes on. Ignored
+    /// by default: it opens local sockets and runs for seconds.
     /// `cargo test --all-features -- --ignored loopback`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "opens loopback sockets and takes a few seconds"]
@@ -1506,6 +1680,33 @@ mod tests {
         let heard: Arc<Mutex<Heard>> = Arc::default();
         let controls: Arc<Mutex<Vec<bool>>> = Arc::default();
         let (media_heard, signaling_controls) = (heard.clone(), controls.clone());
+        // Each SUBSCRIBE's receive_stream_ids, the keyframe requests the
+        // media server got, and the video frames it sent.
+        let subscribed: Arc<Mutex<Vec<Vec<u32>>>> = Arc::default();
+        let signaling_subscribed = subscribed.clone();
+        let keyframe_requests: Arc<Mutex<u32>> = Arc::default();
+        let media_requests = keyframe_requests.clone();
+        let video_sent: Arc<Mutex<u32>> = Arc::default();
+        let media_video_sent = video_sent.clone();
+        // The fixture, one access unit a frame: a new one at each SPS, or
+        // at a slice when the unit already has one.
+        let stream = include_bytes!("fixtures/test-pattern-320x180.h264");
+        let mut units: Vec<Vec<u8>> = Vec::new();
+        let mut has_slice = false;
+        for nal in super::super::bitstream::nal_units(stream) {
+            let kind = nal[0] & 0x1f;
+            let slice = matches!(kind, 1 | 5);
+            if units.is_empty() || kind == 7 || (slice && has_slice) {
+                units.push(Vec::new());
+                has_slice = false;
+            }
+            has_slice |= slice;
+            if let Some(unit) = units.last_mut() {
+                unit.extend_from_slice(&[0, 0, 0, 1]);
+                unit.extend_from_slice(nal);
+            }
+        }
+        assert_eq!(units.len(), 6, "six frames in the fixture");
 
         let media_server: SocketAddr = "127.0.0.2:3478".parse().expect("an address");
         let relayed: SocketAddr = "127.0.0.3:50000".parse().expect("an address");
@@ -1521,6 +1722,9 @@ mod tests {
             let mut chime: Option<Rtc> = None;
             let mut client: Option<SocketAddr> = None;
             let mut audio: Option<(Mid, str0m::media::Pt)> = None;
+            let mut video: Option<(Mid, str0m::media::Pt)> = None;
+            let mut next_video = Instant::now();
+            let mut video_frames = 0u64;
             let mut connected = false;
             let mut sent = 0u64;
             let mut buf = vec![0u8; 2048];
@@ -1569,6 +1773,27 @@ mod tests {
                                 });
                                 audio = pt.map(|pt| (added.mid, pt));
                             }
+                            // Our recvonly m-line: the media server sends
+                            // on it, H.264 with packetization mode 1.
+                            Ok(Output::Event(RtcEvent::MediaAdded(added)))
+                                if added.kind == MediaKind::Video
+                                    && added.direction == Direction::SendOnly =>
+                            {
+                                let pt = rtc.writer(added.mid).and_then(|w| {
+                                    w.payload_params()
+                                        .find(|p| {
+                                            p.spec().codec == Codec::H264
+                                                && p.spec().format.packetization_mode == Some(1)
+                                        })
+                                        .map(|p| p.pt())
+                                });
+                                video = pt.map(|pt| (added.mid, pt));
+                            }
+                            Ok(Output::Event(RtcEvent::KeyframeRequest(_))) => {
+                                if let Ok(mut n) = media_requests.lock() {
+                                    *n += 1;
+                                }
+                            }
                             Ok(Output::Event(_)) => {}
                             Err(_) => break,
                         }
@@ -1582,19 +1807,40 @@ mod tests {
                         let _ = writer.write(pt, now, time, SILENT_OPUS.to_vec());
                         sent += 1;
                     }
+                    // The fixture over and over at 15 frames a second.
+                    if connected
+                        && now >= next_video
+                        && let Some((mid, pt)) = video
+                        && let Some(writer) = rtc.writer(mid)
+                    {
+                        let n = usize::try_from(video_frames).unwrap_or(0) % units.len();
+                        let time = MediaTime::new(
+                            video_frames * 6000,
+                            str0m::media::Frequency::NINETY_KHZ,
+                        );
+                        if writer.write(pt, now, time, units[n].clone()).is_ok()
+                            && let Ok(mut sent) = media_video_sent.lock()
+                        {
+                            *sent += 1;
+                        }
+                        video_frames += 1;
+                        next_video = now + Duration::from_millis(66);
+                    }
                 }
                 tokio::select! {
                     offer = offer_inbox.recv() => {
                         let Some((offer, reply)) = offer else { return };
-                        let mut rtc = RtcConfig::new()
-                            .set_crypto_provider(Arc::new(dtls::provider()))
-                            .build(Instant::now());
-                        rtc.add_local_candidate(Candidate::host(media_server, "udp").expect("a candidate"));
-                        let answer = rtc.sdp_api()
-                            .accept_offer(str0m::change::SdpOffer::from_sdp_string(&offer).expect("parses"))
-                            .expect("accepted");
+                        let offer = str0m::change::SdpOffer::from_sdp_string(&offer).expect("parses");
+                        // A re-SUBSCRIBE renegotiates the same connection.
+                        let rtc = chime.get_or_insert_with(|| {
+                            let mut rtc = RtcConfig::new()
+                                .set_crypto_provider(Arc::new(dtls::provider()))
+                                .build(Instant::now());
+                            rtc.add_local_candidate(Candidate::host(media_server, "udp").expect("a candidate"));
+                            rtc
+                        });
+                        let answer = rtc.sdp_api().accept_offer(offer).expect("accepted");
                         let _ = reply.send(answer.to_sdp_string());
-                        chime = Some(rtc);
                     }
                     got = turn_socket.recv_from(&mut buf) => {
                         let Ok((n, from)) = got else { return };
@@ -1680,15 +1926,61 @@ mod tests {
                             ..Default::default()
                         });
                         let _ = ws.send(reply(ack)).await;
-                        let _ = ws.send(reply(chime::frame(FrameType::Index, 2))).await;
+                        // A screen share, and our own camera, which is
+                        // never received.
+                        let source = |stream: u32, group: u32, attendee: &str| {
+                            chime::proto::SdkStreamDescriptor {
+                                stream_id: Some(stream),
+                                group_id: Some(group),
+                                attendee_id: Some(attendee.into()),
+                                external_user_id: Some(format!("T1-R1-U{group}")),
+                                media_type: Some(chime::proto::SdkStreamMediaType::Video as i32),
+                                width: Some(320),
+                                height: Some(180),
+                                framerate: Some(15),
+                                max_bitrate_kbps: Some(300),
+                                ..Default::default()
+                            }
+                        };
+                        let mut index = chime::frame(FrameType::Index, 2);
+                        index.index = Some(chime::proto::SdkIndexFrame {
+                            sources: vec![source(7, 3, "B2#content"), source(9, 1, "A1")],
+                            num_participants: Some(2),
+                            supported_receive_codec_intersection: vec![3],
+                            ..Default::default()
+                        });
+                        let _ = ws.send(reply(index)).await;
                     }
                     Ok(FrameType::Subscribe) => {
-                        let offer = frame.sub.and_then(|s| s.sdp_offer).expect("an offer");
+                        let sub = frame.sub.expect("a subscribe");
+                        if let Ok(mut subscribed) = signaling_subscribed.lock() {
+                            subscribed.push(sub.receive_stream_ids.clone());
+                        }
+                        let offer = sub.sdp_offer.expect("an offer");
                         let (answer_to, answer) = tokio::sync::oneshot::channel();
                         let _ = offers.send((offer, answer_to)).await;
+                        let answer = answer.await.expect("an answer");
+                        // The stream on the last video m-line, by its SSRC.
+                        let tracks = match sdp::media_lines(&answer).last() {
+                            Some(last)
+                                if last.kind == "video" && sub.receive_stream_ids.len() > 1 =>
+                            {
+                                last.ssrcs
+                                    .first()
+                                    .map(|&ssrc| chime::proto::SdkTrackMapping {
+                                        stream_id: Some(7),
+                                        ssrc: Some(ssrc),
+                                        track_label: Some("video".into()),
+                                    })
+                                    .into_iter()
+                                    .collect()
+                            }
+                            _ => Vec::new(),
+                        };
                         let mut ack = chime::frame(FrameType::SubscribeAck, 3);
                         ack.suback = Some(chime::proto::SdkSubscribeAckFrame {
-                            sdp_answer: Some(answer.await.expect("an answer")),
+                            sdp_answer: Some(answer),
+                            tracks,
                             ..Default::default()
                         });
                         let _ = ws.send(reply(ack)).await;
@@ -1721,22 +2013,79 @@ mod tests {
         };
         let (stop, stopped) = tokio::sync::watch::channel(false);
         // Unmuted from the start, sending the tone; muted after two
-        // seconds, then silence until leaving at three.
+        // seconds, then silence until leaving at six, by when the video
+        // has been renegotiated and has flowed for a while.
         let (frames, frames_in) = tokio::sync::mpsc::channel(25);
         let tone = super::super::microphone::ToneSource::start(frames).expect("a tone");
         let (mute, muted) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(2)).await;
             let _ = mute.send(true);
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_secs(4)).await;
             let _ = stop.send(true);
         });
         let uplink = Uplink {
             frames: frames_in,
             muted,
         };
-        let (report, result) = listen(&join, None, Some(uplink), stopped, None, None).await;
+        // With `huddle-video`, the share is received because the call
+        // window watches it (no `--video` streams), and it is decoded.
+        #[cfg(feature = "huddle-video")]
+        let (viewer, screen, told) = {
+            let screen = super::super::screen::Screen::new(|| {});
+            let (shares, told) = tokio::sync::watch::channel(Vec::new());
+            let (watching, watched) = tokio::sync::watch::channel(None);
+            // The window opens on the share once the session runs.
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let _ = watching.send(Some("B2#content".to_owned()));
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                drop(watching);
+            });
+            let viewer = Viewer {
+                shares,
+                watched,
+                screen: screen.clone(),
+            };
+            (Some(viewer), screen, told)
+        };
+        #[cfg(not(feature = "huddle-video"))]
+        let viewer = None;
+        let (report, result) = listen(
+            &join,
+            None,
+            Some(uplink),
+            stopped,
+            None,
+            None,
+            Video {
+                options: Some(video::Options {
+                    streams: if cfg!(feature = "huddle-video") { 0 } else { 4 },
+                    h264_only: true,
+                    dump: None,
+                }),
+                viewer,
+            },
+        )
+        .await;
         drop(tone);
+        #[cfg(feature = "huddle-video")]
+        {
+            // Who shares reached the viewer, and the share was decoded at
+            // its size.
+            let shares = told.borrow().clone();
+            assert_eq!(shares.len(), 1, "{shares:?}");
+            assert_eq!(shares[0].key, "B2#content");
+            assert_eq!(shares[0].user.as_deref(), Some("U3"));
+            assert!(screen.pictures() >= 5, "{} pictures", screen.pictures());
+            let picture = screen.take().expect("the newest picture");
+            assert_eq!(picture.source, [320, 180]);
+            log::info!(
+                "loopback: {} pictures of {:?} decoded",
+                screen.pictures(),
+                picture.source
+            );
+        }
         assert_eq!(result, Ok(()), "{report:?}");
         assert_eq!(report.ending.as_deref(), Some("left"));
         assert!(report.relay.is_some(), "{report:?}");
@@ -1747,6 +2096,38 @@ mod tests {
 
         // Chime heard the mute.
         assert_eq!(*controls.lock().expect("controls"), vec![true]);
+
+        // Video: one re-SUBSCRIBE for the share alone, slot 0 our send
+        // line; the media server was asked for a keyframe and sent frames,
+        // which were counted and read; audio went on through it.
+        assert_eq!(
+            *subscribed.lock().expect("subscribed"),
+            vec![vec![0], vec![0, 7]]
+        );
+        assert!(*keyframe_requests.lock().expect("requests") >= 1, "no PLI");
+        let sent = *video_sent.lock().expect("sent");
+        let summary = report.video.clone().expect("a video summary");
+        assert!(summary.saw_share, "{summary:?}");
+        assert_eq!(summary.codecs, ["H264_CONSTRAINED_BASELINE_PROFILE"]);
+        let [stream] = &summary.streams[..] else {
+            panic!("{summary:?}");
+        };
+        assert_eq!(stream.stream_id, 7);
+        assert!(stream.share);
+        assert_eq!(stream.user.as_deref(), Some("U3"));
+        assert_eq!(stream.codec.as_ref().map(|c| c.0.as_str()), Some("H264"));
+        assert!(stream.frames >= 10, "{} of {sent} frames", stream.frames);
+        assert!(stream.keyframes >= 1, "{stream:?}");
+        assert!(stream.plis >= 1, "{stream:?}");
+        assert_eq!(stream.resolution(), Some((320, 180)));
+        let [resubscribe] = &summary.resubscribes[..] else {
+            panic!("{summary:?}");
+        };
+        assert_eq!(resubscribe.stream_ids, [0, 7]);
+        assert!(
+            resubscribe.audio_frames.is_some_and(|n| n > 20),
+            "audio through the re-SUBSCRIBE: {resubscribe:?}"
+        );
         // And it decodes what we sent: the tone, then silence; one RTP
         // clock throughout, 960 a frame; the level negotiated and sent.
         let heard = heard.lock().expect("heard").clone();

@@ -23,6 +23,8 @@ use crate::model::{File, Media};
 #[cfg(feature = "audio")]
 mod device;
 #[cfg(feature = "audio")]
+pub mod guard;
+#[cfg(feature = "audio")]
 pub use device::Device;
 
 /// The most a sound may weigh to be played here. It is held in memory

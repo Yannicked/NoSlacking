@@ -3185,6 +3185,7 @@ dependencies = [
  "apple-native-keyring-store",
  "arboard",
  "base64 0.22.1",
+ "bytemuck",
  "calamine",
  "chacha20poly1305",
  "csv",
@@ -3224,6 +3225,7 @@ dependencies = [
  "rfd",
  "rodio",
  "rustls-native-certs",
+ "rusty_h264-decoder",
  "serde",
  "serde_json",
  "sha1",
@@ -3241,6 +3243,7 @@ dependencies = [
  "tracing",
  "windows-native-keyring-store",
  "winresource",
+ "yuv",
  "zbus",
  "zbus-secret-service-keyring-store",
  "zip",
@@ -3819,8 +3822,6 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "opus-decoder"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15ae32c275dabb0cd2c863460bf349e9abc3568ba2abf0f9eb7b7d2edeeed07e"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -4707,10 +4708,47 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "rusty_h264-accel"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18110c8f692668ccf004393bee04e369d4f0f173dd0ea4b515080258e6f9c599"
+
+[[package]]
+name = "rusty_h264-common"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaf982ae23ecf8f13015ec1c5576fe2935f4e4296b097ebc4233b5872623af2a"
+dependencies = [
+ "bytemuck",
+ "once_cell",
+ "portable-atomic",
+ "rusty_h264-accel",
+ "wide",
+]
+
+[[package]]
+name = "rusty_h264-decoder"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0f4deb1a3a5e928cbaa1dff7db6bc46262c850aedeb75cb5aeab890494c18a5"
+dependencies = [
+ "rusty_h264-common",
+]
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "safe_arch"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96b02de82ddbe1b636e6170c21be622223aea188ef2e139be0a5b219ec215323"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "same-file"
@@ -6360,6 +6398,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wide"
+version = "0.7.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce5da8ecb62bcd8ec8b7ea19f69a51275e91299be594ea5cc6ef7819e16cd03"
+dependencies = [
+ "bytemuck",
+ "safe_arch",
+]
+
+[[package]]
 name = "winapi-util"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6911,6 +6959,15 @@ dependencies = [
  "quote",
  "syn 3.0.6",
  "synstructure",
+]
+
+[[package]]
+name = "yuv"
+version = "0.8.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a295923535c00a4e72a50a0a1130097f93160b39892dd4d2d006b1e2b90d6bf9"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]

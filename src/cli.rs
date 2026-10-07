@@ -34,6 +34,15 @@ pub struct Cli {
     /// `--send-tone`: the probe joins unmuted and sends a quiet tone.
     #[cfg(feature = "huddle-audio")]
     pub send_tone: bool,
+    /// `--video N`: how many video streams a huddle receives (app or probe).
+    #[cfg(feature = "huddle-audio")]
+    pub video: usize,
+    /// `--video-h264-only`: huddles offer no VP8.
+    #[cfg(feature = "huddle-audio")]
+    pub video_h264_only: bool,
+    /// `--video-dump DIR`: where huddles write the first video frames.
+    #[cfg(feature = "huddle-audio")]
+    pub video_dump: Option<PathBuf>,
     /// `--demo`: run against a pretend Slack.
     #[cfg(feature = "demo")]
     pub demo: bool,
@@ -175,6 +184,24 @@ pub const FLAGS: &[Flag] = &[
         takes: Takes::Nothing(|cli| cli.send_tone = true),
         help: "Have the huddle probe join unmuted and send a quiet 440 Hz tone the whole time (never the microphone), to hear in Slack that our audio gets through",
     },
+    #[cfg(feature = "huddle-audio")]
+    Flag {
+        name: "video",
+        takes: Takes::One("N", |cli, v| number(v).map(|v| cli.video = v)),
+        help: "When joining a huddle (in the app or the probe), receive up to N video streams once the audio is live (screen shares first), logging the codec, frames, keyframes and gaps of each; nothing is decoded or shown [default: 0, only Chime's video signaling is logged]",
+    },
+    #[cfg(feature = "huddle-audio")]
+    Flag {
+        name: "video-h264-only",
+        takes: Takes::Nothing(|cli| cli.video_h264_only = true),
+        help: "When joining a huddle (in the app or the probe), offer H.264 only for video (no VP8), to see whether the others' apps then send H.264",
+    },
+    #[cfg(feature = "huddle-audio")]
+    Flag {
+        name: "video-dump",
+        takes: Takes::One("DIR", |cli, v| path(v).map(|v| cli.video_dump = Some(v))),
+        help: "When joining a huddle (in the app or the probe), write the first 300 frames of each video stream it receives into DIR (H.264 as .h264, VP8 as .ivf). These files hold the people's camera pictures and screens: keep them private and delete them when done",
+    },
     #[cfg(feature = "demo")]
     Flag {
         name: "demo",
@@ -203,7 +230,7 @@ pub const FLAGS: &[Flag] = &[
     Flag {
         name: "demo-view",
         takes: Takes::One("VIEW", |cli, v| text(v).map(|v| cli.demo_view = Some(v))),
-        help: "Open a view before the screenshot: thread, settings, sign-in, switcher, palette, picker, profile, share, upload, drafts, lightbox, media, previews, viewer-sheet, viewer-csv, viewer-zip, viewer-text, compact, held-media, shortcuts, delete-file, add-emoji or (with huddle-audio) listening or talking",
+        help: "Open a view before the screenshot: thread, settings, sign-in, switcher, palette, picker, profile, share, upload, drafts, lightbox, media, previews, viewer-sheet, viewer-csv, viewer-zip, viewer-text, compact, held-media, shortcuts, delete-file, add-emoji or (with huddle-audio) listening or talking, and (with huddle-video) sharing or call-window",
     },
     #[cfg(feature = "demo")]
     Flag {
@@ -268,8 +295,8 @@ fn text(value: OsString) -> Result<String, String> {
 
 /// A value as a path, which may be any bytes the system allows.
 #[cfg_attr(
-    not(feature = "demo"),
-    expect(dead_code, reason = "only the demo flags take paths")
+    not(any(feature = "demo", feature = "huddle-audio")),
+    expect(dead_code, reason = "only the demo and huddle flags take paths")
 )]
 #[expect(
     clippy::unnecessary_wraps,
@@ -685,6 +712,26 @@ mod tests {
         fn send_tone_is_off_unless_asked() {
             assert!(!run(&["--huddle-probe", "T1", "C1"]).send_tone);
             assert!(run(&["--huddle-probe", "T1", "C1", "--send-tone"]).send_tone);
+        }
+
+        #[test]
+        fn video_flags_are_off_unless_asked() {
+            let plain = run(&["--huddle-probe", "T1", "C1"]);
+            assert_eq!(
+                (plain.video, plain.video_h264_only, plain.video_dump),
+                (0, false, None)
+            );
+            for args in [
+                &["--video", "4", "--video-h264-only", "--video-dump", "dumps"][..],
+                &["--video=4", "--video-h264-only", "--video-dump=dumps"],
+            ] {
+                let cli = run(args);
+                assert_eq!(cli.video, 4);
+                assert!(cli.video_h264_only);
+                assert_eq!(cli.video_dump, Some(PathBuf::from("dumps")));
+            }
+            assert!(help().contains("--video-dump <DIR>"));
+            assert!(help().contains("keep them private"));
         }
 
         #[test]

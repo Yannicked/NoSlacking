@@ -2606,6 +2606,9 @@ msgstr "de geluidsverbinding kon niet worden gemaakt"
 msgid "the audio connection was lost"
 msgstr "de geluidsverbinding is verbroken"
 
+msgid "the sound device stopped playing"
+msgstr "het geluidsapparaat speelt niet meer af"
+
 # The call bar, while a huddle plays here.
 msgid "Listening in #{channel}"
 msgstr "Luisteren in #{channel}"
@@ -2712,6 +2715,30 @@ msgstr "Hier meedoen aan de huddle, met je microfoon uit"
 
 msgid "Join the huddle here: {names}"
 msgstr "Hier meedoen aan de huddle: {names}"
+
+msgid "{name} is sharing their screen"
+msgstr "{name} deelt het scherm"
+
+msgid "Watch"
+msgstr "Bekijken"
+
+msgid "Stop watching"
+msgstr "Niet meer bekijken"
+
+msgid "The screen share ended"
+msgstr "Het delen van het scherm is gestopt"
+
+msgid "{name}'s screen"
+msgstr "Scherm van {name}"
+
+msgid "{name}'s screen, shown"
+msgstr "Scherm van {name}, getoond"
+
+msgid "Show {name}'s screen"
+msgstr "Scherm van {name} tonen"
+
+msgid "Waiting for the picture…"
+msgstr "Wachten op het beeld…"
 
 # Microsoft Teams sign-in
 msgid "Sign in to Microsoft Teams"

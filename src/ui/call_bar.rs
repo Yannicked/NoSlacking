@@ -8,6 +8,10 @@
 //! it with the speaking ringed and the muted marked (you as your
 //! microphone really is), and offers Leave (also Ctrl+Shift+H) and the
 //! microphone's mute button while live (see [`super::huddle_mic`]).
+//!
+//! With `huddle-video`, a row for each screen shared in the huddle ("Ana
+//! is sharing their screen") with Watch, which opens the call window on
+//! it (see [`super::call_window`]).
 
 use egui::{Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke, Vec2};
 
@@ -24,6 +28,9 @@ const FACE_GAP: f32 = 5.0;
 /// Leave's red: deep enough for white text on both themes (the dark
 /// palette's own red is too light for it).
 const LEAVE: Color32 = Color32::from_rgb(0xcc, 0x2e, 0x45);
+/// Watch's green: the call's own colour, deep enough for white text.
+#[cfg(feature = "huddle-video")]
+const ACTIVE_BUTTON: Color32 = Color32::from_rgb(0x00, 0x7a, 0x5a);
 
 /// One person as the bar draws them.
 struct Face {
@@ -36,6 +43,15 @@ struct Face {
     me: bool,
 }
 
+/// A screen shared in the huddle, as the bar lists it.
+#[cfg(feature = "huddle-video")]
+struct ShareRow {
+    key: String,
+    text: String,
+    /// Shown in the call window now.
+    watched: bool,
+}
+
 /// What the bar shows, gathered before drawing.
 struct Bar {
     team: String,
@@ -45,6 +61,8 @@ struct Bar {
     /// The workspace's name, when more than one is signed in.
     workspace: Option<String>,
     faces: Vec<Face>,
+    #[cfg(feature = "huddle-video")]
+    shares: Vec<ShareRow>,
 }
 
 /// Gathers the bar for `listening` at `now`.
@@ -101,6 +119,21 @@ fn gather(
         status: huddles::status_text(&listening.phase, now),
         workspace: (workspaces.len() > 1).then(|| workspace.info.name.clone()),
         faces,
+        #[cfg(feature = "huddle-video")]
+        shares: listening
+            .shares
+            .iter()
+            .map(|share| ShareRow {
+                key: share.key.clone(),
+                text: huddles::sharing_text(
+                    &share
+                        .user
+                        .as_deref()
+                        .map_or_else(|| t("Someone").into_owned(), |id| workspace.user_label(id)),
+                ),
+                watched: listening.watching.as_deref() == Some(share.key.as_str()),
+            })
+            .collect(),
     })
 }
 
@@ -166,6 +199,12 @@ fn bar(
             if !bar.faces.is_empty() {
                 ui.horizontal(|ui| faces(ui, palette, &bar.faces));
             }
+            #[cfg(feature = "huddle-video")]
+            if !failed {
+                for share in &bar.shares {
+                    share_row(ui, palette, share, actions);
+                }
+            }
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -202,6 +241,43 @@ fn bar(
                 });
             });
         });
+}
+
+/// Someone's screen share: who, and Watch (or, while it is open in the
+/// call window, Stop watching).
+#[cfg(feature = "huddle-video")]
+fn share_row(ui: &mut egui::Ui, palette: &Palette, share: &ShareRow, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (label, wanted) = if share.watched {
+                (t("Stop watching"), None)
+            } else {
+                (t("Watch"), Some(share.key.clone()))
+            };
+            let fill = (!share.watched).then_some(ACTIVE_BUTTON);
+            if small_button(ui, palette, &label, fill)
+                .on_hover_text(&share.text)
+                .clicked()
+            {
+                actions.push(Action::Huddle(huddles::Action::Watch(wanted)));
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(Icon::Monitor.image(ACTIVE, 14.0));
+                // On two lines if it must: the sidebar is narrow.
+                ui.vertical(|ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&share.text)
+                                .font(theme::regular(12.0))
+                                .color(palette.text),
+                        )
+                        .wrap(),
+                    );
+                });
+            });
+        });
+    });
 }
 
 /// The headphones and the huddle's name, which opens its conversation.

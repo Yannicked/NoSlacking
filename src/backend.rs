@@ -982,6 +982,13 @@ pub struct Sink {
 }
 
 impl Sink {
+    /// The interface's waker, for what reaches it other than as an event:
+    /// a huddle share's pictures, which wait in a slot of their own.
+    #[cfg(feature = "huddle-video")]
+    pub fn waker(&self) -> Waker {
+        self.waker.clone()
+    }
+
     pub fn send(&self, event: Event) {
         match &self.gate {
             Some(gate) => {

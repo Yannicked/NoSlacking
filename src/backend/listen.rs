@@ -10,6 +10,17 @@
 //! back as [`crate::people::Event::Microphone`]. The session sends the
 //! microphone's frames only once it is open (`effective` below), so a
 //! microphone that would not open never unmutes the call.
+//!
+//! The speaker is checked every second: one that stopped playing (its
+//! device thread gone, or no longer asking for sound) is opened again on
+//! the same feed, up to three times; after that the huddle is left with
+//! [`HuddleTrouble::SoundStopped`] rather than staying in it hearing
+//! nothing.
+//!
+//! With `huddle-video`, the session also says who shares their screen
+//! (`Listen::Shares`) and hands over the `Screen` the watched share's
+//! pictures arrive in (`Listen::Screen`); the interface says which
+//! share its call window shows, and only that one is received.
 
 use std::time::Duration;
 
@@ -22,7 +33,10 @@ use crate::huddle_audio::media::{self, Stage, Uplink};
 use crate::huddle_audio::microphone::{Cpal, MicControl, Wiring};
 use crate::huddle_audio::processing::RenderTap;
 use crate::huddle_audio::roster::Roster;
-use crate::huddle_audio::speaker::Speaker;
+#[cfg(feature = "huddle-video")]
+use crate::huddle_audio::screen::Screen;
+use crate::huddle_audio::speaker::{Feed, Speaker};
+use crate::huddle_audio::video::Share;
 use crate::huddle_mic::MicNews;
 use crate::huddles::{Left, Listen};
 use crate::people;
@@ -32,6 +46,11 @@ use crate::slack::Client;
 /// sends volumes several times a second; the window need not wake for
 /// each, and a speaking mark held a moment longer reads as well.
 const ROSTER_EVERY: Duration = Duration::from_millis(250);
+/// How often the speaker is asked whether it still plays.
+const SPEAKER_CHECK: Duration = Duration::from_secs(1);
+/// How many times a session opens a stopped speaker again before it
+/// gives up.
+const SPEAKER_REOPENS: u32 = 3;
 
 /// The huddle being listened to.
 #[derive(Debug)]
@@ -40,6 +59,9 @@ struct Running {
     stop: watch::Sender<bool>,
     /// Whether the interface wants the microphone muted.
     muted: watch::Sender<bool>,
+    /// Which share the call window shows.
+    #[cfg(feature = "huddle-video")]
+    watched: watch::Sender<Option<String>>,
 }
 
 /// The one listening session there may be.
@@ -55,8 +77,31 @@ impl Listener {
         self.stop();
         let (stop, stopped) = watch::channel(false);
         let (muted, wanted) = watch::channel(true);
-        tokio::spawn(run(client, team.clone(), channel, stopped, wanted, sink));
-        self.running = Some(Running { team, stop, muted });
+        #[cfg(feature = "huddle-video")]
+        let (watched, watching) = watch::channel(None);
+        let controls = Controls {
+            stopped,
+            wanted,
+            #[cfg(feature = "huddle-video")]
+            watching,
+        };
+        tokio::spawn(run(client, team.clone(), channel, controls, sink));
+        self.running = Some(Running {
+            team,
+            stop,
+            muted,
+            #[cfg(feature = "huddle-video")]
+            watched,
+        });
+    }
+
+    /// Shows the share `key` in the call window, or none: only that one
+    /// is received.
+    #[cfg(feature = "huddle-video")]
+    pub fn watch_share(&mut self, key: Option<String>) {
+        if let Some(running) = &self.running {
+            let _ = running.watched.send(key);
+        }
     }
 
     /// Mutes or unmutes the microphone in the huddle, if there is one.
@@ -158,9 +203,31 @@ async fn microphone(
     }
 }
 
+/// Lets go of a speaker that stopped and opens the device again for the
+/// same feed, off this thread: both wait on the device's.
+async fn reopen(old: Speaker, feed: Feed, tap: RenderTap) -> Result<Speaker, String> {
+    let reopened = tokio::task::spawn_blocking(move || {
+        drop(old);
+        Speaker::reopen(&feed, Some(tap))
+    })
+    .await;
+    match reopened {
+        Ok(result) => result,
+        Err(error) => Err(format!("the device thread failed: {error}")),
+    }
+}
+
 /// How a session that ran ended, for the interface: left when asked,
-/// the huddle over, or a failure in words.
-fn ending(meeting_ended: bool, result: Result<(), media::Failure>) -> Result<Left, Failure> {
+/// the huddle over, or a failure in words; `sound_stopped` when the
+/// speaker gave up, which is why it was left.
+fn ending(
+    meeting_ended: bool,
+    sound_stopped: bool,
+    result: Result<(), media::Failure>,
+) -> Result<Left, Failure> {
+    if sound_stopped {
+        return Err(Failure::Huddle(HuddleTrouble::SoundStopped));
+    }
     match result {
         Ok(()) if meeting_ended => Ok(Left::Ended),
         Ok(()) => Ok(Left::Asked),
@@ -171,15 +238,38 @@ fn ending(meeting_ended: bool, result: Result<(), media::Failure>) -> Result<Lef
     }
 }
 
-/// One listening session, start to end.
-async fn run(
-    client: Client,
-    team: String,
-    channel: String,
+/// What the interface tells a session as it goes.
+struct Controls {
+    /// Whether to leave.
     stopped: watch::Receiver<bool>,
+    /// Whether the microphone should be muted.
     wanted: watch::Receiver<bool>,
-    sink: Sink,
-) {
+    /// Which share the call window shows.
+    #[cfg(feature = "huddle-video")]
+    watching: watch::Receiver<Option<String>>,
+}
+
+/// The next list of who shares, or never while there is none.
+async fn next_shares(
+    shares: &mut Option<watch::Receiver<Vec<Share>>>,
+) -> Result<Vec<Share>, watch::error::RecvError> {
+    match shares {
+        Some(shares) => {
+            shares.changed().await?;
+            Ok(shares.borrow_and_update().clone())
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// One listening session, start to end.
+async fn run(client: Client, team: String, channel: String, controls: Controls, sink: Sink) {
+    let Controls {
+        mut stopped,
+        wanted,
+        #[cfg(feature = "huddle-video")]
+        watching,
+    } = controls;
     let tell = |state: Listen| {
         sink.send(Event::People {
             team: team.clone(),
@@ -192,6 +282,7 @@ async fn run(
     tell(Listen::Joining);
     let tap = RenderTap::default();
     let speaker_tap = tap.clone();
+    let reopen_tap = tap.clone();
     let (speaker, feed) =
         match tokio::task::spawn_blocking(move || Speaker::open(Some(speaker_tap))).await {
             Ok(Ok(opened)) => opened,
@@ -244,13 +335,43 @@ async fn run(
     };
     let (live, connected) = oneshot::channel();
     let (roster, mut rosters) = watch::channel(Roster::default());
+    // The session stops when the interface asks, or when the speaker
+    // gives up.
+    let (halt, halted) = watch::channel(false);
+    let mut heard_stop = false;
+    let mut speaker = Some(speaker);
+    let mut reopened = 0;
+    let mut sound_stopped = false;
+    let mut checks = tokio::time::interval(SPEAKER_CHECK);
+    checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Who shares, for the call bar, and the screen the watched share's
+    // pictures go to, woken as the events are.
+    #[cfg(feature = "huddle-video")]
+    let (viewer, mut shares) = {
+        let waker = sink.waker();
+        let screen = Screen::new(move || waker.wake());
+        tell(Listen::Screen(screen.clone()));
+        let (shares, told) = watch::channel(Vec::new());
+        let viewer = crate::huddle_audio::watch::Viewer {
+            shares,
+            watched: watching,
+            screen,
+        };
+        (Some(viewer), Some(told))
+    };
+    #[cfg(not(feature = "huddle-video"))]
+    let (viewer, mut shares) = (None, None);
     let listening = media::listen(
         &joined,
-        Some(feed),
+        Some(feed.clone()),
         Some(uplink),
-        stopped,
+        halted,
         Some(live),
         Some(roster),
+        media::Video {
+            options: crate::huddle_audio::video::for_app(),
+            viewer,
+        },
     );
     tokio::pin!(listening);
     let mut connected = Some(connected);
@@ -260,6 +381,46 @@ async fn run(
     let (report, result) = loop {
         tokio::select! {
             ended = &mut listening => break ended,
+            changed = async {
+                // A closed channel answers at once, over and over: once
+                // heard, never again.
+                if heard_stop {
+                    std::future::pending().await
+                } else {
+                    stopped.changed().await
+                }
+            } => {
+                if changed.is_err() || *stopped.borrow() {
+                    heard_stop = true;
+                    let _ = halt.send(true);
+                }
+            }
+            _ = checks.tick(), if speaker.is_some() => {
+                let now = std::time::Instant::now();
+                if !speaker.as_mut().is_some_and(|s| s.stopped(now)) {
+                    continue;
+                }
+                let Some(old) = speaker.take() else {
+                    continue;
+                };
+                if reopened < SPEAKER_REOPENS {
+                    reopened += 1;
+                    log::warn!("huddle audio: the speaker stopped playing; opening it again ({reopened})");
+                    match reopen(old, feed.clone(), reopen_tap.clone()).await {
+                        Ok(fresh) => speaker = Some(fresh),
+                        Err(why) => {
+                            log::warn!("huddle audio: {why}");
+                            sound_stopped = true;
+                            let _ = halt.send(true);
+                        }
+                    }
+                } else {
+                    log::warn!("huddle audio: the speaker stopped playing again; leaving");
+                    let _ = tokio::task::spawn_blocking(move || drop(old)).await;
+                    sound_stopped = true;
+                    let _ = halt.send(true);
+                }
+            }
             up = async {
                 match connected.as_mut() {
                     Some(connected) => connected.await,
@@ -288,6 +449,13 @@ async fn run(
                     next_roster = None;
                 }
             }
+            told = next_shares(&mut shares) => match told {
+                #[cfg(feature = "huddle-video")]
+                Ok(now) => tell(Listen::Shares(now)),
+                #[cfg(not(feature = "huddle-video"))]
+                Ok(_) => {}
+                Err(_) => shares = None,
+            },
         }
     };
     // Left: the microphone closes before anything else.
@@ -301,7 +469,16 @@ async fn run(
         report.audio_bytes,
         report.ending.as_deref().unwrap_or("-")
     );
-    tell(Listen::Ended(ending(report.meeting_ended, result)));
+    if let Some(video) = &report.video {
+        for line in crate::huddle_audio::probe::video_summary(video) {
+            log::info!("huddle {line}");
+        }
+    }
+    tell(Listen::Ended(ending(
+        report.meeting_ended,
+        sound_stopped,
+        result,
+    )));
 }
 
 #[cfg(test)]
@@ -324,10 +501,16 @@ mod tests {
             join_failure(&JoinFailure::NotSession),
             Failure::NeedsSession
         );
-        assert_eq!(ending(true, Ok(())), Ok(Left::Ended));
-        assert_eq!(ending(false, Ok(())), Ok(Left::Asked));
+        assert_eq!(ending(true, false, Ok(())), Ok(Left::Ended));
+        assert_eq!(ending(false, false, Ok(())), Ok(Left::Asked));
+        assert_eq!(
+            ending(false, true, Ok(())),
+            Err(Failure::Huddle(HuddleTrouble::SoundStopped)),
+            "left because the speaker gave up"
+        );
         assert_eq!(
             ending(
+                false,
                 false,
                 Err(media::Failure {
                     stage: Stage::Media,
