@@ -362,6 +362,8 @@ fn decode_one(
         decoder.lost();
     }
     let started = Instant::now();
+    let (width, height) = gallery.fit();
+    decoder.set_fit(width, height);
     match decoder.decode(unit) {
         Ok(Some(yuv)) => {
             let source = [yuv.width, yuv.height];

@@ -9,7 +9,7 @@
 //!
 //! The real one, [`Nokhwa`], opens the first camera through `nokhwa`
 //! (V4L2 on Linux, AVFoundation on macOS, Media Foundation on Windows)
-//! on a thread of its own, asking for 640×480 at 15 frames a second in a
+//! on a thread of its own, asking for 640×480 at 30 frames a second in a
 //! raw format if it has one (YUYV or NV12), MJPEG otherwise. Each frame
 //! becomes I420 ([`I420`]), shrunk to fit 640×480 if the camera gave
 //! more, and waits in a [`Latest`] for the encoder: a frame the encoder
@@ -31,7 +31,7 @@ pub const MAX_WIDTH: usize = 640;
 /// The largest picture's height.
 pub const MAX_HEIGHT: usize = 480;
 /// Frames a second asked of the camera, and sent.
-pub const FPS: u32 = 15;
+pub const FPS: u32 = 30;
 
 /// A picture in I420: a full-size luma plane and two chroma planes of
 /// half its width and height. Always of even size, as H.264's 4:2:0

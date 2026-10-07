@@ -23,7 +23,9 @@ ZapFast and Spotifast.
 
 ## Rules
 
-- `unsafe` is forbidden. Clippy runs with `-D warnings`, including
+- `unsafe` is forbidden. The one exception is the hardware video helper
+  (`crates/noslacking-video`, a separate process), where it is denied
+  except in the modules that call the platform's C libraries. Clippy runs with `-D warnings`, including
   `unwrap_used`; handle errors or use `expect` with a reason in tests only.
 - Tests never touch the network, the keyring or the clock-dependent world.
   Parse fixtures, test pure functions. `cargo test` must pass offline.
@@ -42,7 +44,7 @@ ZapFast and Spotifast.
 
 ```
 cargo fmt --all --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --all-features --no-deps
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 ```

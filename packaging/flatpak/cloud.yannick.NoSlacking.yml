@@ -39,8 +39,12 @@ modules:
     buildsystem: simple
     build-commands:
       - cargo --offline fetch --manifest-path Cargo.toml --verbose
-      - cargo --offline build --release --locked
+      # The app and its hardware video helper. The runtime has libva and
+      # its GL extension Mesa's VA-API drivers; --device=dri lets the
+      # helper reach the GPU.
+      - cargo --offline build --release --locked -p noslacking -p noslacking-video
       - install -Dm755 target/release/noslacking /app/bin/noslacking
+      - install -Dm755 target/release/noslacking-video /app/bin/noslacking-video
       - install -Dm644 packaging/applications/cloud.yannick.NoSlacking.desktop
         /app/share/applications/cloud.yannick.NoSlacking.desktop
       - install -Dm644 packaging/metainfo/cloud.yannick.NoSlacking.metainfo.xml

@@ -1055,7 +1055,8 @@ engineering, as for the rest of the session sign-in.
   - [x] Stage 3 built, behind `huddle-camera` (off by default), not yet
         tried against Slack: a Video button beside Mute (Ctrl+Shift+O), the
         camera opened only while on (nokhwa: V4L2, AVFoundation, Media
-        Foundation), H.264 constrained baseline 640×480 at 15 fps from
+        Foundation), H.264 constrained baseline 640×480 at 30 fps (15 at
+        first; raised 2026-10-07) from
         `rusty_h264-encoder` (pure Rust, about 4 ms a picture, chosen
         after a spike) on its own thread, slot 0 `sendrecv` with a DUPLEX
         re-SUBSCRIBE, keyframes on PLI/FIR and every 4 s, bitrate from
@@ -1077,6 +1078,101 @@ engineering, as for the rest of the session sign-in.
         V4L2, which would need `--device=all`.
   - [ ] Choosing the camera (Settings) when there is more than one;
         today the first is taken.
+  - [ ] **Hardware video decoding (and maybe encoding), in a separate
+        process.** Pure Rust in software costs little today (about 0.4 ms
+        per 480×480 camera frame, 3–5 ms per 1080p share frame, 4 ms to
+        encode 640×480), so this is for 1080p shares, many tiles and weak
+        laptops. The user is fine with `unsafe` for it, ideally isolated in
+        a helper process (like the viewer's planned `--parse-file`
+        helper): the main app keeps `forbid(unsafe)`, a crash or a
+        malicious stream only kills the helper, and frames come back over
+        a pipe or shared memory. Options, none pure Rust (all drive the
+        system's C libraries and GPU drivers):
+        - GStreamer (`gstreamer-rs`, safe API; VA-API / VideoToolbox /
+          Media Foundation / NVIDIA through its plugins; LGPL system
+          libraries, which macOS and Windows would need shipped; the
+          Flatpak runtime has GStreamer with VA-API).
+        - `cros-codecs` (ChromeOS, Rust over VA-API / V4L2 stateless;
+          Linux only; decoding more mature than encoding).
+        - Direct platform APIs in the helper: VA-API, VideoToolbox, Media
+          Foundation (`unsafe` bindings, one back end each).
+        **Chosen (2026-10-07): the platform APIs directly, in the
+        helper** — VA-API on Linux, VideoToolbox on macOS, Media
+        Foundation (or D3D11 video) on Windows — rather than GStreamer
+        or cros-codecs: no large runtime to ship, and each back end
+        small and under our control.
+        Start with decoding 1080p shares on one platform, keep the
+        pure-Rust path as the default and the fallback, and keep
+        software encoding unless quality and keyframe control hold up
+        (hardware encoders are often worse at call bitrates).
+        - Done (2026-10-07, docs/research/huddle-video.md §6): the
+          helper `noslacking-video` (crates/noslacking-video, a
+          workspace member; `unsafe` only in its libva and pipe
+          modules) and its protocol (crates/video-ipc: framed,
+          versioned, a hello with capabilities; open/decode/close, and
+          encode messages ready). The app starts it beside its own
+          executable or from PATH on the first stream start, kills it
+          after a 1 s timeout, restarts it at most 3 times, and decodes
+          in software for anything it cannot do, asking for a keyframe
+          when it switches. Settings → Huddles → "Decode video on the
+          graphics card", on by default since 2026-10-07. Linux back end: VA-API, libva
+          opened at run time (no build dependency), our own H.264
+          stateless state over cros-codecs' parser; bit-exact on both
+          fixtures. Ships in the tar.gz, .deb (recommends libva2 and a
+          driver), .rpm (suggests libva), Flatpak, the macOS bundle and
+          the Windows zip; elsewhere than Linux it reports no hardware.
+        - Done: **the GPU path pays where pictures are shown smaller.**
+          Protocol 2's `SetOutputSize`: the helper scales each picture
+          on the GPU (VA-API video processing) to the size shown before
+          copying it back, or shrinks it on its CPU without video
+          processing. Here (Ryzen AI 7 350, research doc §6.3): a 1080p
+          share shown 960 wide takes 0.7 ms of CPU a frame against
+          software's 4.4, a camera in a 240 tile 0.17 against 0.85; at
+          full size software still wins (1.8 against 2.5). Off by
+          default for now (decided with the user); the numbers say to
+          turn it on.
+        - [x] Turn GPU decoding on by default (2026-10-07, the user's
+              call on the §6.3 numbers; software takes over on any
+              failure).
+        - [ ] Look at it on a weaker laptop and an Intel GPU.
+        - [ ] Pipeline the helper's requests (or a helper per decoding
+              thread): the share's and the cameras' threads wait for
+              each other's replies (in the demo a camera picture took
+              3.1 ms through the helper against 1.35 in software).
+        - [ ] A faster whole-step shrink in the app: halving a 1080p
+              picture costs 2.7 ms, more than decoding it (a 2× special
+              case, or the `yuv` crate's SIMD scaler).
+        - [ ] **VA-API encoding** (640×480@30, CBR ~1.8 Mbit/s, IDR on
+              request): `VAEntrypointEncSlice(LP)`, packed SPS/PPS/slice
+              headers (cros-codecs' `nalu_writer`/`synthesizer` without
+              features), `OpenEncoder`/`Encode`/`SetBitrate` are in the
+              protocol; compare quality with rusty_h264-encoder at call
+              bitrates before using it.
+        - [ ] **Vulkan Video** with `gpu-video` (MIT, safe API, H.264
+              decode and encode, Linux and Windows, NV12 bytes without
+              its wgpu feature): the Windows back end and Linux's second
+              where VA-API lacks H.264. Not usable on this machine:
+              Fedora's RADV has no H.264 (AV1 and VP9 only).
+        - [ ] **V4L2 on ARM Linux** with `v4l2r` (MIT; deny.toml needs
+              a clarify for its license-file): stateful decoders
+              (Qualcomm Venus/Iris, Raspberry Pi) take Annex B frames;
+              stateless ones (Rockchip, Hantro, MediaTek, Allwinner) take
+              the request API and reuse the helper's `h264.rs`. Detect
+              M2M devices under /dev/video* with H264 or H264_SLICE
+              OUTPUT and NV12 CAPTURE formats.
+        - [ ] **macOS: VideoToolbox** (`objc2-video-toolbox`,
+              `objc2-core-media`, `objc2-core-video`):
+              `VTDecompressionSession` from the SPS/PPS, AVCC samples,
+              `CVPixelBuffer` NV12 back; `VTCompressionSession` with
+              `kVTEncodeFrameOptionKey_ForceKeyFrame` for sending.
+        - [ ] **Windows: Media Foundation / D3D11 video** (`windows`
+              crate) if Vulkan Video does not cover a GPU: the H.264
+              decoder MFT with a D3D11 device manager, NV12 out; the
+              encoder MFT for sending. Snapdragon laptops included.
+        - Back ends by platform: desktop Linux → VA-API (done), Vulkan
+          Video (planned); ARM Linux → V4L2 stateful/stateless; Windows
+          (x86 and Snapdragon) → Vulkan Video, else Media Foundation;
+          macOS → VideoToolbox; software everywhere as the fallback.
 - **Microsoft Teams:** [docs/research/microsoft-teams.md](docs/research/microsoft-teams.md)
   (2026-10-06). Not being built: the official Graph route can't do live
   updates or calls, and the route other clients take signs in as

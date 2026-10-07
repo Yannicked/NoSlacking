@@ -24,8 +24,8 @@ needed.
 
 ```
 cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
 cargo deny check          # advisories, licenses, sources (cargo install cargo-deny)
 ```
 
@@ -75,9 +75,14 @@ appstreamcli validate --no-net packaging/metainfo/cloud.yannick.NoSlacking.metai
 made from the 512 px icon, and an ad-hoc signature:
 
 ```
-cargo build --release
-packaging/macos/bundle.sh target/release/noslacking 0.1.0 dist
+cargo build --release -p noslacking -p noslacking-video
+packaging/macos/bundle.sh target/release/noslacking 0.1.0 dist target/release/noslacking-video
 ```
+
+The last argument, the hardware video helper (crates/noslacking-video),
+is optional; without it the app decodes huddle video in software. Every
+package puts the helper beside the app's binary, where the app looks
+for it.
 
 For a universal binary, build `aarch64-apple-darwin` and
 `x86_64-apple-darwin` and `lipo -create` them first. The bundle is not

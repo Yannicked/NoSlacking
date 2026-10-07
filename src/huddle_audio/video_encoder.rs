@@ -28,8 +28,8 @@ const MAX_PIXELS: usize = 1280 * 720;
 /// The least bitrate set, in bit/s: below it the picture is mush anyway.
 pub const MIN_BITRATE: u32 = 150_000;
 /// The most, in bit/s: Slack's own cameras send up to about 500 kbit/s at
-/// 480×480; 640×480 looks good from 600 to 1,200.
-pub const MAX_BITRATE: u32 = 1_200_000;
+/// 480×480; 640×480 at 30 frames a second looks good from 900 to 1,800.
+pub const MAX_BITRATE: u32 = 1_800_000;
 /// What sending starts at, before bandwidth estimation says more.
 pub const START_BITRATE: u32 = 600_000;
 

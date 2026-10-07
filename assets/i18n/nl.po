@@ -2819,6 +2819,16 @@ msgstr[1] "nog {count} camera's"
 msgid "{name} (you)"
 msgstr "{name} (jij)"
 
+# Settings: the group for calls.
+msgid "Huddles"
+msgstr "Huddles"
+
+msgid "Decode video on the graphics card"
+msgstr "Video op de videokaart decoderen"
+
+msgid "When it can. Off: shared screens and cameras are always decoded by the processor."
+msgstr "Waar dat kan. Uit: gedeelde schermen en camera's worden altijd door de processor gedecodeerd."
+
 # Microsoft Teams sign-in
 msgid "Sign in to Microsoft Teams"
 msgstr "Aanmelden bij Microsoft Teams"

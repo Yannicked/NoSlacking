@@ -1177,6 +1177,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cros-codecs"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80f7441b4f31c17b6b6b7f57f6c202944aad11d0ab23739a9ff88d8d34dec621"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3509,6 +3518,7 @@ dependencies = [
  "log",
  "md-5",
  "nokhwa",
+ "noslacking-video-ipc",
  "notify-rust",
  "open",
  "openssl",
@@ -3547,6 +3557,22 @@ dependencies = [
  "zbus-secret-service-keyring-store",
  "zip",
 ]
+
+[[package]]
+name = "noslacking-video"
+version = "0.1.0"
+dependencies = [
+ "cros-codecs",
+ "libc",
+ "libloading",
+ "noslacking-video-ipc",
+ "rusty_h264-decoder",
+ "sha2",
+]
+
+[[package]]
+name = "noslacking-video-ipc"
+version = "0.1.0"
 
 [[package]]
 name = "notify"

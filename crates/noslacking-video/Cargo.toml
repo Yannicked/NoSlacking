@@ -1,0 +1,59 @@
+[package]
+name = "noslacking-video"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+description = "NoSlacking's hardware video helper: decodes H.264 on the GPU, in a process of its own"
+repository = "https://github.com/Yannicked/NoSlacking"
+
+[lib]
+name = "noslacking_video"
+path = "src/lib.rs"
+
+[[bin]]
+name = "noslacking-video"
+path = "src/main.rs"
+
+[dependencies]
+noslacking-video-ipc = { path = "../video-ipc" }
+
+# VA-API, Linux's video acceleration API. libva is opened at run time
+# (libloading, ISC), never linked: the helper builds without libva's
+# headers and starts on a system without it, where it reports no
+# hardware. The H.264 parser is ChromeOS's (cros-codecs, BSD-3-Clause)
+# without any of its back ends: its default features are none, and its
+# parser and bitstream reader need only `log`. The decoding state around
+# it (picture order, reference marking, reference lists) is ours, in
+# src/h264.rs, as is the small part of libva's API used (src/vaapi/ffi.rs).
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.8.9"
+# fcntl, to make the pipe a picture goes back through larger (src/pipe.rs).
+libc = "0.2.189"
+cros-codecs = { version = "0.0.6", default-features = false }
+
+[dev-dependencies]
+# The tests hash decoded pictures to compare them with the software
+# decoder's.
+sha2 = "0.11"
+# The benchmark (examples/bench.rs) and the GPU tests set the hardware
+# against the app's software decoder; the same version and features as
+# the app's.
+rusty_h264-decoder = { version = "0.16", default-features = false, features = ["std", "asm"] }
+
+[lints.rust]
+# This crate is where the unsafe code lives that the app forbids: the
+# calls into libva. Everything else in it is denied unsafe code, and the
+# one module that needs it says so (`#[allow(unsafe_code)]`).
+unsafe_code = "deny"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+print_stdout = "warn"
+undocumented_unsafe_blocks = "warn"

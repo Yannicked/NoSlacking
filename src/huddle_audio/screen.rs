@@ -271,6 +271,8 @@ struct Timings {
     errors: u32,
     size: [usize; 2],
     shown: [usize; 2],
+    /// Whether the last picture came from the GPU.
+    gpu: bool,
 }
 
 impl Timings {
@@ -286,14 +288,19 @@ impl Timings {
             let per =
                 |total: Duration| total.as_secs_f64() * 1000.0 / f64::from(self.pictures.max(1));
             log::info!(
-                "video: decoded {} pictures in {:.0} s ({}x{} shown at {}x{}): {:.1} ms a picture \
-                 (slowest {:.1} ms), {:.1} ms converting; {} frames did not decode",
+                "video: decoded {} pictures in {:.0} s ({}x{} shown at {}x{}) {}: {:.1} ms a \
+                 picture (slowest {:.1} ms), {:.1} ms converting; {} frames did not decode",
                 self.pictures,
                 now.duration_since(since).as_secs_f64(),
                 self.size[0],
                 self.size[1],
                 self.shown[0],
                 self.shown[1],
+                if self.gpu {
+                    "on the GPU"
+                } else {
+                    "in software"
+                },
                 per(self.decoding),
                 self.slowest.as_secs_f64() * 1000.0,
                 per(self.converting),
@@ -331,8 +338,10 @@ fn run(jobs: &Jobs, screen: &Screen) {
                     decoder.lost();
                 }
                 let started = Instant::now();
+                decoder.set_fit(screen.fit().0, screen.fit().1);
                 let decoded = decoder.decode(&unit);
                 let took = started.elapsed();
+                timings.gpu = decoder.on_hardware();
                 match decoded {
                     Ok(Some(yuv)) => {
                         timings.decoding += took;

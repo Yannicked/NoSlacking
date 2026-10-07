@@ -458,7 +458,6 @@ pub fn read_xor_address(value: &[u8], transaction: &TransactionId) -> Option<Soc
     Some(SocketAddr::new(ip, port))
 }
 
-/// An ERROR-CODE value's code and reason.
 /// An address as STUN writes one unXORed (`ALTERNATE-SERVER`): a zero, the
 /// family (1 IPv4, 2 IPv6), the port, the address.
 pub fn read_plain_address(value: &[u8]) -> Option<SocketAddr> {
@@ -477,6 +476,7 @@ pub fn read_plain_address(value: &[u8]) -> Option<SocketAddr> {
     Some(SocketAddr::new(ip, port))
 }
 
+/// An ERROR-CODE value's code and reason.
 pub fn read_error(value: &[u8]) -> Option<(u16, String)> {
     if value.len() < 4 {
         return None;
@@ -846,7 +846,9 @@ impl Client {
             }
         }
         if code == 300 && pending.purpose == Purpose::Allocate {
-            self.alternate = message.get(attr::ALTERNATE_SERVER).and_then(read_plain_address);
+            self.alternate = message
+                .get(attr::ALTERNATE_SERVER)
+                .and_then(read_plain_address);
         }
         self.refused(&pending.purpose, code, &reason);
     }
@@ -1204,7 +1206,10 @@ mod tests {
                 Class::Error,
                 vec![
                     (attr::ERROR_CODE, error),
-                    (attr::ALTERNATE_SERVER, vec![0, 1, 0x0d, 0x96, 203, 0, 113, 9]),
+                    (
+                        attr::ALTERNATE_SERVER,
+                        vec![0, 1, 0x0d, 0x96, 203, 0, 113, 9],
+                    ),
                 ],
                 None,
             ),

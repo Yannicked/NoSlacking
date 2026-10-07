@@ -113,7 +113,9 @@ impl SendControl {
 /// The bitrate an encoder made for `wanted` uses: a few steps, so small
 /// swings of the estimate do not each cost a keyframe.
 pub fn step(wanted: u32) -> u32 {
-    const STEPS: [u32; 6] = [150_000, 250_000, 400_000, 600_000, 850_000, 1_200_000];
+    const STEPS: [u32; 7] = [
+        150_000, 250_000, 400_000, 600_000, 900_000, 1_300_000, 1_800_000,
+    ];
     STEPS
         .iter()
         .rev()
@@ -472,8 +474,8 @@ mod tests {
         assert_eq!(step(0), 150_000);
         assert_eq!(step(300_000), 250_000);
         assert_eq!(step(600_000), 600_000);
-        assert_eq!(step(999_999), 850_000);
-        assert_eq!(step(u32::MAX), 1_200_000);
+        assert_eq!(step(999_999), 900_000);
+        assert_eq!(step(u32::MAX), 1_800_000);
         let control = SendControl::default();
         assert_eq!(control.bitrate(), video_encoder::START_BITRATE);
         control.set_bitrate(10);
@@ -536,7 +538,9 @@ mod tests {
         camera.set_on(true).expect("on");
         let mut got = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(10);
-        while got.len() < 12 && Instant::now() < deadline {
+        // A second's worth: a keyframe asked for waits out KEYFRAME_EVERY.
+        let wanted = FPS as usize;
+        while got.len() < wanted && Instant::now() < deadline {
             if got.len() == 6 {
                 control.want_keyframe();
             }
@@ -546,7 +550,7 @@ mod tests {
             }
         }
         camera.set_on(false).expect("off");
-        assert!(got.len() >= 12, "only {} frames", got.len());
+        assert!(got.len() >= wanted, "only {} frames", got.len());
         assert!(got[0].keyframe, "the first is a keyframe");
         assert!(got.windows(2).all(|w| w[1].time > w[0].time));
         assert!(

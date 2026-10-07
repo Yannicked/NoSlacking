@@ -42,14 +42,16 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Formatting
         run: cargo fmt --all --check
+      # --workspace: the app, and the hardware video helper and its
+      # protocol under crates/.
       - name: Clippy (default features)
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Clippy (all features)
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Rustdoc
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --locked --all-features --no-deps
+        run: cargo doc --locked --workspace --all-features --no-deps
 
   test:
     name: test (${{ matrix.os }})
@@ -78,14 +80,15 @@ jobs:
       # (keyring stores, single instance, the URL scheme) only here.
       - name: Clippy (default features)
         if: runner.os != 'Linux'
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Clippy (all features)
         if: runner.os != 'Linux'
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      # The helper's GPU test is ignored: the runners have no GPU.
       - name: Test
-        run: cargo test --locked --all-features
+        run: cargo test --locked --workspace --all-features
       - name: Build (what ships)
-        run: cargo build --locked
+        run: cargo build --locked -p noslacking -p noslacking-video
       - name: Demo build
         run: cargo build --locked --features demo
 

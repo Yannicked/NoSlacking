@@ -12,6 +12,13 @@ repository = "https://github.com/Yannicked/NoSlacking"
 keywords = ["slack", "chat", "egui", "client"]
 categories = ["gui"]
 
+[workspace]
+# The app, and its hardware video helper with the messages they share
+# (crates/; see crates/noslacking-video). `cargo build` at the root builds
+# the app alone; `--workspace` (or `-p noslacking-video`) builds the
+# helper too. Profiles and patches below apply to every member.
+members = [".", "crates/video-ipc", "crates/noslacking-video"]
+
 [lib]
 name = "noslacking"
 path = "src/lib.rs"
@@ -145,6 +152,10 @@ sonora-simd = "0.2.0"
 # unsafe in our crate. See docs/research/huddle-video.md.
 rusty_h264-decoder = { version = "0.16", default-features = false, features = ["std", "asm"], optional = true }
 yuv = { version = "0.8.19", optional = true }
+# Decoding on the GPU, in the noslacking-video helper process
+# (crates/noslacking-video, which ships beside the app): the messages
+# the two exchange. Plain std; the helper itself is not a dependency.
+noslacking-video-ipc = { path = "crates/video-ipc", optional = true }
 # Writes the RGBA straight into egui's pixels (already in the tree
 # through egui; no crate added).
 bytemuck = { version = "1.25", optional = true }
@@ -225,9 +236,13 @@ extended-description = "One window for your Slack workspaces: channels, direct m
 # ALSA is linked, so $auto finds it (as libasound2t64 on newer releases);
 # the others are loaded at run time and must be named.
 depends = "$auto, libxkbcommon0, libegl1, libgl1"
-recommends = "libwayland-client0, libxkbcommon-x11-0"
+# libva and a VA-API driver: noslacking-video loads them at run time to
+# decode huddle video on the GPU; without them it decodes in software.
+recommends = "libwayland-client0, libxkbcommon-x11-0, libva2, libva-drm2, mesa-va-drivers | intel-media-va-driver"
 assets = [
     ["target/release/noslacking", "usr/bin/", "755"],
+    # The hardware video helper, beside the app where it looks first.
+    ["target/release/noslacking-video", "usr/bin/", "755"],
     ["packaging/applications/cloud.yannick.NoSlacking.desktop", "usr/share/applications/", "644"],
     ["packaging/metainfo/cloud.yannick.NoSlacking.metainfo.xml", "usr/share/metainfo/", "644"],
     ["packaging/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
@@ -246,8 +261,12 @@ auto-req = "auto"
 # By library, so the same package fits Fedora and openSUSE.
 requires = { "libxkbcommon.so.0()(64bit)" = "*", "libEGL.so.1()(64bit)" = "*", "libGL.so.1()(64bit)" = "*" }
 recommends = { "libwayland-client.so.0()(64bit)" = "*", "libxkbcommon-x11.so.0()(64bit)" = "*" }
+# libva for the hardware video helper (loaded at run time, so auto-req
+# cannot see it); the driver comes with Mesa or intel-media-driver.
+suggests = { "libva.so.2()(64bit)" = "*", "libva-drm.so.2()(64bit)" = "*" }
 assets = [
     { source = "target/release/noslacking", dest = "/usr/bin/noslacking", mode = "755" },
+    { source = "target/release/noslacking-video", dest = "/usr/bin/noslacking-video", mode = "755" },
     { source = "packaging/applications/cloud.yannick.NoSlacking.desktop", dest = "/usr/share/applications/cloud.yannick.NoSlacking.desktop", mode = "644" },
     { source = "packaging/metainfo/cloud.yannick.NoSlacking.metainfo.xml", dest = "/usr/share/metainfo/cloud.yannick.NoSlacking.metainfo.xml", mode = "644" },
     { source = "packaging/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg", dest = "/usr/share/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg", mode = "644" },
@@ -274,7 +293,7 @@ demo = []
 # Watching screen shares in huddles: a call window with the share,
 # decoded on a thread of its own. Off until it has been tried against
 # Slack.
-huddle-video = ["dep:rusty_h264-decoder", "dep:yuv", "dep:bytemuck"]
+huddle-video = ["dep:rusty_h264-decoder", "dep:yuv", "dep:bytemuck", "dep:noslacking-video-ipc"]
 # Sending your camera in huddles: the camera, opened only while it is
 # on, encoded to H.264 on a thread of its own, with a self-preview in the
 # call bar. Independent of `huddle-video` (sending needs no decoder). Off
