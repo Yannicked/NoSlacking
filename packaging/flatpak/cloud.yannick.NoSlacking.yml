@@ -18,8 +18,8 @@ finish-args:
   - --share=network
   # Voice clips and sound files played in the app (through the runtime's
   # ALSA, which talks to PulseAudio or PipeWire's stand-in for it). The
-  # same socket carries recording, so a huddle-audio build's microphone
-  # needs nothing more.
+  # same socket carries recording, so the microphone in huddles needs
+  # nothing more.
   - --socket=pulseaudio
   # Desktop notifications, and the keyring that holds the tokens.
   - --talk-name=org.freedesktop.Notifications

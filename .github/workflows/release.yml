@@ -55,7 +55,7 @@ jobs:
       - name: Build dependencies and packaging validators
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev cmake desktop-file-utils appstream dpkg-dev
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake desktop-file-utils appstream dpkg-dev
       - name: Build
         run: cargo build --locked --release
       - name: Package
