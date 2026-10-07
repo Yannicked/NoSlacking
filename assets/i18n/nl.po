@@ -2606,6 +2606,9 @@ msgstr "de geluidsverbinding kon niet worden gemaakt"
 msgid "the audio connection was lost"
 msgstr "de geluidsverbinding is verbroken"
 
+msgid "the sound device stopped playing"
+msgstr "het geluidsapparaat speelt niet meer af"
+
 # The call bar, while a huddle plays here.
 msgid "Listening in #{channel}"
 msgstr "Luisteren in #{channel}"

@@ -299,6 +299,7 @@ impl Failure {
                 HuddleTrouble::Offer => t("the huddle's server did not take the audio setup"),
                 HuddleTrouble::Connect => t("the audio connection could not be made"),
                 HuddleTrouble::Lost => t("the audio connection was lost"),
+                HuddleTrouble::SoundStopped => t("the sound device stopped playing"),
                 // Windows keeps apps from the microphone until its privacy
                 // settings allow them; that is the likeliest cause there.
                 HuddleTrouble::Microphone if cfg!(windows) => t(
@@ -331,6 +332,8 @@ pub enum HuddleTrouble {
     Connect,
     /// The session broke while listening.
     Lost,
+    /// The sound device stopped playing and would not start again.
+    SoundStopped,
     /// No microphone would open on unmuting.
     Microphone,
 }
@@ -586,6 +589,8 @@ mod tests {
             Failure::Huddle(HuddleTrouble::Connect),
             #[cfg(feature = "huddle-audio")]
             Failure::Huddle(HuddleTrouble::Lost),
+            #[cfg(feature = "huddle-audio")]
+            Failure::Huddle(HuddleTrouble::SoundStopped),
             #[cfg(feature = "huddle-audio")]
             Failure::Huddle(HuddleTrouble::Microphone),
             Failure::Slack("some_new_code".into()),

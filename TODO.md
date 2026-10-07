@@ -900,6 +900,117 @@ engineering, as for the rest of the session sign-in.
       - Not done: choosing the input device (the system's default for
         now), a level meter, reconnects, a microphone that fails while
         open (it logs and goes quiet; mute and unmute again).
+- [ ] **File upstream: opus-decoder's collapse mask overflows.** A real
+      huddle stopped playing in a debug build: opus-decoder panicked on
+      the sound device's thread. We turn its overflow checks off in
+      `Cargo.toml` (`[profile.dev.package.opus-decoder]`); drop that once
+      a fixed release is out. To file at
+      <https://github.com/TadeuszWolfGang/Rusopus/issues>:
+
+      > **`extract_collapse_mask` overflows its `u8` with 16 short blocks
+      > (attempt to shift left with overflow, celt/vq.rs:118)**
+      >
+      > opus-decoder 0.1.1, `src/celt/vq.rs`:
+      >
+      > ```rust
+      > fn extract_collapse_mask(iy: &[i32], n: usize, b: usize) -> u8 {
+      >     ...
+      >     let mut mask = 0u8;
+      >     for i in 0..b {
+      >         ...
+      >         if nonzero != 0 {
+      >             mask |= 1 << i; // line 118
+      > ```
+      >
+      > `b` can be 16: a transient 20 ms CELT frame has 8 short blocks,
+      > and a negative `tf_change` doubles them once more (the
+      > `time_divide` step before `quant_partition_mono`, undone later by
+      > `post_tf_collapse_mask`). With overflow checks on
+      > (any debug build) `1 << i` panics for `i >= 8`:
+      >
+      > ```
+      > thread 'cpal_alsa_out' panicked at
+      > opus-decoder-0.1.1/src/celt/vq.rs:118:21:
+      > attempt to shift left with overflow
+      > ```
+      >
+      > libopus keeps this mask in an `unsigned` (`celt/vq.c`,
+      > `static unsigned extract_collapse_mask(int *iy, int N, int B)`,
+      > and `alg_unquant` returns `unsigned`); the bits above 8 are folded
+      > down by `quant_band`'s `cm |= cm >> B` after the time-divide
+      > Haar steps, and only the final mask is stored as `unsigned char`.
+      > This crate's `post_tf_collapse_mask` already works on a `u32`, so
+      > the fix is to make `AlgUnquantResult::collapse_mask` and
+      > `extract_collapse_mask` `u32` (the `as u32` at bands.rs:1301 then
+      > goes).
+      >
+      > Reproduce: decode this 55-byte packet with
+      > `OpusDecoder::new(48_000, 2)` and `decode_float(.., false)` in a
+      > debug build:
+      >
+      > ```
+      > f8 75 d5 48 6a 8c cf b8 7d b1 d2 3b 43 7d 6b 6b 17 c1 14 fe 7d
+      > a5 ae 93 56 58 c4 69 d1 30 da 3f 75 ab 8e ab 1c 2c 0e f2 e7 e0
+      > 6b f5 08 84 7d 51 67 f9 16 30 90 1d 29
+      > ```
+      >
+      > About 1.4% of random 20 ms CELT packets hit it. In release builds
+      > the shift wraps to bit `i % 8`; after the fold that gives the same
+      > final mask, so the output matched a `u32` build bit for bit over
+      > 20,000 random packets. The panic is the only harm, but it takes
+      > down the audio thread of whatever is decoding.
+- [ ] **File upstream, and weigh a patched copy: a malformed hybrid
+      packet panics opus-decoder in release builds too.** Found by
+      fuzzing while fixing the above: about 1 in 80,000 random packets.
+      Our release builds abort on a panic, so any huddle participant (or
+      Chime) sending such a packet closes NoSlacking for everyone
+      listening; SRTP rules out corruption on the way, not a hostile
+      sender. Debug builds catch it now (`audio::guard`). Until upstream
+      fixes it, the choices are a `[patch.crates-io]` copy with the
+      two-line check below, or living with it. To file:
+
+      > **Hybrid redundancy longer than the frame: `range start index
+      > out of range` (lib.rs:676 and :724)**
+      >
+      > In `OpusMode::Hybrid`, `redundancy_bytes = ec.dec_uint(256) + 2`
+      > is read from the packet and then used as
+      > `&frame[frame.len() - redundancy_bytes..]` without checking it
+      > against `frame.len()`. A frame shorter than the redundancy it
+      > claims underflows the subtraction and panics ("range start index
+      > 18446744073709551534 out of range for slice of length 76" in a
+      > release build).
+      >
+      > libopus (`src/opus_decoder.c`, `opus_decode_frame`) checks
+      > right after reading it:
+      >
+      > ```c
+      > len -= redundancy_bytes;
+      > /* This is a sanity check. It should never happen for a valid
+      >    packet, so the exact behaviour is not normative. */
+      > if (len*8 < ec_tell(&dec))
+      > {
+      >    len = 0;
+      >    redundancy_bytes = 0;
+      >    redundancy = 0;
+      > }
+      > ```
+      >
+      > Reproduce with a fresh `OpusDecoder::new(48_000, 1)` and
+      > `decode_float(.., false)`, release or debug, on this 153-byte
+      > packet (TOC 0x69, two 76-byte hybrid frames):
+      >
+      > ```
+      > 69 af 0e e6 85 96 57 1b b5 8c c1 a2 21 35 a5 94 3d 0d 19 d1 c8 e7
+      > 7c d0 63 03 bd c4 31 df 4e 76 64 f8 27 93 e6 c1 2e 44 06 6c 2e a8
+      > df a2 5d 8f b0 e1 a8 8f ce 1f d7 8a 47 af 68 f8 71 37 f5 9e 65 a3
+      > 2a 18 28 26 82 e1 88 a7 b8 27 ad 60 fa 63 9d 18 42 b4 b7 92 e3 60
+      > 34 5e 40 7e 7c ee 8b 98 8f 1c de 63 ad 44 ce 75 0b 2f 15 f7 be 4f
+      > 2d a3 9e 57 bb a8 dd bc f9 0a 3a 14 c2 73 f7 34 98 bb 54 28 c4 db
+      > fe 4d 7f 97 0a 58 92 0b 47 59 37 15 85 30 e0 b1 78 d8 9f 26 72
+      > ```
+      >
+      > A decoder fed by the network should turn this into an error (or
+      > libopus's behaviour), never a panic.
 
 ## Research notes
 

@@ -387,11 +387,19 @@ fn capture(
 
     let mut delay_ms = OUTPUT_GUESS_MS;
     let mut next_log = Instant::now() + Duration::from_secs(5);
+    // The callback holds the other end of `incoming`; it lets go only
+    // when cpal's thread ends, which while the stream lives means a
+    // panic took it.
+    let mut thread_gone = false;
     while !stop.load(Ordering::Relaxed) {
         let chunk = match incoming.recv_timeout(Duration::from_millis(100)) {
             Ok(chunk) => chunk,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                log::warn!("huddle microphone: the device's thread stopped");
+                thread_gone = true;
+                break;
+            }
         };
         if let Some(latency) = chunk.latency {
             let ms = i32::try_from(latency.as_millis()).unwrap_or(i32::MAX);
@@ -428,7 +436,7 @@ fn capture(
         }
     }
     wiring.render.set_on(false);
-    drop(stream);
+    crate::audio::guard::let_go(stream, thread_gone);
     log::info!("huddle microphone: closed; {:?}", pipeline.counts);
 }
 
