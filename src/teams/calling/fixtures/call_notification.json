@@ -1,0 +1,63 @@
+{
+  "evt": 107,
+  "gp": {
+    "callNotification": {
+      "from": {
+        "id": "8:live:other",
+        "displayName": "Other Example",
+        "displayNameSource": "unknown",
+        "endpointId": "00000000-0000-4000-8000-000000000006",
+        "languageId": "en-GB",
+        "participantId": "00000000-0000-4000-8000-000000000013",
+        "hidden": false,
+        "propertyBag": null
+      },
+      "to": {
+        "id": "8:live:me",
+        "displayName": null,
+        "displayNameSource": "unknown",
+        "endpointId": "00000000-0000-0000-0000-000000000000",
+        "languageId": null,
+        "participantId": "00000000-0000-4000-8000-000000000014",
+        "hidden": false,
+        "propertyBag": null
+      },
+      "links": {
+        "attach": "https://fp.example/api/v2/cp/cc.example/cc/v1/forked/00000000-0000-4000-8000-000000000015/27/i1/734/attach?i=192-0-2-1",
+        "mediaAnswer": "cc://ma",
+        "progress": "https://fp.example/api/v2/cp/cc.example/cc/v1/forked/00000000-0000-4000-8000-000000000015/27/i1/734/progress?i=192-0-2-1",
+        "reject": "https://fp.example/api/v2/cp/cc.example/cc/v1/forked/00000000-0000-4000-8000-000000000015/27/i1/734/reject?i=192-0-2-1",
+        "udpTransport": "udp://192.0.2.20:3478/"
+      },
+      "mediaContent": {
+        "contentType": "application/sdp",
+        "blob": "v=0 (an SDP, left out of the fixture)",
+        "mediaLegId": "00000000000000000000000000000003",
+        "escalationOccurring": false,
+        "newOffer": false,
+        "clientLocation": "NL"
+      },
+      "udpKey": {
+        "sessionKey": "AAAA",
+        "ticket": "AAAA"
+      },
+      "fromApplicationType": "TFL",
+      "clientEndpointCapabilities": 799810
+    },
+    "conversationInvitation": {
+      "conversationController": "https://fp.example/api/v2/cp/conv.example/conv/ID3?i=192-0-2-1&e=1",
+      "isMultiParty": false,
+      "isBroadcast": false
+    },
+    "debugContent": {
+      "causeId": "00000000-0000-4000-8000-000000000016",
+      "clientDebugContent": {},
+      "ecsEtag": "\"etag\"",
+      "callId": "00000000-0000-4000-8000-000000000016",
+      "ProcessingCallControllerInstance": "https://cc.example/",
+      "potentialCallNotificationSent": false,
+      "participantId": "00000000-0000-4000-8000-000000000014"
+    },
+    "groupContext": null
+  }
+}

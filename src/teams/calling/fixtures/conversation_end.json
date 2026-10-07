@@ -1,0 +1,28 @@
+{
+  "code": 0,
+  "subCode": 5002,
+  "phrase": "This conversation has ended as all participants left the audio-video modality.",
+  "sender": null,
+  "resultCategories": [
+    "Success"
+  ],
+  "callControllerTransactionEnd": {
+    "sender": {
+      "endpointId": "00000000-0000-4000-8000-000000000006",
+      "id": "8:live:other",
+      "displayName": "Other Example",
+      "propertyBag": null,
+      "resourceId": null,
+      "participantId": "00000000-0000-4000-8000-000000000012",
+      "languageId": null,
+      "hidden": false
+    },
+    "reason": "noError",
+    "code": 0,
+    "subCode": 0,
+    "phrase": "LocalUserInitiated",
+    "resultCategories": [],
+    "acceptedElsewhereBy": null
+  },
+  "conversationType": "default"
+}

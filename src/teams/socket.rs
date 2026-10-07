@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 /// An event decoded from a Trouter WebSocket frame.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrouterEvent {
     /// Server ping requiring pong response.
     Ping,
@@ -17,8 +17,44 @@ pub enum TrouterEvent {
         message: Box<crate::teams::types::Message>,
         changed: bool,
     },
+    /// A push to one of a call's callbacks: `path` is the frame's url
+    /// (`/v4/f/{trouterId}/callAgent/{agent}/{tag}/{scope}/{event}/`, see
+    /// [`crate::teams::calling::links::read_push_path`]), `body` its JSON,
+    /// unpacked.
+    Call {
+        path: String,
+        body: serde_json::Value,
+    },
+    /// The incoming-call notification (`evt` 107), its `gp` decoded from
+    /// base64 into JSON and its `udpKey` secret dropped.
+    CallNotification(serde_json::Value),
     /// Other unparsed raw payload.
     Raw(String),
+}
+
+// A call's pushes hold callback URLs and ICE passwords, so their content
+// stays out of any log that prints an event.
+impl std::fmt::Debug for TrouterEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ping => f.write_str("Ping"),
+            Self::Message { message, changed } => f
+                .debug_struct("Message")
+                .field("message", message)
+                .field("changed", changed)
+                .finish(),
+            Self::Call { path, .. } => {
+                let event = crate::teams::calling::links::read_push_path(path)
+                    .map(|p| p.event)
+                    .unwrap_or_default();
+                f.debug_struct("Call")
+                    .field("event", &event)
+                    .finish_non_exhaustive()
+            }
+            Self::CallNotification(_) => f.write_str("CallNotification(..)"),
+            Self::Raw(raw) => f.debug_tuple("Raw").field(raw).finish(),
+        }
+    }
 }
 
 /// Connect parameters provided in Trouter session response.
@@ -178,6 +214,9 @@ pub fn parse_frame(frame: &str) -> Option<TrouterEvent> {
     if let Some(body) = frame.strip_prefix("3:::")
         && let Ok(request) = serde_json::from_str::<serde_json::Value>(body)
     {
+        if let Some(event) = call_event(&request) {
+            return Some(event);
+        }
         return Some(
             request
                 .get("body")
@@ -190,6 +229,53 @@ pub fn parse_frame(frame: &str) -> Option<TrouterEvent> {
         return Some(TrouterEvent::Raw(frame.to_owned()));
     }
     None
+}
+
+/// A call's push, if the request is one: a callback (its url has
+/// `/callAgent/`) or the incoming-call notification (a body with `evt`
+/// and `gp`, which comes to the bare `{surl}`; it is told by its body, as
+/// chat events may come to that path too).
+fn call_event(request: &serde_json::Value) -> Option<TrouterEvent> {
+    let path = request
+        .get("url")
+        .and_then(|u| u.as_str())
+        .unwrap_or_default();
+    let body = request.get("body").and_then(unpack);
+    if path.contains("/callAgent/") {
+        return Some(TrouterEvent::Call {
+            path: path.to_owned(),
+            body: body.unwrap_or_default(),
+        });
+    }
+    let mut body = body?;
+    if body.get("evt").is_some_and(serde_json::Value::is_number)
+        && let Some(gp) = body.get("gp").and_then(decode_gp)
+    {
+        body["gp"] = gp;
+        if let Some(call) = body["gp"]
+            .get_mut("callNotification")
+            .and_then(|c| c.as_object_mut())
+        {
+            call.remove("udpKey");
+        }
+        return Some(TrouterEvent::CallNotification(body));
+    }
+    None
+}
+
+/// The notification's `gp`: JSON in base64 (possibly gzip-compressed
+/// first), or JSON already.
+fn decode_gp(gp: &serde_json::Value) -> Option<serde_json::Value> {
+    use base64::Engine as _;
+    let serde_json::Value::String(text) = gp else {
+        return gp.is_object().then(|| gp.clone());
+    };
+    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(text.trim())
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+    {
+        return Some(value);
+    }
+    unpack(gp)
 }
 
 /// A request body as JSON: a string of JSON, or of gzip-compressed JSON in
@@ -503,6 +589,68 @@ mod tests {
         let event = r#"{"resourceType":"ConversationUpdate","resource":{"id":"19:a@thread.v2"}}"#;
         let frame = format!("3:::{}", serde_json::json!({ "id": 7, "body": event }));
         assert!(matches!(parse_frame(&frame), Some(TrouterEvent::Raw(_))));
+    }
+
+    fn gzip_base64(text: &str) -> String {
+        use base64::Engine as _;
+        use std::io::Write as _;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(text.as_bytes()).expect("compresses");
+        base64::engine::general_purpose::STANDARD.encode(gz.finish().expect("compresses"))
+    }
+
+    #[test]
+    fn a_call_push_is_unpacked_with_its_path() {
+        // As a callback push arrives: gzip-compressed (its headers say
+        // so), in base64, in the frame's body.
+        let body = include_str!("calling/fixtures/call_end.json");
+        let path = "/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000009/a0000017/call/end/";
+        let frame = format!(
+            "3:::{}",
+            serde_json::json!({
+                "id": 8, "method": "POST", "url": path,
+                "headers": {"X-Microsoft-Skype-Content-Encoding": "gzip"},
+                "body": gzip_base64(body),
+            })
+        );
+        match parse_frame(&frame).expect("parses") {
+            TrouterEvent::Call {
+                path: got,
+                body: json,
+            } => {
+                assert_eq!(got, path);
+                assert_eq!(json["callEnd"]["phrase"], "LocalUserInitiated");
+                let event = TrouterEvent::Call {
+                    path: got,
+                    body: json,
+                };
+                assert_eq!(format!("{event:?}"), r#"Call { event: "end", .. }"#);
+            }
+            other => panic!("expected a call push, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_incoming_call_has_its_payload_decoded() {
+        use base64::Engine as _;
+        let mut note: serde_json::Value =
+            serde_json::from_str(include_str!("calling/fixtures/call_notification.json"))
+                .expect("fixture");
+        note["gp"]["callNotification"]["udpKey"] = serde_json::json!({"sessionKey": "secret"});
+        let gp = base64::engine::general_purpose::STANDARD.encode(note["gp"].to_string());
+        let body = serde_json::json!({"evt": 107, "gp": gp}).to_string();
+        let frame = format!(
+            "3:::{}",
+            serde_json::json!({"id": 9, "method": "POST", "url": "/v4/f/ID1/", "body": body})
+        );
+        match parse_frame(&frame).expect("parses") {
+            TrouterEvent::CallNotification(json) => {
+                assert_eq!(json["evt"], 107);
+                assert_eq!(json["gp"]["callNotification"]["from"]["id"], "8:live:other");
+                assert!(json["gp"]["callNotification"].get("udpKey").is_none());
+            }
+            other => panic!("expected a call notification, got {other:?}"),
+        }
     }
 
     #[test]

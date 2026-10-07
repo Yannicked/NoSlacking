@@ -1,0 +1,20 @@
+{
+  "from": {
+    "id": "8:live:me",
+    "displayName": "Me Example",
+    "endpointId": "00000000-0000-4000-8000-000000000002",
+    "participantId": "00000000-0000-4000-8000-000000000010",
+    "languageId": "en-us"
+  },
+  "endpointState": {
+    "endpointStateSequenceNumber": 3,
+    "endpointProperties": {
+      "additionalEndpointProperties": {
+        "infoShownInReportMode": "FullInformation"
+      }
+    },
+    "state": {
+      "isMuted": true
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "mediaAcknowledgement": {
+    "reason": "noError",
+    "sender": null,
+    "code": 0,
+    "subCode": 0,
+    "phrase": "Success",
+    "resultCategories": [
+      "Success"
+    ]
+  },
+  "links": {
+    "callLeg": null
+  },
+  "debugContent": {}
+}
