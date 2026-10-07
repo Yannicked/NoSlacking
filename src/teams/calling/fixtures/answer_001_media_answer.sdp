@@ -1,0 +1,110 @@
+v=0
+o=- 0 0 IN IP4 198.51.100.11
+s=-
+c=IN IP4 198.51.100.11
+b=CT:4000
+t=0 0
+a=x-mediabw:main-video send=12000;recv=12000
+a=x-mediabw:applicationsharing-video send=12000;recv=12000
+a=group:BUNDLE 0 1 2 3
+m=audio 3480 RTP/SAVP 111 9 0 8 13 120 126
+a=x-ssrc-range:3079-3079
+a=rtcp-fb:* x-message app send:dsh,x-gain recv:dsh,x-gain
+a=rtcp-fb:* nack
+a=rtcp-fb:* transport-cc
+a=rtcp-rsize
+a=label:main-audio
+a=x-source:main-audio
+a=ice-ufrag:uf02
+a=ice-pwd:placeholder-ice-pwd-0002
+a=candidate:10 1 UDP 1258286078 198.51.100.11 3480 typ relay raddr 203.0.113.10 rport 9763 MTURNID 8686599429519376595
+a=x-candidate-info:10 network-type=wlan
+a=candidate:7 1 UDP 2130702846 192.0.2.142 9763 typ host
+a=x-candidate-info:7 network-type=wlan
+a=candidate:3 1 TCP-ACT 2121005566 192.0.2.142 1024 typ host
+a=x-candidate-info:3 network-type=wlan
+a=candidate:9 1 UDP 1694494206 203.0.113.10 9763 typ srflx raddr 192.0.2.142 rport 9763
+a=x-candidate-info:9 network-type=wlan
+a=candidate:11 1 TCP-ACT 1684793854 203.0.113.10 5078 typ srflx raddr 192.0.2.142 rport 5078
+a=x-candidate-info:11 network-type=wlan
+a=candidate:12 1 TCP-PASS 1248192510 198.51.100.12 57975 typ relay raddr 203.0.113.10 rport 5078
+a=x-candidate-info:12 network-type=wlan
+a=candidate:13 1 TCP-ACT 1248585214 198.51.100.12 57975 typ relay raddr 203.0.113.10 rport 5078
+a=x-candidate-info:13 network-type=wlan
+a=fingerprint:sha-256 02:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:EE:FF:00
+a=setup:passive
+a=maxptime:200
+a=mid:0
+a=rtpmap:111 opus/48000/2
+a=fmtp:111 maxplaybackrate=16000; sprop-maxcapturerate=16000; useinbandfec=1; usedtx=1; minptime=10
+a=rtpmap:9 G722/8000
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:13 CN/8000
+a=rtpmap:120 CN/48000
+a=rtpmap:126 telephone-event/8000
+a=fmtp:126 0-16
+a=rtcp-mux
+a=ptime:20
+a=extmap:2 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+m=video 3480 RTP/SAVP 102 103
+a=x-ssrc-range:3080-3179
+a=ssrc-group:FID 3080 3130
+a=rtcp-fb:* x-message app send:src,x-pli recv:src,x-pli
+a=rtcp-fb:* nack
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* goog-remb
+a=rtcp-fb:* transport-cc
+a=rtcp-rsize
+a=label:main-video
+a=x-source:main-video
+a=ice-ufrag:uf02
+a=ice-pwd:placeholder-ice-pwd-0002
+a=fingerprint:sha-256 02:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:EE:FF:00
+a=setup:passive
+a=mid:1
+a=rtpmap:102 H264/90000
+a=fmtp:102 profile-level-id=42C02A;packetization-mode=1;max-mbps=3600;max-fs=240;max-br=208;max-fps=1500
+a=rtpmap:103 rtx/90000
+a=fmtp:103 apt=102
+a=rtcp-mux
+a=extmap:2 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+m=video 3480 RTP/SAVP 102 103
+a=x-ssrc-range:3180-3279
+a=ssrc-group:FID 3180 3230
+a=rtcp-fb:* x-message app send:src,x-pli recv:src,x-pli
+a=rtcp-fb:* nack
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* goog-remb
+a=rtcp-fb:* transport-cc
+a=rtcp-rsize
+a=label:applicationsharing-video
+a=ice-ufrag:uf02
+a=ice-pwd:placeholder-ice-pwd-0002
+a=x-mediasettings:applicationsharing-video=required
+a=fingerprint:sha-256 02:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:EE:FF:00
+a=setup:passive
+a=mid:2
+a=inactive
+a=rtpmap:102 H264/90000
+a=fmtp:102 profile-level-id=42C02A;packetization-mode=1;max-mbps=30600;max-fs=8160;max-br=3333;max-fps=375
+a=rtpmap:103 rtx/90000
+a=fmtp:103 apt=102
+a=rtcp-mux
+a=extmap:2 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+m=x-data 3480 RTP/SAVP 127 126
+a=x-ssrc-range:3280-3379
+a=ssrc-group:FID 3280 3330
+a=rtcp-fb:* nack
+a=rtcp-rsize
+a=label:data
+a=ice-ufrag:uf02
+a=ice-pwd:placeholder-ice-pwd-0002
+a=fingerprint:sha-256 02:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:EE:FF:00
+a=setup:passive
+a=mid:3
+a=rtpmap:127 x-data/90000
+a=rtpmap:126 rtx/90000
+a=fmtp:126 apt=127
+a=rtcp-mux
+a=x-data-protocol: sctp
