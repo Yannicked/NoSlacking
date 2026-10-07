@@ -9,8 +9,8 @@ use futures_util::future::BoxFuture;
 
 use crate::failure::Failure;
 use crate::teams::auth::{
-    Account, AudienceToken, RESOURCE_CSA, RESOURCE_GRAPH, RESOURCE_MT_PERSONAL, TeamsCredentials,
-    now_secs,
+    Account, AudienceToken, RESOURCE_CSA, RESOURCE_GRAPH, RESOURCE_GROUPS_PERSONAL,
+    RESOURCE_MT_PERSONAL, TeamsCredentials, now_secs,
 };
 use crate::teams::types::{
     Conversation, ConversationsResponse, Message, MessagesResponse, PostedMessage, Team,
@@ -97,6 +97,35 @@ async fn refused(resp: reqwest::Response, what: &str) -> Failure {
 struct ShortProfiles {
     #[serde(default)]
     value: Vec<ShortProfile>,
+}
+
+/// Where a personal account's chats are started.
+const PERSONAL_THREADS_URL: &str = "https://teams.live.com/api/groups/v1/threads";
+
+/// The new chat's id, from the answer's body (the groups service:
+/// `{"value":{"threadId":…}}`) or else its `Location` (the chat service:
+/// `…/v1/threads/{id}`).
+fn created_thread(body: &str, location: Option<&str>) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/value/threadId")
+                .and_then(|id| id.as_str())
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            location
+                .and_then(|l| l.rsplit("/threads/").next())
+                .filter(|id| id.starts_with("19:"))
+                .map(str::to_owned)
+        })
+}
+
+/// One query's answer from `searchUsers`.
+#[derive(serde::Deserialize)]
+struct SearchResult {
+    #[serde(default, rename = "userProfiles")]
+    user_profiles: Vec<ShortProfile>,
 }
 
 /// What `/beta/users/me` answers.
@@ -758,6 +787,115 @@ impl TeamsClient {
         Ok(found)
     }
 
+    /// People whose name or address matches `query`, as the New message
+    /// dialog's search finds them: an address is looked up exactly, a name
+    /// searched for.
+    pub async fn search_people(&self, query: &str) -> Result<Vec<UserDetails>, Failure> {
+        let creds = self.ensure_fresh_tokens().await?;
+        let url = format!(
+            "{}/beta/users/searchUsers?ggEnabled=true&resultCount=20",
+            creds
+                .middle_tier_url()
+                .ok_or_else(|| Failure::Unexpected("no middle tier in regionGtms".into()))?
+                .trim_end_matches('/')
+        );
+        let body = if query.contains('@') {
+            serde_json::json!({ "emails": [query], "phones": [] })
+        } else {
+            serde_json::json!({ "emails": [], "phones": [], "searchKeyWord": query })
+        };
+        let skype = creds.skype_token.clone().unwrap_or_default();
+        let resp = match creds.account {
+            Account::Personal => {
+                self.bearer(RESOURCE_MT_PERSONAL, |http, token| {
+                    crate::teams::auth::consumer_headers(
+                        http.post(&url)
+                            .bearer_auth(token)
+                            .header("x-skypetoken", &skype)
+                            .json(&body),
+                    )
+                })
+                .await?
+            }
+            Account::Work => self
+                .http
+                .post(&url)
+                .bearer_auth(&creds.access_token)
+                .header("x-skypetoken", &skype)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| Failure::Network(e.without_url().to_string()))?,
+        };
+        if !resp.status().is_success() {
+            return Err(refused(resp, "search for people").await);
+        }
+        let found: std::collections::HashMap<String, SearchResult> = resp
+            .json()
+            .await
+            .map_err(|e| Failure::Unexpected(e.to_string()))?;
+        Ok(found
+            .into_values()
+            .flat_map(|result| result.user_profiles)
+            .filter_map(ShortProfile::into_details)
+            .collect())
+    }
+
+    /// Starts a chat with `others` and you, answering its id: one other
+    /// person makes a one-to-one chat, more a group.
+    pub async fn create_chat(&self, me: &str, others: &[String]) -> Result<String, Failure> {
+        let creds = self.ensure_fresh_tokens().await?;
+        let members: Vec<serde_json::Value> = std::iter::once(me)
+            .chain(others.iter().map(String::as_str))
+            .map(|id| serde_json::json!({ "id": user_mri(id), "role": "User" }))
+            .collect();
+        let resp = match creds.account {
+            // As the personal web client starts a chat (recorded).
+            Account::Personal => {
+                let skype = creds.skype_token.clone().unwrap_or_default();
+                let body = serde_json::json!({
+                    "members": members,
+                    "properties": { "threadType": "chat", "isStickyThread": "true" },
+                });
+                self.bearer(RESOURCE_GROUPS_PERSONAL, |http, token| {
+                    crate::teams::auth::consumer_headers(
+                        http.post(PERSONAL_THREADS_URL)
+                            .bearer_auth(token)
+                            .header("x-skypetoken", &skype)
+                            .json(&body),
+                    )
+                })
+                .await?
+            }
+            // The chat service's own way, which work clients have used:
+            // not yet seen in a recording of the work web client.
+            Account::Work => {
+                let url = format!("{}/v1/threads", self.chat_service_url());
+                let body = serde_json::json!({
+                    "members": members,
+                    "properties": { "threadType": "chat", "fixedRoster": "true", "uniquerosterthread": "true" },
+                });
+                self.authed_skype_request(|http, token| {
+                    http.post(&url)
+                        .header("Authentication", format!("skypetoken={}", token))
+                        .json(&body)
+                })
+                .await?
+            }
+        };
+        if !resp.status().is_success() {
+            return Err(refused(resp, "start a chat").await);
+        }
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|l| l.to_str().ok())
+            .map(str::to_owned);
+        let text = resp.text().await.unwrap_or_default();
+        created_thread(&text, location.as_deref())
+            .ok_or_else(|| Failure::Unexpected("no chat id in the answer".into()))
+    }
+
     /// Your own profile on a personal account's middle tier (its token
     /// carries no name), named by the id messages name you by.
     pub async fn own_profile(&self) -> Result<UserDetails, Failure> {
@@ -1162,6 +1300,37 @@ mod tests {
             ..TeamsCredentials::default()
         });
         assert_eq!(client.get_teams().await, Ok(Vec::new()));
+    }
+
+    #[test]
+    fn a_new_chat_is_found_in_either_answer() {
+        let groups =
+            r#"{"value":{"threadId":"19:uni01_abc@thread.v2","membersStatus":[]},"Type":"x"}"#;
+        assert_eq!(
+            created_thread(groups, None).as_deref(),
+            Some("19:uni01_abc@thread.v2")
+        );
+        let located = created_thread(
+            "",
+            Some("https://x.msg.teams.microsoft.com/v1/threads/19:abc@thread.v2"),
+        );
+        assert_eq!(located.as_deref(), Some("19:abc@thread.v2"));
+        assert_eq!(created_thread("{}", None), None);
+    }
+
+    #[test]
+    fn search_results_are_named_by_mri() {
+        let found: std::collections::HashMap<String, SearchResult> = serde_json::from_str(
+            r#"{"pim":{"userProfiles":[{"mri":"8:live:.cid.8a2c","displayName":"pim pim","objectId":"00000000-0000-0000-8a2c-09c8303fc296"}]}}"#,
+        )
+        .expect("an answer");
+        let people: Vec<UserDetails> = found
+            .into_values()
+            .flat_map(|r| r.user_profiles)
+            .filter_map(ShortProfile::into_details)
+            .collect();
+        assert_eq!(people[0].id, "live:.cid.8a2c");
+        assert_eq!(people[0].display_name.as_deref(), Some("pim pim"));
     }
 
     #[test]

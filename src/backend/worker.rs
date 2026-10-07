@@ -1111,6 +1111,10 @@ impl Worker {
                 }
             }
             Command::People { team, command } => self.people_command(team, command),
+            #[cfg(feature = "teams")]
+            Command::Convos { team, command } if self.teams_session(&team).is_some() => {
+                self.teams_convos(team, command);
+            }
             Command::Convos { team, command } => match self.slack(&team) {
                 Some((client, sink)) => {
                     tokio::spawn(super::convos::run(client, team, command, sink));
@@ -1560,6 +1564,32 @@ impl Worker {
         }
         #[cfg(feature = "teams")]
         self.restart_teams();
+    }
+
+    /// Runs a command about conversations in a Teams workspace: finding
+    /// people and starting chats; the rest is Slack's.
+    #[cfg(feature = "teams")]
+    fn teams_convos(&self, team: String, command: crate::convos::Command) {
+        let Some(session) = self.teams_session(&team) else {
+            return;
+        };
+        let (client, sink) = (session.client.clone(), session.sink.clone());
+        match command {
+            crate::convos::Command::FindPeople { query } => {
+                tokio::spawn(super::teams::find_people(client, team, query, sink));
+            }
+            crate::convos::Command::Open { users } => {
+                let me = session.workspace.user_id.clone();
+                tokio::spawn(super::teams::open(client, team, me, users, sink));
+            }
+            other => sink.send(Event::Convos {
+                team,
+                event: crate::convos::Event::Failed {
+                    what: other.failure(),
+                    error: Failure::Unsupported,
+                },
+            }),
+        }
     }
 
     /// Starts every Teams workspace again: lists it afresh and reconnects

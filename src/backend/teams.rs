@@ -452,6 +452,76 @@ pub async fn fetch_users(client: TeamsClient, team: String, ids: Vec<String>, si
     }
 }
 
+/// Finds people for the New message dialog; they arrive among the
+/// workspace's people, where its suggestions look.
+pub async fn find_people(client: TeamsClient, team: String, query: String, sink: Sink) {
+    match client.search_people(&query).await {
+        Ok(found) => {
+            let users: Vec<_> = found.iter().map(translate_user).collect();
+            if !users.is_empty() {
+                sink.send(Event::Users { team, users });
+            }
+        }
+        Err(error) => sink.send(Event::Convos {
+            team,
+            event: crate::convos::Event::Failed {
+                what: crate::convos::Failure::Open,
+                error,
+            },
+        }),
+    }
+}
+
+/// Starts a chat with `users` (the dialog has already looked for one with
+/// that one person) and opens it, as Slack's `conversations.open` does.
+pub async fn open(client: TeamsClient, team: String, me: String, users: Vec<String>, sink: Sink) {
+    let chat = match client.create_chat(&me, &users).await {
+        Ok(chat) => chat,
+        Err(error) => {
+            sink.send(Event::Convos {
+                team,
+                event: crate::convos::Event::Failed {
+                    what: crate::convos::Failure::Open,
+                    error,
+                },
+            });
+            return;
+        }
+    };
+    let mut conversation = translate_conversation(&crate::teams::types::Conversation {
+        id: chat.clone(),
+        ..Default::default()
+    });
+    match users.as_slice() {
+        [other] => {
+            conversation.kind = crate::model::ConversationKind::Direct;
+            conversation.user = Some(other.clone());
+        }
+        others => {
+            conversation.kind = crate::model::ConversationKind::Group;
+            let names: std::collections::HashMap<String, String> = client
+                .get_users(others)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|u| u.display_name.map(|name| (u.id, name)))
+                .collect();
+            if let Some(name) = group_name(others, &names) {
+                conversation.name = name;
+            }
+        }
+    }
+    conversation.empty = true;
+    sink.send(Event::Conversation {
+        team: team.clone(),
+        conversation,
+    });
+    sink.send(Event::Convos {
+        team,
+        event: crate::convos::Event::Opened { channel: chat },
+    });
+}
+
 /// A message to post to a Teams conversation.
 pub struct Post {
     pub team: String,

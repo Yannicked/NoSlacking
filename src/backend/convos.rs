@@ -124,6 +124,8 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
     let what = command.failure();
     let result = match command {
         Command::Open { users } => open(&client, &team, &users, &sink).await,
+        // A Slack workspace has everyone already: nothing to ask.
+        Command::FindPeople { .. } => Ok(()),
         Command::Browse => browse(&client, &team, &sink).await,
         Command::Join { channel } => join(&client, &team, &channel, &sink).await,
         Command::Leave { channel } => leave(&client, &team, &channel, &sink).await,
@@ -674,6 +676,8 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
             }
             demo_opened(team, conversation)
         }
+        // The pretend workspace has everyone already.
+        Command::FindPeople { .. } => Vec::new(),
         Command::Browse => vec![Event::Convos {
             team: team.to_owned(),
             event: convos::Event::Browsed {

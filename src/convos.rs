@@ -34,6 +34,11 @@ pub enum Action {
     Open {
         users: Vec<String>,
     },
+    /// Asks the server for people matching what is typed in the New
+    /// message dialog (see [`crate::model::Service::searches_people`]).
+    FindPeople {
+        query: String,
+    },
     /// Shows the channel browser and lists the public channels.
     Browse,
     /// Joins a public channel and opens it.
@@ -104,6 +109,8 @@ pub enum Action {
 pub enum Command {
     /// `conversations.open` with these people, then opens the result.
     Open { users: Vec<String> },
+    /// Finds people by name or address; they arrive as `Event::Users`.
+    FindPeople { query: String },
     /// Lists the public channels you are not in.
     Browse,
     /// `conversations.join`, then opens the channel.
@@ -142,7 +149,7 @@ impl Command {
     /// What failed, should this command fail.
     pub fn failure(&self) -> Failure {
         match self {
-            Self::Open { .. } => Failure::Open,
+            Self::Open { .. } | Self::FindPeople { .. } => Failure::Open,
             Self::Browse => Failure::Browse,
             Self::Join { .. } => Failure::Join,
             Self::Leave { .. } => Failure::Leave,
@@ -560,6 +567,9 @@ pub struct NewMessage {
     pub selected: usize,
     /// Waiting for Slack to open the conversation.
     pub busy: bool,
+    /// The last query sent to the server for people, so each is asked
+    /// once.
+    pub asked: String,
     /// The last query's matches: a workspace can have tens of thousands
     /// of people, too many to search on every frame.
     found: Option<FoundPeople>,
@@ -952,6 +962,11 @@ pub fn apply(app: &mut App, action: Action) {
             app.convos.new_message = Some(NewMessage::default());
         }
         Action::Open { users } => open(app, users),
+        Action::FindPeople { query } => {
+            if let Some(team) = app.active_team() {
+                send(app, team, Command::FindPeople { query });
+            }
+        }
         Action::Browse => {
             app.focus_overlay = true;
             app.convos.browse = Some(Browse {

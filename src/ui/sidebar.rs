@@ -672,7 +672,7 @@ fn section_view(
     // A "+" at the end of the Direct messages line, as in Slack's client:
     // the quickest way to a new conversation with someone is where your
     // conversations with people are. It opens the New message dialog.
-    if section.kind == SectionKind::DirectMessages && workspace.info.offers(Ability::Channels) {
+    if section.kind == SectionKind::DirectMessages && workspace.info.offers(Ability::NewMessage) {
         let plus = egui::Rect::from_center_size(
             egui::pos2(rect.right() - 18.0, rect.center().y),
             Vec2::splat(24.0),

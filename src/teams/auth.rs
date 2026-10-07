@@ -31,6 +31,10 @@ pub const RESOURCE_CSA: &str = "https://chatsvcagg.teams.microsoft.com";
 /// in a recording of teams.live.com, 2026-10-07).
 pub const RESOURCE_MT_PERSONAL: &str = "https://mtsvc.fl.teams.microsoft.com";
 
+/// The groups service's audience for personal accounts, where chats are
+/// started.
+pub const RESOURCE_GROUPS_PERSONAL: &str = "https://groupssvc.fl.teams.microsoft.com";
+
 /// Microsoft Graph's audience, for looking people up by id.
 pub const RESOURCE_GRAPH: &str = "https://graph.microsoft.com";
 
@@ -102,6 +106,9 @@ impl Account {
             Self::Personal if resource == RESOURCE_SPACES => Some(SCOPE_PERSONAL.to_owned()),
             Self::Personal if resource == RESOURCE_MT_PERSONAL => Some(format!(
                 "{RESOURCE_MT_PERSONAL}/teams.mt.readwrite openid profile offline_access"
+            )),
+            Self::Personal if resource == RESOURCE_GROUPS_PERSONAL => Some(format!(
+                "{RESOURCE_GROUPS_PERSONAL}/teams.readwrite openid profile offline_access"
             )),
             Self::Personal => None,
         }

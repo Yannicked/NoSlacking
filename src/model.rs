@@ -155,6 +155,13 @@ impl Service {
         }
     }
 
+    /// Whether the New message dialog asks the server for people as you
+    /// type: a Teams workspace knows only the people met in its chats,
+    /// where a Slack one has everyone already.
+    pub fn searches_people(self) -> bool {
+        self == Self::Teams
+    }
+
     /// Whether workspaces of this service can do `ability` here. Slack
     /// does everything; Teams reads, sends, edits, deletes, reacts and
     /// marks read so far, so the interface leaves the rest out rather than
@@ -164,7 +171,7 @@ impl Service {
             Self::Slack => true,
             Self::Teams => match ability {
                 // Seen in recordings of the Teams web client and built.
-                Ability::Reactions | Ability::Edit => true,
+                Ability::Reactions | Ability::Edit | Ability::NewMessage => true,
                 Ability::Huddles
                 | Ability::CustomEmoji
                 | Ability::Threads
@@ -217,6 +224,8 @@ pub enum Ability {
     Bookmarks,
     /// Browsing, creating, joining and leaving channels.
     Channels,
+    /// Starting a conversation with people (the New message dialog).
+    NewMessage,
     /// Renaming a conversation and setting its topic.
     Describe,
     /// Editing sidebar sections.
