@@ -261,7 +261,7 @@ pub struct Encoding {
 
 impl Encoding {
     /// Starts encoding what arrives in `latest` into `frames`, as
-    /// `control` says; `preview` gets a picture now and then.
+    /// `control` says; `preview` gets every picture.
     pub fn spawn(
         latest: Latest,
         frames: mpsc::Sender<VideoFrame>,
@@ -303,7 +303,6 @@ fn encode(
     let mut counts = EncodeCounts::default();
     let mut busy = Duration::ZERO;
     let mut next_report = Instant::now() + REPORT_EVERY;
-    let mut n = 0u64;
     while !stop.load(Ordering::Relaxed) {
         let Some(frame) = latest.take(STALLED) else {
             // The camera is off or stalled; when it comes back the stream
@@ -315,6 +314,13 @@ fn encode(
         };
         let now = Instant::now();
         let picture = &frame.picture;
+        // Every picture, before encoding: the self-view keeps the camera's
+        // pace instead of waiting for the encoder.
+        if let Some(preview) = preview
+            && let Some(image) = preview_image(picture)
+        {
+            preview.put(image);
+        }
         let wanted = step(control.bitrate());
         let rebuild = match &encoder {
             None => true,
@@ -398,13 +404,6 @@ fn encode(
             }
             Err(mpsc::error::TrySendError::Closed(_)) => break,
         }
-        if let Some(preview) = preview
-            && n.is_multiple_of(2)
-            && let Some(image) = preview_image(picture)
-        {
-            preview.put(image);
-        }
-        n += 1;
         if Instant::now() >= next_report {
             next_report += REPORT_EVERY;
             let ms = busy.as_secs_f64() * 1000.0 / counts.encoded.max(1) as f64;
@@ -421,23 +420,19 @@ fn encode(
     log::info!("huddle camera: encoder stopped; {counts:?}");
 }
 
-/// Feeds `preview` from `latest` without encoding, every other picture,
-/// until dropped: the demo's camera, which goes nowhere.
+/// Feeds `preview` from `latest` without encoding, every picture, until
+/// dropped: the demo's camera, which goes nowhere.
 pub fn preview_feed(latest: Latest, preview: Preview) -> Result<Running, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = stop.clone();
     let thread = std::thread::Builder::new()
         .name("noslacking-camera-preview".into())
         .spawn(move || {
-            let mut n = 0u64;
             while !thread_stop.load(Ordering::Relaxed) {
-                if let Some(frame) = latest.take(STALLED) {
-                    if n.is_multiple_of(2)
-                        && let Some(image) = preview_image(&frame.picture)
-                    {
-                        preview.put(image);
-                    }
-                    n += 1;
+                if let Some(frame) = latest.take(STALLED)
+                    && let Some(image) = preview_image(&frame.picture)
+                {
+                    preview.put(image);
                 }
             }
             preview.clear();
