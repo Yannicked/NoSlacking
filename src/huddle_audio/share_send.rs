@@ -211,7 +211,14 @@ fn send(
             control.take_keyframe();
             force_next = false;
         }
-        gate.sent(now);
+        // A fresh picture carries its capture time; one sent again, now.
+        let at = now
+            .checked_sub(Duration::from_micros(u64::from(frame.age_us)))
+            .unwrap_or(now);
+        // Paced from the capture, not from when encoding finished: the
+        // next ask comes a little before the next picture, which is then
+        // encoded as it arrives.
+        gate.sent(at);
         if frame.keyframe {
             counts.keyframes += 1;
             last_keyframe = Some(now);
@@ -240,10 +247,6 @@ fn send(
         }
         counts.encoded += 1;
         counts.bytes += frame.data.len() as u64;
-        // A fresh picture carries its capture time; one sent again, now.
-        let at = now
-            .checked_sub(Duration::from_micros(u64::from(frame.age_us)))
-            .unwrap_or(now);
         let time = rtp_time(epoch, at).max(last_time + 1);
         last_time = time;
         let sent = VideoFrame {

@@ -77,8 +77,8 @@ impl GpuShare {
                 None
             }
         };
-        let dmabuf = scaler.is_some()
-            && std::env::var_os("NOSLACKING_VIDEO_DMABUF").is_none_or(|v| v != "0");
+        let off = |name: &str| std::env::var_os(name).is_some_and(|v| v == "0");
+        let dmabuf = scaler.is_some() && !off("NOSLACKING_VIDEO_DMABUF");
         Ok(Self {
             encoder: None,
             scaler,
@@ -86,8 +86,17 @@ impl GpuShare {
             display,
             support,
             dmabuf,
-            no_upload: false,
+            // NOSLACKING_VIDEO_RGB_UPLOAD=0 converts packed pictures on
+            // the processor, to compare the two (examples/share.rs).
+            no_upload: off("NOSLACKING_VIDEO_RGB_UPLOAD"),
         })
+    }
+
+    /// Whether packed pictures are written as RGB and converted on the
+    /// GPU (the default), or converted on the processor and written as
+    /// NV12.
+    pub fn convert_on_gpu(&mut self, on: bool) {
+        self.no_upload = !on;
     }
 
     /// Writes a packed picture into an RGB surface and converts it into

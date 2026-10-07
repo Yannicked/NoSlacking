@@ -2,7 +2,8 @@
 //!
 //! The capture ([`crate::capture`]) runs on a thread of its own and hands
 //! each frame to the share's [`Pipeline`] on that thread. The pipeline
-//! keeps at most [`capture::FPS`] pictures a second, skips pictures that
+//! keeps at most 25 pictures a second (the app asks for at most
+//! [`capture::FPS`]), skips pictures that
 //! did not change (a screen is mostly still), and encodes when the app
 //! asks for the next frame ([`Ask::Next`]): on the GPU when the app wants
 //! it and it can ([`Gpu`]; a dma-buf from PipeWire goes there without
@@ -33,9 +34,11 @@ pub const BITRATES: (u32, u32) = (50_000, 20_000_000);
 /// A new software encoder for a new bit rate at most this often: making
 /// one costs an IDR.
 const RETUNE_EVERY: Duration = Duration::from_secs(8);
-/// A frame kept at most this often: a little under a frame's time, so 15
-/// a second are not missed by a capture a millisecond early.
-const MIN_GAP: Duration = Duration::from_millis(1000 / capture::FPS as u64 - 5);
+/// A frame kept at most this often: a compositor sending 60 a second is
+/// not copied 60 times. Well under a frame's time at [`capture::FPS`],
+/// since frames come unevenly (a polled capture waits while its thread
+/// encodes) and the app paces what is sent.
+const MIN_GAP: Duration = Duration::from_millis(40);
 /// How often the numbers go to the log.
 const REPORT_EVERY: Duration = Duration::from_secs(10);
 
@@ -501,11 +504,12 @@ impl Pipeline {
         if let Some(trouble) = &self.ended {
             return Some(Err(trouble.clone()));
         }
-        let age = if let Some(at) = self.fresh.take() {
-            at.elapsed()
+        // When the picture was captured; none for one sent again.
+        let captured = if let Some(at) = self.fresh.take() {
+            Some(at)
         } else if (repeat || force_keyframe) && (self.gpu_loaded || self.held.is_some()) {
             self.counts.repeated += 1;
-            Duration::ZERO
+            None
         } else {
             return None;
         };
@@ -515,7 +519,10 @@ impl Pipeline {
                 hardware,
                 width: size.0,
                 height: size.1,
-                age_us: u32::try_from(age.as_micros()).unwrap_or(u32::MAX),
+                // As the answer goes out, the encoding included.
+                age_us: captured.map_or(0, |at| {
+                    u32::try_from(at.elapsed().as_micros()).unwrap_or(u32::MAX)
+                }),
                 data: encoded.data,
             },
         )))
@@ -761,19 +768,19 @@ mod tests {
     }
 
     #[test]
-    fn at_most_fifteen_pictures_a_second_are_kept() {
+    fn at_most_twenty_five_pictures_a_second_are_kept() {
         let mut pipeline = Pipeline::new(settings(None));
         let start = Instant::now();
         let mut n = 0;
-        while start.elapsed() < Duration::from_millis(300) {
+        while start.elapsed() < Duration::from_millis(400) {
             let picture = pattern(64, 48, n, Duration::ZERO);
             pipeline.put(&Frame::I420(&picture), Instant::now());
             n += 1;
             std::thread::sleep(Duration::from_millis(5));
         }
-        // 300 ms at 15 a second: about five.
+        // 400 ms, one kept every 40 ms or a little more: about ten.
         assert!(
-            (4..=6).contains(&pipeline.counts.kept),
+            (7..=11).contains(&pipeline.counts.kept),
             "{:?}",
             pipeline.counts
         );
