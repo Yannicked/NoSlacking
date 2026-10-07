@@ -1,4 +1,4 @@
-//! Listening to a huddle: the `huddle-audio` feature.
+//! Listening and talking in a huddle.
 //!
 //! A huddle is an Amazon Chime meeting. `rooms.join` (a browser session's
 //! method, like the rest of [`crate::huddles`]) hands out the meeting's

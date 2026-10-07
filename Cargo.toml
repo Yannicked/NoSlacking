@@ -61,7 +61,8 @@ hyper-util = { version = "0.1.21", default-features = false, features = ["client
 # Socket Mode: Slack's real-time events over a WebSocket.
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs", "net", "io-util"] }
+# signal: `--huddle-probe` leaves the call cleanly on Ctrl+C.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs", "net", "io-util", "signal"] }
 # Slack names emoji by shortcode (`:thumbsup:`); this is the table that turns
 # those into Unicode, and the picker's list.
 emojis = "0.9"
@@ -84,55 +85,54 @@ chacha20poly1305 = { version = "0.11", default-features = false, features = ["al
 # Spell checking in the composer with the system's Hunspell dictionaries:
 # pure Rust (Helix's), MPL-2.0, two small dependencies.
 spellbook = "0.4.2"
-# Voice clips and sound files play in the app (the `audio` feature).
-# rodio drives the sound device through cpal (ALSA on Linux, so the
-# packages need libasound2) and decodes with symphonia (MPL-2.0, pure
-# Rust): AAC in MP4/M4A, MP3, Ogg Vorbis, FLAC and WAV. Symphonia has no
+# Voice clips, sound files and huddles play in the app. rodio drives the
+# sound device through cpal (ALSA on Linux, so the packages need
+# libasound2) and decodes with symphonia (MPL-2.0, pure Rust): AAC in
+# MP4/M4A, MP3, Ogg Vorbis, FLAC and WAV. Symphonia has no
 # Opus decoder; those open in the system's player.
-rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp4", "mp3", "vorbis", "flac", "wav"], optional = true }
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp4", "mp3", "vorbis", "flac", "wav"] }
 
-# Listening and talking in huddles (the `huddle-audio` feature, a spike;
-# see TODO.md).
+# Listening and talking in huddles (src/huddle_audio.rs; see TODO.md).
 # Chime's signaling frames are protobuf; the Rust for them is generated
 # ahead of time and checked in (src/huddle_audio/chime/), so the build
 # needs no protoc, only prost's derive.
-prost = { version = "0.14", default-features = false, features = ["derive", "std"], optional = true }
+prost = { version = "0.14", default-features = false, features = ["derive", "std"] }
 # WebRTC, sans-IO, with OpenSSL's DTLS on every platform. Chime's media
 # servers refuse the handshake of str0m's own DTLS, dimpl (alert 40,
 # handshake_failure), which every other str0m backend (aws-lc-rs,
 # rust-crypto, apple-crypto, wincrypto) uses; OpenSSL's was taken. Linux
 # links the system's OpenSSL (libssl-dev to build); macOS and Windows
 # build it from source, below.
-str0m = { version = "0.24.1", default-features = false, features = ["openssl"], optional = true }
+str0m = { version = "0.24.1", default-features = false, features = ["openssl"] }
 # The certificate Chime's media server shows, read for the log only
 # (str0m-openssl's own OpenSSL, so no crate is added).
-openssl = { version = "0.10.78", optional = true }
+openssl = "0.10.78"
 # Opus in pure Rust, without unsafe code or a C library to find.
-opus-decoder = { version = "0.1.1", optional = true }
+opus-decoder = "0.1.1"
 # The TURN client's long-term credential: HMAC-SHA1 (sha1 is above) keyed
 # with MD5.
-hmac = { version = "0.13", optional = true }
-md-5 = { version = "0.11", default-features = false, optional = true }
+hmac = "0.13"
+md-5 = { version = "0.11", default-features = false }
 # TURN over TLS: the same rustls (with ring) and system roots reqwest uses.
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
-rustls-native-certs = { version = "0.8", optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-native-certs = "0.8"
 # str0m and its DTLS log through tracing; with this they reach the app's
 # log too, so a probe run can show ICE and DTLS (NOSLACKING_LOG=str0m=debug).
-tracing = { version = "0.1.44", default-features = false, features = ["log", "std"], optional = true }
+tracing = { version = "0.1.44", default-features = false, features = ["log", "std"] }
 
-# Talking in a huddle (also `huddle-audio`): the microphone through cpal
-# (rodio's), WebRTC's audio processing and an Opus encoder, all pure Rust.
+# Talking in a huddle: the microphone through cpal (rodio's), WebRTC's
+# audio processing and an Opus encoder, all pure Rust.
 # opus-rs: libopus 1.6 ported (BSD-3-Clause, no dependencies); its unsafe
 # is SIMD and unchecked indexing. sonora: WebRTC's AEC3, noise
 # suppression, AGC2 and high-pass filter, M145, ported (BSD-3-Clause);
 # its unsafe is SIMD behind runtime CPU detection. sonora-agc2's RNN
 # voice detector decides what DTX leaves out; sonora-common-audio's sinc
 # resampler brings a 44.1 kHz microphone to 48. Both come with sonora.
-opus-rs = { version = "0.1.34", optional = true }
-sonora = { version = "0.2.0", optional = true }
-sonora-agc2 = { version = "0.2.0", optional = true }
-sonora-common-audio = { version = "0.2.0", optional = true }
-sonora-simd = { version = "0.2.0", optional = true }
+opus-rs = "0.1.34"
+sonora = "0.2.0"
+sonora-agc2 = "0.2.0"
+sonora-common-audio = "0.2.0"
+sonora-simd = "0.2.0"
 
 # Watching screen shares in a huddle (the `huddle-video` feature): H.264
 # decoded in pure Rust (rusty_h264, BSD-2-Clause; the decoder itself
@@ -164,11 +164,11 @@ quick-xml = { version = "0.41", default-features = false }
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly", target_os = "macos", windows))'.dependencies]
 notify-rust = "4.18"
 
-# For huddle-audio: OpenSSL built from source with the app (openssl-src;
+# For huddles: OpenSSL built from source with the app (openssl-src;
 # Perl and a C compiler, which the CI runners have), as macOS and Windows
 # have no OpenSSL to link. The same str0m as above, one feature more.
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
-str0m = { version = "0.24.1", default-features = false, features = ["openssl", "vendored"], optional = true }
+str0m = { version = "0.24.1", default-features = false, features = ["openssl", "vendored"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
@@ -237,10 +237,7 @@ assets = [
 ]
 
 [features]
-default = ["highlight", "bundled-emoji", "audio", "huddle-audio"]
-# Plays voice clips and sound files in the app. Without it they open in
-# the system's player, and the build needs no sound libraries.
-audio = ["dep:rodio"]
+default = ["highlight", "bundled-emoji"]
 # Compiles all of Noto Color Emoji (about 10 MB) into Linux and other Unix
 # builds, for desktops whose emoji font is one fastframe-emoji cannot draw
 # (COLRv1 only, as on Fedora). Without it the app reads
@@ -249,15 +246,10 @@ audio = ["dep:rodio"]
 bundled-emoji = []
 # Sample data and the screenshot flag; never part of a release build.
 demo = []
-# Listening and talking in huddles (src/huddle_audio.rs), on by default.
-# Adds `noslacking --huddle-probe`. Needs OpenSSL's headers on Linux
-# (libssl-dev, openssl-devel); macOS and Windows build OpenSSL from
-# source, which needs Perl.
-huddle-audio = ["audio", "dep:prost", "dep:str0m", "dep:openssl", "dep:opus-decoder", "dep:hmac", "dep:md-5", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:tracing", "tokio/signal", "dep:opus-rs", "dep:sonora", "dep:sonora-agc2", "dep:sonora-common-audio", "dep:sonora-simd"]
 # Watching screen shares in huddles: a call window with the share,
 # decoded on a thread of its own. Off until it has been tried against
-# Slack; needs `huddle-audio`.
-huddle-video = ["huddle-audio", "dep:rusty_h264-decoder", "dep:yuv", "dep:bytemuck"]
+# Slack.
+huddle-video = ["dep:rusty_h264-decoder", "dep:yuv", "dep:bytemuck"]
 # Colours code blocks that name their language (```` ```rust ````). Our own
 # small lexer, a few kilobytes; turn it off for plain code blocks.
 highlight = []

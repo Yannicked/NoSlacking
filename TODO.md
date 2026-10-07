@@ -711,7 +711,7 @@ engineering, as for the rest of the session sign-in.
         this.
       - Verified 2026-10-06: a real invitation reached NoSlacking's
         `rtm.connect` socket and showed its card, so the flannel gateway
-        is not needed for invitations. With `huddle-audio` the card offers
+        is not needed for invitations. The card offers
         Listen here (opens the conversation and listens) and Open in Slack.
       - Seen on the same socket in a real huddle: `huddle_invite_cancel`
         (the call stopped ringing: its card goes, and on Linux its
@@ -734,7 +734,8 @@ engineering, as for the rest of the session sign-in.
       - Skipped "Open in Slack app": after a browser sign-in NoSlacking
         stays the `slack://` handler, so `slack://channel?…` would come
         straight back here. It needs the claim given back first.
-- [x] **Listen-only (1–2 weeks), behind a `huddle-audio` feature:**
+- [x] **Listen-only (1–2 weeks), first behind a feature, now in every
+      build:**
       join, receive Chime's mixed audio and play it (`str0m` or
       `webrtc-rs`, `opus`, `cpal`), to prove the path and judge echo
       cancellation (`webrtc-audio-processing`) before going further.
@@ -755,7 +756,7 @@ engineering, as for the rest of the session sign-in.
       - DTLS: Chime's media servers refused dimpl's ClientHello (alert
         40, handshake_failure) and took OpenSSL's. Every other `str0m`
         backend uses dimpl (`wincrypto` always does, and `apple-crypto`
-        depends on it), so `huddle-audio` now uses OpenSSL on every
+        depends on it), so huddles now use OpenSSL on every
         platform: the system's on Linux (`libssl-dev` to build), built
         from source (`vendored`, openssl-src: Perl, and NASM where the
         runner has it) on macOS and Windows, unproven there until CI
@@ -812,14 +813,13 @@ engineering, as for the rest of the session sign-in.
         builds its bundled C with CMake on Windows and macOS (or needs
         the system's library on Linux, which the Flatpak runtime has);
         it is the fallback if the decoder sounds wrong. It has not.
-      - Cost when on: str0m, str0m-openssl, OpenSSL, prost and the Opus
-        decoder; `cargo deny` passes as is. The default build pulls none
-        of it, and no release (`.tar.gz`, `.deb`, `.rpm`, Flatpak, macOS,
-        Windows) enables the feature. The Linux x86-64 release binary is
+      - Cost: str0m, str0m-openssl, OpenSSL, prost and the Opus decoder;
+        `cargo deny` passes as is. Every build carries it (there is no
+        feature to leave it out). The Linux x86-64 release binary is
         49.5 MB with it (47.2 MiB; libssl and libcrypto linked from the
         system), against 52.7 MB with aws-lc and dimpl before.
-      - Try it from the command line: `cargo run --release --features
-        huddle-audio -- --huddle-probe TEAM CHANNEL [--seconds 30]
+      - Try it from the command line: `cargo run --release --
+        --huddle-probe TEAM CHANNEL [--seconds 30]
         [--huddle-region REGION]`, with the browser sign-in saved for
         TEAM. Without `--huddle-region` the region is the nearest one AWS
         names at `nearest-media-region.l.chime.aws`, else `us-east-1`. It
@@ -839,7 +839,7 @@ engineering, as for the rest of the session sign-in.
       unmuted, Chime's AUDIO_CONTROL for mute), echo cancellation and
       noise suppression, devices, reconnects. Who is talking is done (the
       call bar). Video and screen viewing after that (+4–8 weeks).
-      - Built, unproven against Slack (steps 1 and 2; also `huddle-audio`):
+      - Built, unproven against Slack (steps 1 and 2):
         microphone → 48 kHz mono → WebRTC's audio processing → Opus → the
         audio track we already send silence on. `src/huddle_audio/`:
         `microphone` (cpal's default input, opened on a thread of its own
@@ -882,19 +882,18 @@ engineering, as for the rest of the session sign-in.
       - Cost: `opus-rs` (no dependencies; its unsafe is SIMD and
         unchecked indexing), `sonora` and its six crates (unsafe only in
         SIMD behind runtime CPU detection), `derive_more`; all
-        BSD-3-Clause or MIT/Apache, `cargo deny` passes. The default build
-        gains no crate. With `huddle-audio`, talking added 4.6 MB to the
-        release binary (49.3 to 54.0 MB, Linux x86-64, measured before
-        the move to OpenSSL).
+        BSD-3-Clause or MIT/Apache, `cargo deny` passes. Talking added
+        4.6 MB to the release binary (49.3 to 54.0 MB, Linux x86-64,
+        measured before the move to OpenSSL).
       - Packaging: macOS's Info.plist has `NSMicrophoneUsageDescription`
         (ad-hoc signed without the hardened runtime, so no entitlement);
         the Flatpak's `--socket=pulseaudio` carries recording too; on
         Windows, a refused microphone says to check the privacy settings.
-      - Try it: first `cargo run --release --features huddle-audio --
-        --huddle-probe TEAM CHANNEL --seconds 60 --send-tone` (the others
+      - Try it: first `cargo run --release -- --huddle-probe TEAM
+        CHANNEL --seconds 60 --send-tone` (the others
         should hear a quiet 440 Hz tone; the log shows what was sent and
-        Chime's receiver reports), then `cargo run --release --features
-        huddle-audio`, Listen and Unmute: with headphones (is the voice
+        Chime's receiver reports), then `cargo run --release`, Listen
+        and Unmute: with headphones (is the voice
         clear, the level right?), then without (does the far end hear
         itself back?).
       - Not done: choosing the input device (the system's default for
@@ -1100,15 +1099,14 @@ Slack already makes most previews; NoSlacking parses few of them.
 - [x] **Audio in the app (small–medium).** `rodio` + `symphonia` (aac,
       isomp4, mp3, vorbis, flac, wav; no Opus) with `cpal`; the packages
       need ALSA, the Flatpak `--socket=pulseaudio`.
-      - Done (`src/audio.rs`, the `audio` feature, on by default): voice
+      - Done (`src/audio.rs`, in every build): voice
         clips and sound files play on their cards: play/pause, the
         waveform (or a bar) fills in and seeks on click, position /
         length. The worker fetches the sound into memory (50 MB cap);
         a thread of its own decodes and plays it, opening the device
         only while something plays. One sound at a time; signing out
         stops it. Opus/WebM, larger files, no sound device and
-        undecodable files open in the system's player with a toast;
-        without the feature every sound does, as before.
+        undecodable files open in the system's player with a toast.
 - [ ] **Every page of PDFs and Office files (medium)** through Slack's
       `converted_pdf`, rendered with `hayro` (pure Rust, experimental),
       falling back to `thumb_pdf` and "open".

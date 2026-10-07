@@ -276,8 +276,7 @@ pub struct Worker {
     uploads: HashMap<u64, Running>,
     /// Presence and the like for the people on screen.
     people: super::people::Hub,
-    /// The huddle being listened to (`huddle-audio`).
-    #[cfg(feature = "huddle-audio")]
+    /// The huddle being listened to.
     huddle_audio: super::listen::Listener,
 }
 
@@ -309,7 +308,6 @@ impl Worker {
             waiting: Some(Vec::new()),
             uploads: HashMap::new(),
             people: super::people::Hub::default(),
-            #[cfg(feature = "huddle-audio")]
             huddle_audio: super::listen::Listener::default(),
         }
     }
@@ -1672,7 +1670,6 @@ impl Worker {
             log::debug!("not acting on people in {team}: signed out");
             return;
         };
-        #[cfg(feature = "huddle-audio")]
         let command = match command {
             crate::people::Command::ListenHuddle { channel } => {
                 self.huddle_audio.start(client, team, channel, sink);

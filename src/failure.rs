@@ -138,7 +138,6 @@ pub enum Failure {
     BadProxy,
     /// Listening to a huddle failed at this step; the technical detail
     /// went to the log.
-    #[cfg(feature = "huddle-audio")]
     Huddle(HuddleTrouble),
     /// Slack's error code, for codes not worded here: shown with its
     /// underscores as spaces, which mostly reads.
@@ -290,7 +289,6 @@ impl Failure {
             Self::NeedsSession => t("it only works when you sign in with your browser"),
             Self::NoInvitee => t("name someone to invite with @"),
             Self::BadProxy => t("the proxy URL cannot be used; check it in Settings"),
-            #[cfg(feature = "huddle-audio")]
             Self::Huddle(trouble) => match trouble {
                 HuddleTrouble::NoSound => t("the sound device could not be opened"),
                 HuddleTrouble::Signaling => t("the huddle's server could not be reached"),
@@ -315,7 +313,6 @@ impl Failure {
 }
 
 /// Where listening to a huddle failed, for [`Failure::Huddle`].
-#[cfg(feature = "huddle-audio")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HuddleTrouble {
     /// No sound device would open.
@@ -575,23 +572,14 @@ mod tests {
             Failure::NeedsSession,
             Failure::NoInvitee,
             Failure::BadProxy,
-            #[cfg(feature = "huddle-audio")]
             Failure::Huddle(HuddleTrouble::NoSound),
-            #[cfg(feature = "huddle-audio")]
             Failure::Huddle(HuddleTrouble::Signaling),
-            #[cfg(feature = "huddle-audio")]
             Failure::Huddle(HuddleTrouble::Join),
-            #[cfg(feature = "huddle-audio")]
             Failure::Huddle(HuddleTrouble::Relay),
-            #[cfg(feature = "huddle-audio")]
             Failure::Huddle(HuddleTrouble::Offer),
-            #[cfg(feature = "huddle-audio")]
             Failure::Huddle(HuddleTrouble::Connect),
-            #[cfg(feature = "huddle-audio")]
             Failure::Huddle(HuddleTrouble::Lost),
-            #[cfg(feature = "huddle-audio")]
             Failure::Huddle(HuddleTrouble::SoundStopped),
-            #[cfg(feature = "huddle-audio")]
             Failure::Huddle(HuddleTrouble::Microphone),
             Failure::Slack("some_new_code".into()),
             Failure::Other("disk full".into()),

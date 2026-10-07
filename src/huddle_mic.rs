@@ -1,6 +1,5 @@
-//! The microphone in a huddle, as the interface sees it (the
-//! `huddle-audio` feature): muted on joining, opened only when you
-//! unmute, closed when you mute or leave.
+//! The microphone in a huddle, as the interface sees it: muted on
+//! joining, opened only when you unmute, closed when you mute or leave.
 //!
 //! Unmuting shows at once as "turning on" and becomes live when the worker
 //! says the device is open; muting shows at once, as the device closes

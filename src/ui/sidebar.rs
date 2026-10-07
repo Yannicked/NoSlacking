@@ -205,7 +205,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         sidebar_filter,
         socket,
         views,
-        #[cfg(feature = "huddle-audio")]
         huddles,
         ..
     } = app;
@@ -312,7 +311,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     });
             }
             // The huddle being listened to, at the foot, as in Slack.
-            #[cfg(feature = "huddle-audio")]
             super::call_bar::panel(
                 ui,
                 "sidebar-call-bar",

@@ -1,6 +1,5 @@
-//! The microphone's mute button in the call bar (the `huddle-audio`
-//! feature), beside Leave while the huddle is live: one self-contained
-//! widget.
+//! The microphone's mute button in the call bar, beside Leave while the
+//! huddle is live: one self-contained widget.
 //!
 //! Muted it is a quiet button with a red, struck-through microphone;
 //! live it is filled with the huddle's green and a white microphone, so

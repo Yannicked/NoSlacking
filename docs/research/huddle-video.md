@@ -326,10 +326,11 @@ others' codecs today: log INDEX's `supported_receive_codec_intersection`.
 
 ## 4. Fit and architecture
 
-- **Feature flag:** `huddle-video = ["huddle-audio", "dep:openh264",
-  "dep:yuv"]` (built as `rusty_h264-decoder`, `yuv` and `bytemuck`
-  instead of openh264), plus `huddle-video-send` later for the encoder and capture.
-  It stays off in releases until proven, like `huddle-audio`.
+- **Feature flag:** `huddle-video = ["dep:openh264", "dep:yuv"]`
+  (built as `rusty_h264-decoder`, `yuv` and `bytemuck` instead of
+  openh264), plus `huddle-video-send` later for the encoder and capture.
+  It stays off in releases until proven, as huddle audio did until it
+  became part of every build.
 - **Receive pipeline:**
   - `huddle_audio/` would gain `video_index.rs`: a pure module for INDEX
     sources by group, the `#content` flag, the choice of which streams to
@@ -421,8 +422,8 @@ user who turns on their camera and then shares a screen:
 - What do the DATA_MESSAGE topics look like while someone draws or
   reacts?
 
-**Stage 0: built (2026-10-07); what to run.** All behind `huddle-audio`,
-in `src/huddle_audio/video.rs` (INDEX, the choice of streams, the slot
+**Stage 0: built (2026-10-07); what to run.** In every build, in
+`src/huddle_audio/video.rs` (INDEX, the choice of streams, the slot
 table, SSRC → stream), `watch.rs` (renegotiation and counting in the
 session), `bitstream.rs` (a small SPS reader, the VP8 keyframe header,
 IVF) and `probe.rs`. No new crate; the SPS is read by hand.
@@ -465,10 +466,10 @@ camera on after about 20 s and starts sharing a screen after about 50 s
 (and, for the last question, reacts or draws during the share):
 
 ```
-cargo run --release --features huddle-audio -- --huddle-probe TEAM CHANNEL --seconds 90
-cargo run --release --features huddle-audio -- --huddle-probe TEAM CHANNEL --seconds 90 --video 4
-cargo run --release --features huddle-audio -- --huddle-probe TEAM CHANNEL --seconds 90 --video 4 --video-h264-only
-cargo run --release --features huddle-audio -- --huddle-probe TEAM CHANNEL --seconds 90 --video 4 --video-dump probe-dumps
+cargo run --release -- --huddle-probe TEAM CHANNEL --seconds 90
+cargo run --release -- --huddle-probe TEAM CHANNEL --seconds 90 --video 4
+cargo run --release -- --huddle-probe TEAM CHANNEL --seconds 90 --video 4 --video-h264-only
+cargo run --release -- --huddle-probe TEAM CHANNEL --seconds 90 --video 4 --video-dump probe-dumps
 ```
 
 Not yet known, and what the logs will settle: whether Chime takes a
@@ -577,7 +578,7 @@ going through software GL. A real GPU and a real share (mostly still,
 smaller P frames) should cost less; to be measured on a desktop.
 
 *Binary size:* `--features huddle-video` adds 0.99 MB to the release
-binary (50.32 → 51.31 MB, both with `huddle-audio`).
+binary (50.32 → 51.31 MB, both with huddle audio).
 
 *Not yet known:* whether real shares keep decoding cleanly for minutes
 (SEI, multiple slices, Chrome's hardware encoders), how long the first
