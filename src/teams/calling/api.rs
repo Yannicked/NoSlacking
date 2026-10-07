@@ -460,7 +460,7 @@ pub struct RelayCredentials {
     pub realm: String,
     pub username: String,
     pub password: String,
-    /// When they run out, as the service says it (seconds; unverified).
+    /// How long they last, in seconds (a week in a recording).
     pub expires: Option<u64>,
 }
 
@@ -506,8 +506,13 @@ pub fn read_relay_credentials(answer: &serde_json::Value) -> Option<RelayCredent
 pub async fn relay_credentials(client: &TeamsClient) -> Result<RelayCredentials, Failure> {
     let resp = client
         .plain_skype_request(|http, token| {
+            // `api-version: 2` gives the answer in the shape the web
+            // client reads (recorded); without it the answer differs.
             http.get(TRAP_TOKENS_URL)
                 .header("X-Skypetoken", token)
+                .header("api-version", "2")
+                .header("x-ms-migration", "True")
+                .header(reqwest::header::ACCEPT, "application/json, text/javascript")
                 .header("x-microsoft-skype-client", client_header())
         })
         .await?;
@@ -518,8 +523,15 @@ pub async fn relay_credentials(client: &TeamsClient) -> Result<RelayCredentials,
         .json()
         .await
         .map_err(|e| Failure::Unexpected(e.without_url().to_string()))?;
-    read_relay_credentials(&answer)
-        .ok_or_else(|| Failure::Unexpected("no relay credentials in the answer".into()))
+    read_relay_credentials(&answer).ok_or_else(|| {
+        // Its field names say what shape it came in; their values are secrets.
+        let fields: Vec<&str> = answer
+            .as_object()
+            .map(|o| o.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        log::warn!("relay credentials in an unknown shape: fields {fields:?}");
+        Failure::Unexpected("no relay credentials in the answer".into())
+    })
 }
 
 /// Microsoft's relay (TURN) servers.
