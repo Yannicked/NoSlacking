@@ -1313,7 +1313,7 @@ impl TeamsClient {
             .split("; ")
             .filter_map(|pair| pair.split_once('=').map(|(name, _)| name))
             .collect();
-        log::info!(
+        log::debug!(
             "Teams cookies for pictures at {host}{}: {names:?}",
             if fresh {
                 ", asked as the web client asks"

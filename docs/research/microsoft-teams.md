@@ -384,7 +384,7 @@ personal `teams.live.com/api/…`):
 |---|---|---|
 | Chat service | `chatsvc/{region}/v1/…`, Bearer **IC3** token | `chatsvc/consumer/v1/…`, skype token |
 | People | `mt/{region}/beta/users/fetchShortProfile` and `users/fetch` (spaces token); `fetchFederated` 401 for a guest | `mt/beta/users/fetchShortProfile`, `fetchFederated` (mtsvc token + skype token) |
-| Avatars | `mt/{region}/beta/users/{mri}/profilepicturev2/…`, cookie from `POST …/users/{id}/cookiev2` | `mt/beta/users/{mri}/profilepicturev2?size=HR64x64`, cookie from `POST mt/beta/imageauth/cookie`; groups `groups/v1/threads/{id}/profilepicturev2` |
+| Avatars | `mt/{region}/beta/users/{mri}/profilepicturev2/…`, cookie from `POST …/users/{id}/cookiev2` | `mt/beta/users/{mri}/profilepicturev2?displayname=…&imageUri=…&size=HR64x64` (`imageUri` from the profile's own field, for someone with a photo), cookie from `POST mt/beta/imageauth/cookie`, asked with `Referer: https://teams.live.com/v2/` and an image `Accept` (without them a photo is refused 401); groups `groups/v1/threads/{id}/profilepicturev2` |
 | Inline images (`<img itemtype="…/AMSImage">`) | `{region}-prod.asyncgw.teams.microsoft.com/v1/objects/{id}/views/imgo`, Bearer IC3 | `*-api.asm.skype.com/v1/objects/{id}/views/imgo`, cookie from `POST …/v1/skypetokenauth` (form `skypetoken=…`) |
 | Presence | `ups/{region}/v1/presence/getpresence/`, `me/endpoints`, `pubsub/subscriptions` (presence token) | `ups/global/v1/…` (same shapes) |
 | Read receipts | `chatsvc/…/v1/threads/{id}/consumptionhorizons` | the same |
