@@ -485,7 +485,7 @@ pub fn offer(local: &LocalMedia) -> String {
                 local,
                 mid,
                 codec,
-                ssrc,
+                (ssrc, local.video_rtx_ssrc),
                 local.video_direction,
                 setup,
                 false,
@@ -620,7 +620,14 @@ pub fn answer(local: &LocalMedia, remote: &RemoteMedia) -> String {
                         rtx: offered.rtx.filter(|_| local.video_rtx.is_some()),
                     };
                     camera_line(
-                        &mut out, local, &line.mid, codec, ssrc, direction, setup, first,
+                        &mut out,
+                        local,
+                        &line.mid,
+                        codec,
+                        (ssrc, local.video_rtx_ssrc),
+                        direction,
+                        setup,
+                        first,
                     );
                 }
             }
@@ -647,6 +654,10 @@ fn answer_direction(ours: Direction, theirs: Direction) -> Direction {
     }
 }
 
+/// The canonical name our streams go by in the SDP: one per peer, made
+/// up, as the web client's placeholder is.
+const CNAME: &str = "noslackingcname";
+
 /// The camera's line (`main-video`): H.264 at `codec.pt`, packetization
 /// mode 1, constrained baseline as our encoder makes it, the receiver
 /// free to send another level (`level-asymmetry-allowed`), as the web
@@ -663,7 +674,7 @@ fn camera_line(
     local: &LocalMedia,
     mid: &str,
     codec: VideoCodec,
-    ssrc: u32,
+    (ssrc, rtx_ssrc): (u32, Option<u32>),
     direction: Direction,
     setup: &str,
     candidates: bool,
@@ -696,6 +707,14 @@ fn camera_line(
         push(out, "a=rtcp-fb:* nack");
     }
     push(out, "a=rtcp-fb:* nack pli");
+    // Our resends' stream, paired with the camera's, as the web client
+    // writes it.
+    if let (Some(_), Some(rtx_ssrc)) = (codec.rtx, rtx_ssrc) {
+        for one in [ssrc, rtx_ssrc] {
+            push(out, &format!("a=ssrc:{one} cname:{CNAME}"));
+        }
+        push(out, &format!("a=ssrc-group:FID {ssrc} {rtx_ssrc}"));
+    }
     push(out, &format!("a=setup:{setup}"));
     push(out, &format!("a=mid:{mid}"));
     push(out, direction_text(direction));
@@ -926,6 +945,7 @@ mod tests {
             video_ssrc: None,
             video_pt: 108,
             video_rtx: Some(109),
+            video_rtx_ssrc: Some(78),
             video_direction: Direction::SendRecv,
             opus_pt: 111,
             audio_direction: Direction::SendRecv,
@@ -1339,6 +1359,8 @@ mod tests {
             })
         );
         assert!(offer(&local).contains("a=x-ssrc-range:77-77\r\n"));
+        // Our resends' stream is announced, so a resend can be asked for.
+        assert!(offer(&local).contains("a=ssrc-group:FID 77 78\r\n"));
 
         // To the native client's offer: its payload type and mid, both
         // ways.

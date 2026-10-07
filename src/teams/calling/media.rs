@@ -970,6 +970,7 @@ fn local_media(
         video_ssrc: None,
         video_pt: offer_video_pt(opus_pt),
         video_rtx: None,
+        video_rtx_ssrc: None,
         video_direction: Direction::SendRecv,
         // No data channel offered: audio only, the third attempt of §F.3.
         data_ssrc: None,
@@ -1314,6 +1315,7 @@ impl Session {
             local.video_ssrc = Some(video.ssrc());
             local.video_pt = video.pt();
             local.video_rtx = video.rtx();
+            local.video_rtx_ssrc = video.rtx_ssrc();
         }
         log::info!(
             "gather: done after {:?}: {}",

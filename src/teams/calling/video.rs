@@ -114,8 +114,11 @@ struct Report {
 /// The camera line of one call.
 pub(super) struct CallVideo {
     mid: Mid,
-    /// Our camera's SSRC.
+    /// Our camera's SSRC, and its resends', which str0m must have
+    /// whenever the codec has a retransmission payload type (it panics
+    /// on a resend asked for without one).
     ssrc: u32,
+    rtx_ssrc: Option<u32>,
     /// The line's H.264 payload type.
     pt: u8,
     /// Its retransmission's, if lost packets are asked for again.
@@ -172,9 +175,17 @@ impl CallVideo {
         video: Video,
         tell: mpsc::UnboundedSender<MediaEvent>,
     ) -> Self {
+        let rtx_ssrc = rtx.map(|_| {
+            loop {
+                let candidate = rand::random::<u32>().max(1);
+                if candidate != ssrc {
+                    break candidate;
+                }
+            }
+        });
         let mut api = rtc.direct_api();
         api.declare_media(mid, MediaKind::Video);
-        api.declare_stream_tx(ssrc.into(), None, mid, None);
+        api.declare_stream_tx(ssrc.into(), rtx_ssrc.map(Into::into), mid, None);
         #[cfg(feature = "huddle-video")]
         let decoding = video.gallery.clone().and_then(|gallery| {
             CameraDecoding::spawn(gallery)
@@ -195,6 +206,7 @@ impl CallVideo {
         Self {
             mid,
             ssrc,
+            rtx_ssrc,
             pt,
             rtx,
             seen: HashSet::new(),
@@ -240,6 +252,11 @@ impl CallVideo {
     /// Its retransmission's payload type, if lost packets are asked for.
     pub(super) fn rtx(&self) -> Option<u8> {
         self.rtx
+    }
+
+    /// The SSRC our camera's resends go out on.
+    pub(super) fn rtx_ssrc(&self) -> Option<u32> {
+        self.rtx_ssrc
     }
 
     /// What the far end's latest description says of the line.

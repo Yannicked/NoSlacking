@@ -172,6 +172,10 @@ pub struct LocalMedia {
     /// Its retransmission's payload type, if lost packets are sent again
     /// (`nack` and `rtx`).
     pub video_rtx: Option<u8>,
+    /// The SSRC our camera's resends go out on, paired with
+    /// `video_ssrc` (`a=ssrc-group:FID`); set with `video_rtx`, since a
+    /// peer that may ask for resends must have somewhere to get them.
+    pub video_rtx_ssrc: Option<u32>,
     /// Whether we send and receive on the camera line. Kept `sendrecv`
     /// for the whole call, the camera sending only while it is on, so
     /// turning it on needs no renegotiation.
