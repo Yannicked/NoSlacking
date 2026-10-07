@@ -42,8 +42,10 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(1);
 /// The helper's name, beside this program or on `PATH`.
 const HELPER: &str = "noslacking-video";
 
-/// Settings → Huddles → Hardware video decoding; on unless turned off.
-static ENABLED: AtomicBool = AtomicBool::new(true);
+/// Settings → Huddles → Hardware video decoding; off unless turned on
+/// (on this machine it did not yet beat software: research doc §6).
+/// Tests turn it on for themselves.
+static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Turns hardware decoding on or off for streams that start from now on.
 pub fn set_enabled(enabled: bool) {
@@ -489,6 +491,25 @@ impl HwDecoder {
                 }
             }),
             Ok(other) => Err(HwTrouble::Lost(format!("an answer to decode: {other:?}"))),
+            Err(Lost(why)) => Err(HwTrouble::Lost(why)),
+        }
+    }
+}
+
+impl HwDecoder {
+    /// Asks the helper for pictures shrunk to cover `width`×`height`
+    /// (0×0: their own size).
+    pub fn set_output_size(&mut self, width: u32, height: u32) -> Result<(), HwTrouble> {
+        let request = Request::SetOutputSize {
+            id: self.id,
+            width,
+            height,
+        };
+        match self.helper.call(self.generation, &request) {
+            Ok(Reply::Done) => Ok(()),
+            Ok(other) => Err(HwTrouble::Lost(format!(
+                "an answer to the output size: {other:?}"
+            ))),
             Err(Lost(why)) => Err(HwTrouble::Lost(why)),
         }
     }

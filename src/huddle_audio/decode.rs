@@ -85,6 +85,13 @@ pub struct H264 {
     /// The GPU cannot decode this stream (it said so, or failed on a
     /// keyframe): software from here on.
     software_only: bool,
+    /// Whether Settings → Huddles turning the GPU off stops it at the
+    /// next start (a decoder made by [`H264::new`]).
+    follow_setting: bool,
+    /// The size the pictures are shown at; 0×0 until known.
+    fit: (usize, usize),
+    /// The size the helper was last told to shrink to.
+    told: Option<(usize, usize)>,
 }
 
 impl std::fmt::Debug for H264 {
@@ -111,18 +118,24 @@ impl H264 {
         } else {
             None
         };
-        Self::with_helper(helper)
+        Self {
+            follow_setting: true,
+            ..Self::with_helper(helper)
+        }
     }
 
-    /// A decoder that tries the GPU through `helper`, or only software
-    /// with none.
+    /// A decoder that tries the GPU through `helper` whatever the
+    /// setting says, or only software with none.
     pub fn with_helper(helper: Option<Helper>) -> Self {
         Self {
+            follow_setting: false,
             decoder: rusty_h264_decoder::Decoder::new(),
             waiting: true,
             helper,
             hardware: None,
             software_only: false,
+            fit: (0, 0),
+            told: None,
         }
     }
 
@@ -134,7 +147,7 @@ impl H264 {
     /// A decoder in the helper for the stream starting at keyframe
     /// `unit`, if the helper decodes it.
     fn open_hardware(&mut self, unit: &[u8]) -> Option<HwDecoder> {
-        if self.software_only || !hardware::enabled() {
+        if self.software_only || (self.follow_setting && !hardware::enabled()) {
             return None;
         }
         let helper = self.helper.as_ref()?;
@@ -152,6 +165,33 @@ impl H264 {
                 None
             }
         }
+    }
+
+    /// The size the pictures are shown at, in pixels. On the GPU they
+    /// are shrunk to it there, so neither the copy back from the GPU nor
+    /// the pipe carries more than is shown; in software the caller
+    /// shrinks them ([`shrink`]), which then finds nothing to do for the
+    /// GPU's.
+    pub fn set_fit(&mut self, width: usize, height: usize) {
+        self.fit = (width, height);
+    }
+
+    /// Tells the helper the size to shrink to, if it changed.
+    fn tell_fit(&mut self) -> Result<(), HwTrouble> {
+        let Some(hardware) = &mut self.hardware else {
+            return Ok(());
+        };
+        if self.told == Some(self.fit) {
+            return Ok(());
+        }
+        let side = |n: usize| {
+            u32::try_from(n)
+                .unwrap_or(u32::MAX)
+                .min(noslacking_video_ipc::MAX_SIDE)
+        };
+        hardware.set_output_size(side(self.fit.0), side(self.fit.1))?;
+        self.told = Some(self.fit);
+        Ok(())
     }
 
     /// Frames went missing before the next one: what follows cannot be
@@ -176,14 +216,20 @@ impl H264 {
             // A decoder that failed once fails on: a new one for the new
             // start, on the GPU if it can.
             self.hardware = None;
+            self.told = None;
             self.hardware = self.open_hardware(unit);
             if self.hardware.is_none() {
                 self.decoder = rusty_h264_decoder::Decoder::new();
             }
             self.waiting = false;
         }
+        let told = self.tell_fit();
         if let Some(hardware) = &mut self.hardware {
-            let trouble = match hardware.decode(unit, keyframe) {
+            let decoded = match told {
+                Ok(()) => hardware.decode(unit, keyframe),
+                Err(trouble) => Err(trouble),
+            };
+            let trouble = match decoded {
                 Ok(Some(yuv)) if yuv.whole() => return Ok(Some(yuv)),
                 Ok(Some(yuv)) => {
                     HwTrouble::Lost(format!("planes do not match {}x{}", yuv.width, yuv.height))
@@ -499,12 +545,23 @@ mod tests {
         use super::super::hardware::pretend::{Act, Pretend, picture, welcome};
         use noslacking_video_ipc::{Reply, Request};
         let decodes = std::sync::atomic::AtomicUsize::new(0);
+        let fit = std::sync::Mutex::new((0, 0));
         let pretend = Pretend::new(move |request| match request {
             Request::Hello { .. } => Act::Reply(welcome()),
             Request::OpenDecoder { .. } => Act::Reply(Reply::Opened { id: 1 }),
+            Request::SetOutputSize { width, height, .. } => {
+                *fit.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = (*width, *height);
+                Act::Reply(Reply::Done)
+            }
             Request::Decode { .. } => {
                 let n = decodes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                failing(n).unwrap_or_else(|| Act::Reply(picture(480, 480, 200)))
+                let (width, height) = noslacking_video_ipc::output_size(
+                    (480, 480),
+                    *fit.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+                failing(n).unwrap_or_else(|| Act::Reply(picture(width, height, 200)))
             }
             _ => Act::Reply(Reply::Done),
         });
@@ -555,6 +612,44 @@ mod tests {
                 .expect("software goes on")
                 .is_some()
         );
+    }
+
+    /// The helper is told the size the pictures are shown at, once and
+    /// again when it changes, and they come back at it: the caller's
+    /// shrink then has nothing left to do.
+    #[test]
+    fn pictures_from_the_gpu_come_at_the_size_shown() {
+        let (helper, _) = pretend_helper(|_| None);
+        let frames = frames(CAMERA);
+        let mut decoder = H264::with_helper(Some(helper));
+        decoder.set_fit(240, 180);
+        let picture = decoder
+            .decode(&frames[0])
+            .expect("decodes")
+            .expect("a picture");
+        assert_eq!((picture.width, picture.height), (240, 240));
+        assert_eq!(
+            reduction((240, 240), (240, 180)),
+            1,
+            "nothing left to shrink"
+        );
+        decoder.set_fit(160, 120);
+        let picture = decoder
+            .decode(&frames[1])
+            .expect("decodes")
+            .expect("a picture");
+        assert_eq!((picture.width, picture.height), (160, 160));
+        decoder.set_fit(0, 0);
+        let picture = decoder
+            .decode(&frames[2])
+            .expect("decodes")
+            .expect("a picture");
+        assert_eq!(
+            (picture.width, picture.height),
+            (480, 480),
+            "back to its own size"
+        );
+        assert!(to_image(&picture).is_ok());
     }
 
     #[test]

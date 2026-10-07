@@ -338,6 +338,7 @@ fn run(jobs: &Jobs, screen: &Screen) {
                     decoder.lost();
                 }
                 let started = Instant::now();
+                decoder.set_fit(screen.fit().0, screen.fit().1);
                 let decoded = decoder.decode(&unit);
                 let took = started.elapsed();
                 timings.gpu = decoder.on_hardware();

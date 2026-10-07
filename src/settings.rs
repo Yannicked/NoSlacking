@@ -130,8 +130,9 @@ pub struct Settings {
     /// newest message when it was closed. Anything newer brings it back.
     pub closed: BTreeMap<String, BTreeMap<String, String>>,
     /// Whether huddle video is decoded on the GPU when it can be (through
-    /// the `noslacking-video` helper); on by default, and software
-    /// decodes whenever the GPU cannot.
+    /// the `noslacking-video` helper); off by default until it measures
+    /// better than software (docs/research/huddle-video.md §6), and
+    /// software decodes whenever the GPU cannot.
     pub hardware_video: bool,
     /// Whether your Slack app is known to be made from an older manifest,
     /// which Slack would not authorize with the newer scopes: sign-ins
@@ -167,7 +168,7 @@ impl Default for Settings {
             proxy: crate::slack::net::ProxySettings::default(),
             spelling: crate::spell::SpellSettings::default(),
             closed: BTreeMap::new(),
-            hardware_video: true,
+            hardware_video: false,
             older_app: false,
         }
     }
@@ -681,14 +682,14 @@ mod tests {
     }
 
     #[test]
-    fn hardware_video_is_on_until_turned_off() {
+    fn hardware_video_is_off_until_turned_on() {
         let old: Settings = serde_json::from_str("{}").expect("parses");
-        assert!(old.hardware_video, "older files: on");
-        let off: Settings = serde_json::from_str(r#"{"hardware_video":false}"#).expect("parses");
-        assert!(!off.hardware_video);
+        assert!(!old.hardware_video, "older files: off");
+        let on: Settings = serde_json::from_str(r#"{"hardware_video":true}"#).expect("parses");
+        assert!(on.hardware_video);
         let again: Settings =
-            serde_json::from_slice(&off.encode().expect("encodes")).expect("parses");
-        assert!(!again.hardware_video);
+            serde_json::from_slice(&on.encode().expect("encodes")).expect("parses");
+        assert!(again.hardware_video);
     }
 
     #[test]
