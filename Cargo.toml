@@ -12,6 +12,13 @@ repository = "https://github.com/Yannicked/NoSlacking"
 keywords = ["slack", "chat", "egui", "client"]
 categories = ["gui"]
 
+[workspace]
+# The app, and its hardware video helper with the messages they share
+# (crates/; see crates/noslacking-video). `cargo build` at the root builds
+# the app alone; `--workspace` (or `-p noslacking-video`) builds the
+# helper too. Profiles and patches below apply to every member.
+members = [".", "crates/video-ipc"]
+
 [lib]
 name = "noslacking"
 path = "src/lib.rs"
