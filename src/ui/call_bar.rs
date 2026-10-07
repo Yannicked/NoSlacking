@@ -10,7 +10,8 @@
 //!
 //! With `huddle-video`, a row for each screen shared in the huddle ("Ana
 //! is sharing their screen") with Watch, which opens the call window on
-//! it (see [`super::call_window`]).
+//! it (see [`super::call_window`]), and one saying how many have a camera
+//! on ("2 cameras on") with Video, which opens it on their tiles.
 //!
 //! With `huddle-camera`, the camera's button beside the microphone's and,
 //! while it is on, your self-preview above the buttons (see
@@ -66,6 +67,12 @@ struct Bar {
     faces: Vec<Face>,
     #[cfg(feature = "huddle-video")]
     shares: Vec<ShareRow>,
+    /// How many others have a camera on.
+    #[cfg(feature = "huddle-video")]
+    cameras: usize,
+    /// Whether the call window is open.
+    #[cfg(feature = "huddle-video")]
+    window: bool,
 }
 
 /// Gathers the bar for `listening` at `now`.
@@ -134,9 +141,14 @@ fn gather(
                         .as_deref()
                         .map_or_else(|| t("Someone").into_owned(), |id| workspace.user_label(id)),
                 ),
-                watched: listening.watching.as_deref() == Some(share.key.as_str()),
+                watched: listening.window
+                    && listening.watching.as_deref() == Some(share.key.as_str()),
             })
             .collect(),
+        #[cfg(feature = "huddle-video")]
+        cameras: listening.cameras.len(),
+        #[cfg(feature = "huddle-video")]
+        window: listening.window,
     })
 }
 
@@ -206,6 +218,9 @@ fn bar(
             if !failed {
                 for share in &bar.shares {
                     share_row(ui, palette, share, actions);
+                }
+                if bar.cameras > 0 {
+                    cameras_row(ui, palette, bar.cameras, bar.window, actions);
                 }
             }
             #[cfg(feature = "huddle-camera")]
@@ -289,6 +304,46 @@ fn share_row(ui: &mut egui::Ui, palette: &Palette, share: &ShareRow, actions: &m
                         .wrap(),
                     );
                 });
+            });
+        });
+    });
+}
+
+/// How many have a camera on, and Video, which opens the call window on
+/// their tiles (or, while it is open, Close video).
+#[cfg(feature = "huddle-video")]
+fn cameras_row(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    count: usize,
+    open: bool,
+    actions: &mut Vec<Action>,
+) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (label, action, fill) = if open {
+                (t("Close video"), huddles::Action::Watch(None), None)
+            } else {
+                (t("Video"), huddles::Action::OpenCall, Some(ACTIVE_BUTTON))
+            };
+            let text = huddles::cameras_text(count);
+            if small_button(ui, palette, &label, fill)
+                .on_hover_text(&text)
+                .clicked()
+            {
+                actions.push(Action::Huddle(action));
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(Icon::Users.image(ACTIVE, 14.0));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(text)
+                            .font(theme::regular(12.0))
+                            .color(palette.text),
+                    )
+                    .wrap(),
+                );
             });
         });
     });

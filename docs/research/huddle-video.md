@@ -595,6 +595,58 @@ or BT.709 (the conversion assumes BT.601 studio range).
 - Verify: faces match people, tiles come and go with the camera, and
   behaviour holds with 5 or more cameras on.
 
+**Stage 2: built (2026-10-07), behind `huddle-video`; not yet tried
+against Slack.**
+
+- *Selection* (`huddle_audio::cameras`, pure, tested offline): nothing is
+  received while the call window is closed. Open, it says in a `Wish`
+  whether it shows a share, how many tiles it has room for (1–9, from
+  its size: as many as fit at least 200 points wide, 4:3) and a tile's
+  size in pixels (rounded up to 32). Cameras are others' non-`#content`
+  video, one per attendee with all its layers. If everyone fits,
+  everyone gets a tile; otherwise those with a tile keep it in its
+  place, free places go to whoever spoke last (from AUDIO_METADATA via
+  the roster's `Voices`, by attendee id), then INDEX order, and someone
+  speaking takes the place of the longest-silent person with a tile
+  unless that person also spoke in the last 5 s. Our own camera never.
+  Per camera, the smallest layer covering the tile, else the largest.
+  A new choice waits until it has stood still 400 ms, and re-SUBSCRIBE
+  stays at most every 3 s; slots freed by a camera turning off are
+  reused by the next one.
+- *PAUSE/RESUME*: paused streams are INDEX's `paused_at_source_ids`,
+  then PAUSE/RESUME frames (by stream or group) until the next INDEX. A
+  paused camera keeps its tile (showing the avatar or initials, "camera
+  paused") and its m-line while nobody else needs them, so it returns at
+  once: RESUME (or an INDEX without it) asks for a keyframe at once. Any
+  camera that is on takes a paused one's place when there is no room.
+- *Decoding* (`huddle_audio::gallery`): one thread for every camera,
+  a `decode::H264` each (fresh decoder per keyframe after errors), the
+  picture shrunk to the tile before RGBA, the newest per camera kept in
+  the `Gallery` (older dropped, the window woken once for any number),
+  a keyframe asked for at a tile's start, on gaps, decoder errors and a
+  queue over a second per camera. The share keeps its own thread.
+- *Measured* (release, AMD Ryzen AI 7 350, the 480×480 fixture, tiles
+  320×240, `gallery::tests::cameras_cost`): 0.38 ms a picture decoding
+  and converting with 4 cameras, 0.43 ms with 9: **3 % of one core for
+  4 cameras and 8 % for 9** at 22 fps. Uploads (a 480×480 texture each)
+  are on the interface thread, not measured separately.
+- *The app*: the call bar says "N cameras on" with Video (opens the call
+  window) / Close video. The call window shows the tiles in a grid
+  without a share, or the share large with the tiles in a column beside
+  it (wide window) or a row below (tall), each tile filled by its
+  picture (cropped), the name on a plate, the muted mark, the speaking
+  ring, "+N more cameras" in the bar for those without room. The tiles
+  are built from a list (`TileView`), so a self-preview is one more
+  entry. A share ending leaves the window on the cameras. Demo: five
+  cameras (the fixture, tinted per person, Dev's paused) and the share;
+  `--demo-view cameras` (the grid) and `call-window` (share and tiles).
+- *Not yet known*: whether Slack's PAUSE/RESUME are sender pauses or
+  the server's bandwidth pauses (handled alike), whether senders
+  simulcast to us (the layer choice is ready, untried), how the camera
+  attendee id lines up with the audio one for the speaking order (it is
+  assumed the same, as in the JS SDK), and the cost of 9 texture uploads
+  a frame on a slow GPU.
+
 **Stage 3: send camera (3–5 weeks).**
 - Work: capture (nokhwa natively, the ashpd Camera portal in the
   Flatpak), the openh264 encoder (720p or 540p, 15–30 fps, about

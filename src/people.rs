@@ -244,10 +244,12 @@ pub enum Command {
     /// Mutes (closing the microphone) or unmutes (opening it) in the
     /// huddle being listened to.
     MuteHuddle { muted: bool },
-    /// Shows the share `share` (its key) in the call window, receiving
-    /// it, or none, receiving no share at all.
+    /// What the call window wants: open or closed, the share it shows,
+    /// room for how many camera tiles. Only that is received.
     #[cfg(feature = "huddle-video")]
-    WatchShare { share: Option<String> },
+    WatchCall {
+        wish: crate::huddle_audio::cameras::Wish,
+    },
     /// Turns the camera on (opening it) or off (closing it) in the huddle
     /// being listened to.
     #[cfg(feature = "huddle-camera")]

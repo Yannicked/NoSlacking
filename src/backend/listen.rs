@@ -17,9 +17,11 @@
 //! nothing.
 //!
 //! With `huddle-video`, the session also says who shares their screen
-//! (`Listen::Shares`) and hands over the `Screen` the watched share's
-//! pictures arrive in (`Listen::Screen`); the interface says which
-//! share its call window shows, and only that one is received.
+//! (`Listen::Shares`) and who has a camera on (`Listen::Cameras`), and
+//! hands over the `Screen` the watched share's pictures arrive in
+//! (`Listen::Screen`) and the `Gallery` the camera tiles' do
+//! (`Listen::Gallery`); the interface says what its call window wants,
+//! and only that is received, nothing while it is closed.
 //!
 //! With `huddle-camera`, joined with the camera off. The camera opens
 //! only when the interface turns it on and closes when it turns it off,
@@ -35,6 +37,11 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{Event, Sink};
 use crate::failure::{Failure, HuddleTrouble};
+use crate::huddle_audio::cameras::Camera;
+#[cfg(feature = "huddle-video")]
+use crate::huddle_audio::cameras::Wish;
+#[cfg(feature = "huddle-video")]
+use crate::huddle_audio::gallery::Gallery;
 use crate::huddle_audio::join::{self, JoinFailure};
 use crate::huddle_audio::media::{self, Stage, Uplink};
 use crate::huddle_audio::microphone::{Cpal, MicControl, Wiring};
@@ -66,9 +73,9 @@ struct Running {
     stop: watch::Sender<bool>,
     /// Whether the interface wants the microphone muted.
     muted: watch::Sender<bool>,
-    /// Which share the call window shows.
+    /// What the call window wants.
     #[cfg(feature = "huddle-video")]
-    watched: watch::Sender<Option<String>>,
+    wish: watch::Sender<Wish>,
     /// Whether the interface wants the camera on.
     #[cfg(feature = "huddle-camera")]
     camera: watch::Sender<bool>,
@@ -88,7 +95,7 @@ impl Listener {
         let (stop, stopped) = watch::channel(false);
         let (muted, wanted) = watch::channel(true);
         #[cfg(feature = "huddle-video")]
-        let (watched, watching) = watch::channel(None);
+        let (wish, wishes) = watch::channel(Wish::closed());
         // Joined with the camera off.
         #[cfg(feature = "huddle-camera")]
         let (camera, camera_wanted) = watch::channel(false);
@@ -96,7 +103,7 @@ impl Listener {
             stopped,
             wanted,
             #[cfg(feature = "huddle-video")]
-            watching,
+            wishes,
             #[cfg(feature = "huddle-camera")]
             camera_wanted,
         };
@@ -106,7 +113,7 @@ impl Listener {
             stop,
             muted,
             #[cfg(feature = "huddle-video")]
-            watched,
+            wish,
             #[cfg(feature = "huddle-camera")]
             camera,
         });
@@ -120,12 +127,11 @@ impl Listener {
         }
     }
 
-    /// Shows the share `key` in the call window, or none: only that one
-    /// is received.
+    /// The call window wants `wish`: only that is received.
     #[cfg(feature = "huddle-video")]
-    pub fn watch_share(&mut self, key: Option<String>) {
+    pub fn watch_call(&mut self, wish: Wish) {
         if let Some(running) = &self.running {
-            let _ = running.watched.send(key);
+            let _ = running.wish.send(wish);
         }
     }
 
@@ -395,9 +401,9 @@ struct Controls {
     stopped: watch::Receiver<bool>,
     /// Whether the microphone should be muted.
     wanted: watch::Receiver<bool>,
-    /// Which share the call window shows.
+    /// What the call window wants.
     #[cfg(feature = "huddle-video")]
-    watching: watch::Receiver<Option<String>>,
+    wishes: watch::Receiver<Wish>,
     /// Whether the camera should be on.
     #[cfg(feature = "huddle-camera")]
     camera_wanted: watch::Receiver<bool>,
@@ -416,13 +422,26 @@ async fn next_shares(
     }
 }
 
+/// The next list of cameras, or never while there is none.
+async fn next_cameras(
+    cameras: &mut Option<watch::Receiver<Vec<Camera>>>,
+) -> Result<Vec<Camera>, watch::error::RecvError> {
+    match cameras {
+        Some(cameras) => {
+            cameras.changed().await?;
+            Ok(cameras.borrow_and_update().clone())
+        }
+        None => std::future::pending().await,
+    }
+}
+
 /// One listening session, start to end.
 async fn run(client: Client, team: String, channel: String, controls: Controls, sink: Sink) {
     let Controls {
         mut stopped,
         wanted,
         #[cfg(feature = "huddle-video")]
-        watching,
+        wishes,
         #[cfg(feature = "huddle-camera")]
         camera_wanted,
     } = controls;
@@ -500,23 +519,29 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
     let mut sound_stopped = false;
     let mut checks = tokio::time::interval(SPEAKER_CHECK);
     checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // Who shares, for the call bar, and the screen the watched share's
-    // pictures go to, woken as the events are.
+    // Who shares and who has a camera on, for the call bar, and where the
+    // watched share's and the tiles' pictures go, woken as the events are.
     #[cfg(feature = "huddle-video")]
-    let (viewer, mut shares) = {
+    let (viewer, mut shares, mut cameras) = {
         let waker = sink.waker();
         let screen = Screen::new(move || waker.wake());
         tell(Listen::Screen(screen.clone()));
+        let waker = sink.waker();
+        let gallery = Gallery::new(move || waker.wake());
+        tell(Listen::Gallery(gallery.clone()));
         let (shares, told) = watch::channel(Vec::new());
+        let (cameras, cameras_told) = watch::channel(Vec::new());
         let viewer = crate::huddle_audio::watch::Viewer {
             shares,
-            watched: watching,
+            cameras,
+            wish: wishes,
             screen,
+            gallery,
         };
-        (Some(viewer), Some(told))
+        (Some(viewer), Some(told), Some(cameras_told))
     };
     #[cfg(not(feature = "huddle-video"))]
-    let (viewer, mut shares) = (None, None);
+    let (viewer, mut shares, mut cameras) = (None, None, None);
     // The camera: closed until turned on, its pictures encoded on a
     // thread of their own, its preview for the call bar.
     #[cfg(feature = "huddle-camera")]
@@ -657,6 +682,13 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
                 #[cfg(not(feature = "huddle-video"))]
                 Ok(_) => {}
                 Err(_) => shares = None,
+            },
+            told = next_cameras(&mut cameras) => match told {
+                #[cfg(feature = "huddle-video")]
+                Ok(now) => tell(Listen::Cameras(now)),
+                #[cfg(not(feature = "huddle-video"))]
+                Ok(_) => {}
+                Err(_) => cameras = None,
             },
         }
     };

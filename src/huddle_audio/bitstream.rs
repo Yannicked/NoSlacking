@@ -43,6 +43,23 @@ pub fn nal_type(unit: &[u8]) -> Option<u8> {
     unit.first().map(|b| b & 0x1f)
 }
 
+/// An Annex B stream split into frames as `str0m` hands them over: each
+/// ends after its slice, the parameter sets going with the slice they
+/// precede. For streams of one slice a picture, as the fixtures and the
+/// demo's are.
+pub fn access_units(stream: &[u8]) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    let mut frame = Vec::new();
+    for nal in nal_units(stream) {
+        frame.extend_from_slice(&[0, 0, 0, 1]);
+        frame.extend_from_slice(nal);
+        if matches!(nal_type(nal), Some(1 | 5)) {
+            frames.push(std::mem::take(&mut frame));
+        }
+    }
+    frames
+}
+
 /// What an H.264 sequence parameter set says about the stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sps {

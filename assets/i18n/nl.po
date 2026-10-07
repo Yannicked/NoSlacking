@@ -2784,3 +2784,34 @@ msgstr "de camera kon niet worden geopend; misschien gebruikt een andere app hem
 
 msgid "This huddle takes no more video, so your camera stays off"
 msgstr "Deze huddle neemt geen video meer aan, dus je camera blijft uit"
+
+msgid "{count} camera on"
+msgid_plural "{count} cameras on"
+msgstr[0] "{count} camera aan"
+msgstr[1] "{count} camera's aan"
+
+msgid "Video"
+msgstr "Video"
+
+msgid "Close video"
+msgstr "Video sluiten"
+
+msgid "Huddle video"
+msgstr "Video in de huddle"
+
+msgid "No one has their camera on"
+msgstr "Niemand heeft een camera aan"
+
+msgid "{name}, camera paused"
+msgstr "{name}, camera gepauzeerd"
+
+msgid "{name} · camera paused"
+msgstr "{name} · camera gepauzeerd"
+
+msgid "{count} more camera"
+msgid_plural "{count} more cameras"
+msgstr[0] "nog {count} camera"
+msgstr[1] "nog {count} camera's"
+
+msgid "{name} (you)"
+msgstr "{name} (jij)"

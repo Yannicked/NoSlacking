@@ -696,7 +696,8 @@ impl DemoSetup {
                 app.huddles.listening = Some(noslacking::demo::camera_on());
                 app.actions.push(Action::OpenConversation("C03".into()));
             }
-            // Ana and Carla share their screens: the call bar's rows.
+            // Ana and Carla share their screens and five have a camera
+            // on: the call bar's rows.
             #[cfg(feature = "huddle-video")]
             Some("sharing") => {
                 app.huddles.listening = Some(noslacking::demo::sharing());
@@ -716,6 +717,19 @@ impl DemoSetup {
                 app.actions.push(Action::OpenConversation("C02".into()));
                 app.actions
                     .push(Action::Huddle(noslacking::huddles::Action::Watch(first)));
+            }
+            // The call window on the cameras alone: the grid of tiles,
+            // drawn inside the main window as above.
+            #[cfg(feature = "huddle-video")]
+            Some("cameras") => {
+                app.huddles.listening = Some(noslacking::huddles::Listening {
+                    shares: Vec::new(),
+                    ..noslacking::demo::sharing()
+                });
+                app.huddles.picture.embed = true;
+                app.actions.push(Action::OpenConversation("C02".into()));
+                app.actions
+                    .push(Action::Huddle(noslacking::huddles::Action::OpenCall));
             }
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             // The deploy bot's Approve button pressed: its question.

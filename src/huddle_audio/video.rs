@@ -287,14 +287,26 @@ pub fn share_stream(index: &Index, me: &str, key: &str) -> Option<u32> {
 }
 
 /// The streams to receive: the share the call window shows, if it is
-/// still going, and with `--video N` also what [`choose`] picks. Nothing
-/// is received that is not watched.
-pub fn wanted(index: &Index, me: &str, diagnostic: usize, watched: Option<&str>) -> Vec<u32> {
+/// still going, then the `cameras` its tiles show (chosen by
+/// [`super::cameras`]), and with `--video N` also what [`choose`] picks.
+/// Nothing is received that is not watched.
+pub fn wanted(
+    index: &Index,
+    me: &str,
+    diagnostic: usize,
+    watched: Option<&str>,
+    cameras: &[u32],
+) -> Vec<u32> {
     let mut wanted = choose(index, me, diagnostic);
     if let Some(stream) = watched.and_then(|key| share_stream(index, me, key))
         && !wanted.contains(&stream)
     {
         wanted.insert(0, stream);
+    }
+    for &stream in cameras {
+        if !wanted.contains(&stream) {
+            wanted.push(stream);
+        }
     }
     wanted
 }
@@ -793,31 +805,64 @@ mod tests {
         );
 
         // Nobody watching: nothing, whoever shares; cameras never.
-        assert!(wanted(&one, "me", 0, None).is_empty());
-        assert!(wanted(&two, "me", 0, None).is_empty());
+        assert!(wanted(&one, "me", 0, None, &[]).is_empty());
+        assert!(wanted(&two, "me", 0, None, &[]).is_empty());
         // Watching Ana: her best layer.
-        assert_eq!(wanted(&one, "me", 0, Some("ana#content")), [6]);
-        assert_eq!(wanted(&two, "me", 0, Some("ana#content")), [6]);
+        assert_eq!(wanted(&one, "me", 0, Some("ana#content"), &[]), [6]);
+        assert_eq!(wanted(&two, "me", 0, Some("ana#content"), &[]), [6]);
         // Switched to Bob: his alone.
-        assert_eq!(wanted(&two, "me", 0, Some("bob#content")), [9]);
+        assert_eq!(wanted(&two, "me", 0, Some("bob#content"), &[]), [9]);
         // Ana stopped sharing while watched: nothing.
-        assert!(wanted(&none, "me", 0, Some("ana#content")).is_empty());
+        assert!(wanted(&none, "me", 0, Some("ana#content"), &[]).is_empty());
         // Our own share is never received, even if asked for.
-        assert!(wanted(&mine, "me", 0, Some("me#content")).is_empty());
+        assert!(wanted(&mine, "me", 0, Some("me#content"), &[]).is_empty());
         // `--video N` still adds what it picks, the watched share first.
-        assert_eq!(wanted(&two, "me", 1, Some("bob#content")), [9, 6]);
-        assert_eq!(wanted(&two, "me", 3, Some("bob#content")), [6, 9, 2]);
+        assert_eq!(wanted(&two, "me", 1, Some("bob#content"), &[]), [9, 6]);
+        assert_eq!(wanted(&two, "me", 3, Some("bob#content"), &[]), [6, 9, 2]);
 
         // And the slots follow: open, switch, close.
         let slots = Slots::default();
-        let watching = slots.after(&slots.plan(&wanted(&two, "me", 0, Some("ana#content"))));
+        let watching = slots.after(&slots.plan(&wanted(&two, "me", 0, Some("ana#content"), &[])));
         assert_eq!(watching.receive_stream_ids(), [0, 6]);
-        let plan = watching.plan(&wanted(&two, "me", 0, Some("bob#content")));
+        let plan = watching.plan(&wanted(&two, "me", 0, Some("bob#content"), &[]));
         assert_eq!((plan.free.clone(), plan.add.clone()), (vec![0], vec![9]));
         let switched = watching.after(&plan);
-        let closed = switched.plan(&wanted(&two, "me", 0, None));
+        let closed = switched.plan(&wanted(&two, "me", 0, None, &[]));
         assert_eq!(closed.free, [1]);
         assert!(switched.after(&closed).receiving().is_empty());
+    }
+
+    /// Cameras go after the share, each on a slot of its own; a camera
+    /// turned off frees its slot, which the next one turned on takes, so
+    /// m-lines do not pile up as people come and go.
+    #[test]
+    fn camera_slots_are_reused_as_cameras_go_off_and_on() {
+        let share = source(6, 6, "ana#content", 1000);
+        let index = index(vec![
+            share,
+            source(2, 1, "bob", 500),
+            source(3, 2, "carla", 500),
+        ]);
+        let wanted = |cameras: &[u32]| super::wanted(&index, "me", 0, Some("ana#content"), cameras);
+        assert_eq!(wanted(&[2, 3]), [6, 2, 3]);
+        assert_eq!(wanted(&[2, 6]), [6, 2], "a stream is asked for once");
+        let slots = Slots::default();
+        let both = slots.after(&slots.plan(&wanted(&[2, 3])));
+        assert_eq!(both.receive_stream_ids(), [0, 6, 2, 3]);
+        // Bob's camera goes off: his slot turns inactive, the rest stay.
+        let plan = both.plan(&wanted(&[3]));
+        assert_eq!((plan.free.clone(), plan.add.len()), (vec![1], 0));
+        let one = both.after(&plan);
+        assert_eq!(one.receive_stream_ids(), [0, 6, 0, 3]);
+        // Dev turns his on: Bob's old slot, no new m-line.
+        let plan = one.plan(&wanted(&[3, 7]));
+        assert_eq!((plan.reuse.clone(), plan.add.len()), (vec![(1, 7)], 0));
+        let again = one.after(&plan);
+        assert_eq!(again.receive_stream_ids(), [0, 6, 7, 3]);
+        // The window closes: everything goes.
+        let closed = again.plan(&super::wanted(&index, "me", 0, None, &[]));
+        assert_eq!(closed.free, [0, 1, 2]);
+        assert!(again.after(&closed).receiving().is_empty());
     }
 
     #[test]

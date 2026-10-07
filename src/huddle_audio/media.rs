@@ -40,6 +40,7 @@ use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event as RtcEvent, IceConnectionState, Input, Output, Rtc, RtcConfig};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+pub use super::cameras::Wish;
 use super::chime::{self, FrameType};
 use super::dtls;
 use super::join::ChimeJoin;
@@ -430,8 +431,8 @@ struct Session<'a> {
     /// What it follows of video: the probe's look, and the shares the
     /// app watches.
     video: Option<Watch>,
-    /// Which share the call window shows, as it changes.
-    watched: Option<tokio::sync::watch::Receiver<Option<String>>>,
+    /// What the call window wants, as it changes.
+    wish: Option<tokio::sync::watch::Receiver<Wish>>,
     /// Our camera, if this session may send one.
     camera: Option<CameraSide>,
     /// How it ended, once it has.
@@ -1146,6 +1147,14 @@ impl Session<'_> {
         self.last_inbound = Instant::now();
         if let Some(metadata) = &frame.audio_metadata {
             self.voices.metadata(metadata, self.last_inbound);
+            // Who speaks decides who gets a camera tile.
+            if let Some(watch) = &mut self.video {
+                for (&stream, attendee) in self.handshake.attendees() {
+                    if self.voices.speaking(stream, self.last_inbound) {
+                        watch.spoke(&attendee.attendee_id, self.last_inbound);
+                    }
+                }
+            }
         }
         if let Some(count) = frame.index.as_ref().and_then(|i| i.num_participants) {
             self.count = Some(count);
@@ -1240,14 +1249,14 @@ pub struct Video {
     pub camera: Option<super::camera_send::CameraUplink>,
 }
 
-/// The share watched next, or never while nothing tells.
-async fn watched_change(
-    watched: &mut Option<tokio::sync::watch::Receiver<Option<String>>>,
-) -> Result<Option<String>, tokio::sync::watch::error::RecvError> {
-    match watched {
-        Some(watched) => {
-            watched.changed().await?;
-            Ok(watched.borrow_and_update().clone())
+/// The call window's next wish, or never while nothing tells.
+async fn wish_change(
+    wish: &mut Option<tokio::sync::watch::Receiver<Wish>>,
+) -> Result<Wish, tokio::sync::watch::error::RecvError> {
+    match wish {
+        Some(wish) => {
+            wish.changed().await?;
+            Ok(wish.borrow_and_update().clone())
         }
         None => std::future::pending().await,
     }
@@ -1327,7 +1336,7 @@ pub async fn listen(
     let camera = camera.map(CameraSide::new);
     #[cfg(not(feature = "huddle-camera"))]
     let camera: Option<CameraSide> = None;
-    let watched = viewer.as_ref().map(|v| v.watched.clone());
+    let wish = viewer.as_ref().map(|v| v.wish.clone());
     let watch = (options.is_some() || viewer.is_some() || camera.is_some())
         .then(|| Watch::new(options, viewer, &join.attendee_id));
     let mut session = Session {
@@ -1365,7 +1374,7 @@ pub async fn listen(
         count: None,
         report: Report::default(),
         video: watch,
-        watched,
+        wish,
         camera,
         over: None,
     };
@@ -1425,13 +1434,13 @@ pub async fn listen(
                 // The microphone's side is gone: silence from here.
                 None => session.frames = None,
             },
-            watched = watched_change(&mut session.watched) => {
-                let key = watched.unwrap_or_else(|_| {
-                    session.watched = None;
-                    None
+            wish = wish_change(&mut session.wish) => {
+                let wish = wish.unwrap_or_else(|_| {
+                    session.wish = None;
+                    Wish::closed()
                 });
                 if let Some(watch) = &mut session.video {
-                    watch.set_watched(key);
+                    watch.set_wish(wish);
                 }
                 session.try_resubscribe().await;
             }
@@ -1920,9 +1929,16 @@ mod tests {
 
         watch.set_sending(Some(camera));
         assert!(!watch.sending(), "not before the answer");
-        let made = watch
-            .reoffer(&mut ours, now, dtls_up, 0)
-            .expect("a new offer");
+        // The stream to receive waits until the choice has stood still.
+        let made = match watch.reoffer(&mut ours, now, dtls_up, 0) {
+            Some(made) => made,
+            None => {
+                now += Duration::from_secs(1);
+                watch
+                    .reoffer(&mut ours, now, dtls_up, 0)
+                    .expect("a new offer")
+            }
+        };
         assert!(watch.offering_to_send());
         let (video, ids, directions) = exchange(&mut watch, &mut ours, &mut chime_peer, made, now);
         assert_eq!(video, Some(camera));
@@ -2167,16 +2183,19 @@ mod tests {
     /// on UDP and a `str0m` media server sending Opus, all driven by
     /// [`listen`] itself. We talk too, the probe's tone through the real
     /// encoder: the pretend media server decodes what we send, and the
-    /// signaling server hears the mute that ends it. Video as the probe
-    /// sees it: INDEX announces a screen share (and our own camera, never
-    /// taken), the session renegotiates a `recvonly` m-line and
-    /// re-SUBSCRIBEs for it, and the media server sends the H.264 fixture
-    /// on it, which is counted and read while the audio goes on. With
-    /// `huddle-camera` we send the test picture as our camera too: the
-    /// same re-SUBSCRIBE asks for both ways, and the media server receives
-    /// our H.264 on the first video m-line, asks once for a keyframe and
-    /// decodes every frame. Ignored by default: it opens local sockets and
-    /// runs for seconds.
+    /// signaling server hears the mute that ends it. Video: INDEX
+    /// announces a screen share, two cameras (one in two layers) and our
+    /// own camera, never taken; the session renegotiates a `recvonly`
+    /// m-line for each stream wanted and re-SUBSCRIBEs for them, and the
+    /// media server sends the H.264 fixture on each, which is counted and
+    /// read while the audio goes on. With `huddle-video` the call window
+    /// asks for the share and the cameras (the smaller layer, for small
+    /// tiles), both are decoded, and closing it frees every m-line.
+    /// With `huddle-camera` we send the test picture as our camera too:
+    /// the same re-SUBSCRIBE asks for both ways, and the media server
+    /// receives our H.264 on the first video m-line, asks once for a
+    /// keyframe and decodes every frame. Ignored by default: it opens
+    /// local sockets and runs for seconds.
     /// `cargo test --all-features -- --ignored loopback`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "opens loopback sockets and takes a few seconds"]
@@ -2242,7 +2261,7 @@ mod tests {
             let mut chime: Option<Rtc> = None;
             let mut client: Option<SocketAddr> = None;
             let mut audio: Option<(Mid, str0m::media::Pt)> = None;
-            let mut video: Option<(Mid, str0m::media::Pt)> = None;
+            let mut video: Vec<(Mid, str0m::media::Pt)> = Vec::new();
             let mut next_video = Instant::now();
             let mut video_frames = 0u64;
             let mut connected = false;
@@ -2322,7 +2341,7 @@ mod tests {
                                         })
                                         .map(|p| p.pt())
                                 });
-                                video = pt.map(|pt| (added.mid, pt));
+                                video.extend(pt.map(|pt| (added.mid, pt)));
                             }
                             Ok(Output::Event(RtcEvent::KeyframeRequest(_))) => {
                                 if let Ok(mut n) = media_requests.lock() {
@@ -2342,21 +2361,21 @@ mod tests {
                         let _ = writer.write(pt, now, time, SILENT_OPUS.to_vec());
                         sent += 1;
                     }
-                    // The fixture over and over at 15 frames a second.
-                    if connected
-                        && now >= next_video
-                        && let Some((mid, pt)) = video
-                        && let Some(writer) = rtc.writer(mid)
-                    {
+                    // The fixture over and over at 15 frames a second, on
+                    // every video m-line.
+                    if connected && now >= next_video && !video.is_empty() {
                         let n = usize::try_from(video_frames).unwrap_or(0) % units.len();
                         let time = MediaTime::new(
                             video_frames * 6000,
                             str0m::media::Frequency::NINETY_KHZ,
                         );
-                        if writer.write(pt, now, time, units[n].clone()).is_ok()
-                            && let Ok(mut sent) = media_video_sent.lock()
-                        {
-                            *sent += 1;
+                        for &(mid, pt) in &video {
+                            if let Some(writer) = rtc.writer(mid)
+                                && writer.write(pt, now, time, units[n].clone()).is_ok()
+                                && let Ok(mut sent) = media_video_sent.lock()
+                            {
+                                *sent += 1;
+                            }
                         }
                         video_frames += 1;
                         next_video = now + Duration::from_millis(66);
@@ -2461,8 +2480,9 @@ mod tests {
                             ..Default::default()
                         });
                         let _ = ws.send(reply(ack)).await;
-                        // A screen share, and our own camera, which is
-                        // never received.
+                        // A screen share, two cameras (C3's in two
+                        // layers), and our own camera, which is never
+                        // received.
                         let source = |stream: u32, group: u32, attendee: &str| {
                             chime::proto::SdkStreamDescriptor {
                                 stream_id: Some(stream),
@@ -2477,9 +2497,21 @@ mod tests {
                                 ..Default::default()
                             }
                         };
+                        let small = chime::proto::SdkStreamDescriptor {
+                            width: Some(160),
+                            height: Some(90),
+                            max_bitrate_kbps: Some(100),
+                            ..source(12, 5, "C3")
+                        };
                         let mut index = chime::frame(FrameType::Index, 2);
                         index.index = Some(chime::proto::SdkIndexFrame {
-                            sources: vec![source(7, 3, "B2#content"), source(9, 1, "A1")],
+                            sources: vec![
+                                source(7, 3, "B2#content"),
+                                source(9, 1, "A1"),
+                                source(11, 5, "C3"),
+                                small,
+                                source(13, 6, "D4"),
+                            ],
                             num_participants: Some(2),
                             supported_receive_codec_intersection: vec![3],
                             ..Default::default()
@@ -2507,23 +2539,22 @@ mod tests {
                         let (answer_to, answer) = tokio::sync::oneshot::channel();
                         let _ = offers.send((offer, answer_to)).await;
                         let answer = answer.await.expect("an answer");
-                        // The stream on the last video m-line, by its SSRC.
-                        let tracks = match sdp::media_lines(&answer).last() {
-                            Some(last)
-                                if last.kind == "video" && sub.receive_stream_ids.len() > 1 =>
-                            {
-                                last.ssrcs
+                        // The stream on each video m-line, by its SSRC.
+                        let tracks = sdp::media_lines(&answer)
+                            .into_iter()
+                            .filter(|m| m.kind == "video")
+                            .zip(&sub.receive_stream_ids)
+                            .filter(|&(_, &stream)| stream != 0)
+                            .filter_map(|(line, &stream)| {
+                                line.ssrcs
                                     .first()
                                     .map(|&ssrc| chime::proto::SdkTrackMapping {
-                                        stream_id: Some(7),
+                                        stream_id: Some(stream),
                                         ssrc: Some(ssrc),
                                         track_label: Some("video".into()),
                                     })
-                                    .into_iter()
-                                    .collect()
-                            }
-                            _ => Vec::new(),
-                        };
+                            })
+                            .collect();
                         let mut ack = chime::frame(FrameType::SubscribeAck, 3);
                         ack.suback = Some(chime::proto::SdkSubscribeAckFrame {
                             sdp_answer: Some(answer),
@@ -2560,41 +2591,70 @@ mod tests {
         };
         let (stop, stopped) = tokio::sync::watch::channel(false);
         // Unmuted from the start, sending the tone; muted after two
-        // seconds, then silence until leaving at six, by when the video
-        // has been renegotiated and has flowed for a while.
+        // seconds, then silence until leaving at nine, by when the video
+        // has been renegotiated, has flowed for a while and (with
+        // `huddle-video`) been closed again.
         let (frames, frames_in) = tokio::sync::mpsc::channel(25);
         let tone = super::super::microphone::ToneSource::start(frames).expect("a tone");
         let (mute, muted) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(2)).await;
             let _ = mute.send(true);
-            tokio::time::sleep(Duration::from_secs(4)).await;
+            tokio::time::sleep(Duration::from_secs(7)).await;
             let _ = stop.send(true);
         });
         let uplink = Uplink {
             frames: frames_in,
             muted,
         };
-        // With `huddle-video`, the share is received because the call
-        // window watches it (no `--video` streams), and it is decoded.
+        // With `huddle-video`, the share and the cameras are received
+        // because the call window shows them (no `--video` streams), and
+        // they are decoded; what the window had is noted before it closes.
         #[cfg(feature = "huddle-video")]
-        let (viewer, screen, told) = {
+        let (viewer, screen, gallery, told, cameras_told, seen) = {
             let screen = super::super::screen::Screen::new(|| {});
+            let gallery = super::super::gallery::Gallery::new(|| {});
             let (shares, told) = tokio::sync::watch::channel(Vec::new());
-            let (watching, watched) = tokio::sync::watch::channel(None);
-            // The window opens on the share once the session runs.
+            let (cameras, cameras_told) = tokio::sync::watch::channel(Vec::new());
+            let (wishing, wish) = tokio::sync::watch::channel(Wish::closed());
+            type Seen = (
+                Vec<super::super::cameras::Camera>,
+                Vec<(String, [usize; 2])>,
+            );
+            let seen: Arc<Mutex<Seen>> = Arc::default();
+            let (window_gallery, window_cameras, window_seen) =
+                (gallery.clone(), cameras_told.clone(), seen.clone());
+            // The window opens on the share with small tiles once the
+            // session runs, and closes after a while.
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                let _ = watching.send(Some("B2#content".to_owned()));
+                let _ = wishing.send(Wish {
+                    open: true,
+                    share: Some("B2#content".to_owned()),
+                    tiles: 4,
+                    tile: [150, 90],
+                });
+                tokio::time::sleep(Duration::from_secs(4)).await;
+                if let Ok(mut seen) = window_seen.lock() {
+                    seen.0 = window_cameras.borrow().clone();
+                    seen.1 = window_gallery
+                        .take()
+                        .into_iter()
+                        .map(|(key, picture)| (key, picture.source))
+                        .collect();
+                }
+                let _ = wishing.send(Wish::closed());
                 tokio::time::sleep(Duration::from_secs(10)).await;
-                drop(watching);
+                drop(wishing);
             });
             let viewer = Viewer {
                 shares,
-                watched,
+                cameras,
+                wish,
                 screen: screen.clone(),
+                gallery: gallery.clone(),
             };
-            (Some(viewer), screen, told)
+            (Some(viewer), screen, gallery, told, cameras_told, seen)
         };
         #[cfg(not(feature = "huddle-video"))]
         let viewer = None;
@@ -2630,7 +2690,7 @@ mod tests {
             None,
             Video {
                 options: Some(video::Options {
-                    streams: if cfg!(feature = "huddle-video") { 0 } else { 4 },
+                    streams: if cfg!(feature = "huddle-video") { 0 } else { 1 },
                     h264_only: true,
                     dump: None,
                 }),
@@ -2650,13 +2710,26 @@ mod tests {
             assert_eq!(shares[0].key, "B2#content");
             assert_eq!(shares[0].user.as_deref(), Some("U3"));
             assert!(screen.pictures() >= 5, "{} pictures", screen.pictures());
-            let picture = screen.take().expect("the newest picture");
-            assert_eq!(picture.source, [320, 180]);
             log::info!(
-                "loopback: {} pictures of {:?} decoded",
-                screen.pictures(),
-                picture.source
+                "loopback: {} pictures of the share decoded",
+                screen.pictures()
             );
+            // Both cameras had a tile and their pictures, at their size.
+            let (cameras, pictures) = seen.lock().expect("seen").clone();
+            let tiles: Vec<(&str, bool, Option<&str>)> = cameras
+                .iter()
+                .map(|c| (c.key.as_str(), c.tile, c.user.as_deref()))
+                .collect();
+            assert_eq!(tiles, [("C3", true, Some("U5")), ("D4", true, Some("U6"))]);
+            assert_eq!(
+                pictures,
+                [("C3".to_owned(), [320, 180]), ("D4".to_owned(), [320, 180])]
+            );
+            assert!(gallery.pictures() >= 10, "{} pictures", gallery.pictures());
+            // Closed: no tiles, the cameras still on, nothing left to draw.
+            let after: Vec<bool> = cameras_told.borrow().iter().map(|c| c.tile).collect();
+            assert_eq!(after, [false, false]);
+            assert!(gallery.take().is_empty());
         }
         assert_eq!(result, Ok(()), "{report:?}");
         assert_eq!(report.ending.as_deref(), Some("left"));
@@ -2669,13 +2742,17 @@ mod tests {
         // Chime heard the mute.
         assert_eq!(*controls.lock().expect("controls"), vec![true]);
 
-        // Video: one re-SUBSCRIBE for the share alone, slot 0 our send
-        // line; the media server was asked for a keyframe and sent frames,
-        // which were counted and read; audio went on through it.
-        assert_eq!(
-            *subscribed.lock().expect("subscribed"),
-            vec![vec![0], vec![0, 7]]
-        );
+        // Video: one re-SUBSCRIBE for the share (with `huddle-video` and
+        // the cameras, C3's smaller layer), slot 0 our send line, then
+        // with the window closed one freeing them all; the media server
+        // was asked for keyframes and sent frames, which were counted and
+        // read; audio went on through it.
+        let subscribed = subscribed.lock().expect("subscribed").clone();
+        if cfg!(feature = "huddle-video") {
+            assert_eq!(subscribed, [vec![0], vec![0, 7, 12, 13], vec![0, 0, 0, 0]]);
+        } else {
+            assert_eq!(subscribed, [vec![0], vec![0, 7]]);
+        }
         assert!(*keyframe_requests.lock().expect("requests") >= 1, "no PLI");
         // Our camera: asked for in the same re-SUBSCRIBE, both ways; its
         // frames arrived from a keyframe on, another keyframe came after
@@ -2684,7 +2761,10 @@ mod tests {
         let camera_frames = camera_heard.lock().expect("heard").clone();
         #[cfg(feature = "huddle-camera")]
         {
-            assert_eq!(camera_subscribes, [false, true]);
+            // The first SUBSCRIBE is before the camera can be sent; every
+            // re-SUBSCRIBE after it sends it, the camera being on throughout.
+            assert!(camera_subscribes.len() >= 2, "{camera_subscribes:?}");
+            assert!(!camera_subscribes[0] && camera_subscribes[1..].iter().all(|&c| c));
             assert!(
                 camera_frames.len() >= 10,
                 "{} camera frames",
@@ -2707,16 +2787,27 @@ mod tests {
         }
         #[cfg(not(feature = "huddle-camera"))]
         {
-            assert_eq!(camera_subscribes, [false, false]);
+            assert!(
+                camera_subscribes.iter().all(|&c| !c),
+                "{camera_subscribes:?}"
+            );
             assert!(camera_frames.is_empty());
         }
         let sent = *video_sent.lock().expect("sent");
         let summary = report.video.clone().expect("a video summary");
         assert!(summary.saw_share, "{summary:?}");
         assert_eq!(summary.codecs, ["H264_CONSTRAINED_BASELINE_PROFILE"]);
-        let [stream] = &summary.streams[..] else {
-            panic!("{summary:?}");
-        };
+        let streams: Vec<u32> = summary.streams.iter().map(|s| s.stream_id).collect();
+        if cfg!(feature = "huddle-video") {
+            assert_eq!(streams, [7, 12, 13]);
+            for camera in &summary.streams[1..] {
+                assert!(!camera.share && camera.frames >= 10, "{camera:?}");
+                assert!(camera.plis >= 1, "{camera:?}");
+            }
+        } else {
+            assert_eq!(streams, [7]);
+        }
+        let stream = &summary.streams[0];
         assert_eq!(stream.stream_id, 7);
         assert!(stream.share);
         assert_eq!(stream.user.as_deref(), Some("U3"));
@@ -2725,10 +2816,13 @@ mod tests {
         assert!(stream.keyframes >= 1, "{stream:?}");
         assert!(stream.plis >= 1, "{stream:?}");
         assert_eq!(stream.resolution(), Some((320, 180)));
-        let [resubscribe] = &summary.resubscribes[..] else {
-            panic!("{summary:?}");
-        };
-        assert_eq!(resubscribe.stream_ids, [0, 7]);
+        let resubscribe = &summary.resubscribes[0];
+        assert_eq!(
+            summary.resubscribes.len(),
+            if cfg!(feature = "huddle-video") { 2 } else { 1 },
+            "{summary:?}"
+        );
+        assert_eq!(resubscribe.stream_ids, subscribed[1]);
         assert!(
             resubscribe.audio_frames.is_some_and(|n| n > 20),
             "audio through the re-SUBSCRIBE: {resubscribe:?}"
