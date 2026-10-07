@@ -189,7 +189,10 @@ pub use listen::{
     clock, faces, leave_alone, quit, status_text, title_text,
 };
 #[cfg(feature = "huddle-video")]
-pub use listen::{Picture, Screen, Share, sharing_text, watch};
+pub use listen::{
+    Camera, Gallery, MAX_TILES, Picture, Screen, Share, Wish, cameras_text, open_call,
+    sharing_text, tell_wish, watch,
+};
 
 /// The call window's picture: the watched share's newest, uploaded.
 #[cfg(feature = "huddle-video")]
@@ -201,6 +204,9 @@ pub struct CallPicture {
     pub source: [usize; 2],
     /// Which share it is of.
     pub of: Option<String>,
+    /// Each camera tile's newest picture, uploaded, and the camera's own
+    /// size, by camera.
+    pub tiles: std::collections::BTreeMap<String, (egui::TextureHandle, [usize; 2])>,
     /// The demo draws the window inside the main one, to be in its
     /// screenshot.
     #[cfg(feature = "demo")]
@@ -213,6 +219,7 @@ impl std::fmt::Debug for CallPicture {
         f.debug_struct("CallPicture")
             .field("source", &self.source)
             .field("of", &self.of)
+            .field("tiles", &self.tiles.keys().collect::<Vec<_>>())
             .finish_non_exhaustive()
     }
 }
@@ -271,6 +278,9 @@ pub enum Action {
     /// Opens the call window on a share (by key), or closes it (none).
     #[cfg(feature = "huddle-video")]
     Watch(Option<String>),
+    /// Opens the call window on the cameras (and a share, if any).
+    #[cfg(feature = "huddle-video")]
+    OpenCall,
 }
 
 /// Applies a view's request.
@@ -319,6 +329,8 @@ pub fn apply(app: &mut App, action: Action) {
         Action::Leave => listen::leave(app),
         #[cfg(feature = "huddle-video")]
         Action::Watch(share) => listen::watch(app, share),
+        #[cfg(feature = "huddle-video")]
+        Action::OpenCall => listen::open_call(app),
     }
 }
 

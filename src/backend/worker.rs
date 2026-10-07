@@ -1684,8 +1684,8 @@ impl Worker {
                 return;
             }
             #[cfg(feature = "huddle-video")]
-            crate::people::Command::WatchShare { share } => {
-                self.huddle_audio.watch_share(share);
+            crate::people::Command::WatchCall { wish } => {
+                self.huddle_audio.watch_call(wish);
                 return;
             }
             other => other,
