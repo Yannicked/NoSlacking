@@ -1078,6 +1078,26 @@ engineering, as for the rest of the session sign-in.
         V4L2, which would need `--device=all`.
   - [ ] Choosing the camera (Settings) when there is more than one;
         today the first is taken.
+  - [ ] **All video in the helper (decided 2026-10-07).** The helper
+        (`noslacking-video`) does everything that touches pixels; the app
+        keeps the call (signaling, DTLS/SRTP, RTP, the UI) and all audio
+        (small, latency-sensitive, and echo cancellation needs the
+        speaker next to the microphone). Why: release builds abort on any
+        panic, and decoders read other people's network data, so a decoder
+        bug must kill the helper (which restarts), not the app; capture's
+        native dependencies (nokhwa's ObjC shim, libclang, PipeWire, portal
+        fds) leave the app's build; capture → GPU encode → small NAL units
+        over the pipe instead of 3 MB raw frames; one place for codec,
+        capture and hardware choices. No helper, or one that keeps
+        crashing, means no video for that session (no in-process
+        fallback). Check macOS permissions (camera, Screen Recording) carry
+        from the app bundle to its helper on a real Mac. Order, after
+        `feat/huddle-share` and `feat/hw-encode` merge:
+        1. Software decoding (rusty_h264 + the shrink) moves into the
+           helper: every decode goes through it, hardware or not.
+        2. Screen capture + encoding in the helper (PipeWire dmabuf →
+           VA-API encode, software fallback), from the share branch.
+        3. The camera in the helper (capture + encode).
   - [ ] **Hardware video decoding (and maybe encoding), in a separate
         process.** Pure Rust in software costs little today (about 0.4 ms
         per 480×480 camera frame, 3–5 ms per 1080p share frame, 4 ms to
