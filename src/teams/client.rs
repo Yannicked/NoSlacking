@@ -331,6 +331,9 @@ pub struct TeamsClient {
     /// messages where the token header is not taken), by the host that
     /// set them.
     media_cookies: Arc<RwLock<std::collections::HashMap<String, String>>>,
+    /// Where this account's call pushes go (see
+    /// [`crate::teams::calling::router`]).
+    calls: crate::teams::calling::router::Router,
     /// Held while a cookie is asked for, so the pictures of a whole
     /// screen ask once rather than each.
     cookie_asked: Arc<tokio::sync::Mutex<()>>,
@@ -355,6 +358,7 @@ impl TeamsClient {
             asked: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             endpoint: Arc::new(RwLock::new(None)),
             media_cookies: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            calls: crate::teams::calling::router::Router::default(),
             cookie_asked: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -392,6 +396,12 @@ impl TeamsClient {
         if let Ok(mut held) = self.own_name.write() {
             *held = Some(name);
         }
+    }
+
+    /// Where this account's call pushes go, and the live connection's
+    /// address for their callbacks.
+    pub fn calls(&self) -> &crate::teams::calling::router::Router {
+        &self.calls
     }
 
     /// Stops handing refreshes to the save callback, for good: the

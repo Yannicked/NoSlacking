@@ -884,7 +884,10 @@ async fn trouter(team: String, client: TeamsClient, sink: Sink, report: Report) 
     let http = crate::slack::net::api();
     loop {
         report(Socket::Connecting);
-        match trouter_once(&team, &client, &http, &sink, &report).await {
+        let ended = trouter_once(&team, &client, &http, &sink, &report).await;
+        // A call's callbacks named the connection that just closed.
+        client.calls().set_surl(None);
+        match ended {
             Ok(()) => log::info!("Trouter closed for {team}, reconnecting"),
             Err(error) => {
                 log::warn!("Trouter failed for {team}: {error:?}, retrying");
@@ -958,6 +961,8 @@ async fn trouter_once(
 
     log::info!("Trouter connected for {team}");
     report(Socket::Connected);
+    // Calls name this connection in their callbacks.
+    client.calls().set_surl(Some(session.surl.clone()));
     // Teams shows you offline unless an endpoint of yours says otherwise.
     if let Err(error) = client.publish_presence(&epid).await {
         log::info!("could not say you are here in {team}: {error:?}");
@@ -979,8 +984,14 @@ async fn trouter_once(
                     if let Some(answer) = handle_frame_control(&text) {
                         let _ = write.send(WsMessage::Text(answer.into())).await;
                     }
-                    if let Some(TrouterEvent::Message { message, changed }) = parse_frame(&text) {
-                        live_message(team, client, &message, changed, sink);
+                    match parse_frame(&text) {
+                        Some(TrouterEvent::Message { message, changed }) => {
+                            live_message(team, client, &message, changed, sink);
+                        }
+                        Some(TrouterEvent::Call { path, body }) => {
+                            client.calls().deliver(&path, &body);
+                        }
+                        _ => {}
                     }
                 }
                 Some(Ok(WsMessage::Ping(payload))) => {

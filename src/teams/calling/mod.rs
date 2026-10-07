@@ -16,6 +16,7 @@ pub mod api;
 pub mod codes;
 pub mod links;
 pub mod media;
+pub mod router;
 pub mod sdp;
 pub mod types;
 
