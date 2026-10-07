@@ -4,7 +4,9 @@
 //! The helper decodes every video stream the app shows: on the GPU
 //! through the platform's C libraries (VA-API on Linux), which takes
 //! `unsafe` code and trusts drivers with whatever a stranger's stream
-//! holds, and otherwise in software. It runs as its own process so the
+//! holds, and otherwise in software. It also captures the screen the
+//! user shares and encodes it, so the app only ever sees the H.264 that
+//! goes out ([`Request::StartShare`]). It runs as its own process so the
 //! app keeps `forbid(unsafe_code)` and a decoder's crash or hang (a
 //! panic aborts a release build) only costs the helper. This crate is
 //! the one thing both sides share: the framing and the messages, in
@@ -43,8 +45,10 @@ pub const MAGIC: [u8; 4] = *b"NSVH";
 /// [`Request::SetOutputSize`]; version 3 made the helper decode in
 /// software too: [`Request::OpenDecoder`] says whether to try the GPU,
 /// and a picture says its stream's size and which decoded it
-/// ([`Decoded`]).
-pub const VERSION: u16 = 3;
+/// ([`Decoded`]); version 4 moved screen sharing into the helper: it
+/// lists what can be shared ([`Request::ListSources`]), and captures and
+/// encodes it ([`Request::StartShare`], [`Request::NextShareFrame`]).
+pub const VERSION: u16 = 4;
 
 /// The largest frame either side accepts, in bytes: room for an I420
 /// picture at [`MAX_SIDE`] square (24 MiB) and its header.
@@ -61,6 +65,13 @@ pub const MAX_TEXT: usize = 4096;
 
 /// The most capabilities a welcome lists.
 pub const MAX_CAPABILITIES: usize = 64;
+
+/// The most screens and windows a list of sources holds.
+pub const MAX_SOURCES: usize = 256;
+
+/// The longest a share may be asked to wait for a new picture, in
+/// milliseconds: well inside the app's timeout for one reply.
+pub const MAX_SHARE_WAIT_MS: u32 = 250;
 
 /// What went wrong reading or writing a frame.
 #[derive(Debug)]
@@ -593,6 +604,126 @@ impl Decoded {
     }
 }
 
+/// What kind of thing can be shared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SourceKind {
+    /// A whole screen.
+    Screen,
+    /// One window.
+    Window,
+}
+
+impl SourceKind {
+    fn to_byte(self) -> u8 {
+        match self {
+            Self::Screen => 1,
+            Self::Window => 2,
+        }
+    }
+
+    fn from_byte(byte: u8) -> Result<Self, Error> {
+        match byte {
+            1 => Ok(Self::Screen),
+            2 => Ok(Self::Window),
+            _ => Err(Error::BadValue("source kind")),
+        }
+    }
+}
+
+/// A screen or window the app's own picker offers, where the system has
+/// no dialog of its own.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Source {
+    /// How the helper finds it again ([`ShareChoice::Source`]).
+    pub id: String,
+    /// What the picker calls it: the screen's or the window's name.
+    pub name: String,
+    /// A screen or a window.
+    pub kind: SourceKind,
+}
+
+/// What to share.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShareChoice {
+    /// Whatever the system's own dialog lets the user pick (the
+    /// ScreenCast portal); `again` asks it to ask rather than share what
+    /// the restore token names. Where there is no dialog, the first
+    /// screen.
+    System {
+        /// Choose afresh.
+        again: bool,
+    },
+    /// One of [`Reply::Sources`]' sources, by its id.
+    Source(String),
+    /// A generated 1080p test screen with a moving clock, never anyone's
+    /// screen (the probe's, and the benchmarks').
+    Test,
+}
+
+/// Why a share did not start, or stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShareProblem {
+    /// The user closed the system's dialog without choosing.
+    Cancelled,
+    /// The system did not let the helper capture the screen (macOS's
+    /// Screen Recording permission, a portal that refused).
+    Denied,
+    /// Nothing here can capture the screen: no portal, no X server.
+    Unavailable,
+    /// The source chosen is gone (a window closed, a screen unplugged).
+    Gone,
+    /// The capture ended by itself: the compositor's own "stop sharing",
+    /// the window closed, PipeWire went away.
+    Ended,
+    /// It failed; the detail says why, for the log.
+    Failed,
+}
+
+impl ShareProblem {
+    fn to_byte(self) -> u8 {
+        match self {
+            Self::Cancelled => 1,
+            Self::Denied => 2,
+            Self::Unavailable => 3,
+            Self::Gone => 4,
+            Self::Ended => 5,
+            Self::Failed => 6,
+        }
+    }
+
+    fn from_byte(byte: u8) -> Result<Self, Error> {
+        match byte {
+            1 => Ok(Self::Cancelled),
+            2 => Ok(Self::Denied),
+            3 => Ok(Self::Unavailable),
+            4 => Ok(Self::Gone),
+            5 => Ok(Self::Ended),
+            6 => Ok(Self::Failed),
+            _ => Err(Error::BadValue("share problem")),
+        }
+    }
+}
+
+/// One encoded picture of a share: an access unit and what the app needs
+/// to send it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShareFrame {
+    /// Whether it is an IDR (with its SPS and PPS in front).
+    pub keyframe: bool,
+    /// Whether the GPU encoded it (else software did).
+    pub hardware: bool,
+    /// The picture's width as encoded.
+    pub width: u32,
+    /// Its height.
+    pub height: u32,
+    /// How long ago, in microseconds, the picture was captured when this
+    /// reply was written: the app's RTP time comes from it. A picture
+    /// sent again (a still screen) says 0.
+    pub age_us: u32,
+    /// The NAL units, Annex B.
+    pub data: Vec<u8>,
+}
+
 /// What the app asks the helper.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
@@ -675,6 +806,44 @@ pub enum Request {
         /// The box's height in pixels.
         height: u32,
     },
+    /// What can be shared; the reply is [`Reply::Sources`], or a
+    /// [`Reply::ShareProblem`] when nothing can capture here.
+    ListSources,
+    /// Starts capturing and encoding `choice`; the reply is
+    /// [`Reply::ShareStarted`] or a [`Reply::ShareProblem`]. With the
+    /// system's dialog this waits for the user. Nothing is captured
+    /// before it, and nothing after the share's [`Request::Close`].
+    StartShare {
+        /// What to share.
+        choice: ShareChoice,
+        /// Encode on the GPU where it can (Settings → Huddles → Use the
+        /// graphics card for video); otherwise software, at most
+        /// 1280×720.
+        hardware: bool,
+        /// The bit rate to start at, in bits a second.
+        bitrate: u32,
+        /// What the portal said to remember the last choice by (empty:
+        /// nothing), so sharing again in this run of the app does not
+        /// ask again.
+        restore: String,
+    },
+    /// Share `id`'s next picture, encoded: the reply is
+    /// [`Reply::ShareFrame`], [`Reply::NoPicture`] when nothing new came
+    /// within `wait_ms`, or a [`Reply::ShareProblem`] once the capture
+    /// ended. [`Request::SetBitrate`] and [`Request::Close`] take a
+    /// share's number too.
+    NextShareFrame {
+        /// The share.
+        id: u32,
+        /// Make it a keyframe.
+        force_keyframe: bool,
+        /// Encode the last picture again if nothing new came (a still
+        /// screen's keepalive, or a keyframe asked for).
+        repeat: bool,
+        /// How long to wait for a new picture, at most
+        /// [`MAX_SHARE_WAIT_MS`].
+        wait_ms: u32,
+    },
 }
 
 /// The size a `source`-sized picture is shrunk to so it still covers a
@@ -743,6 +912,31 @@ pub enum Reply {
         /// How.
         kind: FailKind,
         /// What happened, for the log.
+        detail: String,
+    },
+    /// What can be shared.
+    Sources {
+        /// The system shows its own dialog when the share starts (the
+        /// ScreenCast portal): there is nothing for the app to list.
+        dialog: bool,
+        /// The screens and windows for the app's picker.
+        sources: Vec<Source>,
+    },
+    /// A share started with this number.
+    ShareStarted {
+        /// Its number, for the requests that follow.
+        id: u32,
+        /// What to give the next [`Request::StartShare`] so the portal
+        /// shares the same again without asking (empty: nothing).
+        restore: String,
+    },
+    /// A share's picture.
+    ShareFrame(ShareFrame),
+    /// A share did not start, or its capture ended.
+    ShareProblem {
+        /// What happened.
+        problem: ShareProblem,
+        /// More, for the log.
         detail: String,
     },
 }
@@ -922,6 +1116,35 @@ impl Request {
             Self::SetOutputSize { id, width, height } => {
                 Out::new(8).u32(*id).u32(*width).u32(*height).done()
             }
+            Self::ListSources => Out::new(9).done(),
+            Self::StartShare {
+                choice,
+                hardware,
+                bitrate,
+                restore,
+            } => {
+                let mut out = Out::new(10);
+                match choice {
+                    ShareChoice::System { again } => out.u8(1).u8(u8::from(*again)),
+                    ShareChoice::Source(id) => out.u8(2).text(id),
+                    ShareChoice::Test => out.u8(3),
+                };
+                out.u8(u8::from(*hardware))
+                    .u32(*bitrate)
+                    .text(restore)
+                    .done()
+            }
+            Self::NextShareFrame {
+                id,
+                force_keyframe,
+                repeat,
+                wait_ms,
+            } => Out::new(11)
+                .u32(*id)
+                .u8(u8::from(*force_keyframe))
+                .u8(u8::from(*repeat))
+                .u32(*wait_ms)
+                .done(),
         }
     }
 
@@ -968,6 +1191,29 @@ impl Request {
                 width: input.side("width")?,
                 height: input.side("height")?,
             },
+            9 => Self::ListSources,
+            10 => Self::StartShare {
+                choice: match input.u8()? {
+                    1 => ShareChoice::System {
+                        again: input.flag()?,
+                    },
+                    2 => ShareChoice::Source(input.text()?),
+                    3 => ShareChoice::Test,
+                    _ => return Err(Error::BadValue("share choice")),
+                },
+                hardware: input.flag()?,
+                bitrate: input.u32()?,
+                restore: input.text()?,
+            },
+            11 => Self::NextShareFrame {
+                id: input.u32()?,
+                force_keyframe: input.flag()?,
+                repeat: input.flag()?,
+                wait_ms: match input.u32()? {
+                    wait if wait <= MAX_SHARE_WAIT_MS => wait,
+                    _ => return Err(Error::BadValue("wait")),
+                },
+            },
             tag => return Err(Error::UnknownTag(tag)),
         };
         input.end()?;
@@ -1010,6 +1256,30 @@ impl Reply {
             }
             Self::Done => Out::new(6).done(),
             Self::Failed { kind, detail } => Out::new(7).u8(kind.to_byte()).text(detail).done(),
+            Self::Sources { dialog, sources } => {
+                let mut out = Out::new(8);
+                out.u8(u8::from(*dialog));
+                let listed = &sources[..sources.len().min(MAX_SOURCES)];
+                out.u16(u16::try_from(listed.len()).unwrap_or(0));
+                for source in listed {
+                    out.text(&source.id)
+                        .text(&source.name)
+                        .u8(source.kind.to_byte());
+                }
+                out.done()
+            }
+            Self::ShareStarted { id, restore } => Out::new(9).u32(*id).text(restore).done(),
+            Self::ShareFrame(frame) => Out::new(10)
+                .u8(u8::from(frame.keyframe))
+                .u8(u8::from(frame.hardware))
+                .u32(frame.width)
+                .u32(frame.height)
+                .u32(frame.age_us)
+                .bytes(&frame.data)
+                .done(),
+            Self::ShareProblem { problem, detail } => {
+                Out::new(11).u8(problem.to_byte()).text(detail).done()
+            }
         }
     }
 
@@ -1061,6 +1331,44 @@ impl Reply {
             6 => Self::Done,
             7 => Self::Failed {
                 kind: FailKind::from_byte(input.u8()?)?,
+                detail: input.text()?,
+            },
+            8 => {
+                let dialog = input.flag()?;
+                let count = usize::from(input.u16()?);
+                if count > MAX_SOURCES {
+                    return Err(Error::TooLarge(count));
+                }
+                let mut sources = Vec::with_capacity(count);
+                for _ in 0..count {
+                    sources.push(Source {
+                        id: input.text()?,
+                        name: input.text()?,
+                        kind: SourceKind::from_byte(input.u8()?)?,
+                    });
+                }
+                Self::Sources { dialog, sources }
+            }
+            9 => Self::ShareStarted {
+                id: input.u32()?,
+                restore: input.text()?,
+            },
+            10 => {
+                let frame = ShareFrame {
+                    keyframe: input.flag()?,
+                    hardware: input.flag()?,
+                    width: input.side("width")?,
+                    height: input.side("height")?,
+                    age_us: input.u32()?,
+                    data: input.bytes(MAX_MESSAGE)?,
+                };
+                if frame.width == 0 || frame.height == 0 || frame.data.is_empty() {
+                    return Err(Error::BadValue("share frame"));
+                }
+                Self::ShareFrame(frame)
+            }
+            11 => Self::ShareProblem {
+                problem: ShareProblem::from_byte(input.u8()?)?,
                 detail: input.text()?,
             },
             tag => return Err(Error::UnknownTag(tag)),
@@ -1132,6 +1440,31 @@ mod tests {
                 width: 960,
                 height: 540,
             },
+            Request::ListSources,
+            Request::StartShare {
+                choice: ShareChoice::System { again: true },
+                hardware: true,
+                bitrate: 600_000,
+                restore: String::new(),
+            },
+            Request::StartShare {
+                choice: ShareChoice::Source("x11:0:0:1920:1080".into()),
+                hardware: false,
+                bitrate: 2_500_000,
+                restore: "a-token".into(),
+            },
+            Request::StartShare {
+                choice: ShareChoice::Test,
+                hardware: true,
+                bitrate: 1,
+                restore: String::new(),
+            },
+            Request::NextShareFrame {
+                id: 3,
+                force_keyframe: true,
+                repeat: false,
+                wait_ms: MAX_SHARE_WAIT_MS,
+            },
         ]
     }
 
@@ -1159,7 +1492,131 @@ mod tests {
                 kind: FailKind::Broken,
                 detail: "no slice".into(),
             },
+            Reply::Sources {
+                dialog: true,
+                sources: Vec::new(),
+            },
+            Reply::Sources {
+                dialog: false,
+                sources: vec![
+                    Source {
+                        id: "screen:1".into(),
+                        name: "DP-1 (2560×1440)".into(),
+                        kind: SourceKind::Screen,
+                    },
+                    Source {
+                        id: "window:7".into(),
+                        name: "Release plan.md — Editor".into(),
+                        kind: SourceKind::Window,
+                    },
+                ],
+            },
+            Reply::ShareStarted {
+                id: 3,
+                restore: "a-token".into(),
+            },
+            Reply::ShareFrame(ShareFrame {
+                keyframe: true,
+                hardware: false,
+                width: 1280,
+                height: 720,
+                age_us: 4_000,
+                data: vec![0, 0, 0, 1, 0x67, 0, 0, 0, 1, 0x68, 0, 0, 0, 1, 0x65],
+            }),
+            Reply::ShareProblem {
+                problem: ShareProblem::Ended,
+                detail: "PipeWire: unconnected".into(),
+            },
         ]
+    }
+
+    #[test]
+    fn share_messages_check_their_fields() {
+        // A wait past the most, an unknown choice, problem or kind.
+        let mut next = Request::NextShareFrame {
+            id: 1,
+            force_keyframe: false,
+            repeat: false,
+            wait_ms: 0,
+        }
+        .encode();
+        next[7..11].copy_from_slice(&(MAX_SHARE_WAIT_MS + 1).to_le_bytes());
+        assert!(matches!(
+            Request::decode(&next),
+            Err(Error::BadValue("wait"))
+        ));
+        let mut start = Request::StartShare {
+            choice: ShareChoice::Test,
+            hardware: false,
+            bitrate: 0,
+            restore: String::new(),
+        }
+        .encode();
+        start[1] = 9;
+        assert!(matches!(
+            Request::decode(&start),
+            Err(Error::BadValue("share choice"))
+        ));
+        assert!(matches!(
+            Reply::decode(&[11, 42, 0, 0, 0, 0]),
+            Err(Error::BadValue("share problem"))
+        ));
+        let mut sources = Reply::Sources {
+            dialog: false,
+            sources: vec![Source {
+                id: "a".into(),
+                name: "b".into(),
+                kind: SourceKind::Window,
+            }],
+        }
+        .encode();
+        let last = sources.len() - 1;
+        sources[last] = 3;
+        assert!(matches!(
+            Reply::decode(&sources),
+            Err(Error::BadValue("source kind"))
+        ));
+        // A list longer than allowed is refused before it is read.
+        let mut many = vec![8, 0];
+        many.extend_from_slice(&u16::try_from(MAX_SOURCES + 1).expect("small").to_le_bytes());
+        assert!(matches!(Reply::decode(&many), Err(Error::TooLarge(_))));
+        // And one that long is cut to the most when written.
+        let long = Reply::Sources {
+            dialog: false,
+            sources: vec![
+                Source {
+                    id: "x".into(),
+                    name: "y".into(),
+                    kind: SourceKind::Screen,
+                };
+                MAX_SOURCES + 5
+            ],
+        };
+        let Reply::Sources { sources, .. } = Reply::decode(&long.encode()).expect("decodes") else {
+            panic!("sources");
+        };
+        assert_eq!(sources.len(), MAX_SOURCES);
+        // A share frame with nothing in it, or of no size.
+        for frame in [
+            ShareFrame {
+                keyframe: false,
+                hardware: false,
+                width: 16,
+                height: 16,
+                age_us: 0,
+                data: Vec::new(),
+            },
+            ShareFrame {
+                keyframe: false,
+                hardware: false,
+                width: 0,
+                height: 16,
+                age_us: 0,
+                data: vec![1],
+            },
+        ] {
+            assert!(Reply::decode(&Reply::ShareFrame(frame).encode()).is_err());
+        }
     }
 
     #[test]

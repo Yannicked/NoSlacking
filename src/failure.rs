@@ -354,6 +354,10 @@ impl Failure {
                 }
                 HuddleTrouble::ShareRefused => t("the huddle's server did not take your share"),
                 HuddleTrouble::ShareLost => t("the share's connection was lost"),
+                HuddleTrouble::NoVideoHelper => t(
+                    "screen sharing needs NoSlacking's video helper (noslacking-video), which is missing or keeps failing",
+                ),
+                HuddleTrouble::ShareHelperLost => t("NoSlacking's video helper stopped"),
             },
             Self::Slack(code) => return code.replace('_', " "),
             Self::Other(text) => return text.clone(),
@@ -409,6 +413,11 @@ pub enum HuddleTrouble {
     ShareRefused,
     /// The share's own connection to the huddle broke.
     ShareLost,
+    /// The video helper, which captures and encodes a shared screen, is
+    /// not installed or was given up on.
+    NoVideoHelper,
+    /// The video helper failed (crashed, hung) while sharing.
+    ShareHelperLost,
 }
 
 /// Why the system keyring did not do what was asked. The worker hands this
@@ -673,6 +682,8 @@ mod tests {
             Failure::Huddle(HuddleTrouble::ShareLimit),
             Failure::Huddle(HuddleTrouble::ShareRefused),
             Failure::Huddle(HuddleTrouble::ShareLost),
+            Failure::Huddle(HuddleTrouble::NoVideoHelper),
+            Failure::Huddle(HuddleTrouble::ShareHelperLost),
             Failure::Slack("some_new_code".into()),
             Failure::Other("disk full".into()),
         ]

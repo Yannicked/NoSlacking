@@ -151,7 +151,7 @@ fn the_helper_says_its_version_and_probes() {
         .output()
         .expect("runs");
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("protocol 3"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("protocol 4"));
     let output = Command::new(env!("CARGO_BIN_EXE_noslacking-video"))
         .arg("--probe")
         .env("NOSLACKING_VIDEO_BACKEND", "none")
@@ -163,4 +163,88 @@ fn the_helper_says_its_version_and_probes() {
         .output()
         .expect("runs");
     assert!(!output.status.success());
+}
+
+/// The test screen shared through the program, in software (no back
+/// end): what the probe does, never a real screen. Listing what can be
+/// shared depends on the session the test runs in, so only that it
+/// answers is checked.
+#[test]
+fn the_helper_shares_the_test_screen_until_it_is_closed() {
+    use noslacking_video_ipc::ShareChoice;
+    let mut child = helper("none");
+    let mut input = child.stdin.take().expect("stdin");
+    let mut output = BufReader::new(child.stdout.take().expect("stdout"));
+    let mut call = |seq: u32, request: Request| {
+        ipc::write_request(&mut input, seq, &request).expect("sent");
+        let (got, reply) = ipc::read_reply(&mut output)
+            .expect("read")
+            .expect("a reply");
+        assert_eq!(got, seq);
+        reply
+    };
+    call(
+        1,
+        Request::Hello {
+            version: ipc::VERSION,
+        },
+    );
+    let sources = call(2, Request::ListSources);
+    assert!(
+        matches!(sources, Reply::Sources { .. } | Reply::ShareProblem { .. }),
+        "{sources:?}"
+    );
+    let Reply::ShareStarted { id, .. } = call(
+        3,
+        Request::StartShare {
+            choice: ShareChoice::Test,
+            hardware: true,
+            bitrate: 1_000_000,
+            restore: String::new(),
+        },
+    ) else {
+        panic!("a share");
+    };
+    let mut frames = Vec::new();
+    for seq in 4..40 {
+        match call(
+            seq,
+            Request::NextShareFrame {
+                id,
+                force_keyframe: false,
+                repeat: false,
+                wait_ms: ipc::MAX_SHARE_WAIT_MS,
+            },
+        ) {
+            Reply::ShareFrame(frame) => frames.push(frame),
+            Reply::NoPicture => {}
+            other => panic!("{other:?}"),
+        }
+        if frames.len() == 3 {
+            break;
+        }
+    }
+    assert_eq!(frames.len(), 3);
+    assert!(frames[0].keyframe && !frames[1].keyframe);
+    // No GPU here: software, shrunk to 720p.
+    assert!(
+        frames
+            .iter()
+            .all(|f| !f.hardware && (f.width, f.height) == (1280, 720))
+    );
+    assert_eq!(call(50, Request::Close { id }), Reply::Done);
+    assert!(matches!(
+        call(
+            51,
+            Request::NextShareFrame {
+                id,
+                force_keyframe: false,
+                repeat: true,
+                wait_ms: 0,
+            }
+        ),
+        Reply::Failed { .. }
+    ));
+    drop(input);
+    assert!(child.wait().expect("it ends").success());
 }

@@ -474,9 +474,9 @@ fn test_video() -> Result<(super::camera_send::CameraUplink, TestVideo), String>
 }
 
 /// The probe's test share: waits for the audio to be live (`up`), then
-/// captures the 1080p test screen, encodes it (on the GPU if the setting
-/// and the helper allow) and sends it as the `content` attendee until
-/// `stopped`. Returns the summary's lines.
+/// has the video helper share its 1080p test screen (encoded on the GPU
+/// if the setting and the helper allow) and sends it as the `content`
+/// attendee until `stopped`. Returns the summary's lines.
 #[cfg(feature = "huddle-share")]
 async fn test_share(
     content: super::join::ChimeJoin,
@@ -484,9 +484,9 @@ async fn test_share(
     stopped: tokio::sync::watch::Receiver<bool>,
 ) -> Vec<String> {
     use super::camera_send::{QUEUE, SendControl};
-    use super::share::{Choice, Frames, ShareControl, TestShare};
+    use super::helper::{self, Lane};
     use super::share_send::{self, Encoding};
-    use super::video_encoder::Limits;
+    use super::video_encoder::{Limits, START_BITRATE};
     if up.await.is_err() {
         return vec!["summary: share: not started, the audio never came up".into()];
     }
@@ -495,18 +495,33 @@ async fn test_share(
          join token with #content); NoSlacking tells Slack nothing else about it",
         content.attendee_id
     );
-    let frames = Frames::default();
-    let mut capture = ShareControl::new(TestShare::new(frames.clone()));
-    if let Err(error) = capture.start(&Choice::System { again: false }) {
-        return vec![format!(
-            "summary: share: the test screen did not start: {error}"
-        )];
-    }
+    let Some(helper) = helper::shared(Lane::Screen) else {
+        return vec!["summary: share: no video helper (noslacking-video) to share with".into()];
+    };
+    let started = tokio::task::spawn_blocking(move || {
+        helper.start_share(
+            noslacking_video_ipc::ShareChoice::Test,
+            helper::gpu(),
+            Limits::SHARE.bitrate(START_BITRATE),
+            "",
+        )
+    })
+    .await;
+    let share = match started {
+        Ok(Ok((share, _))) => share,
+        Ok(Err(trouble)) => {
+            return vec![format!(
+                "summary: share: the test screen did not start: {trouble:?}"
+            )];
+        }
+        Err(error) => return vec![format!("summary: share: its start failed: {error}")],
+    };
     let (encoded, encoded_in) = tokio::sync::mpsc::channel(QUEUE);
     let control = SendControl::new(Limits::SHARE);
-    let encoding = match Encoding::spawn(frames, encoded, control.clone()) {
+    let (ending, _ended) = tokio::sync::watch::channel(None);
+    let encoding = match Encoding::spawn(share, encoded, control.clone(), ending) {
         Ok(encoding) => encoding,
-        Err(why) => return vec![format!("summary: share: no encoder: {why}")],
+        Err(why) => return vec![format!("summary: share: no sending thread: {why}")],
     };
     let (_on, on) = tokio::sync::watch::channel(true);
     let (refused, mut refusals) = tokio::sync::mpsc::channel(1);
@@ -525,8 +540,8 @@ async fn test_share(
         },
     )
     .await;
-    drop(encoding);
-    capture.stop();
+    // Stopping waits on the helper: not on the async threads.
+    let _ = tokio::task::spawn_blocking(move || drop(encoding)).await;
     let mut lines = vec![
         format!(
             "summary: share: ended {}; {}",

@@ -1,12 +1,16 @@
 //! The helper's side of the conversation: reads requests, hands them to
-//! the back end, writes one reply for each, until its input closes.
+//! the back end (or a share's capture), writes one reply for each, until
+//! its input closes.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::time::Duration;
 
 use noslacking_video_ipc::{self as ipc, FailKind, Reply, Request};
 
 use crate::backend::{self, Backend, Decoder, Encoder};
+use crate::capture::{Screens, Trouble};
+use crate::share::{Settings, Share};
 
 /// The most decoders and encoders open at once: a huddle's share, its
 /// camera tiles and your own camera are far fewer.
@@ -18,15 +22,21 @@ const MAX_OPEN: usize = 64;
 /// conversation. A message that does not decode gets a protocol failure
 /// and the conversation goes on (its frame was whole); broken framing
 /// ends it, since nothing after it can be trusted to line up.
+///
+/// Screen shares are captured from `screens`; when the input closes, any
+/// share still open is stopped before this returns.
 pub fn serve(
     input: &mut impl Read,
     output: &mut impl Write,
     backend: &mut dyn Backend,
+    screens: &mut dyn Screens,
 ) -> Result<(), ipc::Error> {
     let mut server = Server {
         backend,
+        screens,
         decoders: HashMap::new(),
         encoders: HashMap::new(),
+        shares: HashMap::new(),
         next_id: 1,
     };
     let Some((first, hello)) = ipc::read_request(input)? else {
@@ -66,10 +76,23 @@ fn failed(kind: FailKind, detail: &str) -> Reply {
     }
 }
 
+/// The most screen shares open at once: the app makes one; its tests,
+/// sharing one helper, a few.
+const MAX_SHARES: usize = 4;
+
+fn share_problem(trouble: Trouble) -> Reply {
+    Reply::ShareProblem {
+        problem: trouble.problem,
+        detail: trouble.detail,
+    }
+}
+
 struct Server<'a> {
     backend: &'a mut dyn Backend,
+    screens: &'a mut dyn Screens,
     decoders: HashMap<u32, Box<dyn Decoder>>,
     encoders: HashMap<u32, Box<dyn Encoder>>,
+    shares: HashMap<u32, Share>,
     next_id: u32,
 }
 
@@ -81,7 +104,7 @@ impl Server<'_> {
     }
 
     fn full(&self) -> bool {
-        self.decoders.len() + self.encoders.len() >= MAX_OPEN
+        self.decoders.len() + self.encoders.len() + self.shares.len() >= MAX_OPEN
     }
 
     fn handle(&mut self, request: Request) -> Reply {
@@ -154,6 +177,10 @@ impl Server<'_> {
                 }
             }
             Request::SetBitrate { id, bitrate } => {
+                if let Some(share) = self.shares.get(&id) {
+                    share.set_bitrate(bitrate);
+                    return Reply::Done;
+                }
                 let Some(encoder) = self.encoders.get_mut(&id) else {
                     return failed(FailKind::UnknownId, "no such encoder");
                 };
@@ -170,10 +197,56 @@ impl Server<'_> {
                 Reply::Done
             }
             Request::Close { id } => {
-                if self.decoders.remove(&id).is_some() || self.encoders.remove(&id).is_some() {
+                if self.decoders.remove(&id).is_some()
+                    || self.encoders.remove(&id).is_some()
+                    || self.shares.remove(&id).is_some()
+                {
                     Reply::Done
                 } else {
                     failed(FailKind::UnknownId, "nothing open with that number")
+                }
+            }
+            Request::ListSources => match self.screens.sources() {
+                Ok((dialog, sources)) => Reply::Sources { dialog, sources },
+                Err(trouble) => share_problem(trouble),
+            },
+            Request::StartShare {
+                choice,
+                hardware,
+                bitrate,
+                restore,
+            } => {
+                if self.full() || self.shares.len() >= MAX_SHARES {
+                    return failed(FailKind::Unsupported, "too many open");
+                }
+                let settings = Settings {
+                    hardware,
+                    bitrate,
+                    gpu: self.backend.share_gpu(),
+                };
+                match self.screens.start(&choice, settings, &restore) {
+                    Ok((share, restore)) => {
+                        let id = self.id();
+                        self.shares.insert(id, share);
+                        Reply::ShareStarted { id, restore }
+                    }
+                    Err(trouble) => share_problem(trouble),
+                }
+            }
+            Request::NextShareFrame {
+                id,
+                force_keyframe,
+                repeat,
+                wait_ms,
+            } => {
+                let Some(share) = self.shares.get(&id) else {
+                    return failed(FailKind::UnknownId, "no such share");
+                };
+                let wait = Duration::from_millis(u64::from(wait_ms.min(ipc::MAX_SHARE_WAIT_MS)));
+                match share.next(force_keyframe, repeat, wait) {
+                    Ok(Some(frame)) => Reply::ShareFrame(frame),
+                    Ok(None) => Reply::NoPicture,
+                    Err(trouble) => share_problem(trouble),
                 }
             }
         }
@@ -197,7 +270,13 @@ mod tests {
             ipc::write_frame(&mut input, 10 + seq as u32, body).expect("written");
         }
         let mut output = Vec::new();
-        let ok = serve(&mut input.as_slice(), &mut output, backend).is_ok();
+        let ok = serve(
+            &mut input.as_slice(),
+            &mut output,
+            backend,
+            &mut crate::capture::Pretend::default(),
+        )
+        .is_ok();
         let mut replies = Vec::new();
         let mut output = output.as_slice();
         while let Some(frame) = ipc::read_frame(&mut output).expect("whole frames") {
@@ -528,6 +607,14 @@ mod tests {
         ipc::write_frame(&mut input, 1, &hello()).expect("written");
         input.extend_from_slice(&[200, 0, 0]);
         let mut output = Vec::new();
-        assert!(serve(&mut input.as_slice(), &mut output, &mut Fake).is_err());
+        assert!(
+            serve(
+                &mut input.as_slice(),
+                &mut output,
+                &mut Fake,
+                &mut crate::capture::Pretend::default()
+            )
+            .is_err()
+        );
     }
 }

@@ -90,6 +90,12 @@ pub trait Backend {
         let _ = (codec, width, height, fps, bitrate);
         Err(Failure::unsupported("this back end does not encode"))
     }
+    /// What opens its GPU's share encoder on a share's capture thread,
+    /// if it has one (libva's state is kept to one thread, so the share
+    /// opens its own rather than borrowing this back end's).
+    fn share_gpu(&self) -> Option<crate::share::GpuOpener> {
+        None
+    }
 }
 
 /// One stream's decoder.

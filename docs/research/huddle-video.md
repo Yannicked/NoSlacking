@@ -1447,6 +1447,125 @@ shared memory would also cut the full-size decoding cost above. A
 faster shrink (a 2× special case) now pays in the helper. The software
 encoder is the next thing to move, behind the same `hardware` switch.
 
+### 6.10 Screen sharing in the helper (step 2 of "All video in the helper", 2026-10-07)
+
+The app no longer sees the screen it shares: capture, conversion,
+scaling and encoding moved into `noslacking-video`, and the app gets
+only H.264 access units. The app keeps the share's Chime session,
+RTP, pacing, keyframe requests, the bitrate and the interface.
+
+- **Protocol 4.** `ListSources` → `Sources{dialog, sources}` (dialog:
+  the system shows its own, nothing to list); `StartShare{choice
+  (System{again} | Source(id) | Test), hardware, bitrate, restore}` →
+  `ShareStarted{id, restore}` or `ShareProblem{Cancelled | Denied |
+  Unavailable | Gone | Ended | Failed, detail}`; `NextShareFrame{id,
+  force_keyframe, repeat, wait_ms ≤ 250}` → `ShareFrame{keyframe,
+  hardware, width, height, age_us, NAL units}` | `NoPicture` |
+  `ShareProblem`; `SetBitrate` and `Close` take a share's id. The app
+  checks every frame (a slice; an IDR with SPS and PPS when asked).
+- **Pull, not push.** The request/reply framing stays: the app's
+  sending thread asks a little under a frame's time after the last
+  picture's *capture*, and the helper waits (long poll) for the next
+  picture and encodes it as it arrives, so capture to access unit is
+  the encoding time, at 15 a second. A still screen is asked to
+  `repeat` once a second, keyframes every 4 s and on PLI/FIR, a new
+  rate at most once a second (in place on the GPU; software makes a
+  new encoder at most every 8 s, which costs an IDR).
+- **A lane of its own** (`helper::Lane::Screen`): the portal's dialog
+  keeps `StartShare` waiting for the user (timeout 5 minutes), and
+  nothing else should wait behind it.
+- **The capture thread is the pipeline's thread.** Each capture
+  (`capture/`) runs on a thread that also runs the share's
+  `Pipeline`: a dma-buf is only lent for the PipeWire callback, and
+  libva's state is kept to one thread, so the frame reaches the GPU
+  there. The GPU's share encoder opens its own VA display on that
+  thread.
+- **Linux, Wayland:** ashpd (portal) + PipeWire, behind the helper's
+  `pipewire` feature (off by default: it needs PipeWire's headers and
+  libclang; without it the helper shares X11 screens only and says it
+  cannot capture under Wayland). The stream offers BGRx/BGRA/RGBx/RGBA
+  as a **linear dma-buf** first (modifier `DRM_FORMAT_MOD_LINEAR`,
+  mandatory, don't-fixate), then in shared memory; with a GPU that
+  does video processing. The dma-buf is imported as a VA surface
+  (`VASurfaceAttribExternalBufferDescriptor`, `DRM_PRIME_2`), scaled
+  and converted to NV12 by video processing (sRGB full range → BT.601
+  studio) straight into the encoder's input surface, and encoded:
+  the processor never touches a pixel. Memory frames are written into
+  an RGB surface and converted the same way. If the GPU stops taking
+  dma-bufs the stream renegotiates memory only; a GPU that fails
+  encodes in software (720p) from then on. The restore token is kept
+  in the app for the run, so a restarted helper still has it.
+- **X11 without a portal:** x11rb in the helper; **macOS/Windows:** xcap
+  in the helper (built only in CI; the macOS Screen Recording
+  permission check moved with it).
+- **Source picking:** where the system has a dialog the helper drives
+  it; elsewhere the helper lists, the app's picker in the call bar
+  shows them, and `StartShare{Source(id)}` names the pick.
+- **No helper, no sharing:** pressing Share says "Could not share your
+  screen: screen sharing needs NoSlacking's video helper
+  (noslacking-video), which is missing or keeps failing". **A helper
+  that crashes while sharing ends the share** ("Your screen share
+  stopped: NoSlacking's video helper stopped") rather than restarting
+  it: a new capture may need the system's dialog again, and a crash in
+  capture or the driver would likely repeat; pressing Share starts a
+  fresh helper (restarted up to `MAX_RESTARTS` times, as for decoding).
+- **The app's tree** lost ashpd, pipewire, libspa, its bindgen and
+  libclang build, and xcap (x11rb and objc2-core-graphics stay, eframe's
+  through arboard). The app's capture code (portal, X11, xcap, the
+  BGRA conversion) is gone.
+
+**Measured** (this machine as §6.3, release; `examples/share.rs`, the
+test screen's 30 moving pictures made once and handed over as PipeWire
+would: BGRx in memory, or dma-bufs exported linearly from another VA
+display; 1920×1080 at 15 a second, 2.5 Mbit/s):
+
+| path | frame in → access unit | CPU a picture | CPU at 15/s |
+| --- | --- | --- | --- |
+| before (main): app copies and converts (0.65 ms) + I420 through the pipe, GPU encode (§6.8: 2.28 ms CPU) | ≈ 6.5 ms | ≈ 2.9 ms (app ≈ 1.2) | ≈ 4.4 % |
+| dma-buf → VA import → video processing → encode | 6.4 ms | **0.87 ms** | **1.3 %** |
+| BGRx in memory → RGB surface → video processing → encode | 9.1 ms | 3.3 ms | 5.0 % |
+| BGRx in memory → converted on the processor → NV12 → encode | 10.2 ms | 6.1 ms | 9.1 % |
+| BGRx in memory → software (shrunk to 720p) | 18.3 ms | 17.9 ms | 27 % |
+
+Through the helper as the app drives it (ten seconds each, CPU of the
+app's side and of the helper):
+
+| path | pictures/s | app | helper | capture → access unit in the app |
+| --- | --- | --- | --- | --- |
+| dma-buf, GPU | 15.0 | 0.1 % | 1.2–1.4 % | 6.4 ms (p95 8.1) |
+| memory, GPU | 15.0 | 0.1 % | 5.0 % | 9.0 ms (p95 9.9) |
+| memory, GPU, converted on the processor | 15.0 | 0.1 % | 9.7 % | 10.5 ms |
+| memory, software | 15.0 | 0.1 % | 27 % | 18.1 ms (p95 22.7) |
+
+So with dma-bufs a 1080p share costs about a third of what it did on
+main, and the app's own part goes from about 2 % of a core to nothing
+measurable. In shared memory the whole is about what main cost (8 MB
+of RGB into write-combined GPU memory is not cheaper than main's 3 MB
+of I420), but all of it is the helper's; converting on the GPU beats
+converting on the processor (3.3 against 6.1 ms), so that is the
+default. Software stays at 720p and about a quarter of a core.
+Quality: the GPU's conversion is within a mean of 1.3 (luma) and 2.8
+(chroma) of the processor's BT.601 one (ignored test
+`vaapi_shares_dmabufs_packed_and_i420_pictures`).
+
+**Tested here without anyone's screen:** the dma-buf path end to end
+(export, import, convert, encode, decode back); the PipeWire stream
+against a pretend video source in this machine's PipeWire (the
+dma-buf-then-memory offer settles on memory, frames encode, the
+source going away ends the share: ignored test
+`pipewire_hands_a_screen_to_the_share`); the helper program sharing
+its test screen; the app's sender against the helper's own code on a
+thread and against pretend helpers (pacing, PLI, a crash). Not tested:
+a real compositor's dma-bufs through the portal (GNOME and KDE should
+honour the linear modifier; a compositor that will not gives memory).
+
+**For step 3 (the camera):** the same shape fits: a capture thread
+that is the pipeline's thread, a pull of encoded frames, the app's
+gate. V4L2 and the Camera portal give dma-bufs too (PipeWire's camera
+nodes), so the import path is ready; the app's copies of the test
+pattern, `fit`/`scale` and the software encoder then go, with nokhwa
+and its libclang build.
+
 ## Sources
 - amazon-chime-sdk-js @ dea69d268c623ab2006169d3899981fea766fa8a (Apache-2.0), files as cited.
 - HuddleFM (AGPL, read only): `src_native-media_chime-link.ts`, `src_native-media_rtp.ts`, `src_native-media_signaling.ts`, `src_slack-huddle.ts`.
