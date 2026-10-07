@@ -77,7 +77,7 @@ fn numeric_message_id(id: &str) -> String {
 
 /// Logs why the chat service refused `what`, by its own error code and
 /// message (it does not echo what was sent), and answers the failure.
-async fn refused(resp: reqwest::Response, what: &str) -> Failure {
+pub(crate) async fn refused(resp: reqwest::Response, what: &str) -> Failure {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     let message = serde_json::from_str::<serde_json::Value>(&body)
@@ -567,6 +567,44 @@ impl TeamsClient {
             .send()
             .await
             .map_err(|e| Failure::Network(e.without_url().to_string()))
+    }
+
+    /// The HTTP client every request of this sign-in goes through, for the
+    /// call signalling, which sends its own headers.
+    pub(crate) fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    /// Sends a request with the skype token as it is, renewing the token
+    /// once on HTTP 401, but without the personal client's extra headers:
+    /// the calling services were recorded without them.
+    pub(crate) async fn plain_skype_request<F>(
+        &self,
+        make_request: F,
+    ) -> Result<reqwest::Response, Failure>
+    where
+        F: Fn(&reqwest::Client, &str) -> reqwest::RequestBuilder,
+    {
+        let send = |request: reqwest::RequestBuilder| async move {
+            request
+                .send()
+                .await
+                .map_err(|e| Failure::Network(e.without_url().to_string()))
+        };
+        let token = self
+            .ensure_fresh_tokens()
+            .await?
+            .skype_token
+            .filter(|t| !t.is_empty())
+            .ok_or(Failure::NoSavedSignIn)?;
+        let resp = send(make_request(&self.http, &token)).await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && let Ok(renewed) = self.force_refresh(&token).await
+            && let Some(new_token) = renewed.skype_token
+        {
+            return send(make_request(&self.http, &new_token)).await;
+        }
+        Ok(resp)
     }
 
     fn skype_token(&self) -> Result<String, Failure> {

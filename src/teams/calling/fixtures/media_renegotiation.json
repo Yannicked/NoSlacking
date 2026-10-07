@@ -1,0 +1,21 @@
+{
+  "mediaNegotiation": {
+    "sender": null,
+    "mediaContent": {
+      "contentType": "application/sdp",
+      "blob": "v=0 (an SDP, left out of the fixture)",
+      "mediaLegId": "00000000000000000000000000000002",
+      "escalationOccurring": false,
+      "newOffer": false,
+      "clientLocation": "NL"
+    },
+    "callModalities": [
+      "audio"
+    ],
+    "links": {
+      "mediaAnswer": "https://fp.example/api/v2/cp/cc.example/cc/v1/negotiations/00000000-0000-4000-8000-000000000008/13/t/1543/answer?i=192-0-2-1",
+      "rejection": "https://fp.example/api/v2/cp/cc.example/cc/v1/negotiations/00000000-0000-4000-8000-000000000008/13/t/1543/reject?i=192-0-2-1"
+    }
+  },
+  "debugContent": null
+}

@@ -138,6 +138,13 @@ pub enum Failure {
     Unsupported,
     /// The manual proxy's URL cannot be used.
     BadProxy,
+    /// The person called declined the call, or was busy.
+    CallDeclined,
+    /// Nobody answered the call.
+    CallNotAnswered,
+    /// A call failed; the detail is Microsoft's own phrase (English) or
+    /// its code.
+    CallFailed(String),
     /// Listening to a huddle failed at this step; the technical detail
     /// went to the log.
     Huddle(HuddleTrouble),
@@ -292,6 +299,11 @@ impl Failure {
             Self::NoInvitee => t("name someone to invite with @"),
             Self::Unsupported => t("Microsoft Teams workspaces cannot do that here yet"),
             Self::BadProxy => t("the proxy URL cannot be used; check it in Settings"),
+            Self::CallDeclined => t("the call was declined"),
+            Self::CallNotAnswered => t("nobody answered the call"),
+            Self::CallFailed(detail) => {
+                return fill(&t("the call failed: {detail}"), &[("detail", detail)]);
+            }
             Self::Huddle(trouble) => match trouble {
                 HuddleTrouble::NoSound => t("the sound device could not be opened"),
                 HuddleTrouble::Signaling => t("the huddle's server could not be reached"),
@@ -602,6 +614,9 @@ mod tests {
             Failure::NoInvitee,
             Failure::Unsupported,
             Failure::BadProxy,
+            Failure::CallDeclined,
+            Failure::CallNotAnswered,
+            Failure::CallFailed("ServiceUnavailable".into()),
             Failure::Huddle(HuddleTrouble::NoSound),
             Failure::Huddle(HuddleTrouble::Signaling),
             Failure::Huddle(HuddleTrouble::Join),

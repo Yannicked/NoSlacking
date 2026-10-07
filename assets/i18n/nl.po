@@ -2591,6 +2591,15 @@ msgstr "De huddle verlaten"
 msgid "the sound device could not be opened"
 msgstr "het geluidsapparaat kon niet worden geopend"
 
+msgid "the call was declined"
+msgstr "de oproep werd geweigerd"
+
+msgid "nobody answered the call"
+msgstr "niemand nam de oproep aan"
+
+msgid "the call failed: {detail}"
+msgstr "de oproep is mislukt: {detail}"
+
 msgid "the huddle's server could not be reached"
 msgstr "de server van de huddle was niet bereikbaar"
 
