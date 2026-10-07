@@ -1220,9 +1220,15 @@ impl TeamsClient {
         fresh: bool,
     ) -> Result<reqwest::Response, Failure> {
         let cookie = self.media_cookie(host, fresh).await?;
+        // As the web client's page asks for a picture.
         self.http
             .get(url)
             .header(reqwest::header::COOKIE, cookie)
+            .header(
+                reqwest::header::ACCEPT,
+                "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            )
+            .header(reqwest::header::REFERER, format!("{PERSONAL_ORIGIN}/v2/"))
             .send()
             .await
             .map_err(|e| Failure::Network(e.without_url().to_string()))
@@ -1263,24 +1269,58 @@ impl TeamsClient {
                 .trim_end_matches('/')
                 .to_owned();
             let url = format!("{base}/beta/imageauth/cookie");
-            // The middle tier sets its cookie only for a request that
-            // says which site it comes from, as a browser's always does.
-            self.bearer(RESOURCE_MT_PERSONAL, |http, token| {
-                crate::teams::auth::consumer_headers(
-                    http.post(&url)
-                        .bearer_auth(token)
-                        .header("x-skypetoken", &skype)
-                        .header(reqwest::header::ORIGIN, PERSONAL_ORIGIN)
-                        .header(reqwest::header::REFERER, format!("{PERSONAL_ORIGIN}/"))
-                        .header(reqwest::header::CONTENT_LENGTH, "0"),
-                )
-            })
-            .await?
+            if fresh {
+                // Asked again after a refusal: as the web client asks
+                // (recorded), by the skype token alone, as a form from its
+                // page.
+                self.http
+                    .post(&url)
+                    .header("x-skypetoken", &skype)
+                    .header("x-ms-client-type", "web")
+                    .header(reqwest::header::ACCEPT, "*/*")
+                    .header(
+                        reqwest::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .header(reqwest::header::ORIGIN, PERSONAL_ORIGIN)
+                    .header(reqwest::header::REFERER, format!("{PERSONAL_ORIGIN}/v2/"))
+                    .header(reqwest::header::CONTENT_LENGTH, "0")
+                    .send()
+                    .await
+                    .map_err(|e| Failure::Network(e.without_url().to_string()))?
+            } else {
+                // The middle tier sets its cookie only for a request that
+                // says which site it comes from, as a browser's always does.
+                self.bearer(RESOURCE_MT_PERSONAL, |http, token| {
+                    crate::teams::auth::consumer_headers(
+                        http.post(&url)
+                            .bearer_auth(token)
+                            .header("x-skypetoken", &skype)
+                            .header(reqwest::header::ORIGIN, PERSONAL_ORIGIN)
+                            .header(reqwest::header::REFERER, format!("{PERSONAL_ORIGIN}/"))
+                            .header(reqwest::header::CONTENT_LENGTH, "0"),
+                    )
+                })
+                .await?
+            }
         };
         if !resp.status().is_success() {
             return Err(refused(resp, "sign in for pictures").await);
         }
         let cookie = cookies_of(resp.headers());
+        // Which cookies came, by name: their values are the sign-in.
+        let names: Vec<&str> = cookie
+            .split("; ")
+            .filter_map(|pair| pair.split_once('=').map(|(name, _)| name))
+            .collect();
+        log::info!(
+            "Teams cookies for pictures at {host}{}: {names:?}",
+            if fresh {
+                ", asked as the web client asks"
+            } else {
+                ""
+            }
+        );
         if cookie.is_empty() {
             return Err(Failure::Unexpected("no cookie for pictures".into()));
         }
