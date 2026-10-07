@@ -1,0 +1,137 @@
+v=0
+o=- 0 0 IN IP4 198.51.100.15
+s=session
+c=IN IP4 198.51.100.15
+b=CT:4000
+t=0 0
+a=x-mediabw:main-video send=12000;recv=12000
+a=group:BUNDLE audio_0 video_1
+m=audio 3480 RTP/SAVP 109 108 104 102 9 111 18 0 8 103 97 13 118 117 120 101
+a=x-ssrc-range:33015-33015
+a=rtcp-fb:* x-message app send:dsh,x-gain recv:dsh,x-gain
+a=rtcp-fb:* nack
+a=rtcp-fb:* transport-cc
+a=rtcp-rsize
+a=label:main-audio
+a=x-source:main-audio
+a=ice-ufrag:uf04
+a=ice-pwd:placeholder-ice-pwd-0004
+a=candidate:10 1 UDP 1258286591 198.51.100.15 3480 typ relay raddr 203.0.113.10 rport 31170 MTURNID 7951292989021428913
+a=candidate:10 2 UDP 1258286078 198.51.100.15 3481 typ relay raddr 203.0.113.10 rport 31171 MTURNID 5089539333798421560
+a=x-candidate-info:10 network-type=wlan
+a=candidate:7 1 UDP 2130703359 192.0.2.142 31170 typ host
+a=candidate:7 2 UDP 2130702846 192.0.2.142 31171 typ host
+a=x-candidate-info:7 network-type=wlan
+a=candidate:3 1 TCP-ACT 2121005566 192.0.2.142 1024 typ host
+a=candidate:3 2 TCP-ACT 2121005566 192.0.2.142 1024 typ host
+a=x-candidate-info:3 network-type=wlan
+a=candidate:9 1 UDP 1694494719 203.0.113.10 31170 typ srflx raddr 192.0.2.142 rport 31170
+a=candidate:9 2 UDP 1694494206 203.0.113.10 31171 typ srflx raddr 192.0.2.142 rport 31171
+a=x-candidate-info:9 network-type=wlan
+a=candidate:11 1 TCP-ACT 1684793854 203.0.113.10 27598 typ srflx raddr 192.0.2.142 rport 27598
+a=candidate:11 2 TCP-ACT 1684793854 203.0.113.10 27598 typ srflx raddr 192.0.2.142 rport 27598
+a=x-candidate-info:11 network-type=wlan
+a=candidate:12 1 TCP-PASS 1248192510 198.51.100.16 52598 typ relay raddr 203.0.113.10 rport 27598
+a=candidate:12 2 TCP-PASS 1248192510 198.51.100.16 52598 typ relay raddr 203.0.113.10 rport 27598
+a=x-candidate-info:12 network-type=wlan
+a=candidate:13 1 TCP-ACT 1248585214 198.51.100.16 52598 typ relay raddr 203.0.113.10 rport 27598
+a=candidate:13 2 TCP-ACT 1248585214 198.51.100.16 52598 typ relay raddr 203.0.113.10 rport 27598
+a=x-candidate-info:13 network-type=wlan
+a=crypto:1 AES_CM_128_HMAC_SHA1_32 inline:PLACEHOLDERSDESKEYPLACEHOLDERSDESKEY|2^31
+a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:PLACEHOLDERSDESKEYPLACEHOLDERSDESKEY|2^31
+a=crypto:3 AES_CM_128_HMAC_SHA1_80 inline:PLACEHOLDERSDESKEYPLACEHOLDERSDESKEY|2^31|1:1
+a=crypto:4 AEAD_AES_256_GCM inline:PLACEHOLDERSDESKEYPLACEHOLDERSDESKEY|2^31
+a=crypto:5 AEAD_AES_256_GCM inline:PLACEHOLDERSDESKEYPLACEHOLDERSDESKEY|2^31|1:1
+a=fingerprint:sha-256 04:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:EE:FF:00
+a=maxptime:200
+a=rtcp:3481
+a=mid:audio_0
+a=rtpmap:109 SATINFB/48000/2
+a=rtpmap:108 SATIN/48000
+a=rtpmap:104 SILK/16000
+a=fmtp:104 useinbandfec=0; usedtx=0
+a=rtpmap:102 opus/48000/2
+a=fmtp:102 maxplaybackrate=16000; sprop-maxcapturerate=16000; useinbandfec=1; usedtx=1; minptime=10
+a=rtpmap:9 G722/8000
+a=rtpmap:111 SIREN/16000
+a=fmtp:111 bitrate=16000
+a=rtpmap:18 G729/8000
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:103 SILK/8000
+a=fmtp:103 useinbandfec=0; usedtx=0
+a=rtpmap:97 RED/8000
+a=rtpmap:13 CN/8000
+a=rtpmap:118 CN/16000
+a=rtpmap:117 CN/24000
+a=rtpmap:120 CN/48000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+a=rtcp-mux
+a=ptime:20
+a=extmap:1 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+a=extmap:3 http:\\skype.com\experiments\rtp-hdrext\fast_bandwidth_feedback#version_3
+a=x-bwealgorithm:rmestimator bwc packetpair webrtc
+m=video 3480 RTP/SAVP 119 100 122 125 107 99 114 115 123
+c=IN IP4 198.51.100.17
+a=x-ssrc-range:33016-33115
+a=ssrc-group:FID 33016 33066
+a=rtcp-fb:* x-message app send:src,x-pli recv:src,x-pli
+a=rtcp-fb:* nack
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* goog-remb
+a=rtcp-fb:* transport-cc
+a=rtcp-rsize
+a=label:main-video
+a=x-source:main-video
+a=ice-ufrag:uf05
+a=ice-pwd:placeholder-ice-pwd-0005
+a=candidate:10 1 UDP 1258286591 198.51.100.17 3480 typ relay raddr 203.0.113.10 rport 40100 MTURNID 2802013195229526119
+a=candidate:10 2 UDP 1258286078 198.51.100.17 3481 typ relay raddr 203.0.113.10 rport 40101 MTURNID 11906226456633012402
+a=x-candidate-info:10 network-type=wlan
+a=candidate:7 1 UDP 2130703359 192.0.2.142 40100 typ host
+a=candidate:7 2 UDP 2130702846 192.0.2.142 40101 typ host
+a=x-candidate-info:7 network-type=wlan
+a=candidate:3 1 TCP-ACT 2121005566 192.0.2.142 1024 typ host
+a=candidate:3 2 TCP-ACT 2121005566 192.0.2.142 1024 typ host
+a=x-candidate-info:3 network-type=wlan
+a=candidate:9 1 UDP 1694494719 203.0.113.10 40100 typ srflx raddr 192.0.2.142 rport 40100
+a=candidate:9 2 UDP 1694494206 203.0.113.10 40101 typ srflx raddr 192.0.2.142 rport 40101
+a=x-candidate-info:9 network-type=wlan
+a=candidate:11 1 TCP-ACT 1684793854 203.0.113.10 28835 typ srflx raddr 192.0.2.142 rport 28835
+a=candidate:11 2 TCP-ACT 1684793854 203.0.113.10 28835 typ srflx raddr 192.0.2.142 rport 28835
+a=x-candidate-info:11 network-type=wlan
+a=candidate:12 1 TCP-PASS 1248192510 198.51.100.17 52413 typ relay raddr 203.0.113.10 rport 28835
+a=candidate:12 2 TCP-PASS 1248192510 198.51.100.17 52413 typ relay raddr 203.0.113.10 rport 28835
+a=x-candidate-info:12 network-type=wlan
+a=candidate:13 1 TCP-ACT 1248585214 198.51.100.17 52413 typ relay raddr 203.0.113.10 rport 28835
+a=candidate:13 2 TCP-ACT 1248585214 198.51.100.17 52413 typ relay raddr 203.0.113.10 rport 28835
+a=x-candidate-info:13 network-type=wlan
+a=crypto:1 AES_CM_128_HMAC_SHA1_32 inline:PLACEHOLDERSDESKEYPLACEHOLDERSDESKEY|2^31
+a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:PLACEHOLDERSDESKEYPLACEHOLDERSDESKEY|2^31
+a=crypto:3 AES_CM_128_HMAC_SHA1_80 inline:PLACEHOLDERSDESKEYPLACEHOLDERSDESKEY|2^31|1:1
+a=crypto:4 AEAD_AES_256_GCM inline:PLACEHOLDERSDESKEYPLACEHOLDERSDESKEY|2^31
+a=crypto:5 AEAD_AES_256_GCM inline:PLACEHOLDERSDESKEYPLACEHOLDERSDESKEY|2^31|1:1
+a=fingerprint:sha-256 04:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:AA:BB:CC:DD:EE:FF:00
+a=rtcp:3481
+a=mid:video_1
+a=rtpmap:119 X-MSAV1/90000
+a=rtpmap:100 rtx/90000
+a=fmtp:100 apt=119
+a=rtpmap:122 X-H264UC/90000
+a=fmtp:122 packetization-mode=1;mst-mode=NI-TC
+a=rtpmap:125 rtx/90000
+a=fmtp:125 apt=122
+a=rtpmap:107 H264/90000
+a=fmtp:107 profile-level-id=42C02A;packetization-mode=1;max-mbps=3600;max-fs=240;max-br=208;max-fps=1500
+a=rtpmap:99 rtx/90000
+a=fmtp:99 apt=107
+a=rtpmap:114 H265v2/90000
+a=rtpmap:115 rtx/90000
+a=fmtp:115 apt=114
+a=rtpmap:123 x-ulpfecuc/90000
+a=rtcp-mux
+a=extmap:1 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+a=extmap:2 http:\\skype.com\experiments\rtp-hdrext\frame-counters
+a=extmap:3 http:\\skype.com\experiments\rtp-hdrext\fast_bandwidth_feedback#version_3
+a=x-bwealgorithm:rmestimator bwc packetpair webrtc
