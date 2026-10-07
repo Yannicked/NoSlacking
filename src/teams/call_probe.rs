@@ -137,6 +137,9 @@ async fn probe(options: &Options, handle: tokio::runtime::Handle) -> i32 {
                     flowing = true;
                     log::info!("teams call probe: audio flows both ways");
                 }
+                Some(CallEvent::FarEndMuted(muted)) => {
+                    log::info!("teams call probe: the far end {}", if muted { "muted" } else { "unmuted" });
+                }
                 Some(CallEvent::Ended { result, counts }) => {
                     log::info!(
                         "teams call probe: summary: packets in {} out {}, audio frames in {} out {}",

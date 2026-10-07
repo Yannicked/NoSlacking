@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use super::api::{CallApi, CallIds, own_participant, relay_credentials, relay_servers};
 use super::codes::{self, Ending};
 use super::media::{self, Audio, MediaConfig, MediaEvent, MediaSession, Relay};
-use super::types::{CpconvAnswer, Push};
+use super::types::{CpconvAnswer, Push, RosterUpdate};
 use super::{LocalMedia, RemoteMedia, sdp};
 use crate::failure::Failure;
 use crate::teams::client::TeamsClient;
@@ -41,6 +41,8 @@ pub enum CallEvent {
     Live,
     /// The media is connected and audio flows both ways.
     AudioFlowing,
+    /// The one called muted (`true`) or unmuted their microphone.
+    FarEndMuted(bool),
     /// The call is over: normally (`Ok`) or because something failed.
     Ended {
         result: Result<(), Failure>,
@@ -138,6 +140,11 @@ struct Call {
     /// Where and how often to say the call leg is still here, once
     /// picked up.
     keep_alive: Option<KeepAlive>,
+    /// The one called, as the roster names them.
+    callee: String,
+    /// What the roster last said of them: its version, and whether
+    /// they were muted.
+    far_end: Option<(u64, bool)>,
 }
 
 /// The call leg's keep-alive: its link, and when it is next due.
@@ -151,6 +158,20 @@ struct KeepAlive {
 /// nine tenths of it, as the web client does.
 fn keep_alive_every(interval_secs: u64) -> Duration {
     Duration::from_secs(interval_secs.max(1)) * 9 / 10
+}
+
+/// What `update` says of `callee`: its version and whether they are
+/// muted, when it names them in a version no older than `last`'s. A
+/// roster is a delta: one that leaves them out says nothing of them.
+fn far_end(update: &RosterUpdate, callee: &str, last: Option<(u64, bool)>) -> Option<(u64, bool)> {
+    let (_, them) = update
+        .participants
+        .iter()
+        .find(|(mri, _)| mri.eq_ignore_ascii_case(callee))?;
+    if last.is_some_and(|(version, _)| them.version < version) {
+        return None;
+    }
+    Some((them.version, them.is_muted()))
 }
 
 /// Waits until the keep-alive is due; never while there is none.
@@ -169,6 +190,8 @@ impl Call {
             accepted: false,
             connected: false,
             keep_alive: None,
+            callee: String::new(),
+            far_end: None,
         }
     }
 
@@ -181,6 +204,7 @@ impl Call {
         control: &mut mpsc::UnboundedReceiver<Control>,
         tell: &(impl Fn(CallEvent) + Send),
     ) -> Result<(), Failure> {
+        self.callee = callee.to_owned();
         let offer = sdp::offer(local);
         self.conversation = Some(self.api.create_call(callee, &offer).await?);
         log::info!("Teams call: placed, ringing");
@@ -316,10 +340,28 @@ impl Call {
                     Ending::Failed(failure) => Err(failure),
                 });
             }
-            Push::RosterUpdate(_) => {}
+            Push::RosterUpdate(update) => {
+                if let Some(muted) = self.far_end_change(&update) {
+                    log::info!(
+                        "Teams call: the far end is {}",
+                        if muted { "muted" } else { "unmuted" }
+                    );
+                    tell(CallEvent::FarEndMuted(muted));
+                }
+            }
             Push::Other(name) => log::debug!("Teams call: push {name} not acted on"),
         }
         None
+    }
+
+    /// Whether the far end's mute changed with `update`: answers the new
+    /// state.
+    fn far_end_change(&mut self, update: &RosterUpdate) -> Option<bool> {
+        let was = self.far_end.map(|(_, muted)| muted);
+        self.far_end = Some(far_end(update, &self.callee, self.far_end)?);
+        let muted = self.far_end.is_some_and(|(_, muted)| muted);
+        // Unmuted is what the bar shows until told otherwise.
+        (was.unwrap_or(false) != muted).then_some(muted)
     }
 
     /// Says the call leg is still here, and when to say it next.
@@ -397,6 +439,20 @@ fn media_failure(failure: media::Failure) -> Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn muted_roster() -> RosterUpdate {
+        serde_json::from_str(include_str!("fixtures/roster_update_muted.json")).expect("reads")
+    }
+
+    #[test]
+    fn the_roster_says_whether_the_far_end_is_muted() {
+        let update = muted_roster();
+        assert_eq!(far_end(&update, "8:live:me", None), Some((4, true)));
+        assert_eq!(far_end(&update, "8:LIVE:ME", None), Some((4, true)));
+        // Someone the delta leaves out, and an older version, say nothing.
+        assert_eq!(far_end(&update, "8:live:ana", None), None);
+        assert_eq!(far_end(&update, "8:live:me", Some((5, false))), None);
+    }
 
     #[test]
     fn the_keep_alive_goes_a_little_before_it_runs_out() {

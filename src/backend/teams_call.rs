@@ -106,15 +106,15 @@ struct Place {
     callee: String,
 }
 
-/// Who is in a call with `callee`: you and them. The far end's mute and
-/// speaking are not known; the bar shows them as there.
-fn roster(callee: &str) -> Roster {
+/// Who is in a call with `callee`: you and them, `muted` as the far end
+/// last said. Who speaks is not known.
+fn roster(callee: &str, muted: bool) -> Roster {
     Roster {
         people: vec![
             Person {
                 user: Some(callee.to_owned()),
                 me: false,
-                muted: false,
+                muted,
                 speaking: false,
             },
             Person {
@@ -161,7 +161,7 @@ async fn run(
         }
     };
     tell(Listen::Joining);
-    tell(Listen::Roster(roster(&callee)));
+    tell(Listen::Roster(roster(&callee, false)));
     let tap = RenderTap::default();
     let speaker_tap = tap.clone();
     let (speaker, feed) =
@@ -213,10 +213,12 @@ async fn run(
     let ended: Arc<Mutex<Option<Result<(), Failure>>>> = Arc::default();
     let slot = ended.clone();
     let told = tell.clone();
+    let them = callee.clone();
     outgoing(client, callee, audio, controls, move |event| match event {
         CallEvent::Ringing => told(Listen::Ringing),
         CallEvent::Live => told(Listen::Live),
         CallEvent::AudioFlowing => {}
+        CallEvent::FarEndMuted(muted) => told(Listen::Roster(roster(&them, muted))),
         CallEvent::Ended { result, .. } => {
             if let Ok(mut slot) = slot.lock() {
                 *slot = Some(result);
@@ -242,10 +244,11 @@ mod tests {
 
     #[test]
     fn a_call_is_you_and_the_one_you_rang() {
-        let roster = roster("8:live:ana");
+        let roster = roster("8:live:ana", true);
         assert_eq!(roster.people.len(), 2);
         assert!(!roster.alone());
         assert_eq!(roster.people[0].user.as_deref(), Some("8:live:ana"));
+        assert!(roster.people[0].muted);
         assert!(roster.people[1].me);
     }
 
