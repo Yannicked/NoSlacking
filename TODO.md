@@ -1115,22 +1115,31 @@ engineering, as for the rest of the session sign-in.
           after a 1 s timeout, restarts it at most 3 times, and decodes
           in software for anything it cannot do, asking for a keyframe
           when it switches. Settings → Huddles → "Decode video on the
-          graphics card", on by default. Linux back end: VA-API, libva
+          graphics card", off by default (see below). Linux back end: VA-API, libva
           opened at run time (no build dependency), our own H.264
           stateless state over cros-codecs' parser; bit-exact on both
           fixtures. Ships in the tar.gz, .deb (recommends libva2 and a
           driver), .rpm (suggests libva), Flatpak, the macOS bundle and
           the Windows zip; elsewhere than Linux it reports no hardware.
-        - [ ] **Make the GPU path pay.** Measured here (Ryzen AI 7 350):
-              rusty_h264 decodes the 1080p fixture in 2.1 ms a frame;
-              VA-API takes 3.0 ms in process (1.8 decode, 1.3 copying
-              the surface back) and 3.9 ms through the helper, and the
-              pipe's copies cost more CPU than software decoding does.
-              Next: send the window's shrink factor with `Decode` so the
-              helper returns only what is shown (a quarter of the bytes
-              at half size), then a shared-memory picture (memfd or
-              /dev/shm, read with `pread` by the app), then measure on a
-              weak laptop before deciding the default.
+        - Done: **the GPU path pays where pictures are shown smaller.**
+          Protocol 2's `SetOutputSize`: the helper scales each picture
+          on the GPU (VA-API video processing) to the size shown before
+          copying it back, or shrinks it on its CPU without video
+          processing. Here (Ryzen AI 7 350, research doc §6.3): a 1080p
+          share shown 960 wide takes 0.7 ms of CPU a frame against
+          software's 4.4, a camera in a 240 tile 0.17 against 0.85; at
+          full size software still wins (1.8 against 2.5). Off by
+          default for now (decided with the user); the numbers say to
+          turn it on.
+        - [ ] Turn GPU decoding on by default, after a look on a weaker
+              laptop and an Intel GPU.
+        - [ ] Pipeline the helper's requests (or a helper per decoding
+              thread): the share's and the cameras' threads wait for
+              each other's replies (in the demo a camera picture took
+              3.1 ms through the helper against 1.35 in software).
+        - [ ] A faster whole-step shrink in the app: halving a 1080p
+              picture costs 2.7 ms, more than decoding it (a 2× special
+              case, or the `yuv` crate's SIMD scaler).
         - [ ] **VA-API encoding** (640×480@30, CBR ~1.8 Mbit/s, IDR on
               request): `VAEntrypointEncSlice(LP)`, packed SPS/PPS/slice
               headers (cros-codecs' `nalu_writer`/`synthesizer` without

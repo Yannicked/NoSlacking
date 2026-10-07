@@ -32,8 +32,10 @@ copied. Line refs are `file:line` at those commits.
 - **Hardware decoding (§6, 2026-10-07):** a helper process,
   `noslacking-video`, decodes H.264 with VA-API on Linux, bit-exact,
   with software as the fallback for anything it cannot do or any crash.
-  On this machine the GPU path is not yet faster than rusty_h264 (the
-  copy back and the pipe cost more than they save); Vulkan Video, V4L2,
+  Pictures are scaled on the GPU to the size shown before they are
+  copied back: for a share shown at half size that is 6 times less CPU
+  than software; at full size software still wins. Off by default for
+  now. Vulkan Video, V4L2,
   VideoToolbox and Media Foundation are planned behind the same trait.
 - **Plan**: probe (days) → receive screen shares (2–3 wk) → camera tiles
   (2–3 wk) → send camera (3–5 wk) → share screen (3–5 wk, Wayland the
@@ -866,14 +868,14 @@ and nowhere in the app.
   the timeout (5 s for the hello, which opens the GPU; 1 s per frame).
   Its stderr goes to the app's debug log. It exits when its stdin
   closes, which happens when the app drops it or exits.
-- **Protocol (version 1).** Each frame is `u32` length, `u32` sequence
+- **Protocol (version 2; §6.2 for what 2 added).** Each frame is `u32` length, `u32` sequence
   number (the reply repeats it), a tag and fields, little-endian; byte
   strings carry a `u32` length; frames over 32 MiB and pictures over
   4096 a side are refused before anything is allocated. `Hello{magic,
   version}` → `Welcome{version, backend, capabilities[codec, decode |
   encode, max size]}`; `OpenDecoder{codec, size hint}` → `Opened{id}`;
   `Decode{id, keyframe, Annex B frame}` → `Picture{I420 planes}` |
-  `NoPicture` | `Failed{kind, detail}`; `Close{id}`; and for later
+  `NoPicture` | `Failed{kind, detail}`; `SetOutputSize{id, box}`; `Close{id}`; and for later
   `OpenEncoder{size, fps, bitrate}`, `Encode{id, force keyframe, I420}`
   → `Encoded{keyframe, NALs}`, `SetBitrate`. Failure kinds say what the
   app does next: `NeedKeyframe`, `Broken` (wait for a keyframe),
@@ -896,9 +898,10 @@ and nowhere in the app.
   interlace, a profile the driver lacks) and a GPU failure on a keyframe
   keep that stream in software without counting against the helper.
 - **Setting.** Settings → Huddles → "Decode video on the graphics card"
-  (`hardware_video`, on by default), for streams that start afterwards.
+  (`hardware_video`), for streams that start afterwards; off by default
+  until the measurements say otherwise (§6.3).
 
-### 6.2 Moving pictures: pipe, not shared memory (yet)
+### 6.2 Moving pictures: the pipe, carrying only what is shown
 
 A 1080p I420 picture is 3.1 MB. Measured on this machine (Ryzen AI 7
 350, Radeon 860M, Fedora 44, release build): a framed 1080p picture
@@ -913,39 +916,96 @@ changes brought it to 3.9 ms:
 | planes written and read straight from and into their vectors | 3.9 ms |
 
 So the pipe now costs about 0.9 ms of latency a 1080p frame (nothing
-measurable at 480×480), well inside a frame's 83 ms at 12 fps. It does
-cost CPU in the kernel, though (below), which is what shared memory
-would save: a memfd (or a file in `/dev/shm`) the helper maps and the
-app reads with `pread` (the app cannot `mmap` without `unsafe`), which
-saves one copy and the pipe's wake-ups. Cheaper still, and next: let
-`Decode` carry the app's shrink factor (`decode::reduction`) so the
-helper sends only what the window shows; a 1080p share in a half-size
-window is a quarter of the bytes.
+measurable at 480×480), well inside a frame's 83 ms at 12 fps, but CPU
+in the kernel too. Decided (2026-10-07): keep the pipe, no shared
+memory, and send less: the helper shrinks each picture **on the GPU**
+to the size the app shows it at, before reading it back, so both the
+copy back and the pipe carry only that (§6.3).
+
+- **Protocol 2** adds `SetOutputSize{id, width, height}`: the box the
+  pictures should cover (0×0: their own size). The app sends it when
+  the shown size changes (the call window's share; a camera tile's
+  size, already in 32 px steps), not with every frame. The size is
+  `noslacking_video_ipc::output_size`: scaled by the larger of the two
+  ratios so it still covers the box both ways, the aspect ratio kept,
+  never larger than the source, even each way. Version 1 and 2 do not
+  mix; app and helper ship together, and a mismatch means software.
+- **Scaling on the GPU:** VA-API video processing
+  (`VAProfileNone`/`VAEntrypointVideoProc`, one context per stream,
+  made on first need), a `VAProcPipelineParameterBuffer` scaling the
+  decoded surface's visible region into an NV12 output surface (a pool
+  of four, by size), BT.601 studio range in and out, the default
+  scaling filter. radeonsi offers it (`vaQueryVideoProcPipelineCaps`:
+  no special pipeline or filter flags, outputs from 16 to 10240 wide).
+  The small surface is read back as before (`vaDeriveImage`, else
+  `vaGetImage`). The structure's size and offsets (224 bytes, five
+  padding holes written out) are clang-checked in tests like the rest.
+  The scaled pictures are within a mean difference of 0.07 (share at
+  960×540) and 0.23 (camera at 240×240) of the software decoder's,
+  ffmpeg-exact, pictures shrunk on the CPU (ignored GPU test).
+- **Without video processing** (a driver that lacks it, or a failure),
+  the helper shrinks on its CPU by a whole step (`shrink.rs`, the app's
+  box filter), so the pipe still carries the small picture.
+- **The app** shrinks nothing more: a picture that already covers the
+  shown size gives `decode::reduction` 1. The software path shrinks as
+  before.
 
 ### 6.3 Measurements (this machine, release)
 
-| | 1080p share (36 frames ×10) | 480×480 camera (66 ×10) |
-| --- | --- | --- |
-| software, rusty_h264 | 2.0–2.2 ms a frame | 0.35–0.40 ms |
-| VA-API in process (decode + read back) | 3.0 ms (1.8 decode + 1.3 read back) | 0.87 ms (0.6 + 0.3) |
-| VA-API through the helper | 3.9 ms | 0.9 ms |
+Ryzen AI 7 350, Radeon 860M, Fedora 44, Mesa 26.2.3. `examples/bench.rs`:
+each fixture ten times, one frame at a time. "CPU" is user + system time
+of the bench and the helper together, from /proc, per frame; software is
+the app's path (rusty_h264, then its whole-step shrink).
 
-CPU for the whole run (both fixtures): software 0.94 s; VA-API in
-process 0.54 s (0.36 user, 0.18 system, including opening the driver);
-through the helper 1.19 s (0.41 user, 0.78 system: pipe copies and page
-faults on fresh planes). Decoding is bit-exact with ffmpeg on both
-fixtures (the same hashes as the software decoder's test). Reading the
-surface back with `vaDeriveImage` and a mapped copy took 1.35 ms a
-1080p frame against 2.6 ms through `vaCreateImage` + `vaGetImage`, so
-derive is used and `vaGetImage` is the fallback. rusty_h264 is fast
-here (a recent 8-core with AVX2); on a weak laptop the software numbers
-grow and the GPU's do not. **Honest result:** on this machine hardware
-decoding saves CPU only in process, and through the pipe it costs more
-than software until the shrink above (or shared memory) lands; the
-setting is on by default as asked, but the default should be revisited
-with those, or measured on a weaker machine first. The real win, a
-decoded surface shown as a GL texture with no copy back (dmabuf), needs
-`unsafe` GL in the app or eframe on wgpu.
+| 1080p share (36 frames) | wall | CPU |
+| --- | --- | --- |
+| full size: software | 1.8 ms | 1.8 ms |
+| full size: helper, GPU | 3.7 ms | 2.5 ms |
+| shown 960 wide: software (decode + shrink) | 4.5 ms | 4.4 ms |
+| shown 960 wide: helper, scaled on the GPU | **1.8 ms** | **0.7 ms** |
+| shown 960 wide: helper, shrunk on its CPU | 6.2 ms | 4.6 ms |
+| shown 640 wide: software | 4.0 ms | 4.0 ms |
+| shown 640 wide: helper, scaled on the GPU | **1.4 ms** | **0.5 ms** |
+| shown 640 wide: helper, shrunk on its CPU | 4.4 ms | 2.8 ms |
+
+| 480×480 camera (66 frames) | wall | CPU |
+| --- | --- | --- |
+| full size: software | 0.43 ms | 0.42 ms |
+| full size: helper, GPU | 0.76 ms | 0.33 ms |
+| 240 tile: software | 0.85 ms | 0.85 ms |
+| 240 tile: helper, scaled on the GPU | **0.64 ms** | **0.17 ms** |
+| 240 tile: helper, shrunk on its CPU | 1.15 ms | 0.55 ms |
+
+On the GPU in the bench's own process (no pipe) the 960-wide share is
+1.4 ms and 0.36 ms of CPU, so the pipe now adds little. Before the
+shrink (first version of this section) the helper cost 3.9 ms a 1080p
+frame against software's 2.1 ms. Two surprises: the app's whole-step
+shrink costs more than decoding (2.7 ms to halve a 1080p picture, a
+plain per-pixel box filter); a faster one (a 2× special case, SIMD)
+would narrow the gap for software too. And at full size, where nothing
+is shrunk, software still wins on this machine.
+
+The demo (`NOSLACKING_DEMO_HARDWARE_VIDEO=1 noslacking --demo
+--demo-view call-window`, under Xvfb at 1600×1000: the 1080p share
+shown at about 1624×914 and four cameras in 352 px tiles), CPU of the
+decoding threads (and the helper) over 20 s: software 2.73 s (14 % of a
+core), GPU 0.64 s in the app + 1.54 s in the helper = 2.18 s (11 %). In
+that window the share is shrunk only a little, so the gain is small;
+and each picture took longer (7.6–9.5 ms against 5.7–6.1 ms for the
+share, 3.1–3.7 ms against 1.35 ms for a camera) because the share's and
+the cameras' threads share one helper and wait for each other's
+replies. Pipelining requests, or a helper per decoding thread, would
+remove the wait.
+
+Decoding is bit-exact with ffmpeg on both fixtures at full size.
+Reading back with `vaDeriveImage` takes 1.35 ms a 1080p frame against
+2.6 ms with `vaGetImage`. **Decision:** the setting is off by default
+for now. On these numbers it should be turned on: where the picture is
+shown smaller than it is (most windows and every camera tile) it takes
+3 to 6 times less CPU and less time; it loses only for a share shown at
+its full size, and costs latency when many streams share the helper.
+The real win, a decoded surface shown as a GL texture with no copy back
+(dmabuf), needs `unsafe` GL in the app or eframe on wgpu.
 
 ### 6.4 VA-API binding: libva opened at run time, declarations by hand
 
