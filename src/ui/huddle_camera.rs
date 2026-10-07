@@ -38,7 +38,7 @@ pub fn camera_button(ui: &mut egui::Ui, palette: &Palette, cam: Cam) -> Option<C
     let (icon, label, tip) = match cam {
         Cam::Off => (
             theme::Icon::VideoOff,
-            t("Start video"),
+            t("Video"),
             tf(
                 "Your camera is off. Start video ({shortcut})",
                 &[("shortcut", &shortcut)],
@@ -46,7 +46,7 @@ pub fn camera_button(ui: &mut egui::Ui, palette: &Palette, cam: Cam) -> Option<C
         ),
         Cam::Opening => (
             theme::Icon::Video,
-            t("Starting…"),
+            t("Video"),
             tf(
                 "Opening your camera. Stop video ({shortcut})",
                 &[("shortcut", &shortcut)],
@@ -54,7 +54,7 @@ pub fn camera_button(ui: &mut egui::Ui, palette: &Palette, cam: Cam) -> Option<C
         ),
         Cam::On => (
             theme::Icon::Video,
-            t("Stop video"),
+            t("Video"),
             tf(
                 "Your camera is on: everyone sees you. Stop video ({shortcut})",
                 &[("shortcut", &shortcut)],

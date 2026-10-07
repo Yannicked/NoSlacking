@@ -275,7 +275,8 @@ others' codecs today: log INDEX's `supported_receive_codec_intersection`.
   one thread. The patent note above applies. This is what HuddleFM sends
   (`42e01f`, packetization-mode 1).
 - `rusty_h264-encoder` (pure Rust) claims about 13 ms per 720p inter
-  frame. It is young.
+  frame. It is young. *(Stage 3 chose it after a spike: about 4 ms a
+  640×480 picture, bit-exact under ffmpeg; see Stage 3 in §5.)*
 - libvpx VP8 needs the same C build as decoding.
 - x264 is GPL, so no.
 - rav1e (AV1) is real-time only at fast presets, and Chime would only
@@ -655,6 +656,139 @@ against Slack.**
 - Verify: others see us in Slack's desktop, web and mobile clients; a
   206 view-only case is handled; quality holds under loss; there is no
   green or corrupt frame at start (SPS/PPS sent with every IDR).
+
+**Stage 3: built (2026-10-07), behind `huddle-camera`; not yet tried
+against Slack.**
+
+*Encoder: pure Rust, `rusty_h264-encoder` 0.16* (the decoder's project).
+Spike in a scratch crate, release build, AMD Ryzen AI 7 350, one
+thread, `EncoderConfig::baseline` (constrained baseline, CAVLC, one
+reference, no B-frames, no lookahead: one access unit out per picture
+in), 15 fps, a keyframe every 1000 frames plus two forced. Two 150-frame
+clips per size made with ffmpeg: a photo panned and zoomed with camera
+noise (`noise=alls=6`), and `testsrc2` with noise. Every output was
+decoded by ffmpeg and by `rusty_h264-decoder`, **bit-exact with each
+other, every frame**; ffprobe reads "Constrained Baseline", level 3.1.
+
+| | Preset | Target | ms/frame mean / p95 / max | Got (kbit/s) | Luma PSNR mean / min |
+|---|---|---|---|---|---|
+| 640×480 photo | **Fast** | 600 | **4.1** / 5.4 / 10.8 | 642 | 34.5 / 32.7 |
+| 640×480 photo | Fast | 1200 | 4.8 / 5.6 / 8.9 | 1202 | 35.3 / 33.6 |
+| 640×480 photo | Balanced | 600 | 6.5 / 9.6 / 12.9 | 654 | 35.7 / 31.6 |
+| 640×480 testsrc2 | Fast | 600 | 3.3 / 3.5 / 6.3 | 603 | 37.1 / 33.7 |
+| 640×480 testsrc2 | Fast | 1200 | 3.7 / 4.1 / 6.5 | 1200 | 41.0 / 39.0 |
+| 1280×720 photo | Fast | 600 | 10.4 / 13.4 / 21.5 | 784 | 33.8 / 31.5 |
+| 1280×720 photo | Fast | 1200 | 11.0 / 12.3 / 22.0 | 1345 | 35.0 / 33.1 |
+| 1280×720 photo | Balanced | 1200 | 16.4 / 25.2 / 32.8 | 1380 | 36.0 / 32.5 |
+| 1280×720 testsrc2 | Fast | 1200 | 10.6 / 12.7 / 19.8 | 1245 | 36.0 / 34.1 |
+
+- Rate control holds 600–1,200 kbit/s from the second second on (each
+  one within about ±10 % at 640×480); the first second overshoots by
+  the first IDR (85 KB at 640×480, 236 KB at 720p). The app starts it at
+  QP 30 rather than 26 to soften that.
+- `request_keyframe()` makes the next picture an IDR with SPS and PPS in
+  front, as does every IDR; it also restarts the keyframe interval.
+- Robustness, release and overflow-checked debug: odd, zero and 1×1
+  sizes are refused by `Encoder::new` with an error; 2×2, 16×16, 18×10,
+  640×360, 642×362, 1920×1080, 4096×2304, 10×6000 and 6000×10 encode
+  random noise without a panic; a frame of the wrong size or with short
+  planes is an error. `encode()` itself `expect`s, so the app calls
+  `encode_planes`, which returns errors.
+- No runtime bitrate change: a new bitrate means a new encoder (and a
+  keyframe), so the app moves in steps and at most every 8 s.
+- Licence BSD-2-Clause; `forbid(unsafe_code)`; the `asm` feature is the
+  same `rusty_h264-accel` the decoder already uses (intrinsics, no
+  build script, no C). Default features off (they install a global
+  allocator). Young: 0.16, June 2026, 16 releases, one maintainer.
+- Others looked at: `less-avc` 0.1.5 (pure Rust, but lossless I_PCM
+  only: 640×480 at 15 fps is about 55 Mbit/s, unusable),
+  `oxideav-h264` 0.1.8 ("no decode/encode functionality yet"),
+  `wedeo-codec-h264` (decoder only, LGPL). openh264 was not tried: the
+  rule is pure Rust. **Chosen: rusty_h264-encoder, preset Fast, 640×480
+  at 15 fps** (720p would fit the 20 ms budget at about 11 ms on this
+  machine, but not on older laptops).
+
+*Capture: `nokhwa` 0.10.11* (Apache-2.0, May 2026; 570 k downloads),
+`default-features = false, features = ["input-native"]`, so no mozjpeg:
+MJPEG goes through `image`'s pure-Rust JPEG decoder. YUYV, NV12, MJPEG,
+RGB and grey become I420 (`yuv` for RGB, by hand for the others) and are
+shrunk to fit 640×480 by area averaging. Build needs:
+- Linux: V4L2 through `v4l` 0.14, whose `v4l2-sys-mit` runs **bindgen
+  at build time: libclang** (and the kernel headers) must be there; no C
+  is compiled. CI's Linux jobs install `libclang-dev`.
+- macOS: AVFoundation through `objc`/`cocoa` 0.20-era crates;
+  `objc_exception` **compiles a one-file Objective-C shim** with
+  Xcode's clang (as `mac-notification-sys` already does). Untested here.
+- Windows: Media Foundation through the `windows` crate, nothing to
+  build. Untested here.
+- `paste` (a build-time macro of nokhwa) is unmaintained; `deny.toml`
+  lists the advisory with a reason. `nokhwa`'s `Camera` drop `unwrap`s
+  `stop_stream`, so the capture thread stops the stream itself first.
+- Flatpak: V4L2 needs `--device=all`; the Camera portal (ashpd +
+  PipeWire, libclang again for `pipewire`) is left for later (TODO).
+- Also looked at: `cameras` 0.3.2 (objc2, but pulls retina/tokio
+  unconditionally, 5 months old), `oximedia-capture` (weeks old),
+  `linuxvideo` (pure Rust V4L2, Linux only).
+
+*What was built.*
+- `huddle_audio::camera`: the `Camera` trait and `CameraControl`, the
+  microphone's rule as a state machine (opened only when turned on,
+  closed when off, on leaving and on failure); `Nokhwa` (a thread per
+  open camera, asking for 640×480 at 15 fps, closest raw format);
+  `TestPattern` (moving colour bars, a bouncing square and a mm:ss.t
+  clock with the frame number); `Latest`, the newest-frame slot between
+  capture and encoder; the conversions and the scaler.
+- `huddle_audio::video_encoder`: the encoder set up as above (Fast, CB,
+  CAVLC, level 3.1, an IDR at least every 4 s and on request, ABR from
+  150 to 1,200 kbit/s), refusing sizes it cannot send.
+- `huddle_audio::camera_send`: the encoder thread (newest picture wins;
+  an encoded frame the session cannot take is dropped and the next made
+  a keyframe; a keyframe request at most every 500 ms, kept until its
+  turn; a new encoder on a new size or bitrate step), the 90 kHz RTP
+  time from the capture instant, and the self-preview (every other
+  picture, at most 320 wide, mirrored).
+- The session (`media`, `watch`, `chime`): slot 0, the first video
+  m-line, turns `sendrecv` by the same re-SUBSCRIBE machinery (alone or
+  with receive changes), SUBSCRIBE goes DUPLEX with a second send stream
+  (`AmazonChimeExpressVideo`, stream and group 2, 640×480, 15 fps,
+  1,200 kbit/s), `receive_stream_ids[0]` stays 0. Frames go out only
+  once the answer has the line sending, from a keyframe (a keyframe is
+  asked for until one comes), on the H.264 `42e01f` mode-1 payload type.
+  `Event::KeyframeRequest` on our line asks the encoder for an IDR.
+  `str0m`'s BWE is on when the session has a camera (start 700 kbit/s,
+  desired 1.28 Mbit/s); its estimate less 80 kbit/s sets the encoder.
+  SUBSCRIBE_ACK with 206 or receive-only service, for a SUBSCRIBE that
+  asked to send, stops sending at once, turns the line `inactive` again
+  and tells the app (a toast; the camera closes).
+- The app: a Video button beside Mute while live (off: a struck-through
+  red camera; on: filled green; Ctrl+Shift+O, ⇧⌘O, as Slack's own chord
+  is the composer's paste without formatting here), off on joining,
+  greyed until the camera is open; the mirrored self-preview above the
+  buttons, and, with
+  `huddle-video` too, a "you" tile in the call window (one place fewer
+  for others). Toasts for no camera, not allowed (macOS and Windows
+  name where to allow it), in use, and view only. macOS's Info.plist
+  has `NSCameraUsageDescription`.
+- Probe: `--send-test-video` sends the test picture as our camera from
+  the start (a build with `huddle-camera`); the log says what was sent,
+  keyframe requests and the bandwidth estimate every 5 s.
+- Demo: `--demo-view camera` (the bar with the preview, the test
+  picture as the camera).
+
+*Measured*: encoding 640×480 at 15 fps is about 4 ms a picture (6 % of
+one core) on this machine, from the spike's numbers with the app's
+configuration. *Binary size:* `--features huddle-camera` adds
+1.04 MB to the release binary (50.44 → 51.48 MB): nokhwa, the encoder
+and the camera code.
+
+*Not yet known*: whether Slack shows our video (in the desktop, web
+and mobile apps) and with which profile-level-id it is happy (the
+encoder writes constraint_set1 only, `42401f`, which is constrained
+baseline; the SDP says `42e01f`); whether Chime's answer offers TWCC (if
+not, BWE falls back to REMB or stays at its start); whether senders
+switch codec once we send; the 206 path has only been tested offline;
+nokhwa on macOS and Windows (built and tried on Linux only, and never
+against a real camera here).
 
 **Stage 4: share screen (3–5 weeks, Wayland the main risk).**
 - Work: a second `#content` session, xcap's recorder (the portal on

@@ -2740,15 +2740,6 @@ msgstr "Scherm van {name} tonen"
 msgid "Waiting for the picture…"
 msgstr "Wachten op het beeld…"
 
-msgid "Start video"
-msgstr "Video starten"
-
-msgid "Starting…"
-msgstr "Starten…"
-
-msgid "Stop video"
-msgstr "Video stoppen"
-
 msgid "Your camera is off. Start video ({shortcut})"
 msgstr "Je camera staat uit. Start video ({shortcut})"
 

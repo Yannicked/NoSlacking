@@ -1052,6 +1052,31 @@ engineering, as for the rest of the session sign-in.
   - [ ] Try Stage 2 with colleagues' cameras on (press Video in the
         call bar): faces match names, tiles follow who speaks, cameras
         turned off and on, pause and resume, 5 or more cameras.
+  - [x] Stage 3 built, behind `huddle-camera` (off by default), not yet
+        tried against Slack: a Video button beside Mute (Ctrl+Shift+O), the
+        camera opened only while on (nokhwa: V4L2, AVFoundation, Media
+        Foundation), H.264 constrained baseline 640×480 at 15 fps from
+        `rusty_h264-encoder` (pure Rust, about 4 ms a picture, chosen
+        after a spike) on its own thread, slot 0 `sendrecv` with a DUPLEX
+        re-SUBSCRIBE, keyframes on PLI/FIR and every 4 s, bitrate from
+        str0m's estimate, view only (206) turning it off with a toast,
+        a mirrored self-preview in the bar and a "you" tile in the call
+        window. Details in the research note's Stage 3.
+  - [ ] Try Stage 3 against Slack: first the probe with the test
+        picture (`cargo run --release --features huddle-camera --
+        --huddle-probe TEAM CHANNEL --send-test-video`; does Slack's
+        desktop, web and mobile app show it, sharp, with the clock
+        moving?), then the app (`cargo run --release --features
+        huddle-camera`, press Video). Check the light goes out on turning
+        it off and on leaving, a camera in use or not allowed, the
+        macOS permission prompt, Windows' privacy settings, and the
+        log's bandwidth estimate (is TWCC or REMB there?).
+  - [ ] The camera in the Flatpak: the Camera portal (`ashpd`'s
+        `desktop::camera`, a PipeWire fd read with the `pipewire` crate,
+        which needs libpipewire and libclang to build) instead of raw
+        V4L2, which would need `--device=all`.
+  - [ ] Choosing the camera (Settings) when there is more than one;
+        today the first is taken.
 - **Microsoft Teams:** [docs/research/microsoft-teams.md](docs/research/microsoft-teams.md)
   (2026-10-06). Not being built: the official Graph route can't do live
   updates or calls, and the route other clients take signs in as
