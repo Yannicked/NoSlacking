@@ -569,3 +569,209 @@ fn stream(
     let _ = stream.disconnect();
     pipeline.borrow().ended()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A pretend screen in PipeWire's own graph, as a compositor's: a
+    /// video source of 1280×720 BGRx in memory at 15 a second (driven
+    /// by the graph), each picture a new grey. Sends its node's id once
+    /// it has one; runs until `stop`.
+    fn pretend_screen(ready: mpsc::Sender<u32>, stop: Arc<AtomicBool>) {
+        use spa::param::format::{FormatProperties, MediaSubtype, MediaType};
+        use spa::param::video::VideoFormat;
+        const SIZE: (u32, u32) = (1280, 720);
+        pw::init();
+        let main_loop = pw::main_loop::MainLoopBox::new(None).expect("a loop");
+        let context = pw::context::ContextBox::new(main_loop.loop_(), None).expect("a context");
+        let core = context.connect(None).expect("PipeWire");
+        let stream = pw::stream::StreamBox::new(
+            &core,
+            "noslacking-test-screen",
+            pw::properties::properties! {
+                *pw::keys::MEDIA_CLASS => "Video/Source",
+                *pw::keys::MEDIA_TYPE => "Video",
+                *pw::keys::MEDIA_CATEGORY => "Source",
+            },
+        )
+        .expect("a stream");
+        let _listener = stream
+            .add_local_listener_with_user_data(0u8)
+            .param_changed(|stream, _, id, param| {
+                if id != spa::param::ParamType::Format.as_raw() || param.is_none() {
+                    return;
+                }
+                let stride = i32::try_from(SIZE.0 * 4).expect("small");
+                let buffers = serialize(spa::pod::Object {
+                    type_: spa::utils::SpaTypes::ObjectParamBuffers.as_raw(),
+                    id: spa::param::ParamType::Buffers.as_raw(),
+                    properties: vec![
+                        spa::pod::Property::new(
+                            spa::sys::SPA_PARAM_BUFFERS_buffers,
+                            spa::pod::Value::Int(4),
+                        ),
+                        spa::pod::Property::new(
+                            spa::sys::SPA_PARAM_BUFFERS_blocks,
+                            spa::pod::Value::Int(1),
+                        ),
+                        spa::pod::Property::new(
+                            spa::sys::SPA_PARAM_BUFFERS_size,
+                            spa::pod::Value::Int(stride * i32::try_from(SIZE.1).expect("small")),
+                        ),
+                        spa::pod::Property::new(
+                            spa::sys::SPA_PARAM_BUFFERS_stride,
+                            spa::pod::Value::Int(stride),
+                        ),
+                    ],
+                })
+                .expect("serialized");
+                update(stream, &[buffers]);
+            })
+            .process(|stream, grey| {
+                let Some(mut buffer) = stream.dequeue_buffer() else {
+                    return;
+                };
+                let Some(data) = buffer.datas_mut().first_mut() else {
+                    return;
+                };
+                *grey = grey.wrapping_add(9);
+                let size = (SIZE.0 * SIZE.1 * 4) as usize;
+                if let Some(bytes) = data.data() {
+                    let n = size.min(bytes.len());
+                    bytes[..n].fill(*grey);
+                }
+                let chunk = data.chunk_mut();
+                *chunk.offset_mut() = 0;
+                *chunk.stride_mut() = i32::try_from(SIZE.0 * 4).expect("small");
+                *chunk.size_mut() = u32::try_from(size).expect("small");
+            })
+            .register()
+            .expect("a listener");
+        let format = serialize(spa::pod::object!(
+            spa::utils::SpaTypes::ObjectParamFormat,
+            spa::param::ParamType::EnumFormat,
+            spa::pod::property!(FormatProperties::MediaType, Id, MediaType::Video),
+            spa::pod::property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
+            spa::pod::property!(FormatProperties::VideoFormat, Id, VideoFormat::BGRx),
+            spa::pod::property!(
+                FormatProperties::VideoSize,
+                Rectangle,
+                spa::utils::Rectangle {
+                    width: SIZE.0,
+                    height: SIZE.1
+                }
+            ),
+            spa::pod::property!(
+                FormatProperties::VideoFramerate,
+                Fraction,
+                spa::utils::Fraction { num: 15, denom: 1 }
+            ),
+        ))
+        .expect("serialized");
+        let mut params = [spa::pod::Pod::from_bytes(&format).expect("a pod")];
+        stream
+            .connect(
+                spa::utils::Direction::Output,
+                None,
+                pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+                &mut params,
+            )
+            .expect("connected");
+        let mut told = false;
+        while !stop.load(Ordering::Relaxed) {
+            main_loop
+                .loop_()
+                .iterate(pw::loop_::Timeout::Finite(Duration::from_millis(5)));
+            if !told && stream.node_id() != u32::MAX {
+                told = ready.send(stream.node_id()).is_ok();
+            }
+        }
+        let _ = stream.disconnect();
+    }
+
+    /// The share's PipeWire stream against a pretend screen in this
+    /// machine's PipeWire (no portal, no one's screen): the formats
+    /// offered (a dma-buf first, which this source cannot give) settle
+    /// on memory, frames arrive and encode, and the source going away
+    /// ends the share. Needs a running PipeWire:
+    /// `cargo test -p noslacking-video --features pipewire -- --ignored pipewire --nocapture`
+    #[test]
+    #[ignore = "needs a running PipeWire"]
+    fn pipewire_hands_a_screen_to_the_share() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready, node) = mpsc::channel();
+        let screen = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || pretend_screen(ready, stop))
+        };
+        let node = node
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the pretend screen's node");
+        // What OpenPipeWireRemote hands over: a connection to PipeWire.
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR");
+        let socket = std::os::unix::net::UnixStream::connect(
+            std::path::Path::new(&runtime).join("pipewire-0"),
+        )
+        .expect("PipeWire's socket");
+        let fd = OwnedFd::from(socket);
+        let (asks, inbox) = pw::channel::channel::<Ask>();
+        let (started, result) = mpsc::channel();
+        let share = std::thread::spawn(move || {
+            // The GPU if this machine has one that encodes, so dma-bufs
+            // are offered first.
+            let settings = Settings {
+                hardware: true,
+                bitrate: 1_000_000,
+                gpu: crate::choose_backend().share_gpu(),
+            };
+            stream(fd, node, settings, inbox, &started)
+        });
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .expect("an answer")
+            .expect("the stream connected");
+        let next = |wait: u64| {
+            let (reply, answer) = mpsc::channel();
+            assert!(
+                asks.send(Ask::Next {
+                    force_keyframe: false,
+                    repeat: false,
+                    wait: Duration::from_millis(wait),
+                    reply,
+                })
+                .is_ok()
+            );
+            answer
+                .recv_timeout(Duration::from_secs(2))
+                .expect("answered")
+        };
+        let mut frames = Vec::new();
+        for _ in 0..40 {
+            if let Ok(Some(frame)) = next(200) {
+                frames.push(frame);
+            }
+            if frames.len() == 3 {
+                break;
+            }
+        }
+        assert_eq!(frames.len(), 3, "frames from PipeWire");
+        assert!(frames[0].keyframe);
+        assert!(frames.iter().all(|f| (f.width, f.height) == (1280, 720)));
+        // The screen goes: the share hears it end.
+        stop.store(true, Ordering::Relaxed);
+        screen.join().expect("the pretend screen stopped");
+        let mut ended = None;
+        for _ in 0..20 {
+            if let Err(trouble) = next(100) {
+                ended = Some(trouble.problem);
+                break;
+            }
+        }
+        assert_eq!(ended, Some(ShareProblem::Ended));
+        let _ = asks.send(Ask::Stop);
+        let trouble = share.join().expect("the share's thread");
+        assert_eq!(trouble.map(|t| t.problem), Some(ShareProblem::Ended));
+    }
+}

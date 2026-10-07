@@ -200,6 +200,8 @@ enum Held {
     /// I420.
     I420(Planes),
     /// Only on the GPU (a dma-buf): nothing the processor can encode.
+    /// Linux's alone, where PipeWire hands dma-bufs over.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Gpu,
 }
 
