@@ -569,6 +569,12 @@ impl TeamsClient {
     /// that fails. People neither knows, such as guests from elsewhere,
     /// are left out.
     pub async fn get_users(&self, ids: &[String]) -> Result<Vec<UserDetails>, Failure> {
+        // The personal middle tier refuses every token we hold (401, seen
+        // with `--teams-probe`), and Graph is not ours there: names come
+        // from messages instead.
+        if self.credentials().account == Account::Personal {
+            return Ok(Vec::new());
+        }
         match self.short_profiles(ids).await {
             Ok(found) => Ok(found),
             Err(error) => {

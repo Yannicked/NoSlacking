@@ -303,8 +303,12 @@ opaque (`EwA…`); the consumer `authz` answers with the skype token at
 is `live:.cid.…`; the chat list, messages and Trouter negotiation all
 work with it. One-to-one chats are `19:uni01_…@thread.v2` here too.
 This is what the "Personal account (Teams free)" sign-in now does.
-Still unverified: the people lookup on the personal middle tier, and
-sending.
+Sending works (with a numeric `clientmessageid`). The personal middle
+tier's `fetchShortProfile` refuses every token we hold (401 with the
+access token, the skype token, both, and the consumer headers), and a
+thread's members (`/v1/threads/{id}`) carry ids only, so names come from
+messages' `imdisplayname`: chats without a topic are named after their
+recent writers.
 
 ### 6.2 Audio and video calls
 

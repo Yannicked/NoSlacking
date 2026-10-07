@@ -275,23 +275,68 @@ async fn chat_list(
             Vec::new()
         })
     };
-    let name_of = |id: &str| {
-        found
+    let mut names: std::collections::HashMap<String, String> = found
+        .iter()
+        .filter_map(|u| u.display_name.clone().map(|name| (u.id.clone(), name)))
+        .collect();
+    let mut users: Vec<crate::model::User> = found.iter().map(translate_user).collect();
+
+    // Where the people service gave no names (it refuses personal
+    // accounts), the chats' own messages do: each carries its sender's
+    // name. So a chat whose people are still unnamed has its newest page
+    // read, and its recent writers stand in for its members if those are
+    // not known either.
+    let unnamed: Vec<usize> = wanted
+        .iter()
+        .zip(&members)
+        .filter(|(_, others)| others.is_empty() || others.iter().any(|id| !names.contains_key(id)))
+        .map(|(&i, _)| i)
+        .collect();
+    let pages = futures_util::future::join_all(
+        unnamed
             .iter()
-            .find(|u| u.id == id)
-            .and_then(|u| u.display_name.clone())
-    };
+            .map(|&i| client.get_messages(&chats[i].id, None, PAGE)),
+    )
+    .await;
+    let mut writers: std::collections::HashMap<usize, Vec<String>> =
+        std::collections::HashMap::new();
+    for (&i, page) in unnamed.iter().zip(pages) {
+        let Ok(page) = page else {
+            continue;
+        };
+        let people = senders(&page.messages);
+        // Newest first, as a chat's name lists who is active in it.
+        let ids: Vec<String> = people
+            .iter()
+            .rev()
+            .map(|u| u.id.clone())
+            .filter(|id| id != me)
+            .collect();
+        for person in people {
+            names
+                .entry(person.id.clone())
+                .or_insert_with(|| person.display_name.clone());
+            users.push(person);
+        }
+        writers.insert(i, ids);
+    }
+
     let mut drop = Vec::new();
     for (&i, others) in wanted.iter().zip(&members) {
+        let recent = writers.get(&i).map_or(&[][..], Vec::as_slice);
+        let people = if others.is_empty() {
+            recent
+        } else {
+            others.as_slice()
+        };
         let conversation = &mut list[i];
-        match (conversation.kind, others.as_slice()) {
+        match (conversation.kind, people) {
             (ConversationKind::Direct, [other, ..]) => conversation.user = Some(other.clone()),
             (_, []) if conversation.name == conversation.id => drop.push(i),
             (_, []) => {}
-            (_, others) => {
-                let names: Vec<String> = others.iter().filter_map(|id| name_of(id)).collect();
-                if !names.is_empty() {
-                    conversation.name = names.join(", ");
+            (_, people) => {
+                if let Some(name) = group_name(people, &names) {
+                    conversation.name = name;
                 }
             }
         }
@@ -300,8 +345,32 @@ async fn chat_list(
         log::debug!("leaving out a Teams chat with no name and nobody else in it");
         list.remove(i);
     }
-    let users = found.iter().map(translate_user).collect();
+    users.sort_by(|a, b| a.id.cmp(&b.id));
+    users.dedup_by(|a, b| a.id == b.id);
     (list, users)
+}
+
+/// What Teams calls a group chat without a topic: its people's names, the
+/// first three and how many more, or `None` while none is known.
+fn group_name(
+    people: &[String],
+    names: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let known: Vec<&str> = people
+        .iter()
+        .filter_map(|id| names.get(id))
+        .map(String::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .collect();
+    let (first, rest) = known.split_at(known.len().min(3));
+    if first.is_empty() {
+        return None;
+    }
+    let more = rest.len() + (people.len() - known.len());
+    Some(match more {
+        0 => first.join(", "),
+        more => format!("{} +{more}", first.join(", ")),
+    })
 }
 
 /// The newest page of a conversation, or the one at `cursor`.
@@ -755,6 +824,29 @@ mod tests {
             .map(|u| (u.id.as_str(), u.display_name.as_str()))
             .collect();
         assert_eq!(names, [("a", "Alice")]);
+    }
+
+    #[test]
+    fn group_chats_are_named_after_their_people() {
+        let names: std::collections::HashMap<String, String> =
+            [("a", "Ann"), ("b", "Bob"), ("c", "Cas"), ("d", "Dee")]
+                .map(|(id, name)| (id.to_owned(), name.to_owned()))
+                .into();
+        let ids = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            group_name(&ids(&["a", "b"]), &names).as_deref(),
+            Some("Ann, Bob")
+        );
+        assert_eq!(
+            group_name(&ids(&["a", "b", "c", "d"]), &names).as_deref(),
+            Some("Ann, Bob, Cas +1")
+        );
+        // Someone with no known name still counts.
+        assert_eq!(
+            group_name(&ids(&["a", "x"]), &names).as_deref(),
+            Some("Ann +1")
+        );
+        assert_eq!(group_name(&ids(&["x", "y"]), &names), None);
     }
 
     #[test]
