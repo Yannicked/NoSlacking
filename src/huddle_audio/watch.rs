@@ -1,10 +1,16 @@
-//! The probe's look at video, inside a live session: it logs what
-//! Chime's signaling says of video (INDEX, PAUSE, RESUME, BITRATES,
-//! DATA_MESSAGE, REMOTE_VIDEO_UPDATE), and with `--video N` receives up
-//! to N streams on `recvonly` m-lines added by renegotiation, counts what
-//! arrives on each, asks for keyframes, and can dump the first frames.
-//! Nothing is decoded. The choices are [`super::video`]'s; this is the
-//! part that touches `str0m`.
+//! Video inside a live session: it reads what Chime's signaling says of
+//! video (INDEX, PAUSE, RESUME, BITRATES, DATA_MESSAGE,
+//! REMOTE_VIDEO_UPDATE), receives the streams wanted on `recvonly`
+//! m-lines added by renegotiation, counts what arrives on each and asks
+//! for keyframes. What is wanted: the share the call window shows (with
+//! `huddle-video`, whose frames go on to the decoder thread,
+//! `screen`), and for the probe or `--video N` up to N streams,
+//! which can also be dumped. The choices are [`super::video`]'s; this is
+//! the part that touches `str0m`.
+//!
+//! A probe run or `--video` logs everything at info level; an app session
+//! that only watches shares logs what changes and keeps the rest at debug
+//! level.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -18,8 +24,12 @@ use str0m::media::{Direction, KeyframeRequestKind, MediaData, MediaKind, Mid};
 
 use super::bitstream::{Dump, DumpKind};
 use super::chime::{self, FrameType};
+#[cfg(feature = "huddle-video")]
+use super::screen::{Decoding, Screen};
 use super::sdp::{self, Mids};
-use super::video::{self, Index, Noted, Options, Plan, Resubscribe, Slots, StreamStats, Summary};
+use super::video::{
+    self, Index, Noted, Options, Plan, Resubscribe, Share, Slots, StreamStats, Summary,
+};
 
 /// Before the first re-SUBSCRIBE, audio gets this long to settle, so its
 /// flow before and during can be compared.
@@ -72,10 +82,44 @@ struct Slot {
     last_pli: Option<Instant>,
 }
 
-/// What the probe follows of video in one session.
+/// What the app hands a session to watch screen shares with.
+pub struct Viewer {
+    /// Told who shares their screen, whenever that changes.
+    pub shares: tokio::sync::watch::Sender<Vec<Share>>,
+    /// Which share the call window shows (its key), if any.
+    pub watched: tokio::sync::watch::Receiver<Option<String>>,
+    /// Where the watched share's pictures go.
+    #[cfg(feature = "huddle-video")]
+    pub screen: Screen,
+}
+
+impl std::fmt::Debug for Viewer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Viewer").finish_non_exhaustive()
+    }
+}
+
+/// The session's side of the [`Viewer`].
+struct Viewing {
+    shares: tokio::sync::watch::Sender<Vec<Share>>,
+    #[cfg(feature = "huddle-video")]
+    screen: Screen,
+    /// The decoder thread, from the first share watched.
+    #[cfg(feature = "huddle-video")]
+    decoding: Option<Decoding>,
+    /// The stream whose frames are being decoded.
+    decoding_stream: Option<u32>,
+}
+
+/// What a session follows of video.
 pub struct Watch {
     options: Options,
+    /// Whether this is the probe or `--video`, which log everything.
+    diagnostic: bool,
     me: String,
+    /// The share the call window shows, by key.
+    watched: Option<String>,
+    viewing: Option<Viewing>,
     /// Our first video m-line: the send line, slot 0, always inactive.
     send_line: Option<Mid>,
     /// The latest INDEX and the last one logged.
@@ -109,11 +153,24 @@ impl std::fmt::Debug for Watch {
 }
 
 impl Watch {
-    /// Follows video for attendee `me` as `options` ask.
-    pub fn new(options: Options, me: &str) -> Self {
+    /// Follows video for attendee `me` as `options` ask (the probe's, or
+    /// `--video`'s, which log everything), and for a `viewer` if there is
+    /// one. Only the viewer's half of `watched` stays with the session.
+    pub fn new(options: Option<Options>, viewer: Option<Viewer>, me: &str) -> Self {
+        let viewing = viewer.map(|viewer| Viewing {
+            shares: viewer.shares,
+            #[cfg(feature = "huddle-video")]
+            screen: viewer.screen,
+            #[cfg(feature = "huddle-video")]
+            decoding: None,
+            decoding_stream: None,
+        });
         Self {
-            options,
+            diagnostic: options.is_some(),
+            options: options.unwrap_or_default(),
             me: me.to_owned(),
+            watched: None,
+            viewing,
             send_line: None,
             index: Index::default(),
             logged: None,
@@ -132,9 +189,100 @@ impl Watch {
         }
     }
 
-    /// Whether the offer leaves VP8 out.
+    /// Whether the offer leaves VP8 out: when asked, and always when
+    /// shares are watched, as only H.264 is decoded.
     pub fn h264_only(&self) -> bool {
-        self.options.h264_only
+        self.options.h264_only || (cfg!(feature = "huddle-video") && self.viewing.is_some())
+    }
+
+    /// How loudly the details are logged: all of it for the probe and
+    /// `--video`, only at debug level otherwise.
+    fn level(&self) -> log::Level {
+        if self.diagnostic {
+            log::Level::Info
+        } else {
+            log::Level::Debug
+        }
+    }
+
+    /// The streams to receive now.
+    fn wanted(&self) -> Vec<u32> {
+        video::wanted(
+            &self.index,
+            &self.me,
+            self.options.streams,
+            self.watched.as_deref(),
+        )
+    }
+
+    /// The call window shows the share `key` now, or none. Its stream is
+    /// received from the next re-SUBSCRIBE; with none, decoding stops at
+    /// once.
+    pub fn set_watched(&mut self, key: Option<String>) {
+        if self.watched == key {
+            return;
+        }
+        log::info!(
+            "video: {}",
+            key.as_deref().map_or_else(
+                || "the call window closed".to_owned(),
+                |key| format!("watching the share of {}", video::short(key))
+            )
+        );
+        self.watched = key;
+        self.follow_watched();
+    }
+
+    /// Starts or stops decoding as the watched share's stream is received
+    /// or not.
+    fn follow_watched(&mut self) {
+        let target = self
+            .watched
+            .as_deref()
+            .and_then(|key| video::share_stream(&self.index, &self.me, key))
+            .filter(|stream| self.slots.receiving().contains(stream));
+        let Some(viewing) = &mut self.viewing else {
+            return;
+        };
+        if viewing.decoding_stream == target {
+            return;
+        }
+        viewing.decoding_stream = target;
+        #[cfg(feature = "huddle-video")]
+        {
+            if target.is_some() && viewing.decoding.is_none() {
+                match Decoding::spawn(viewing.screen.clone()) {
+                    Ok(decoding) => viewing.decoding = Some(decoding),
+                    Err(error) => log::warn!("video: no decoder thread: {error}"),
+                }
+            }
+            if let Some(decoding) = &mut viewing.decoding {
+                if target.is_some() {
+                    decoding.start();
+                } else {
+                    decoding.stop();
+                }
+            }
+        }
+        match target {
+            Some(stream) => log::info!("video: decoding stream {stream}"),
+            None => log::info!("video: decoding stopped"),
+        }
+    }
+
+    /// Tells the viewer who shares, if that changed.
+    fn tell_shares(&self) {
+        let Some(viewing) = &self.viewing else {
+            return;
+        };
+        let now = video::shares(&self.index, &self.me);
+        viewing.shares.send_if_modified(|shares| {
+            let changed = *shares != now;
+            if changed {
+                *shares = now;
+            }
+            changed
+        });
     }
 
     /// The first offer was made, its video m-line `send_line`.
@@ -152,27 +300,32 @@ impl Watch {
             }
             self.summary.codecs.clone_from(&self.index.codecs);
             self.log_index(now);
+            self.tell_shares();
         }
         if let Some(pause) = &frame.pause {
             let name = match kind {
                 Some(FrameType::Resume) => "RESUME",
                 _ => "PAUSE",
             };
-            log::info!("video: {}", video::pause_line(name, pause));
+            log::log!(self.level(), "video: {}", video::pause_line(name, pause));
         }
         if let Some(bitrates) = &frame.bitrates
             && self.bitrates_at.is_none_or(|at| now >= at + BITRATES_EVERY)
         {
             self.bitrates_at = Some(now);
-            log::info!("video: {}", video::bitrates_line(bitrates));
+            log::log!(self.level(), "video: {}", video::bitrates_line(bitrates));
         }
         if let Some(data) = &frame.data_message {
             for line in video::data_message_lines(data) {
-                log::info!("video: {line}");
+                log::log!(self.level(), "video: {line}");
             }
         }
         if let Some(update) = &frame.remote_video_update {
-            log::info!("video: {}", video::remote_video_update_line(update));
+            log::log!(
+                self.level(),
+                "video: {}",
+                video::remote_video_update_line(update)
+            );
         }
         if let Some(ack) = &frame.suback {
             self.tracks = video::track_streams(&ack.tracks);
@@ -189,10 +342,15 @@ impl Watch {
                         )
                     })
                     .collect();
-                log::info!("video: SUBSCRIBE_ACK tracks: {}", tracks.join("; "));
+                log::log!(
+                    self.level(),
+                    "video: SUBSCRIBE_ACK tracks: {}",
+                    tracks.join("; ")
+                );
             }
             for a in &ack.allocations {
-                log::info!(
+                log::log!(
+                    self.level(),
                     "video: SUBSCRIBE_ACK allocation: stream {} group {} label {:?}",
                     a.stream_id.unwrap_or_default(),
                     a.group_id.unwrap_or_default(),
@@ -216,8 +374,14 @@ impl Watch {
         self.logged = Some(shape);
         self.logged_at = Some(now);
         self.summary.indexes += 1;
-        for line in self.index.lines() {
-            log::info!("video: {line}");
+        let level = self.level();
+        for (n, line) in self.index.lines().iter().enumerate() {
+            // The heading always; each source only when asked.
+            if n == 0 {
+                log::info!("video: {line}");
+            } else {
+                log::log!(level, "video: {line}");
+            }
         }
     }
 
@@ -230,8 +394,7 @@ impl Watch {
         dtls_up: Instant,
         audio_frames: u64,
     ) -> Option<Reoffer> {
-        if self.options.streams == 0
-            || self.in_flight.is_some()
+        if self.in_flight.is_some()
             || now < dtls_up + SETTLE
             || self
                 .last_resubscribe
@@ -239,7 +402,7 @@ impl Watch {
         {
             return None;
         }
-        let wanted = video::choose(&self.index, &self.me, self.options.streams);
+        let wanted = self.wanted();
         let plan = self.slots.plan(&wanted);
         if !plan.changes() {
             return None;
@@ -342,6 +505,7 @@ impl Watch {
             });
         }
         let media = sdp::media_lines(answer);
+        let level = self.level();
         for (slot, &stream) in after.streams().iter().enumerate() {
             let Some(line) = self.lines.get_mut(slot) else {
                 continue;
@@ -362,7 +526,8 @@ impl Watch {
                         .collect()
                 })
                 .unwrap_or_default();
-            log::info!(
+            log::log!(
+                level,
                 "video: slot {} = mid {chime_mid}: stream {stream}, answered {}, ssrcs [{}]",
                 slot + 1,
                 answered.map_or("nothing", |m| m.direction.as_str()),
@@ -383,6 +548,7 @@ impl Watch {
             }
         }
         self.slots = after;
+        self.follow_watched();
         let answered_ms = u64::try_from(now.duration_since(flight.sent).as_millis()).unwrap_or(0);
         flight.audit.answered_ms = Some(answered_ms);
         flight.answered = Some(now);
@@ -415,6 +581,12 @@ impl Watch {
             return;
         };
         let noted = stats.frame(&codec, pt, &data.data, data.is_keyframe(), data.contiguous);
+        // What arrived first is worth the log; the rest only when asked.
+        let level = if self.diagnostic {
+            log::Level::Info
+        } else {
+            log::Level::Debug
+        };
         for note in noted {
             match note {
                 Noted::First => log::info!(
@@ -442,7 +614,8 @@ impl Watch {
                     stats.mid,
                     stats.frames
                 ),
-                Noted::Sps(said) => log::info!(
+                Noted::Sps(said) => log::log!(
+                    level,
                     "video: stream {} on mid {}: {said}",
                     stats.stream_id,
                     stats.mid
@@ -453,6 +626,16 @@ impl Watch {
             line.want_pli = true;
         }
         let stream = stats.stream_id;
+        #[cfg(feature = "huddle-video")]
+        if let Some(viewing) = &mut self.viewing
+            && viewing.decoding_stream == Some(stream)
+            && let Some(decoding) = &mut viewing.decoding
+        {
+            decoding.push(data.data.to_vec(), data.contiguous);
+            if viewing.screen.take_keyframe_wish() {
+                line.want_pli = true;
+            }
+        }
         let attendee = stats.attendee.clone();
         if let Some(dir) = &self.options.dump {
             dump(
@@ -470,6 +653,7 @@ impl Watch {
 
     /// Asks for the keyframes wanted and due.
     fn request_keyframes(&mut self, rtc: &mut Rtc, now: Instant) {
+        let level = self.level();
         for line in &mut self.lines {
             if !line.want_pli || line.last_pli.is_some_and(|at| now < at + PLI_EVERY) {
                 continue;
@@ -486,7 +670,8 @@ impl Watch {
                 line.last_pli = Some(now);
                 if let Some(stats) = &mut line.stats {
                     stats.plis += 1;
-                    log::info!(
+                    log::log!(
+                        level,
                         "video: stream {} on mid {}: PLI sent ({} so far)",
                         stats.stream_id,
                         stats.mid,
@@ -520,7 +705,7 @@ impl Watch {
         if self.next_stats.is_none_or(|at| now >= at) {
             self.next_stats = Some(now + STATS_EVERY);
             for stats in self.lines.iter().filter_map(|l| l.stats.as_ref()) {
-                log::info!("video: {}", stats.line());
+                log::log!(self.level(), "video: {}", stats.line());
             }
         }
     }
@@ -536,13 +721,7 @@ impl Watch {
                 .iter()
                 .filter_map(|f| f.answered.map(|at| at + AUDIO_WINDOW)),
         );
-        if self.options.streams > 0
-            && self.in_flight.is_none()
-            && self
-                .slots
-                .plan(&video::choose(&self.index, &self.me, self.options.streams))
-                .changes()
-        {
+        if self.in_flight.is_none() && self.slots.plan(&self.wanted()).changes() {
             // A change of streams waits for its turn.
             due.push(
                 self.last_resubscribe
@@ -591,12 +770,15 @@ impl Watch {
     }
 }
 
-/// INDEX without what changes all the time (average bitrates), so a
-/// change in it is worth a log line.
+/// INDEX without what changes all the time (bitrates, frame rates), so a
+/// change in it, a source come or gone, resized or paused, is worth a log
+/// line.
 fn shape(index: &Index) -> Index {
     let mut shape = index.clone();
     for source in &mut shape.sources {
         source.avg_bps = 0;
+        source.max_kbps = 0;
+        source.fps = 0;
     }
     shape
 }

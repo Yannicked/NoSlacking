@@ -43,6 +43,7 @@ use super::speaker::Feed;
 use super::turn::{self, Server, Transport};
 use super::uplink::{Outbound, Outgoing, Stamp};
 use super::video;
+pub use super::watch::Viewer;
 use super::watch::{self, Watch};
 
 /// How long each step may take.
@@ -399,8 +400,11 @@ struct Session<'a> {
     /// Chime's head count, from the last INDEX.
     count: Option<u32>,
     report: Report,
-    /// The probe's look at video, when it asked for one.
+    /// What it follows of video: the probe's look, and the shares the
+    /// app watches.
     video: Option<Watch>,
+    /// Which share the call window shows, as it changes.
+    watched: Option<tokio::sync::watch::Receiver<Option<String>>>,
     /// How it ended, once it has.
     over: Option<Result<(), Failure>>,
 }
@@ -639,8 +643,8 @@ impl Session<'_> {
         Box::pin(self.carry(steps)).await;
     }
 
-    /// Once live, a new offer and SUBSCRIBE when the probe wants other
-    /// video streams than it has; audio goes on meanwhile.
+    /// Once live, a new offer and SUBSCRIBE when other video streams are
+    /// wanted than are received; audio goes on meanwhile.
     async fn try_resubscribe(&mut self) {
         use super::signaling::Phase;
         let now = Instant::now();
@@ -1063,8 +1067,7 @@ impl Session<'_> {
         self.video_tick(now).await;
     }
 
-    /// The probe's video: keyframe requests, counts, a re-SUBSCRIBE
-    /// given up or due.
+    /// Video: keyframe requests, counts, a re-SUBSCRIBE given up or due.
     async fn video_tick(&mut self, now: Instant) {
         let Some(watch) = &mut self.video else {
             return;
@@ -1186,6 +1189,29 @@ async fn next_frame(
     }
 }
 
+/// What a session does with video: the probe's or `--video`'s look at
+/// it, and the app's viewer of screen shares; neither, none at all.
+#[derive(Debug, Default)]
+pub struct Video {
+    /// The probe's options, or `--video`'s.
+    pub options: Option<video::Options>,
+    /// The call window's side, with `huddle-video`.
+    pub viewer: Option<Viewer>,
+}
+
+/// The share watched next, or never while nothing tells.
+async fn watched_change(
+    watched: &mut Option<tokio::sync::watch::Receiver<Option<String>>>,
+) -> Result<Option<String>, tokio::sync::watch::error::RecvError> {
+    match watched {
+        Some(watched) => {
+            watched.changed().await?;
+            Ok(watched.borrow_and_update().clone())
+        }
+        None => std::future::pending().await,
+    }
+}
+
 /// The mute state's next change, or never while there is none.
 async fn mute_change(
     muted: &mut Option<tokio::sync::watch::Receiver<bool>>,
@@ -1203,9 +1229,10 @@ async fn mute_change(
 /// session ends, feeding the audio to `feed`, telling `live` once the
 /// audio connection is up and `roster` who is in it whenever that
 /// changes; talks too, if given an `uplink` (otherwise muted
-/// throughout). With `video` (the probe's), logs what Chime says of
-/// video and receives what it asks (see [`super::watch`]). Leaves
-/// cleanly either way.
+/// throughout). With `video` (the probe's, or `--video`'s), logs what
+/// Chime says of video and receives what it asks; with a `viewer`, tells
+/// who shares their screen and receives the share it watches (see
+/// [`super::watch`]). Leaves cleanly either way.
 pub async fn listen(
     join: &ChimeJoin,
     feed: Option<Feed>,
@@ -1213,7 +1240,7 @@ pub async fn listen(
     mut stop: tokio::sync::watch::Receiver<bool>,
     live: Option<tokio::sync::oneshot::Sender<()>>,
     roster: Option<tokio::sync::watch::Sender<Roster>>,
-    video: Option<video::Options>,
+    video: Video,
 ) -> (Report, Result<(), Failure>) {
     log::info!(
         "signaling: opening {} for attendee {}",
@@ -1247,6 +1274,10 @@ pub async fn listen(
         None => (None, None),
     };
     let muted = muted_rx.as_mut().is_none_or(|m| *m.borrow_and_update());
+    let Video { options, viewer } = video;
+    let watched = viewer.as_ref().map(|v| v.watched.clone());
+    let watch = (options.is_some() || viewer.is_some())
+        .then(|| Watch::new(options, viewer, &join.attendee_id));
     let mut session = Session {
         join,
         started,
@@ -1281,7 +1312,8 @@ pub async fn listen(
         voices: Voices::default(),
         count: None,
         report: Report::default(),
-        video: video.map(|options| Watch::new(options, &join.attendee_id)),
+        video: watch,
+        watched,
         over: None,
     };
     let steps = session.handshake.start(now_ms());
@@ -1339,6 +1371,16 @@ pub async fn listen(
                 // The microphone's side is gone: silence from here.
                 None => session.frames = None,
             },
+            watched = watched_change(&mut session.watched) => {
+                let key = watched.unwrap_or_else(|_| {
+                    session.watched = None;
+                    None
+                });
+                if let Some(watch) = &mut session.video {
+                    watch.set_watched(key);
+                }
+                session.try_resubscribe().await;
+            }
             muted = mute_change(&mut session.muted_rx) => match muted {
                 Ok(muted) => session.mute_changed(muted).await,
                 Err(_) => {
@@ -1986,6 +2028,29 @@ mod tests {
             frames: frames_in,
             muted,
         };
+        // With `huddle-video`, the share is received because the call
+        // window watches it (no `--video` streams), and it is decoded.
+        #[cfg(feature = "huddle-video")]
+        let (viewer, screen, told) = {
+            let screen = super::super::screen::Screen::new(|| {});
+            let (shares, told) = tokio::sync::watch::channel(Vec::new());
+            let (watching, watched) = tokio::sync::watch::channel(None);
+            // The window opens on the share once the session runs.
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let _ = watching.send(Some("B2#content".to_owned()));
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                drop(watching);
+            });
+            let viewer = Viewer {
+                shares,
+                watched,
+                screen: screen.clone(),
+            };
+            (Some(viewer), screen, told)
+        };
+        #[cfg(not(feature = "huddle-video"))]
+        let viewer = None;
         let (report, result) = listen(
             &join,
             None,
@@ -1993,14 +2058,34 @@ mod tests {
             stopped,
             None,
             None,
-            Some(video::Options {
-                streams: 4,
-                h264_only: true,
-                dump: None,
-            }),
+            Video {
+                options: Some(video::Options {
+                    streams: if cfg!(feature = "huddle-video") { 0 } else { 4 },
+                    h264_only: true,
+                    dump: None,
+                }),
+                viewer,
+            },
         )
         .await;
         drop(tone);
+        #[cfg(feature = "huddle-video")]
+        {
+            // Who shares reached the viewer, and the share was decoded at
+            // its size.
+            let shares = told.borrow().clone();
+            assert_eq!(shares.len(), 1, "{shares:?}");
+            assert_eq!(shares[0].key, "B2#content");
+            assert_eq!(shares[0].user.as_deref(), Some("U3"));
+            assert!(screen.pictures() >= 5, "{} pictures", screen.pictures());
+            let picture = screen.take().expect("the newest picture");
+            assert_eq!(picture.source, [320, 180]);
+            log::info!(
+                "loopback: {} pictures of {:?} decoded",
+                screen.pictures(),
+                picture.source
+            );
+        }
         assert_eq!(result, Ok(()), "{report:?}");
         assert_eq!(report.ending.as_deref(), Some("left"));
         assert!(report.relay.is_some(), "{report:?}");

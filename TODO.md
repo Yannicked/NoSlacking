@@ -1025,12 +1025,24 @@ engineering, as for the rest of the session sign-in.
         whether audio kept flowing; `--video-h264-only` offers no VP8;
         `--video-dump DIR` keeps the first 300 frames. What to run is in
         the research note's Stage 0.
-  - [ ] Run it with a colleague's camera and screen share, plain, with
-        `--video 4` and with `--video 4 --video-h264-only`, and settle:
-        shares as `#content`?, which codec arrives and does it move to
-        H.264?, does Chime take the re-SUBSCRIBE with audio going on?,
-        keyframes after a PLI?, DATA_MESSAGE topics while drawing or
-        reacting? Then Stage 1.
+  - [x] Run it against Slack (2026-10-07): shares are `#content`
+        sources in H.264 constrained baseline, 1080p at about 12 fps;
+        cameras H.264 CB 480×480; the re-SUBSCRIBE works with audio
+        going on; keyframes come after a PLI.
+  - [x] Stage 1 built, behind `huddle-video` (off by default), not yet
+        tried against Slack: the call bar lists who shares with Watch;
+        the call window (a native window) shows the share fitted, with
+        tabs for two shares; only the share watched is received; H.264
+        decoded in pure Rust (`rusty_h264-decoder`, chosen over
+        `rust_h264` after a spike: both bit-exact, rusty about 3 ms per
+        1080p frame against 10) on a thread of its own, the newest
+        picture kept, a PLI on loss or error. The comparison and timings
+        are in the research note's Stage 1.
+  - [ ] Try Stage 1 with a colleague sharing a screen
+        (`cargo run --release --features huddle-video`, press Watch):
+        how soon the picture comes, minutes of clean decoding, Watch
+        switching between two shares, closing and the share ending, CPU.
+  - [ ] Stage 2: camera tiles.
 - **Microsoft Teams:** [docs/research/microsoft-teams.md](docs/research/microsoft-teams.md)
   (2026-10-06). Not being built: the official Graph route can't do live
   updates or calls, and the route other clients take signs in as

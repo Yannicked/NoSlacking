@@ -26,7 +26,9 @@ copied. Line refs are `file:line` at those commits.
   library (OpenH264 or libvpx) or platform decoders — there is no mature
   pure-Rust H.264 or full VP8 decoder. Sending needs an encoder (same
   story) plus camera/screen capture, which on Wayland/Flatpak means the
-  PipeWire portals.
+  PipeWire portals. *(Stage 1 update: the spike found rusty_h264, pure
+  Rust, bit-exact and fast enough for 1080p shares; it is what Stage 1
+  uses. Real Slack sends H.264 CB, so VP8 is not needed.)*
 - **Plan**: probe (days) → receive screen shares (2–3 wk) → camera tiles
   (2–3 wk) → send camera (3–5 wk) → share screen (3–5 wk, Wayland the
   risk). Drawing, stickers and effects: not realistic (undocumented,
@@ -246,6 +248,9 @@ from `~/.cargo/registry/src/*/str0m-0.24.1/`.
 
 ### 3.2 Decoding
 
+*(Stage 1 chose `rusty_h264-decoder` after a spike; the comparison is
+under Stage 1 in §5.)*
+
 | Option | Licence | C/unsafe | Build cost | Notes |
 |---|---|---|---|---|
 | **`openh264` 0.9.8** (2026-08, ralfbiedert) | BSD-2 crate, BSD Cisco source | C++ compiled by `cc` (`source` feature); optional nasm, "up to 3x" faster | C++ toolchain on all 3 OSes, which CI already has for OpenSSL. nasm is optional (`OPENH264_NO_ASM`) | Decodes 1080p in 2.8 ms with nasm and 5.7 ms without (Ryzen 7950X3D), so roughly **1.5–3 ms per 720p frame on desktops and 3–6 ms on old laptops**. Officially supports Constrained Baseline; the crate's CABAC bench suggests Main works as well. **Patents:** Cisco's MPEG LA cover applies only to Cisco's binary downloaded at install time. Built from source, there is no cover. The `libloading` feature loads a Cisco blob we supply, with its hash checked. The Flatpak runtime dropped the `org.freedesktop.Platform.openh264` extension from 25.08 on, so the blob has no easy source there |
@@ -322,7 +327,8 @@ others' codecs today: log INDEX's `supported_receive_codec_intersection`.
 ## 4. Fit and architecture
 
 - **Feature flag:** `huddle-video = ["huddle-audio", "dep:openh264",
-  "dep:yuv"]`, plus `huddle-video-send` later for the encoder and capture.
+  "dep:yuv"]` (built as `rusty_h264-decoder`, `yuv` and `bytemuck`
+  instead of openh264), plus `huddle-video-send` later for the encoder and capture.
   It stays off in releases until proven, like `huddle-audio`.
 - **Receive pipeline:**
   - `huddle_audio/` would gain `video_index.rs`: a pure module for INDEX
@@ -479,6 +485,106 @@ for until found, and keyframes without one are counted).
 - Verify: the share is readable at full size and arrives within about
   2 s of joining or starting; CPU is reasonable; audio is unaffected by
   renegotiation; things recover after packet loss (PLI).
+
+**Stage 0: what real Slack showed (2026-10-07).** A share is its own
+INDEX source, attendee `…#content`, external user id carrying the
+sharer's `U…`. It arrives as H.264 constrained baseline
+(`profile-level-id=42e01f`, packetization-mode 1, pt 108), 1920×1080,
+level 4.2, about 12 fps and 200–900 kbit/s, with a keyframe on PLI.
+Cameras: H.264 CB 480×480 at about 22 fps. Once we receive video the
+codec intersection drops VP9 and AV1 and senders pick H.264 CB (VP8 stays
+listed, unused). Re-SUBSCRIBE with `recvonly` m-lines works, audio keeps
+flowing, slots are freed and reused.
+
+**Stage 1: built (2026-10-07), behind `huddle-video`; not yet tried
+against Slack.**
+
+*Decoder: pure Rust, `rusty_h264-decoder` 0.16.* Spike in a scratch
+crate, release build, on an AMD Ryzen AI 7 350, single thread. Fixtures
+made with ffmpeg and libopenh264, constrained baseline: a 1080p "screen"
+(the app's own screenshot with a moving cursor and a frame counter,
+36 frames at 12 fps, 500 kbit/s, IDR every 24; level 4.0, as OpenH264
+writes it), a 480×480 "camera" (testsrc2 with a moving Mandelbrot, 66
+frames at 22 fps, 400 kbit/s) and, for timing only, a 1080p whole-screen
+scroll at 2 Mbit/s (the worst case for a share). Compared with ffmpeg's
+own decode of the same files.
+
+| | `rusty_h264-decoder` 0.16 (`std`+`asm`) | the same, no `asm` | `rust_h264` 0.4 |
+|---|---|---|---|
+| Correct | bit-exact, every frame of all three | bit-exact | bit-exact |
+| 1080p screen, ms/frame (mean / p95 / max) | **3.4 / 10.1 / 16.9** | 5.7 / 17.9 / 34.5 | 9.9 / 25.7 / 42.7 |
+| 1080p scrolling, 2 Mbit/s | **4.9 / 7.6 / 17.3** | 6.9 / 12.7 / 35.5 | 13.8 / 21.8 / 52.9 |
+| 480×480 camera | **0.43** / 0.64 / 1.8 | 0.78 | 1.8 |
+| Broken input (truncated, bit flips, garbage tails, random AUs; release and overflow-checked debug; about 30,000 frames each) | errors, **no panic, no hang** | | errors, no panic, no hang |
+| After an error | refuses every later frame, **even the next IDR**, until a new `Decoder` is made: the wrapper makes one at each keyframe after a loss | | conceals: decodes on with damaged references; a dropped frame is not noticed |
+| Latency | the picture of the access unit given | | a picture comes out when the next one starts (`flush` after each unit to avoid it) |
+| `unsafe` | decoder and common crate `forbid(unsafe_code)`; `asm` adds rusty_h264-accel, about 245 `unsafe` (SSE2/AVX2/NEON intrinsics, AVX2 and SSE4.1 detected at run time; no assembly, no C, no build script) | none | 6, NEON only; 83 `unwrap`, 21 `panic!`/`unreachable!` in the source |
+| Licence | BSD-2-Clause (cargo deny passes) | | MIT OR Apache-2.0 |
+| Maintenance | since 2026-06, 16 releases, 0.16.0 2026-09-07, pushed 2026-10-04, 9 stars | | since 2026-02, 0.4.0 2026-04-20, pushed 2026-09-08, 8 stars |
+| Gotcha | its default features install `rusty_alloc` as the process's **global allocator**: depend with `default-features = false, features = ["std", "asm"]` | | |
+
+Also looked at: `h264-decoder` (xiu) only parses headers; `rumpeg-h264`
+wraps rusty_h264. **Chosen: rusty_h264-decoder** (fastest by 2–3×, fuzzed
+by its authors and here, errors instead of guessing). Its weak points: a
+young, small project, and the poisoned state after an error, which
+`decode::H264` works around. Patents: as with any H.264 built from
+source, no licence comes with it (risk 2 below).
+
+*What was built.*
+- `huddle_audio::decode`: `H264` (waits for a keyframe at the start,
+  after a gap and after an error, then starts a fresh decoder), the
+  shrink by whole steps to the window's size (box filter), and I420 →
+  RGBA with `yuv` (BT.601 studio range), written straight into egui's
+  pixels.
+- `huddle_audio::screen`: `Screen`, the newest-picture slot shared with
+  the interface (an older picture not yet taken is dropped, never
+  queued; the window is woken only when it took the last one), and
+  `Decoding`, a thread per session fed by the session (frames queue up
+  to 36, then are dropped and a keyframe asked for). It logs its
+  timings every 10 s while it works.
+- `video::shares`, `share_stream` and `wanted`: who shares (others'
+  only, one per sharer, keyed by attendee id), and what to receive:
+  the share the call window shows, nothing else (`--video N` still adds
+  its picks). `watch` follows the window (`Viewer`: the shares sent out,
+  the watched key coming in), re-SUBSCRIBEs as before, starts and stops
+  decoding as the slot is answered, and asks for a PLI when a slot
+  starts, on a gap, and when the decoder wants a keyframe (at most one a
+  second). With `huddle-video` the offer is H.264 only: VP8 was never
+  chosen by senders, and it could not be decoded.
+- The app: the call bar lists each share ("Ana is sharing their
+  screen") with Watch / Stop watching; Watch opens the call window, a
+  native window through egui's immediate viewports (as the pop-outs), the
+  share fitted and centred on a dark stage, the sharer's name, a tab per
+  share when two people share, Close. Closing it, leaving, a failure or
+  the share ending (a toast says so) stops receiving it. The picture is
+  uploaded with `TextureHandle::set`. Demo: `--demo-view sharing` (the
+  call bar) and `--demo-view call-window` (drawn inside the main window
+  there, as eframe cannot screenshot a second window; the pretend share
+  plays the 1080p fixture at 12 fps).
+- Logging: INDEX's heading is logged when its shape changes (sources
+  come, go, resize or pause; not bitrates or frame rates), each source,
+  BITRATES, DATA_MESSAGE, tracks and stream counts only at debug level
+  unless it is the probe or `--video`.
+
+*Measured in the app* (release, the demo's 1080p share at 12 fps, the
+call window 1280×780 at scale 2, so pictures are converted at full
+size), headless under Xvfb with Mesa's software GL (llvmpipe), so the
+machine was busy rendering: the decoder thread used **7 % of one core**
+(8–9 ms decoding and 1.7 ms converting a picture, against 3.4 ms
+decoding on a quiet machine in the spike); the interface thread 11 %,
+with the demo repainting every frame for its screenshot and uploads
+going through software GL. A real GPU and a real share (mostly still,
+smaller P frames) should cost less; to be measured on a desktop.
+
+*Binary size:* `--features huddle-video` adds 0.99 MB to the release
+binary (50.32 → 51.31 MB, both with `huddle-audio`).
+
+*Not yet known:* whether real shares keep decoding cleanly for minutes
+(SEI, multiple slices, Chrome's hardware encoders), how long the first
+picture takes after Watch (re-SUBSCRIBE at most every 3 s, then a PLI),
+whether a share's stream id changes mid-share (the key is the attendee,
+so it would be followed), and whether Slack's VUI ever says full range
+or BT.709 (the conversion assumes BT.601 studio range).
 
 **Stage 2: camera tiles (2–3 weeks).**
 - Work: multiple slots, a selection policy (at most 4–9 tiles, active

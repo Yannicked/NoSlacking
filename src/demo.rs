@@ -1184,6 +1184,69 @@ pub fn long_history_ts(index: usize) -> Ts {
         .unwrap_or_default()
 }
 
+/// The demo huddle's pretend screen share: where its pictures go, and
+/// whether it is being watched (then the fixture plays into it).
+#[cfg(feature = "huddle-video")]
+static SHARE: std::sync::OnceLock<(
+    crate::huddles::Screen,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+)> = std::sync::OnceLock::new();
+
+/// Sets up the pretend share, its pictures waking the window through
+/// `sink`'s waker. Only the first call counts.
+#[cfg(feature = "huddle-video")]
+fn start_share(sink: &Sink) {
+    let waker = sink.waker();
+    let screen = crate::huddles::Screen::new(move || waker.wake());
+    let watched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Err(error) = crate::huddle_audio::screen::demo_feed(screen.clone(), watched.clone()) {
+        log::warn!("demo: no pretend share: {error}");
+        return;
+    }
+    let _ = SHARE.set((screen, watched));
+}
+
+/// The pretend share's screen, once the demo has started.
+#[cfg(feature = "huddle-video")]
+pub fn share_screen() -> Option<crate::huddles::Screen> {
+    SHARE.get().map(|(screen, _)| screen.clone())
+}
+
+/// Plays the pretend share, or stops it.
+#[cfg(feature = "huddle-video")]
+pub fn watch_share(on: bool) {
+    if let Some((_, watched)) = SHARE.get() {
+        watched.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Who shares in #design's huddle: Ana, and Carla too, so the call
+/// window has two tabs.
+#[cfg(feature = "huddle-video")]
+pub fn shares() -> Vec<crate::huddles::Share> {
+    vec![
+        crate::huddles::Share {
+            key: "ana-attendee#content".into(),
+            user: Some("U01".into()),
+        },
+        crate::huddles::Share {
+            key: "carla-attendee#content".into(),
+            user: Some("U03".into()),
+        },
+    ]
+}
+
+/// Listening to #design's huddle with Ana's share open in the call
+/// window (`--demo-view share`).
+#[cfg(feature = "huddle-video")]
+pub fn sharing() -> crate::huddles::Listening {
+    crate::huddles::Listening {
+        shares: shares(),
+        screen: share_screen(),
+        ..listening()
+    }
+}
+
 /// Listening to the huddle in #design for 2 min 14 s: Ana speaking,
 /// Carla muted, and you, for the call bar's screenshot
 /// (`--demo-view listening`).
@@ -1339,6 +1402,8 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
     });
     sink.send(Event::Socket(Socket::Connected));
     sink.send(crate::backend::people::demo_huddle(TEAM));
+    #[cfg(feature = "huddle-video")]
+    start_share(&sink);
     // Ana keeps typing in her direct message, as Slack repeats it.
     let typing = sink.clone();
     tokio::spawn(async move {

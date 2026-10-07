@@ -286,7 +286,10 @@ async fn probe(
         stopped,
         None,
         None,
-        Some(options.video.clone()),
+        media::Video {
+            options: Some(options.video.clone()),
+            viewer: None,
+        },
     )
     .await;
     drop(tone);
