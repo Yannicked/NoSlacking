@@ -24,7 +24,7 @@
 //! device takes it: the far end the echo canceller needs while the
 //! microphone is open ([`super::processing`]).
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -50,6 +50,10 @@ struct Shared {
     broken: Mutex<u64>,
     /// Times the decoder panicked and was started afresh.
     restarts: AtomicU64,
+    /// The loudest frame decoded since [`Feed::take_loudness`] last
+    /// asked: its RMS, as `f32` bits (which order as the values do, for
+    /// these never negative).
+    loudest: AtomicU32,
 }
 
 /// One open device's state, shared with its thread and its callback.
@@ -91,6 +95,12 @@ impl Feed {
         lock(&self.shared.jitter).push(timestamp, payload.to_vec());
     }
 
+    /// How loud the loudest frame played since the last call was: its
+    /// RMS, 0 to 1. For telling who speaks where nothing else says.
+    pub fn take_loudness(&self) -> f32 {
+        f32::from_bits(self.shared.loudest.swap(0, Ordering::Relaxed))
+    }
+
     /// What was played so far.
     pub fn played(&self) -> Played {
         Played {
@@ -120,6 +130,21 @@ impl Opus for opus_decoder::OpusDecoder {
     fn decode(&mut self, packet: &[u8], out: &mut [f32]) -> Option<usize> {
         self.decode_float(packet, out, false).ok()
     }
+}
+
+/// The root mean square of `samples`: 0 for none.
+fn rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum: f32 = samples.iter().map(|s| s * s).sum();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a frame is a few thousand samples"
+    )]
+    let mean = sum / samples.len() as f32;
+    let rms = mean.sqrt();
+    if rms.is_finite() { rms } else { 0.0 }
 }
 
 /// Makes a decoder: the first, and a fresh one after a panic.
@@ -167,6 +192,10 @@ impl Decoded {
     fn refill(&mut self) {
         self.device.pulls.fetch_add(1, Ordering::Relaxed);
         self.decode();
+        let loudness = rms(&self.samples);
+        self.shared
+            .loudest
+            .fetch_max(loudness.to_bits(), Ordering::Relaxed);
         if let Some(tap) = &self.tap {
             tap.push(&self.samples, usize::from(CHANNELS));
         }
@@ -383,6 +412,13 @@ impl Drop for Speaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loudness_is_the_root_mean_square() {
+        assert!(rms(&[]).abs() < f32::EPSILON);
+        assert!(rms(&[0.0; 960]).abs() < f32::EPSILON);
+        assert!((rms(&[0.5, -0.5, 0.5, -0.5]) - 0.5).abs() < 1e-6);
+    }
 
     /// Opus's shortest silence: a 20 ms CELT frame with nothing in it.
     const SILENT_FRAME: [u8; 3] = [0xF8, 0xFF, 0xFE];

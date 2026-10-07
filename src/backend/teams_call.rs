@@ -10,6 +10,7 @@
 //! someone to talk.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -26,6 +27,43 @@ use crate::people;
 use crate::teams::calling::call::{CallEvent, Control, outgoing};
 use crate::teams::calling::media::Audio;
 use crate::teams::client::TeamsClient;
+
+/// How often the far end's loudness is looked at.
+const LISTEN_EVERY: Duration = Duration::from_millis(100);
+/// How loud (RMS, 0 to 1) what the far end sends must be to count as
+/// speech: about -36 dBFS, above the hiss Opus lets through between
+/// words, below a quiet voice.
+const SPEECH_RMS: f32 = 0.016;
+/// How long the speaking mark stays after the last loud moment, so it
+/// does not flicker between words.
+const SPEECH_HOLD: Duration = Duration::from_millis(400);
+
+/// Whether the far end speaks, from how loud their sound plays: Teams
+/// sends no levels (the far end turns down RTP's audio level header).
+#[derive(Debug, Default)]
+struct Speech {
+    /// When they were last loud.
+    loud_at: Option<Instant>,
+    /// What the bar was last told.
+    speaking: bool,
+}
+
+impl Speech {
+    /// Takes the loudest moment since the last look, at `now`; answers
+    /// whether they speak when that changed.
+    fn heard(&mut self, loudness: f32, now: Instant) -> Option<bool> {
+        if loudness >= SPEECH_RMS {
+            self.loud_at = Some(now);
+        }
+        let speaking = self
+            .loud_at
+            .is_some_and(|at| now.saturating_duration_since(at) < SPEECH_HOLD);
+        (speaking != self.speaking).then(|| {
+            self.speaking = speaking;
+            speaking
+        })
+    }
+}
 
 /// The call going on.
 #[derive(Debug)]
@@ -106,16 +144,24 @@ struct Place {
     callee: String,
 }
 
-/// Who is in a call with `callee`: you and them, `muted` as the far end
-/// last said. Who speaks is not known.
-fn roster(callee: &str, muted: bool) -> Roster {
+/// What the bar shows of the one called.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FarEnd {
+    /// As the far end last said.
+    muted: bool,
+    /// As their sound says.
+    speaking: bool,
+}
+
+/// Who is in a call with `callee`: you and them, as `far` says.
+fn roster(callee: &str, far: FarEnd) -> Roster {
     Roster {
         people: vec![
             Person {
                 user: Some(callee.to_owned()),
                 me: false,
-                muted,
-                speaking: false,
+                muted: far.muted,
+                speaking: far.speaking,
             },
             Person {
                 user: None,
@@ -161,7 +207,7 @@ async fn run(
         }
     };
     tell(Listen::Joining);
-    tell(Listen::Roster(roster(&callee, false)));
+    tell(Listen::Roster(roster(&callee, FarEnd::default())));
     let tap = RenderTap::default();
     let speaker_tap = tap.clone();
     let (speaker, feed) =
@@ -201,6 +247,7 @@ async fn run(
             });
         },
     ));
+    let meter = feed.clone();
     let audio = Audio {
         feed: Some(feed),
         uplink: Some(Uplink {
@@ -212,20 +259,49 @@ async fn run(
     // this call follows it.
     let ended: Arc<Mutex<Option<Result<(), Failure>>>> = Arc::default();
     let slot = ended.clone();
+    // The far end as the bar shows it, changed by the call's news (mute)
+    // and the sound (speaking), each telling the bar the whole of it.
+    let far = Arc::new(Mutex::new(FarEnd::default()));
+    let show = {
+        let (far, tell, them) = (far.clone(), tell.clone(), callee.clone());
+        move |change: &dyn Fn(&mut FarEnd)| {
+            let Ok(mut far) = far.lock() else {
+                return;
+            };
+            let was = *far;
+            change(&mut far);
+            if *far != was {
+                tell(Listen::Roster(roster(&them, *far)));
+            }
+        }
+    };
     let told = tell.clone();
-    let them = callee.clone();
-    outgoing(client, callee, audio, controls, move |event| match event {
+    let show_mute = show.clone();
+    let call = outgoing(client, callee, audio, controls, move |event| match event {
         CallEvent::Ringing => told(Listen::Ringing),
         CallEvent::Live => told(Listen::Live),
         CallEvent::AudioFlowing => {}
-        CallEvent::FarEndMuted(muted) => told(Listen::Roster(roster(&them, muted))),
+        CallEvent::FarEndMuted(muted) => show_mute(&|far| far.muted = muted),
         CallEvent::Ended { result, .. } => {
             if let Ok(mut slot) = slot.lock() {
                 *slot = Some(result);
             }
         }
-    })
-    .await;
+    });
+    tokio::pin!(call);
+    let mut speech = Speech::default();
+    let mut looks = tokio::time::interval(LISTEN_EVERY);
+    looks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = &mut call => break,
+            _ = looks.tick() => {
+                if let Some(speaking) = speech.heard(meter.take_loudness(), Instant::now()) {
+                    show(&|far| far.speaking = speaking);
+                }
+            }
+        }
+    }
     let _ = close_mic.send(());
     let _ = mic.await;
     // Stopping the device waits for its thread; not on this one.
@@ -244,12 +320,32 @@ mod tests {
 
     #[test]
     fn a_call_is_you_and_the_one_you_rang() {
-        let roster = roster("8:live:ana", true);
+        let roster = roster(
+            "8:live:ana",
+            FarEnd {
+                muted: true,
+                speaking: false,
+            },
+        );
         assert_eq!(roster.people.len(), 2);
         assert!(!roster.alone());
         assert_eq!(roster.people[0].user.as_deref(), Some("8:live:ana"));
         assert!(roster.people[0].muted);
         assert!(roster.people[1].me);
+    }
+
+    #[test]
+    fn speaking_shows_while_loud_and_a_moment_after() {
+        let start = Instant::now();
+        let mut speech = Speech::default();
+        assert_eq!(speech.heard(0.001, start), None);
+        assert_eq!(speech.heard(0.1, start), Some(true));
+        // A pause between words keeps the mark.
+        let pause = start + Duration::from_millis(200);
+        assert_eq!(speech.heard(0.001, pause), None);
+        let quiet = start + SPEECH_HOLD;
+        assert_eq!(speech.heard(0.001, quiet), Some(false));
+        assert_eq!(speech.heard(0.001, quiet + LISTEN_EVERY), None);
     }
 
     #[test]
