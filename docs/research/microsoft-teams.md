@@ -317,3 +317,18 @@ calls via Trouter (1–1.5 weeks); meetings (1–2 weeks); video receive
 (it rests entirely on the first-party client id), protocol churn
 (scraped version strings and capability masks), and codecs (Microsoft's
 servers prefer SILK and X-H264UC).
+
+### 6.3 What other clients taught
+
+- **ost:** its personal-account scope is refused. Asking a device code
+  for `https://api.spaces.skype.com/.default` with the consumer client id
+  gives AADSTS70011 (invalid scope); `service::api.fl.spaces.skype.com::MBI_SSL
+  openid profile offline_access` is accepted (`--teams-probe`, 2026-10-07).
+- **teams-for-linux:** runs the web app and reads its page, so it has
+  almost no protocol knowledge. Its tested Graph results with the web
+  app's token: `/me`, calendar, mail and `/me/people` work; presence,
+  `/me/chats` and creating chats are 403. Graph's `getByIds` is 403 for
+  our token too, which is why people are looked up through the middle
+  tier's `fetchShortProfile`. Work one-to-one chats are either
+  `19:…@unq.gbl.spaces` or `19:uni01_…@thread.v2`. They saw a chat
+  service send answer 201 and never arrive, so check sends end to end.

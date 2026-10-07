@@ -384,7 +384,8 @@ pub fn translate_conversation(conv: &types::Conversation) -> Conversation {
         ConversationKind::Channel
     } else if conv.is_meeting() {
         ConversationKind::Group
-    } else if conv.id.contains("@unq.gbl.spaces") {
+    } else if conv.id.contains("@unq.gbl.spaces") || conv.id.starts_with("19:uni01_") {
+        // One-to-one chats come in both shapes in work tenants.
         ConversationKind::Direct
     } else {
         ConversationKind::Private
@@ -765,6 +766,29 @@ mod tests {
         assert!(!file.is_system());
         assert!(activity("Text", "hello").is_some());
         assert!(activity("RichText/Html", "<p>hello</p>").is_some());
+    }
+
+    #[test]
+    fn both_shapes_of_one_to_one_chat_are_direct() {
+        for id in ["19:a_b@unq.gbl.spaces", "19:uni01_abc123@thread.v2"] {
+            let conv = types::Conversation {
+                id: id.into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                translate_conversation(&conv).kind,
+                ConversationKind::Direct,
+                "{id}"
+            );
+        }
+        let group = types::Conversation {
+            id: "19:0123abcd@thread.v2".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_conversation(&group).kind,
+            ConversationKind::Private
+        );
     }
 
     #[test]
