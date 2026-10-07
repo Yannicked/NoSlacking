@@ -1186,7 +1186,7 @@ impl Worker {
                     local: outgoing.local,
                     client_msg_id: outgoing.client_msg_id,
                     me: session.workspace.user_id.clone(),
-                    me_name: super::teams::own_name(&session.workspace),
+                    me_name: session.client.own_name(),
                 };
                 tokio::spawn(super::teams::send(
                     session.client.clone(),
@@ -1231,7 +1231,7 @@ impl Worker {
             Some(Backend::Teams(session)) => {
                 let me = crate::teams::client::Author {
                     id: session.workspace.user_id.clone(),
-                    name: super::teams::own_name(&session.workspace),
+                    name: session.client.own_name(),
                 };
                 tokio::spawn(super::teams::change(
                     session.client.clone(),

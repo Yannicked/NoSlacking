@@ -59,9 +59,11 @@ impl Session {
         report: Report,
     ) -> Self {
         let team = workspace.team_id.clone();
-        let me = workspace.user_id.clone();
+        if let Some(name) = own_name(&workspace) {
+            client.set_own_name(name);
+        }
         let boot =
-            tokio::spawn(boot(client.clone(), team.clone(), me, sink.clone())).abort_handle();
+            tokio::spawn(boot(client.clone(), workspace.clone(), sink.clone())).abort_handle();
         let trouter =
             tokio::spawn(trouter(team, client.clone(), sink.clone(), report)).abort_handle();
         Self {
@@ -107,8 +109,7 @@ impl Session {
         let team = self.workspace.team_id.clone();
         self.boot = tokio::spawn(boot(
             self.client.clone(),
-            team.clone(),
-            self.workspace.user_id.clone(),
+            self.workspace.clone(),
             self.sink.clone(),
         ))
         .abort_handle();
@@ -163,10 +164,13 @@ pub fn client(
 }
 
 /// Lists the chats, then the teams and their channels, then you.
-async fn boot(client: TeamsClient, team: String, me: String, sink: Sink) {
+async fn boot(client: TeamsClient, workspace: Workspace, sink: Sink) {
+    let team = workspace.team_id.clone();
+    let me = workspace.user_id.clone();
     if let Err(err) = client.ensure_fresh_tokens().await {
         log::warn!("could not renew the Teams tokens of {team}: {err:?}");
     }
+    name_yourself(&client, workspace, &sink).await;
 
     match client.get_conversations(PAGE).await {
         Ok(chats) => {
@@ -471,10 +475,38 @@ impl Post {
     }
 }
 
+/// Learns your own name and picture, for a personal account, whose token
+/// carries neither: renames the workspace after you (the interface keeps
+/// the new name) and tells the interface who you are.
+async fn name_yourself(client: &TeamsClient, mut workspace: Workspace, sink: &Sink) {
+    if client.credentials().account != auth::Account::Personal {
+        return;
+    }
+    match client.own_profile().await {
+        Ok(me) => {
+            if let Some(name) = me.display_name.clone() {
+                client.set_own_name(name.clone());
+                if workspace.name != name {
+                    workspace.name = name;
+                    sink.send(Event::WorkspaceReady(workspace.clone()));
+                }
+            }
+            sink.send(Event::Users {
+                team: workspace.team_id,
+                users: vec![translate_user(&crate::teams::types::UserDetails {
+                    id: workspace.user_id,
+                    ..me
+                })],
+            });
+        }
+        Err(error) => log::info!("could not read your own Teams profile: {error:?}"),
+    }
+}
+
 /// Your name in a Teams workspace, if the workspace's name is it: a
 /// personal sign-in whose name could not be found is called after the
 /// service instead, which is no one's name.
-pub fn own_name(workspace: &Workspace) -> Option<String> {
+fn own_name(workspace: &Workspace) -> Option<String> {
     let fallbacks = [Service::Teams.name(), PERSONAL_FALLBACK];
     (!fallbacks.contains(&workspace.name.as_str())).then(|| workspace.name.clone())
 }
@@ -627,11 +659,10 @@ pub async fn sign_in(
     };
     let client = TeamsClient::new(creds.clone());
     let mut me = client.get_me()?;
-    // A personal token says who you are but not your name; the profile
-    // service may.
+    // A personal token says who you are but not your name; your profile
+    // does.
     if me.display_name.is_none()
-        && let Ok(found) = client.get_users(std::slice::from_ref(&me.id)).await
-        && let Some(profile) = found.into_iter().next()
+        && let Ok(profile) = client.own_profile().await
     {
         me.display_name = profile.display_name;
     }

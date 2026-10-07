@@ -99,6 +99,12 @@ struct ShortProfiles {
     value: Vec<ShortProfile>,
 }
 
+/// What `/beta/users/me` answers.
+#[derive(serde::Deserialize)]
+struct OwnProfile {
+    value: ShortProfile,
+}
+
 /// One person, as the middle tier describes them.
 #[derive(serde::Deserialize)]
 struct ShortProfile {
@@ -188,6 +194,8 @@ pub struct TeamsClient {
     /// Cleared on sign-out, so a refresh still running does not save its
     /// token back after the sign-in was deleted.
     reporting: Arc<std::sync::atomic::AtomicBool>,
+    /// Your name, as messages sent from here carry it, once known.
+    own_name: Arc<RwLock<Option<String>>>,
 }
 
 impl std::fmt::Debug for TeamsClient {
@@ -205,6 +213,7 @@ impl TeamsClient {
             refreshing: Arc::new(tokio::sync::Mutex::new(())),
             on_refresh: None,
             reporting: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            own_name: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -217,6 +226,18 @@ impl TeamsClient {
     {
         self.on_refresh = Some(Arc::new(move |result| Box::pin(save(result))));
         self
+    }
+
+    /// Your name, once known (see [`Self::set_own_name`]).
+    pub fn own_name(&self) -> Option<String> {
+        self.own_name.read().ok().and_then(|name| name.clone())
+    }
+
+    /// Remembers your name for the messages sent from here.
+    pub fn set_own_name(&self, name: String) {
+        if let Ok(mut held) = self.own_name.write() {
+            *held = Some(name);
+        }
     }
 
     /// Stops handing refreshes to the save callback, for good: the
@@ -737,6 +758,39 @@ impl TeamsClient {
         Ok(found)
     }
 
+    /// Your own profile on a personal account's middle tier (its token
+    /// carries no name), named by the id messages name you by.
+    pub async fn own_profile(&self) -> Result<UserDetails, Failure> {
+        let creds = self.ensure_fresh_tokens().await?;
+        let url = format!(
+            "{}/beta/users/me/?skypeTeamsInfo=true&ggEnabled=true",
+            creds
+                .middle_tier_url()
+                .ok_or_else(|| Failure::Unexpected("no middle tier in regionGtms".into()))?
+                .trim_end_matches('/')
+        );
+        let skype = creds.skype_token.unwrap_or_default();
+        let resp = self
+            .bearer(RESOURCE_MT_PERSONAL, |http, token| {
+                crate::teams::auth::consumer_headers(
+                    http.get(&url)
+                        .bearer_auth(token)
+                        .header("x-skypetoken", &skype),
+                )
+            })
+            .await?;
+        if !resp.status().is_success() {
+            return Err(refused(resp, "read your profile").await);
+        }
+        let me: OwnProfile = resp
+            .json()
+            .await
+            .map_err(|e| Failure::Unexpected(e.to_string()))?;
+        me.value
+            .into_details()
+            .ok_or_else(|| Failure::Unexpected("no id in your profile".into()))
+    }
+
     /// People as a personal account's middle tier knows them, the way the
     /// Teams web client asks: personal accounts through `fetchShortProfile`,
     /// work accounts met in personal chats through `fetchFederated`, each
@@ -1108,6 +1162,17 @@ mod tests {
             ..TeamsCredentials::default()
         });
         assert_eq!(client.get_teams().await, Ok(Vec::new()));
+    }
+
+    #[test]
+    fn your_profile_reads_as_you() {
+        let me: OwnProfile = serde_json::from_str(
+            r#"{"value":{"isShortProfile":false,"objectId":"00000000-0000-0000-3448-d9d5387f3b43","mri":"8:live:.cid.3448d9d5387f3b43","displayName":"Yannick de Jong","email":"y@x.org"},"type":"Microsoft.SkypeSpaces.MiddleTier.Models.IUserIdentity"}"#,
+        )
+        .expect("a profile");
+        let me = me.value.into_details().expect("an id");
+        assert_eq!(me.id, "live:.cid.3448d9d5387f3b43");
+        assert_eq!(me.display_name.as_deref(), Some("Yannick de Jong"));
     }
 
     #[test]
