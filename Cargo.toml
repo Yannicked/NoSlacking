@@ -254,7 +254,10 @@ extended-description = "One window for your Slack workspaces: channels, direct m
 depends = "$auto, libxkbcommon0, libegl1, libgl1"
 # libva and a VA-API driver: noslacking-video loads them at run time to
 # decode huddle video on the GPU; without them it decodes in software.
-recommends = "libwayland-client0, libxkbcommon-x11-0, libva2, libva-drm2, mesa-va-drivers | intel-media-va-driver"
+# The ScreenCast portal and PipeWire: how a build with `huddle-share`
+# sees the screen under Wayland (such a build also links libpipewire,
+# which $auto then names).
+recommends = "libwayland-client0, libxkbcommon-x11-0, libva2, libva-drm2, mesa-va-drivers | intel-media-va-driver, xdg-desktop-portal, pipewire"
 assets = [
     ["target/release/noslacking", "usr/bin/", "755"],
     # The hardware video helper, beside the app where it looks first.
