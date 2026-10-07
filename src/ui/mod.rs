@@ -13,6 +13,8 @@ mod desktop;
 mod details;
 mod format;
 mod hooks;
+#[cfg(feature = "huddle-camera")]
+mod huddle_camera;
 mod huddle_mic;
 mod keys;
 mod lightbox;
@@ -86,6 +88,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     keys::global(app, ui.ctx());
     browse::keys(app, ui.ctx());
     views::keys(app, ui.ctx());
+    // Before the call bar draws it.
+    #[cfg(feature = "huddle-camera")]
+    huddle_camera::refresh(app, ui.ctx());
     match app.page {
         Page::SignIn => login::show(app, ui),
         Page::Settings => {

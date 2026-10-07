@@ -12,6 +12,10 @@ use crate::huddles;
 use crate::model::Action;
 use crate::ui::call_window::{self, CallView, TileView};
 
+/// The key of your own tile.
+#[cfg(feature = "huddle-camera")]
+const YOU: &str = "you";
+
 impl App {
     /// Draws the call window if it is open; call once a frame, inside
     /// the main window's frame.
@@ -54,6 +58,27 @@ impl App {
         let gallery = listening.gallery.clone();
         let faces = huddles::faces(&listening.roster);
         let cameras: Vec<huddles::Camera> = listening.cameras.clone();
+        // Your own camera, while it is on: one more tile, never received,
+        // its picture the call bar's self-preview.
+        #[cfg(feature = "huddle-camera")]
+        let you = (listening.camera != crate::huddle_camera::Cam::Off).then(|| {
+            let me = workspace
+                .map(|w| w.info.user_id.clone())
+                .unwrap_or_default();
+            let face = faces.iter().find(|f| f.me);
+            TileView {
+                key: YOU.into(),
+                name: crate::i18n::tf("{name} (you)", &[("name", &name(Some(&me)))]),
+                avatar: workspace
+                    .and_then(|w| w.user(&me))
+                    .and_then(|u| u.avatar.clone()),
+                seed: me,
+                speaking: face.is_some_and(|f| f.speaking),
+                muted: listening.mic != crate::huddle_mic::Mic::Live,
+                paused: false,
+                picture: None,
+            }
+        });
 
         let picture = &mut self.huddles.picture;
         if picture.of != key {
@@ -97,7 +122,8 @@ impl App {
                 }
             }
         }
-        let tiles: Vec<TileView> = cameras
+        #[cfg_attr(not(feature = "huddle-camera"), allow(unused_mut))]
+        let mut tiles: Vec<TileView> = cameras
             .iter()
             .filter(|c| c.tile)
             .map(|camera| {
@@ -124,6 +150,19 @@ impl App {
                 }
             })
             .collect();
+        #[cfg(feature = "huddle-camera")]
+        let yours = you.is_some();
+        #[cfg(feature = "huddle-camera")]
+        if let Some(mut you) = you {
+            you.picture = self
+                .huddles
+                .preview
+                .texture
+                .as_ref()
+                .map(|t| (t.id(), self.huddles.preview.size));
+            tiles.push(you);
+        }
+        let picture = &mut self.huddles.picture;
         let view = CallView {
             title: sharer
                 .as_deref()
@@ -162,6 +201,11 @@ impl App {
             true
         });
         if open {
+            // Your own tile takes a place the others' cannot.
+            #[cfg(feature = "huddle-camera")]
+            let room = room.map(|(n, tile): (usize, [u32; 2])| {
+                (if yours { n.saturating_sub(1) } else { n }, tile)
+            });
             if room.is_some() {
                 huddles::tell_wish(self, room);
             }

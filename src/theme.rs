@@ -398,6 +398,8 @@ fastframe_icons::icons! {
         Type => "type",
         User => lucide "user",
         Users => lucide "users",
+        Video => "video",
+        VideoOff => "video-off",
         X => lucide "x",
         ZoomIn => "zoom-in",
         ZoomOut => "zoom-out",

@@ -124,6 +124,8 @@ impl Hub {
             }
             #[cfg(feature = "huddle-video")]
             Command::WatchCall { .. } => log::debug!("{command:?} is the worker's"),
+            #[cfg(feature = "huddle-camera")]
+            Command::CameraHuddle { .. } => log::debug!("{command:?} is the worker's"),
             Command::Active => {
                 if let Some(rtm) = self
                     .teams
@@ -519,6 +521,15 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
                 )));
                 states
             };
+            // Your camera's self-preview, the test picture when on.
+            #[cfg(feature = "huddle-camera")]
+            let states = {
+                let mut states = states;
+                if let Some(preview) = crate::demo::camera_preview() {
+                    states.push(crate::huddles::Listen::Preview(preview));
+                }
+                states
+            };
             states
                 .into_iter()
                 .map(|state| Event::People {
@@ -547,6 +558,23 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
                 state: crate::huddles::Listen::Cameras(crate::demo::watch_call(&wish)),
             },
         }],
+        // The demo's camera is the test picture; it opens and closes as
+        // asked.
+        #[cfg(feature = "huddle-camera")]
+        Command::CameraHuddle { on } => {
+            crate::demo::camera(on);
+            vec![Event::People {
+                team: team.to_owned(),
+                event: people::Event::Camera {
+                    channel: "C03".into(),
+                    news: if on {
+                        crate::huddle_camera::CamNews::On
+                    } else {
+                        crate::huddle_camera::CamNews::Off
+                    },
+                },
+            }]
+        }
         // The demo has no microphone; it opens and closes as asked.
         Command::MuteHuddle { muted } => vec![Event::People {
             team: team.to_owned(),

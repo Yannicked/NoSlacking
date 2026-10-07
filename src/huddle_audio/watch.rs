@@ -12,6 +12,12 @@
 //! A probe run or `--video` logs everything at info level; an app session
 //! that only watches shares logs what changes and keeps the rest at debug
 //! level.
+//!
+//! Our own camera goes out on the first video m-line, slot 0 (the
+//! `huddle-camera` feature, or the probe's test picture): while it is on,
+//! the same renegotiation turns that line `sendrecv` and the SUBSCRIBE
+//! describes the camera (DUPLEX); off, the line goes back to `inactive`.
+//! Slot 0 stays 0 in `receive_stream_ids` either way.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -25,7 +31,7 @@ use str0m::media::{Direction, KeyframeRequestKind, MediaData, MediaKind, Mid};
 
 use super::bitstream::{Dump, DumpKind};
 use super::cameras::{self, Camera, Debounce, Pauses, Wish};
-use super::chime::{self, FrameType};
+use super::chime::{self, FrameType, VideoSend};
 #[cfg(feature = "huddle-video")]
 use super::gallery::{CameraDecoding, Gallery};
 #[cfg(feature = "huddle-video")]
@@ -64,11 +70,15 @@ pub struct Reoffer {
     pub pending: SdpPendingOffer,
     /// SUBSCRIBE's `receive_stream_ids` for it.
     pub receive_stream_ids: Vec<u32>,
+    /// Our camera, if the offer sends it.
+    pub video: Option<VideoSend>,
 }
 
 /// A re-SUBSCRIBE on its way.
 struct InFlight {
     plan: Plan,
+    /// Whether it asks to send our camera.
+    send: Option<VideoSend>,
     /// The mids of the m-lines it adds, in order.
     added: Vec<Mid>,
     sent: Instant,
@@ -149,8 +159,16 @@ pub struct Watch {
     /// Holds a new choice back until it stands still.
     debounce: Debounce,
     viewing: Option<Viewing>,
-    /// Our first video m-line: the send line, slot 0, always inactive.
+    /// Our first video m-line: the send line, slot 0, inactive unless our
+    /// camera is sent.
     send_line: Option<Mid>,
+    /// Our camera as wanted: sent on the send line, or not.
+    send_wanted: Option<VideoSend>,
+    /// Our camera as the last answered offer has it.
+    send_now: Option<VideoSend>,
+    /// Chime said view only: nothing is sent until an answer without
+    /// our camera (or a new try) comes.
+    refused: bool,
     /// The latest INDEX and the last one logged.
     index: Index,
     logged: Option<Index>,
@@ -212,6 +230,9 @@ impl Watch {
             debounce: Debounce::default(),
             viewing,
             send_line: None,
+            send_wanted: None,
+            send_now: None,
+            refused: false,
             index: Index::default(),
             logged: None,
             logged_at: None,
@@ -478,6 +499,43 @@ impl Watch {
         self.send_line = Some(send_line);
     }
 
+    /// Our send line, once the first offer has been made.
+    pub fn send_line(&self) -> Option<Mid> {
+        self.send_line
+    }
+
+    /// Sends our camera as `video` says from the next re-SUBSCRIBE, or
+    /// stops sending it (none).
+    pub fn set_sending(&mut self, video: Option<VideoSend>) {
+        if self.send_wanted != video {
+            log::info!(
+                "video: our camera {}",
+                if video.is_some() { "on" } else { "off" }
+            );
+        }
+        self.send_wanted = video;
+    }
+
+    /// Whether the media now negotiated sends our camera.
+    pub fn sending(&self) -> bool {
+        self.send_now.is_some() && !self.refused
+    }
+
+    /// Whether the re-SUBSCRIBE on its way asks to send our camera.
+    pub fn offering_to_send(&self) -> bool {
+        self.in_flight
+            .as_ref()
+            .is_some_and(|f| f.answered.is_none() && f.send.is_some())
+    }
+
+    /// Chime will not take our camera (view only): it stops now, and the
+    /// next re-SUBSCRIBE says so.
+    pub fn refuse_sending(&mut self) {
+        log::warn!("video: Chime takes no video from us (view only); our camera is off");
+        self.send_wanted = None;
+        self.refused = true;
+    }
+
     /// Reads what a signaling frame says of video.
     pub fn frame(&mut self, frame: &chime::Frame, now: Instant) {
         let kind = FrameType::try_from(frame.r#type).ok();
@@ -602,13 +660,15 @@ impl Watch {
         }
         let (tiles, wanted) = self.wanted(now);
         let plan = self.slots.plan(&wanted);
-        if !plan.changes() {
+        // Our camera going on or off changes the send line alone.
+        let send = self.send_wanted;
+        if !plan.changes() && send == self.send_now {
             self.commit_tiles(tiles);
             return None;
         }
         // Noted even while its turn has not come, so a choice that stood
         // still meanwhile goes as soon as it has.
-        let settled = self.debounce.settled(&wanted, now);
+        let settled = !plan.changes() || self.debounce.settled(&wanted, now);
         if !settled
             || now < dtls_up + SETTLE
             || self
@@ -618,6 +678,16 @@ impl Watch {
             return None;
         }
         let mut api = rtc.sdp_api();
+        if let Some(line) = self.send_line {
+            api.set_direction(
+                line,
+                if send.is_some() {
+                    Direction::SendRecv
+                } else {
+                    Direction::Inactive
+                },
+            );
+        }
         for &slot in &plan.free {
             if let Some(line) = self.lines.get(slot) {
                 api.set_direction(line.mid, Direction::Inactive);
@@ -653,6 +723,7 @@ impl Watch {
         self.commit_tiles(tiles);
         self.in_flight = Some(InFlight {
             plan,
+            send,
             added,
             sent: now,
             audit: Resubscribe {
@@ -667,6 +738,7 @@ impl Watch {
             offer: offer.to_sdp_string(),
             pending,
             receive_stream_ids,
+            video: send,
         })
     }
 
@@ -759,6 +831,18 @@ impl Watch {
             }
         }
         self.slots = after;
+        if self.send_now != flight.send {
+            log::info!(
+                "video: our camera is {}sent",
+                if flight.send.is_some() {
+                    ""
+                } else {
+                    "no longer "
+                }
+            );
+        }
+        self.send_now = flight.send;
+        self.refused = false;
         self.follow();
         let answered_ms = u64::try_from(now.duration_since(flight.sent).as_millis()).unwrap_or(0);
         flight.audit.answered_ms = Some(answered_ms);
@@ -943,7 +1027,7 @@ impl Watch {
         );
         if self.in_flight.is_none() {
             let (_, wanted) = self.wanted(now);
-            if self.slots.plan(&wanted).changes() {
+            if self.slots.plan(&wanted).changes() || self.send_wanted != self.send_now {
                 // A change of streams waits for its turn, and until it
                 // stands still.
                 due.push(

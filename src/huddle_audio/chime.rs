@@ -179,18 +179,59 @@ pub struct Subscribe {
     /// The video streams wanted, one per video m-line in order; the
     /// first (our send line) and every inactive one 0.
     pub receive_stream_ids: Vec<u32>,
+    /// Our camera, while it is sent on the first video m-line.
+    pub video: Option<VideoSend>,
 }
+
+/// Our camera as SUBSCRIBE describes it: the second send stream, as the
+/// JS SDK and HuddleFM send it while a camera is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoSend {
+    /// Its width in pixels.
+    pub width: u32,
+    /// Its height.
+    pub height: u32,
+    /// Frames a second.
+    pub fps: u32,
+    /// The most it sends, in kbit/s.
+    pub max_kbps: u32,
+}
+
+/// The track label Chime knows a camera by (the JS SDK's).
+pub const VIDEO_TRACK_LABEL: &str = "AmazonChimeExpressVideo";
+/// The camera's stream and group in our SUBSCRIBE: the audio is 1.
+const VIDEO_STREAM: u32 = 2;
 
 /// The SUBSCRIBE that asks to receive audio, like the JS SDK's
 /// `DefaultSignalingClient.subscribe` with an audio host and no video: one
 /// send stream for the audio m-line, receive-only service. HuddleFM
 /// lists one receive stream id of 0 for its inactive video m-line; the
-/// probe's video adds one per receiving m-line.
+/// probe's video adds one per receiving m-line. While our camera is sent,
+/// the service is both ways (DUPLEX) and a second send stream describes
+/// the camera, stream and group 2 (the JS SDK's
+/// `localStreamDescriptions`, as HuddleFM sends it).
 pub fn subscribe(sub: &Subscribe, now_ms: u64) -> Frame {
     let mut frame = frame(FrameType::Subscribe, now_ms);
+    let duplex = if sub.video.is_some() {
+        proto::SdkStreamServiceType::Duplex
+    } else {
+        proto::SdkStreamServiceType::Rx
+    };
+    let camera = sub.video.map(|video| proto::SdkStreamDescriptor {
+        stream_id: Some(VIDEO_STREAM),
+        framerate: Some(video.fps),
+        max_bitrate_kbps: Some(video.max_kbps),
+        track_label: Some(VIDEO_TRACK_LABEL.into()),
+        group_id: Some(VIDEO_STREAM),
+        attendee_id: Some(sub.attendee_id.clone()),
+        media_type: Some(proto::SdkStreamMediaType::Video as i32),
+        width: Some(video.width),
+        height: Some(video.height),
+        ..Default::default()
+    });
     frame.sub = Some(proto::SdkSubscribeFrame {
-        duplex: Some(proto::SdkStreamServiceType::Rx as i32),
-        send_streams: vec![proto::SdkStreamDescriptor {
+        duplex: Some(duplex as i32),
+        send_streams: std::iter::once(proto::SdkStreamDescriptor {
             stream_id: Some(1),
             framerate: Some(15),
             max_bitrate_kbps: Some(600),
@@ -200,7 +241,9 @@ pub fn subscribe(sub: &Subscribe, now_ms: u64) -> Frame {
             attendee_id: Some(sub.attendee_id.clone()),
             media_type: Some(proto::SdkStreamMediaType::Audio as i32),
             ..Default::default()
-        }],
+        })
+        .chain(camera)
+        .collect(),
         receive_stream_ids: sub.receive_stream_ids.clone(),
         sdp_offer: Some(sub.sdp_offer.clone()),
         audio_host: Some(sub.audio_host.clone()),
@@ -209,6 +252,19 @@ pub fn subscribe(sub: &Subscribe, now_ms: u64) -> Frame {
         ..Default::default()
     });
     frame
+}
+
+/// Whether a SUBSCRIBE_ACK says the huddle takes no video from us:
+/// error 206 ("VideoCallSwitchToViewOnly") or receive-only service. It
+/// means that only for a SUBSCRIBE that asked to send video; audio goes
+/// on either way.
+pub fn view_only_ack(frame: &Frame) -> bool {
+    if FrameType::try_from(frame.r#type) != Ok(FrameType::SubscribeAck) {
+        return false;
+    }
+    let status = frame.error.as_ref().and_then(|e| e.status);
+    let duplex = frame.suback.as_ref().and_then(|a| a.duplex);
+    status == Some(206) || duplex == Some(proto::SdkStreamServiceType::Rx as i32)
 }
 
 /// The LEAVE that ends this attendee's stay; Chime answers LEAVE_ACK.
@@ -423,6 +479,7 @@ mod tests {
                 attendee_id: "A1".into(),
                 muted: true,
                 receive_stream_ids: vec![0, 6],
+                video: None,
             },
             5,
         );
@@ -444,6 +501,88 @@ mod tests {
         );
         let pong = ping_pong(proto::SdkPingPongType::Pong, 9, 8);
         assert_eq!(round_trip(&pong), pong);
+    }
+
+    /// While the camera is on, SUBSCRIBE asks for both ways and
+    /// describes the camera as the second send stream; slot 0 of the
+    /// receive list stays 0, our own send line. Off, it is as before.
+    #[test]
+    fn a_subscribe_with_the_camera_on_sends_video_both_ways() {
+        let mut sub = Subscribe {
+            sdp_offer: "v=0\r\n".into(),
+            audio_host: "h.example:3478".into(),
+            attendee_id: "A1".into(),
+            muted: false,
+            receive_stream_ids: vec![0, 7],
+            video: Some(VideoSend {
+                width: 640,
+                height: 480,
+                fps: 15,
+                max_kbps: 1200,
+            }),
+        };
+        let frame = subscribe(&sub, 5);
+        assert_eq!(round_trip(&frame), frame);
+        let body = frame.sub.expect("a subscribe");
+        assert_eq!(
+            body.duplex,
+            Some(proto::SdkStreamServiceType::Duplex as i32)
+        );
+        assert_eq!(body.receive_stream_ids, [0, 7]);
+        let [audio, video] = &body.send_streams[..] else {
+            panic!("{:?}", body.send_streams);
+        };
+        assert_eq!(audio.stream_id, Some(1));
+        assert_eq!(
+            audio.media_type,
+            Some(proto::SdkStreamMediaType::Audio as i32)
+        );
+        assert_eq!(video.stream_id, Some(2));
+        assert_eq!(video.group_id, Some(2));
+        assert_eq!(
+            video.media_type,
+            Some(proto::SdkStreamMediaType::Video as i32)
+        );
+        assert_eq!(
+            video.track_label.as_deref(),
+            Some("AmazonChimeExpressVideo")
+        );
+        assert_eq!(video.attendee_id.as_deref(), Some("A1"));
+        assert_eq!((video.width, video.height), (Some(640), Some(480)));
+        assert_eq!(video.framerate, Some(15));
+        assert_eq!(video.max_bitrate_kbps, Some(1200));
+
+        sub.video = None;
+        let body = subscribe(&sub, 6).sub.expect("a subscribe");
+        assert_eq!(body.duplex, Some(proto::SdkStreamServiceType::Rx as i32));
+        assert_eq!(body.send_streams.len(), 1);
+    }
+
+    /// Chime's "view only": 206 next to the answer, or the service cut
+    /// to receive-only; a plain SUBSCRIBE_ACK or another frame is not.
+    #[test]
+    fn view_only_is_206_or_receive_only() {
+        let mut ack = frame(FrameType::SubscribeAck, 1);
+        ack.suback = Some(proto::SdkSubscribeAckFrame {
+            duplex: Some(proto::SdkStreamServiceType::Duplex as i32),
+            sdp_answer: Some("v=0".into()),
+            ..Default::default()
+        });
+        assert!(!view_only_ack(&ack));
+        let mut refused = ack.clone();
+        refused.error = Some(proto::SdkErrorFrame {
+            status: Some(206),
+            description: Some("VideoCallSwitchToViewOnly".into()),
+        });
+        assert!(view_only_ack(&refused));
+        let mut rx = ack.clone();
+        if let Some(suback) = &mut rx.suback {
+            suback.duplex = Some(proto::SdkStreamServiceType::Rx as i32);
+        }
+        assert!(view_only_ack(&rx));
+        let mut index = frame(FrameType::Index, 1);
+        index.error = refused.error.clone();
+        assert!(!view_only_ack(&index));
     }
 
     #[test]

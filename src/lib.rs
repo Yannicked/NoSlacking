@@ -24,6 +24,8 @@ pub mod failure;
 pub mod highlight;
 pub mod hooks;
 pub mod huddle_audio;
+#[cfg(feature = "huddle-camera")]
+pub mod huddle_camera;
 pub mod huddle_mic;
 pub mod huddles;
 pub mod i18n;

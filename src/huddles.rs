@@ -224,6 +224,25 @@ impl std::fmt::Debug for CallPicture {
     }
 }
 
+/// The self-preview's picture, uploaded (the `huddle-camera` feature).
+#[cfg(feature = "huddle-camera")]
+#[derive(Default)]
+pub struct PreviewPicture {
+    /// The texture it is drawn from, set again for each new picture.
+    pub texture: Option<egui::TextureHandle>,
+    /// Its size in pixels.
+    pub size: [usize; 2],
+}
+
+#[cfg(feature = "huddle-camera")]
+impl std::fmt::Debug for PreviewPicture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreviewPicture")
+            .field("size", &self.size)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The app's side of huddles.
 #[derive(Debug, Default)]
 pub struct State {
@@ -235,6 +254,9 @@ pub struct State {
     /// The call window's picture of the share watched.
     #[cfg(feature = "huddle-video")]
     pub picture: CallPicture,
+    /// Your camera's self-preview.
+    #[cfg(feature = "huddle-camera")]
+    pub preview: PreviewPicture,
 }
 
 impl State {
@@ -281,6 +303,9 @@ pub enum Action {
     /// Opens the call window on the cameras (and a share, if any).
     #[cfg(feature = "huddle-video")]
     OpenCall,
+    /// Turns the camera on or off in the huddle being listened to.
+    #[cfg(feature = "huddle-camera")]
+    Camera(crate::huddle_camera::CamAction),
 }
 
 /// Applies a view's request.
@@ -331,6 +356,8 @@ pub fn apply(app: &mut App, action: Action) {
         Action::Watch(share) => listen::watch(app, share),
         #[cfg(feature = "huddle-video")]
         Action::OpenCall => listen::open_call(app),
+        #[cfg(feature = "huddle-camera")]
+        Action::Camera(action) => crate::huddle_camera::apply(app, action),
     }
 }
 
@@ -474,6 +501,11 @@ pub fn handle(app: &mut App, team: &str, event: people::Event) -> Option<people:
         }
         people::Event::Microphone { channel, news } => {
             crate::huddle_mic::news(app, team, &channel, news);
+            None
+        }
+        #[cfg(feature = "huddle-camera")]
+        people::Event::Camera { channel, news } => {
+            crate::huddle_camera::news(app, team, &channel, news);
             None
         }
         people::Event::InviteDeclined { result } => {

@@ -59,6 +59,9 @@ pub enum Listen {
     /// Where the watched share's pictures arrive, once per session.
     #[cfg(feature = "huddle-video")]
     Screen(Screen),
+    /// Where your camera's self-preview arrives, once per session.
+    #[cfg(feature = "huddle-camera")]
+    Preview(crate::huddle_camera::Preview),
     /// Who has a camera on now and who has a tile, when that changes.
     #[cfg(feature = "huddle-video")]
     Cameras(Vec<Camera>),
@@ -104,6 +107,12 @@ pub struct Listening {
     /// or shows only cameras.
     #[cfg(feature = "huddle-video")]
     pub watching: Option<String>,
+    /// Your camera: off on joining.
+    #[cfg(feature = "huddle-camera")]
+    pub camera: crate::huddle_camera::Cam,
+    /// Where your camera's self-preview arrives.
+    #[cfg(feature = "huddle-camera")]
+    pub preview: Option<crate::huddle_camera::Preview>,
     /// Who has a camera on, as last told; those with a tile first.
     #[cfg(feature = "huddle-video")]
     pub cameras: Vec<Camera>,
@@ -134,6 +143,10 @@ impl Listening {
             screen: None,
             #[cfg(feature = "huddle-video")]
             watching: None,
+            #[cfg(feature = "huddle-camera")]
+            camera: crate::huddle_camera::Cam::Off,
+            #[cfg(feature = "huddle-camera")]
+            preview: None,
             #[cfg(feature = "huddle-video")]
             cameras: Vec::new(),
             #[cfg(feature = "huddle-video")]
@@ -422,6 +435,8 @@ pub fn heard(app: &mut App, team: &str, channel: &str, state: Listen) {
         }
         #[cfg(feature = "huddle-video")]
         Listen::Screen(screen) => listening.screen = Some(screen),
+        #[cfg(feature = "huddle-camera")]
+        Listen::Preview(preview) => listening.preview = Some(preview),
         #[cfg(feature = "huddle-video")]
         Listen::Cameras(cameras) => listening.cameras = cameras,
         #[cfg(feature = "huddle-video")]
@@ -434,6 +449,12 @@ pub fn heard(app: &mut App, team: &str, channel: &str, state: Listen) {
         Listen::Ended(Err(error)) => {
             listening.phase = Phase::Failed { error, at: now };
             listening.alone_since = None;
+            // The camera closed with the session.
+            #[cfg(feature = "huddle-camera")]
+            {
+                listening.camera = crate::huddle_camera::Cam::Off;
+                listening.preview = None;
+            }
             // The session is gone, and its shares with it.
             #[cfg(feature = "huddle-video")]
             {
