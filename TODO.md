@@ -1055,7 +1055,8 @@ engineering, as for the rest of the session sign-in.
   - [x] Stage 3 built, behind `huddle-camera` (off by default), not yet
         tried against Slack: a Video button beside Mute (Ctrl+Shift+O), the
         camera opened only while on (nokhwa: V4L2, AVFoundation, Media
-        Foundation), H.264 constrained baseline 640×480 at 15 fps from
+        Foundation), H.264 constrained baseline 640×480 at 30 fps (15 at
+        first; raised 2026-10-07) from
         `rusty_h264-encoder` (pure Rust, about 4 ms a picture, chosen
         after a spike) on its own thread, slot 0 `sendrecv` with a DUPLEX
         re-SUBSCRIBE, keyframes on PLI/FIR and every 4 s, bitrate from

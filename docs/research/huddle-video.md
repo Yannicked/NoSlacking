@@ -734,24 +734,26 @@ shrunk to fit 640×480 by area averaging. Build needs:
 - `huddle_audio::camera`: the `Camera` trait and `CameraControl`, the
   microphone's rule as a state machine (opened only when turned on,
   closed when off, on leaving and on failure); `Nokhwa` (a thread per
-  open camera, asking for 640×480 at 15 fps, closest raw format);
+  open camera, asking for 640×480 at 30 fps, closest raw format; 15 at
+  first, raised to 30 once tried in a real huddle);
   `TestPattern` (moving colour bars, a bouncing square and a mm:ss.t
   clock with the frame number); `Latest`, the newest-frame slot between
   capture and encoder; the conversions and the scaler.
 - `huddle_audio::video_encoder`: the encoder set up as above (Fast, CB,
   CAVLC, level 3.1, an IDR at least every 4 s and on request, ABR from
-  150 to 1,200 kbit/s), refusing sizes it cannot send.
+  150 to 1,800 kbit/s, 1,200 at first), refusing sizes it cannot send.
 - `huddle_audio::camera_send`: the encoder thread (newest picture wins;
   an encoded frame the session cannot take is dropped and the next made
   a keyframe; a keyframe request at most every 500 ms, kept until its
   turn; a new encoder on a new size or bitrate step), the 90 kHz RTP
-  time from the capture instant, and the self-preview (every other
-  picture, at most 320 wide, mirrored).
+  time from the capture instant, and the self-preview (every picture,
+  shown before it is encoded, at most 320 wide, mirrored; at first every
+  other picture after encoding, which looked laggy).
 - The session (`media`, `watch`, `chime`): slot 0, the first video
   m-line, turns `sendrecv` by the same re-SUBSCRIBE machinery (alone or
   with receive changes), SUBSCRIBE goes DUPLEX with a second send stream
-  (`AmazonChimeExpressVideo`, stream and group 2, 640×480, 15 fps,
-  1,200 kbit/s), `receive_stream_ids[0]` stays 0. Frames go out only
+  (`AmazonChimeExpressVideo`, stream and group 2, 640×480, 30 fps,
+  1,800 kbit/s), `receive_stream_ids[0]` stays 0. Frames go out only
   once the answer has the line sending, from a keyframe (a keyframe is
   asked for until one comes), on the H.264 `42e01f` mode-1 payload type.
   `Event::KeyframeRequest` on our line asks the encoder for an IDR.
@@ -775,8 +777,8 @@ shrunk to fit 640×480 by area averaging. Build needs:
 - Demo: `--demo-view camera` (the bar with the preview, the test
   picture as the camera).
 
-*Measured*: encoding 640×480 at 15 fps is about 4 ms a picture (6 % of
-one core) on this machine, from the spike's numbers with the app's
+*Measured*: encoding 640×480 is about 4 ms a picture (6 % of one core
+at 15 fps, about 12 % at 30) on this machine, from the spike's numbers with the app's
 configuration. *Binary size:* `--features huddle-camera` adds
 1.04 MB to the release binary (50.44 → 51.48 MB): nokhwa, the encoder
 and the camera code.
