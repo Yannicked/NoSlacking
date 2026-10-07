@@ -14,11 +14,19 @@
 //! The encoder takes only even sizes and returns errors rather than
 //! panicking; [`VideoEncoder::new`] also refuses sizes larger than this
 //! feature sends, so nothing past level 3.1 goes out.
+//!
+//! [`Encoder`] is what a sender holds: the GPU's encoder through the
+//! video helper ([`super::hardware`]) when the setting is on and the
+//! helper encodes the size, else this one. A GPU that fails, a helper
+//! that crashes or hangs, or a stream from it that is not what was asked
+//! hands over to software at once, the picture in hand encoded again
+//! there as a keyframe.
 
 use rusty_h264_common::YuvPlanes;
-use rusty_h264_encoder::{Encoder, EncoderConfig, Preset};
+use rusty_h264_encoder::{Encoder as Rusty, EncoderConfig, Preset};
 
 use super::camera::I420;
+use super::hardware::{Helper, HwEncoder};
 
 /// A keyframe at least this often, in seconds: what a receiver that
 /// missed the last one waits at most, if its PLI is lost too.
@@ -69,9 +77,9 @@ pub struct Encoded {
     pub keyframe: bool,
 }
 
-/// The encoder for one size and bitrate.
+/// The software encoder for one size and bitrate.
 pub struct VideoEncoder {
-    encoder: Encoder,
+    encoder: Rusty,
     settings: Settings,
 }
 
@@ -114,7 +122,7 @@ impl VideoEncoder {
         // default, so the first IDR is not a burst of a second's bits.
         config.qp = 30;
         config.level_idc = 31;
-        let encoder = Encoder::new(config).map_err(|e| EncodeTrouble::Encoder(e.to_string()))?;
+        let encoder = Rusty::new(config).map_err(|e| EncodeTrouble::Encoder(e.to_string()))?;
         Ok(Self {
             encoder,
             settings: Settings {
@@ -167,6 +175,185 @@ impl VideoEncoder {
 
 fn config_bitrate(bitrate: u32) -> u32 {
     bitrate.clamp(MIN_BITRATE, MAX_BITRATE)
+}
+
+/// What does the encoding.
+enum Engine {
+    /// rusty_h264, on this thread.
+    Software(Box<VideoEncoder>),
+    /// The GPU, through the helper.
+    Hardware(HwEncoder),
+}
+
+/// One stream's encoder: on the GPU when it can be, else in software,
+/// and in software for good once the GPU has failed it.
+pub struct Encoder {
+    engine: Engine,
+    settings: Settings,
+    /// The next picture must be an IDR.
+    keyframe: bool,
+}
+
+impl std::fmt::Debug for Encoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Encoder")
+            .field("settings", &self.settings)
+            .field("on_gpu", &self.on_gpu())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Encoder {
+    /// An encoder for `settings`: through `gpu`'s helper if it encodes
+    /// this size, else (or if opening fails) in software. Its first
+    /// picture is an IDR.
+    pub fn new(settings: Settings, gpu: Option<&Helper>) -> Result<Self, EncodeTrouble> {
+        if !sendable(settings.width, settings.height) {
+            return Err(EncodeTrouble::Size(settings.width, settings.height));
+        }
+        let settings = Settings {
+            fps: settings.fps.clamp(1, 60),
+            bitrate: config_bitrate(settings.bitrate),
+            ..settings
+        };
+        if let Some(helper) = gpu
+            && let Some(engine) = Self::on_the_gpu(helper, settings)
+        {
+            return Ok(Self {
+                engine,
+                settings,
+                keyframe: true,
+            });
+        }
+        Ok(Self {
+            engine: Engine::Software(Box::new(VideoEncoder::new(settings)?)),
+            settings,
+            keyframe: true,
+        })
+    }
+
+    /// The GPU's encoder for `settings`, if the helper has one.
+    fn on_the_gpu(helper: &Helper, settings: Settings) -> Option<Engine> {
+        let size = |n: usize| u32::try_from(n).ok();
+        let (width, height) = (size(settings.width)?, size(settings.height)?);
+        let codec = noslacking_video_ipc::Codec::H264;
+        if !helper.encodes(codec, width, height) {
+            return None;
+        }
+        match helper.open_encoder(codec, width, height, settings.fps, settings.bitrate) {
+            Ok(encoder) => Some(Engine::Hardware(encoder)),
+            Err(why) => {
+                log::info!("video: no encoder on the GPU ({why}): in software");
+                None
+            }
+        }
+    }
+
+    /// What it is set up for.
+    pub fn settings(&self) -> Settings {
+        self.settings
+    }
+
+    /// Whether it encodes on the GPU.
+    pub fn on_gpu(&self) -> bool {
+        matches!(self.engine, Engine::Hardware(_))
+    }
+
+    /// Makes the next picture an IDR.
+    pub fn request_keyframe(&mut self) {
+        self.keyframe = true;
+    }
+
+    /// Aims at `bitrate` from the next picture on, without a keyframe, if
+    /// the encoder can (the GPU's); false when it cannot, and a new
+    /// encoder must be made for it (software's).
+    pub fn retune(&mut self, bitrate: u32) -> bool {
+        let bitrate = config_bitrate(bitrate);
+        let Engine::Hardware(encoder) = &mut self.engine else {
+            return false;
+        };
+        match encoder.set_bitrate(bitrate) {
+            Ok(()) => {
+                self.settings.bitrate = bitrate;
+                true
+            }
+            Err(trouble) => {
+                self.hand_to_software(&format!("{trouble:?}"));
+                false
+            }
+        }
+    }
+
+    /// Encodes one picture of the size it was set up for. A failure on
+    /// the GPU is not an error: the picture is encoded in software, as a
+    /// keyframe, and so is every picture after it.
+    pub fn encode(&mut self, picture: &I420) -> Result<Encoded, EncodeTrouble> {
+        let Settings { width, height, .. } = self.settings;
+        if (picture.width, picture.height) != (width, height) || !picture.whole() {
+            return Err(EncodeTrouble::Mismatch(
+                picture.width,
+                picture.height,
+                width,
+                height,
+            ));
+        }
+        let keyframe = std::mem::take(&mut self.keyframe);
+        if let Engine::Hardware(encoder) = &mut self.engine {
+            let planes = noslacking_video_ipc::Planes {
+                width: encoder.size().0,
+                height: encoder.size().1,
+                y: picture.y.clone(),
+                u: picture.u.clone(),
+                v: picture.v.clone(),
+            };
+            match encoder.encode(planes, keyframe) {
+                Ok(encoded) => match checked(encoded.data, keyframe) {
+                    Ok(encoded) => return Ok(encoded),
+                    Err(why) => self.hand_to_software(why),
+                },
+                Err(trouble) => self.hand_to_software(&format!("{trouble:?}")),
+            }
+        }
+        let Engine::Software(encoder) = &mut self.engine else {
+            return Err(EncodeTrouble::Encoder("no encoder".into()));
+        };
+        // Asked for, or set by a hand-over to software just now (whose
+        // fresh encoder starts with one anyway).
+        if keyframe || std::mem::take(&mut self.keyframe) {
+            encoder.request_keyframe();
+        }
+        encoder.encode(picture)
+    }
+
+    /// The GPU failed: software from now on, starting with a keyframe.
+    fn hand_to_software(&mut self, why: &str) {
+        log::warn!("video: encoding on the GPU failed ({why}): in software from here on");
+        // A fresh software encoder's first picture is an IDR; on the
+        // rare chance it cannot be made, the next picture tries again.
+        match VideoEncoder::new(self.settings) {
+            Ok(encoder) => self.engine = Engine::Software(Box::new(encoder)),
+            Err(error) => log::warn!("video: {error}"),
+        }
+        self.keyframe = true;
+    }
+}
+
+/// The helper's access unit, checked before it goes out: not empty, a
+/// slice in it, an IDR with SPS and PPS in front when one was asked for.
+/// Its keyframe flag is read from the stream, not taken from the helper.
+fn checked(data: Vec<u8>, asked_keyframe: bool) -> Result<Encoded, &'static str> {
+    let types = nal_types(&data);
+    if !types.iter().any(|&t| t == 1 || t == 5) {
+        return Err("no slice from the helper");
+    }
+    let keyframe = types.contains(&5);
+    if asked_keyframe && !keyframe {
+        return Err("no keyframe from the helper when asked");
+    }
+    if keyframe && !types.starts_with(&[7, 8]) {
+        return Err("a keyframe from the helper without its parameter sets");
+    }
+    Ok(Encoded { data, keyframe })
 }
 
 /// The NAL unit types in an Annex B access unit, in order.
@@ -352,5 +539,302 @@ mod tests {
                 .bitrate,
             MAX_BITRATE
         );
+    }
+}
+
+/// The GPU's encoder as the sender sees it, against a pretend helper.
+#[cfg(test)]
+mod gpu_tests {
+    use super::*;
+    use crate::huddle_audio::camera::pattern;
+    use crate::huddle_audio::hardware::pretend::{Act, Pretend, welcome};
+    use noslacking_video_ipc::{
+        self as ipc, Capability, Codec, Direction, FailKind, Reply, Request,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    fn settings() -> Settings {
+        Settings {
+            width: 320,
+            height: 240,
+            fps: 15,
+            bitrate: 600_000,
+        }
+    }
+
+    /// What a pretend GPU makes of a picture: an IDR with its parameter
+    /// sets when asked (or first), else a P slice.
+    fn unit(keyframe: bool) -> Vec<u8> {
+        if keyframe {
+            vec![
+                0, 0, 0, 1, 0x67, 66, 0xe0, 31, 0, 0, 0, 1, 0x68, 0xce, 0, 0, 0, 1, 0x65, 0x88,
+            ]
+        } else {
+            vec![0, 0, 0, 1, 0x61, 0x9a]
+        }
+    }
+
+    /// A helper that encodes on its pretend GPU, except that `fail` may
+    /// make the `n`th encode (from 0), or a new bit rate (`usize::MAX`),
+    /// do something else; every request is recorded.
+    fn helper(
+        fail: impl Fn(usize, &Request) -> Option<Act> + Send + Sync + 'static,
+    ) -> (Helper, Arc<Mutex<Vec<Request>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        let encodes = AtomicUsize::new(0);
+        let pretend = Pretend::new(move |request| {
+            record.lock().expect("not poisoned").push(request.clone());
+            match request {
+                Request::Hello { .. } => Act::Reply(welcome()),
+                Request::OpenEncoder { .. } => Act::Reply(Reply::Opened { id: 4 }),
+                Request::Encode { force_keyframe, .. } => {
+                    let n = encodes.fetch_add(1, Ordering::Relaxed);
+                    fail(n, request).unwrap_or_else(|| {
+                        Act::Reply(Reply::Encoded {
+                            keyframe: *force_keyframe,
+                            data: unit(*force_keyframe),
+                        })
+                    })
+                }
+                Request::SetBitrate { .. } => {
+                    fail(usize::MAX, request).unwrap_or(Act::Reply(Reply::Done))
+                }
+                _ => Act::Reply(Reply::Done),
+            }
+        });
+        let helper = Helper::with_timeouts(
+            Arc::new(pretend),
+            Duration::from_secs(5),
+            Duration::from_millis(300),
+        );
+        (helper, seen)
+    }
+
+    fn picture(n: u64) -> I420 {
+        pattern(320, 240, n, Duration::ZERO)
+    }
+
+    fn forced(seen: &Mutex<Vec<Request>>) -> Vec<bool> {
+        seen.lock()
+            .expect("not poisoned")
+            .iter()
+            .filter_map(|r| match r {
+                Request::Encode { force_keyframe, .. } => Some(*force_keyframe),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_gpu_encodes_when_the_helper_can() {
+        let (gpu, seen) = helper(|_, _| None);
+        let mut encoder = Encoder::new(settings(), Some(&gpu)).expect("an encoder");
+        assert!(encoder.on_gpu());
+        let first = encoder.encode(&picture(0)).expect("encoded");
+        assert!(first.keyframe, "the first is an IDR");
+        assert_eq!(first.data, unit(true));
+        let second = encoder.encode(&picture(1)).expect("encoded");
+        assert!(!second.keyframe);
+        encoder.request_keyframe();
+        assert!(encoder.encode(&picture(2)).expect("encoded").keyframe);
+        assert_eq!(forced(&seen), [true, false, true]);
+        // The picture went over whole.
+        let sizes: Vec<(u32, u32, usize)> = seen
+            .lock()
+            .expect("not poisoned")
+            .iter()
+            .filter_map(|r| match r {
+                Request::Encode { picture, .. } => {
+                    Some((picture.width, picture.height, picture.y.len()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sizes[0], (320, 240, 320 * 240));
+        drop(encoder);
+        assert!(
+            seen.lock()
+                .expect("not poisoned")
+                .iter()
+                .any(|r| matches!(r, Request::Close { id: 4 })),
+            "closed when dropped"
+        );
+    }
+
+    #[test]
+    fn without_the_setting_or_the_size_it_is_software() {
+        let mut software = Encoder::new(settings(), None).expect("an encoder");
+        assert!(!software.on_gpu());
+        assert!(software.encode(&picture(0)).expect("encoded").keyframe);
+        // A helper that does not encode this size.
+        let pretend = Pretend::new(|request| match request {
+            Request::Hello { .. } => Act::Reply(Reply::Welcome {
+                version: ipc::VERSION,
+                backend: "pretend".into(),
+                capabilities: vec![Capability {
+                    codec: Codec::H264,
+                    direction: Direction::Encode,
+                    max_width: 160,
+                    max_height: 120,
+                }],
+            }),
+            _ => Act::Reply(Reply::Done),
+        });
+        let small = Helper::new(Arc::new(pretend));
+        assert!(
+            !Encoder::new(settings(), Some(&small))
+                .expect("an encoder")
+                .on_gpu()
+        );
+        // One whose GPU will not open an encoder.
+        let pretend = Pretend::new(|request| match request {
+            Request::Hello { .. } => Act::Reply(welcome()),
+            _ => Act::Reply(Reply::Failed {
+                kind: FailKind::Unsupported,
+                detail: "no".into(),
+            }),
+        });
+        let refusing = Helper::new(Arc::new(pretend));
+        let mut encoder = Encoder::new(settings(), Some(&refusing)).expect("an encoder");
+        assert!(!encoder.on_gpu());
+        assert!(encoder.encode(&picture(0)).expect("encoded").keyframe);
+    }
+
+    /// The helper crashes on the third picture: that picture comes out of
+    /// software as a keyframe the software decoder reads, and the rest
+    /// follow in software.
+    #[test]
+    fn a_crashed_helper_hands_over_to_software_with_a_keyframe() {
+        let (gpu, _) = helper(|n, _| (n == 2).then_some(Act::Crash));
+        let mut encoder = Encoder::new(settings(), Some(&gpu)).expect("an encoder");
+        assert!(encoder.on_gpu());
+        for n in 0..2 {
+            encoder.encode(&picture(n)).expect("encoded");
+        }
+        let handed = encoder.encode(&picture(2)).expect("encoded in software");
+        assert!(!encoder.on_gpu());
+        assert!(handed.keyframe);
+        assert!(nal_types(&handed.data).starts_with(&[7, 8, 5]));
+        let mut decoder = rusty_h264_decoder::Decoder::new();
+        let decoded = decoder
+            .decode(&handed.data)
+            .expect("decodes")
+            .expect("a picture");
+        assert_eq!((decoded.width, decoded.height), (320, 240));
+        let next = encoder.encode(&picture(3)).expect("encoded");
+        assert!(!next.keyframe);
+        assert!(decoder.decode(&next.data).expect("decodes").is_some());
+    }
+
+    #[test]
+    fn a_stuck_helper_times_out_to_software() {
+        let (gpu, _) = helper(|n, _| (n == 1).then_some(Act::Hang));
+        let mut encoder = Encoder::new(settings(), Some(&gpu)).expect("an encoder");
+        encoder.encode(&picture(0)).expect("encoded");
+        let started = std::time::Instant::now();
+        let handed = encoder.encode(&picture(1)).expect("encoded in software");
+        assert!(started.elapsed() < Duration::from_secs(3), "the timeout");
+        assert!(handed.keyframe && !encoder.on_gpu());
+    }
+
+    /// A GPU failure the helper survives, or a stream that is not what
+    /// was asked, hands over the same way.
+    #[test]
+    fn failures_and_bad_streams_mean_software() {
+        let cases: [fn(usize, &Request) -> Option<Act>; 4] = [
+            |n, _| {
+                (n == 1).then(|| {
+                    Act::Reply(Reply::Failed {
+                        kind: FailKind::Device,
+                        detail: "the driver".into(),
+                    })
+                })
+            },
+            // No keyframe when one was asked for.
+            |_, request| {
+                matches!(
+                    request,
+                    Request::Encode {
+                        force_keyframe: true,
+                        ..
+                    }
+                )
+                .then(|| {
+                    Act::Reply(Reply::Encoded {
+                        keyframe: true,
+                        data: unit(false),
+                    })
+                })
+            },
+            // An IDR without its parameter sets.
+            |n, _| {
+                (n == 1).then(|| {
+                    Act::Reply(Reply::Encoded {
+                        keyframe: true,
+                        data: vec![0, 0, 0, 1, 0x65, 0x88],
+                    })
+                })
+            },
+            // No slice at all.
+            |n, _| {
+                (n == 1).then(|| {
+                    Act::Reply(Reply::Encoded {
+                        keyframe: false,
+                        data: vec![0, 0, 0, 1, 0x09, 0x10],
+                    })
+                })
+            },
+        ];
+        for (i, fail) in cases.into_iter().enumerate() {
+            let (gpu, _) = helper(fail);
+            let mut encoder = Encoder::new(settings(), Some(&gpu)).expect("an encoder");
+            let mut keyframes = Vec::new();
+            for n in 0..3 {
+                let encoded = encoder.encode(&picture(n)).expect("encoded");
+                keyframes.push(encoded.keyframe);
+            }
+            assert!(!encoder.on_gpu(), "case {i}");
+            assert!(keyframes.contains(&true), "case {i}: {keyframes:?}");
+            assert!(!keyframes[2], "case {i}: software goes on with P pictures");
+        }
+    }
+
+    #[test]
+    fn the_gpu_takes_a_new_bitrate_without_a_keyframe() {
+        let (gpu, seen) = helper(|_, _| None);
+        let mut encoder = Encoder::new(settings(), Some(&gpu)).expect("an encoder");
+        encoder.encode(&picture(0)).expect("encoded");
+        assert!(encoder.retune(900_000));
+        assert_eq!(encoder.settings().bitrate, 900_000);
+        // Kept within what is sent.
+        assert!(encoder.retune(u32::MAX));
+        assert_eq!(encoder.settings().bitrate, MAX_BITRATE);
+        assert!(!encoder.encode(&picture(1)).expect("encoded").keyframe);
+        let rates: Vec<u32> = seen
+            .lock()
+            .expect("not poisoned")
+            .iter()
+            .filter_map(|r| match r {
+                Request::SetBitrate { id: 4, bitrate } => Some(*bitrate),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rates, [900_000, MAX_BITRATE]);
+        // Software cannot: the sender makes a new encoder.
+        let mut software = Encoder::new(settings(), None).expect("an encoder");
+        assert!(!software.retune(900_000));
+        assert_eq!(software.settings().bitrate, 600_000);
+        // A helper gone by the time the rate changes: software, which then
+        // starts with a keyframe.
+        let (dying, _) =
+            helper(|_, r| matches!(r, Request::SetBitrate { .. }).then_some(Act::Crash));
+        let mut encoder = Encoder::new(settings(), Some(&dying)).expect("an encoder");
+        encoder.encode(&picture(0)).expect("encoded");
+        assert!(!encoder.retune(900_000));
+        assert!(!encoder.on_gpu());
+        assert!(encoder.encode(&picture(1)).expect("encoded").keyframe);
     }
 }

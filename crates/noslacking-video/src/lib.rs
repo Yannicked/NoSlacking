@@ -16,6 +16,7 @@ pub mod backend;
 pub mod fake;
 #[cfg(target_os = "linux")]
 pub mod h264;
+pub mod nal;
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 pub mod pipe;

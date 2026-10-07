@@ -41,6 +41,10 @@ sha2 = "0.11"
 # against the app's software decoder; the same version and features as
 # the app's.
 rusty_h264-decoder = { version = "0.16", default-features = false, features = ["std", "asm"] }
+# The encoding benchmark (examples/encode.rs) sets the GPU encoder against
+# the app's software one, set up the same way.
+rusty_h264-encoder = { version = "0.16", default-features = false, features = ["std", "asm"] }
+rusty_h264-common = { version = "0.16", default-features = false, features = ["std", "asm"] }
 
 [lints.rust]
 # This crate is where the unsafe code lives that the app forbids: the

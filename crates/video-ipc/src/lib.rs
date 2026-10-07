@@ -168,17 +168,39 @@ pub fn write_reply(out: &mut impl Write, seq: u32, reply: &Reply) -> Result<(), 
     let Reply::Picture(planes) = reply else {
         return write_frame(out, seq, &reply.encode());
     };
+    write_planes(out, seq, &[PICTURE], planes)
+}
+
+/// Writes `request` as one frame. A picture to encode goes straight from
+/// its vectors to the pipe, without first being copied into one message.
+pub fn write_request(out: &mut impl Write, seq: u32, request: &Request) -> Result<(), Error> {
+    let Request::Encode {
+        id,
+        force_keyframe,
+        picture,
+    } = request
+    else {
+        return write_frame(out, seq, &request.encode());
+    };
+    let mut head = [ENCODE, 0, 0, 0, 0, u8::from(*force_keyframe)];
+    head[1..5].copy_from_slice(&id.to_le_bytes());
+    write_planes(out, seq, &head, picture)
+}
+
+/// Writes a frame of `head` (the tag and any fields before the picture)
+/// and `planes`, each plane straight from its vector.
+fn write_planes(out: &mut impl Write, seq: u32, head: &[u8], planes: &Planes) -> Result<(), Error> {
     let planes_length = planes.y.len() + planes.u.len() + planes.v.len();
-    // Sequence number, tag, size, three plane lengths, the planes.
-    let length = 4 + 1 + 8 + 12 + planes_length;
+    // Sequence number, head, size, three plane lengths, the planes.
+    let length = 4 + head.len() + 8 + 12 + planes_length;
     if length > MAX_MESSAGE {
         return Err(Error::TooLarge(length));
     }
-    let mut header = Vec::with_capacity(4 + 4 + 1 + 8 + 4);
+    let mut header = Vec::with_capacity(4 + 4 + head.len() + 8 + 4);
     let length = u32::try_from(length).map_err(|_| Error::TooLarge(length))?;
     header.extend_from_slice(&length.to_le_bytes());
     header.extend_from_slice(&seq.to_le_bytes());
-    header.push(PICTURE);
+    header.extend_from_slice(head);
     header.extend_from_slice(&planes.width.to_le_bytes());
     header.extend_from_slice(&planes.height.to_le_bytes());
     out.write_all(&header)?;
@@ -191,11 +213,10 @@ pub fn write_reply(out: &mut impl Write, seq: u32, reply: &Reply) -> Result<(), 
     Ok(())
 }
 
-/// Reads one reply and its sequence number: none when the input ended
-/// cleanly between frames. A picture's planes are read straight into
-/// their own vectors, each checked against the frame's length and the
-/// picture's size before anything is allocated for it.
-pub fn read_reply(input: &mut impl Read) -> Result<Option<(u32, Reply)>, Error> {
+/// A frame's sequence number and tag, read with its length: none when
+/// the input ended cleanly between frames; else also the bytes left
+/// after the tag.
+fn read_head(input: &mut impl Read) -> Result<Option<(u32, u8, usize)>, Error> {
     let mut length = [0u8; 4];
     let mut got = 0;
     while got < length.len() {
@@ -222,33 +243,45 @@ pub fn read_reply(input: &mut impl Read) -> Result<Option<(u32, Reply)>, Error> 
         seq_and_tag[2],
         seq_and_tag[3],
     ]);
-    let tag = seq_and_tag[4];
-    let mut left = length - 5;
-    if tag != PICTURE {
-        let mut body = vec![0u8; left + 1];
-        body[0] = tag;
-        input.read_exact(&mut body[1..])?;
-        return Ok(Some((seq, Reply::decode(&body)?)));
+    Ok(Some((seq, seq_and_tag[4], length - 5)))
+}
+
+/// The rest of a frame whose tag was read: the whole message, tag first.
+fn read_body(input: &mut impl Read, tag: u8, left: usize) -> Result<Vec<u8>, Error> {
+    let mut body = vec![0u8; left + 1];
+    body[0] = tag;
+    input.read_exact(&mut body[1..])?;
+    Ok(body)
+}
+
+/// Reads `n` of the `left` bytes of a frame.
+fn read_exact_of(input: &mut impl Read, left: &mut usize, n: usize) -> Result<Vec<u8>, Error> {
+    if n > *left {
+        return Err(Error::Truncated);
     }
-    let mut take = |n: usize, input: &mut dyn Read| -> Result<Vec<u8>, Error> {
-        if n > left {
-            return Err(Error::Truncated);
-        }
-        left -= n;
-        let mut bytes = Vec::with_capacity(n);
-        input.take(n as u64).read_to_end(&mut bytes)?;
-        if bytes.len() != n {
-            return Err(Error::Truncated);
-        }
-        Ok(bytes)
-    };
-    let word = |bytes: Vec<u8>| -> u32 {
-        let mut word = [0u8; 4];
-        word.copy_from_slice(&bytes);
-        u32::from_le_bytes(word)
-    };
-    let width = word(take(4, input)?);
-    let height = word(take(4, input)?);
+    *left -= n;
+    let mut bytes = Vec::with_capacity(n);
+    input.take(n as u64).read_to_end(&mut bytes)?;
+    if bytes.len() != n {
+        return Err(Error::Truncated);
+    }
+    Ok(bytes)
+}
+
+/// Reads a `u32` of the `left` bytes of a frame.
+fn read_u32_of(input: &mut impl Read, left: &mut usize) -> Result<u32, Error> {
+    let bytes = read_exact_of(input, left, 4)?;
+    let mut word = [0u8; 4];
+    word.copy_from_slice(&bytes);
+    Ok(u32::from_le_bytes(word))
+}
+
+/// Reads a picture, the last field of a frame with `left` bytes to go,
+/// each plane straight into its own vector once its length is checked
+/// against the frame's and the picture's size.
+fn read_planes(input: &mut impl Read, mut left: usize) -> Result<Planes, Error> {
+    let width = read_u32_of(input, &mut left)?;
+    let height = read_u32_of(input, &mut left)?;
     if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
         return Err(Error::BadValue("picture size"));
     }
@@ -260,14 +293,12 @@ pub fn read_reply(input: &mut impl Read) -> Result<Option<(u32, Reply)>, Error> 
     ];
     let mut planes = Vec::with_capacity(3);
     for size in sizes {
-        let n = word(take(4, input)?);
+        let n = read_u32_of(input, &mut left)?;
         if u64::from(n) != size {
             return Err(Error::BadValue("plane length"));
         }
-        planes.push(take(
-            usize::try_from(n).map_err(|_| Error::TooLarge(usize::MAX))?,
-            input,
-        )?);
+        let n = usize::try_from(n).map_err(|_| Error::TooLarge(usize::MAX))?;
+        planes.push(read_exact_of(input, &mut left, n)?);
     }
     if left != 0 {
         return Err(Error::Trailing(left));
@@ -283,11 +314,63 @@ pub fn read_reply(input: &mut impl Read) -> Result<Option<(u32, Reply)>, Error> 
         v,
     };
     planes.check()?;
-    Ok(Some((seq, Reply::Picture(planes))))
+    Ok(planes)
+}
+
+/// Reads one reply and its sequence number: none when the input ended
+/// cleanly between frames. A picture's planes are read straight into
+/// their own vectors, each checked against the frame's length and the
+/// picture's size before anything is allocated for it.
+pub fn read_reply(input: &mut impl Read) -> Result<Option<(u32, Reply)>, Error> {
+    let Some((seq, tag, left)) = read_head(input)? else {
+        return Ok(None);
+    };
+    if tag != PICTURE {
+        let body = read_body(input, tag, left)?;
+        return Ok(Some((seq, Reply::decode(&body)?)));
+    }
+    Ok(Some((seq, Reply::Picture(read_planes(input, left)?))))
+}
+
+/// One request off the pipe: its sequence number and the request, or
+/// why its message (read whole, so the next frame still lines up) did
+/// not decode.
+pub type Incoming = (u32, Result<Request, Error>);
+
+/// Reads one request and its sequence number: none when the input ended
+/// cleanly between frames. A picture to encode is read as [`read_reply`]
+/// reads a decoded one; one that does not read breaks the framing (its
+/// frame is not read to its end), anything else that does not decode
+/// does not.
+pub fn read_request(input: &mut impl Read) -> Result<Option<Incoming>, Error> {
+    let Some((seq, tag, mut left)) = read_head(input)? else {
+        return Ok(None);
+    };
+    if tag != ENCODE {
+        let body = read_body(input, tag, left)?;
+        return Ok(Some((seq, Request::decode(&body))));
+    }
+    let id = read_u32_of(input, &mut left)?;
+    let force_keyframe = match read_exact_of(input, &mut left, 1)?[0] {
+        0 => false,
+        1 => true,
+        _ => return Err(Error::BadValue("flag")),
+    };
+    let picture = read_planes(input, left)?;
+    Ok(Some((
+        seq,
+        Ok(Request::Encode {
+            id,
+            force_keyframe,
+            picture,
+        }),
+    )))
 }
 
 /// The picture reply's tag.
 const PICTURE: u8 = 3;
+/// The encode request's tag.
+const ENCODE: u8 = 5;
 
 /// A video coding format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -769,7 +852,7 @@ impl Request {
                 id,
                 force_keyframe,
                 picture,
-            } => Out::new(5)
+            } => Out::new(ENCODE)
                 .u32(*id)
                 .u8(u8::from(*force_keyframe))
                 .planes(picture)
@@ -809,7 +892,7 @@ impl Request {
                 fps: input.u32()?,
                 bitrate: input.u32()?,
             },
-            5 => Self::Encode {
+            ENCODE => Self::Encode {
                 id: input.u32()?,
                 force_keyframe: input.flag()?,
                 picture: input.planes()?,
@@ -1184,6 +1267,65 @@ mod tests {
         assert!(matches!(
             read_reply(&mut huge.as_slice()),
             Err(Error::BadValue("picture size"))
+        ));
+    }
+
+    #[test]
+    fn pictures_to_encode_stream_through_too() {
+        let mut pipe = Vec::new();
+        let sent = requests();
+        for (seq, request) in sent.iter().enumerate() {
+            write_request(&mut pipe, seq as u32, request).expect("written");
+        }
+        let mut input = pipe.as_slice();
+        for (seq, request) in sent.iter().enumerate() {
+            let (got_seq, got) = read_request(&mut input).expect("reads").expect("a request");
+            assert_eq!(
+                (got_seq, got.expect("decodes")),
+                (seq as u32, request.clone())
+            );
+        }
+        assert!(read_request(&mut input).expect("a clean end").is_none());
+        // A message that does not decode leaves the next one readable.
+        let mut pipe = Vec::new();
+        write_frame(&mut pipe, 1, &[42]).expect("written");
+        write_request(&mut pipe, 2, &sent[6]).expect("written");
+        let mut input = pipe.as_slice();
+        let (_, bad) = read_request(&mut input).expect("framed").expect("a frame");
+        assert!(matches!(bad, Err(Error::UnknownTag(42))));
+        let (seq, good) = read_request(&mut input).expect("framed").expect("a frame");
+        assert_eq!((seq, good.expect("decodes")), (2, sent[6].clone()));
+        // Streamed or framed, the bytes are the same, and either reader
+        // reads them.
+        let encode = Request::Encode {
+            id: 3,
+            force_keyframe: true,
+            picture: picture(7, 5),
+        };
+        let mut framed = Vec::new();
+        write_frame(&mut framed, 9, &encode.encode()).expect("written");
+        let mut streamed = Vec::new();
+        write_request(&mut streamed, 9, &encode).expect("written");
+        assert_eq!(framed, streamed);
+        let frame = read_frame(&mut streamed.as_slice())
+            .expect("reads")
+            .expect("a frame");
+        assert_eq!(Request::decode(&frame.body).expect("decodes"), encode);
+        for n in 1..streamed.len() {
+            assert!(read_request(&mut &streamed[..n]).is_err(), "cut at {n}");
+        }
+        // A flag that is neither 0 nor 1, and planes that lie.
+        let mut bad_flag = streamed.clone();
+        bad_flag[13] = 2;
+        assert!(matches!(
+            read_request(&mut bad_flag.as_slice()),
+            Err(Error::BadValue("flag"))
+        ));
+        let mut lying = streamed;
+        lying[22] = lying[22].wrapping_add(1);
+        assert!(matches!(
+            read_request(&mut lying.as_slice()),
+            Err(Error::BadValue("plane length"))
         ));
     }
 
