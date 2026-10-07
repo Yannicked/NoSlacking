@@ -1122,8 +1122,22 @@ engineering, as for the rest of the session sign-in.
         fallback). Check macOS permissions (camera, Screen Recording) carry
         from the app bundle to its helper on a real Mac. Order, after
         `feat/huddle-share` and `feat/hw-encode` merge:
-        1. Software decoding (rusty_h264 + the shrink) moves into the
-           helper: every decode goes through it, hardware or not.
+        1. [x] Software decoding (rusty_h264 + the shrink) moves into the
+           helper: every decode goes through it, hardware or not. Done
+           2026-10-07 (`feat/video-helper-decode`, research doc §6.9):
+           protocol 3 (`OpenDecoder.hardware`; pictures carry their
+           source size and whether the GPU made them), the helper falls
+           back to software itself, a helper per lane (share, cameras,
+           sending), "No video" in the call window without one. The
+           app's video threads take half the CPU they did; in software
+           the whole costs ~8 % of a core more for a full-size 1080p
+           share, nearly all the 3 MB pipe copy.
+           - [ ] Try it against Slack, and on a Mac and Windows (no GPU
+                 back end there: software in the helper).
+           - Learned for 2 and 3: full-size pictures over the pipe are
+             the cost (both ways), so capture should stay in the helper
+             or hand it dmabufs; the `Sending` lane is ready; a 2×
+             shrink special case now pays in the helper.
         2. Screen capture + encoding in the helper (PipeWire dmabuf →
            VA-API encode, software fallback), from the share branch.
         3. The camera in the helper (capture + encode).
@@ -1185,13 +1199,12 @@ engineering, as for the rest of the session sign-in.
               call on the §6.3 numbers; software takes over on any
               failure).
         - [ ] Look at it on a weaker laptop and an Intel GPU.
-        - [ ] Pipeline the helper's requests (or a helper per decoding
-              thread): the share's and the cameras' threads wait for
-              each other's replies (in the demo a camera picture took
-              3.1 ms through the helper against 1.35 in software).
-        - [ ] A faster whole-step shrink in the app: halving a 1080p
-              picture costs 2.7 ms, more than decoding it (a 2× special
-              case, or the `yuv` crate's SIMD scaler).
+        - [x] Pipeline the helper's requests (or a helper per decoding
+              thread): a helper per lane since §6.9 (share, cameras,
+              sending).
+        - [ ] A faster whole-step shrink, now in the helper: halving a
+              1080p picture costs 2.7 ms, more than decoding it (a 2×
+              special case, or the `yuv` crate's SIMD scaler).
         - [x] **VA-API encoding** (2026-10-07, `feat/hw-encode`,
               research doc §6.8): constrained baseline on
               `VAEntrypointEncSlice(LP)`, CBR, our own packed SPS/PPS
