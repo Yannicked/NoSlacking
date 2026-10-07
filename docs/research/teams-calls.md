@@ -1238,8 +1238,12 @@ hang up, and see their hang-up. First as a probe, then in the app.
   huddle's `Gallery`; ours comes from the huddle's camera and encoder.
   H.264 is registered with str0m at the call's one number (ours, 108, in
   an offer; the offerer's in an answer), which the native client keeps
-  through its renegotiations. No `nack` and no `rtx`: a loss asks for a
-  keyframe. Open: the native client's first offer limits what we send to
+  through its renegotiations. Lost packets are asked for again (`nack`,
+  which str0m sends for every incoming stream anyway) and come on the
+  `rtx` payload type (FID, the far end's SSRC plus 50), paired with its
+  video once both have arrived; without that pairing every loss cost a
+  keyframe, and each keyframe a new decoder in the helper, which made the
+  far end's camera stutter on a lossy path. Open: the native client's first offer limits what we send to
   `max-fs=240` (about 320×192) and raises it later; our camera sends
   640×480 regardless.
 - **Stage 6, screen share and group calls.** `applicationsharing-video`

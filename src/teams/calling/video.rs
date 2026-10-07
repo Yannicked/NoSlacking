@@ -34,6 +34,8 @@ pub const FAR_CAMERA: &str = "far";
 const FAR_STOPPED: Duration = Duration::from_secs(3);
 /// The fewest seconds between two keyframe requests of ours.
 const PLI_EVERY: Duration = Duration::from_secs(1);
+/// How often the far end's video's numbers reach the log while it shows.
+const REPORT_EVERY: Duration = Duration::from_secs(10);
 
 /// Where a call's pictures go and come from.
 #[derive(Default)]
@@ -74,6 +76,16 @@ pub(super) enum Input {
     Closed,
 }
 
+/// What the far end's video did over a while, for the log.
+#[derive(Debug, Default)]
+struct Report {
+    since: Option<Instant>,
+    pictures: u64,
+    /// Pictures after a lost packet that was not sent again in time.
+    gaps: u64,
+    plis: u64,
+}
+
 /// The camera line of one call.
 pub(super) struct CallVideo {
     mid: Mid,
@@ -81,8 +93,16 @@ pub(super) struct CallVideo {
     ssrc: u32,
     /// The line's H.264 payload type.
     pt: u8,
+    /// Its retransmission's, if lost packets are asked for again.
+    rtx: Option<u8>,
     /// The far end's video SSRCs str0m was told to expect.
     seen: HashSet<u32>,
+    /// The far end's retransmission SSRCs seen, and the one paired with
+    /// its video.
+    seen_rtx: HashSet<u32>,
+    paired_rtx: Option<u32>,
+    /// What the far end's video did since last logged.
+    report: Report,
     /// Whether the far end takes our camera, and sends its own.
     send: bool,
     receive: bool,
@@ -116,7 +136,7 @@ impl CallVideo {
     pub(super) fn new(
         rtc: &mut Rtc,
         mid: Mid,
-        pt: u8,
+        (pt, rtx): (u8, Option<u8>),
         ssrc: u32,
         video: Video,
         tell: mpsc::UnboundedSender<MediaEvent>,
@@ -145,7 +165,11 @@ impl CallVideo {
             mid,
             ssrc,
             pt,
+            rtx,
             seen: HashSet::new(),
+            seen_rtx: HashSet::new(),
+            paired_rtx: None,
+            report: Report::default(),
             send: true,
             receive: true,
             tell,
@@ -179,6 +203,11 @@ impl CallVideo {
         self.pt
     }
 
+    /// Its retransmission's payload type, if lost packets are asked for.
+    pub(super) fn rtx(&self) -> Option<u8> {
+        self.rtx
+    }
+
     /// What the far end's latest description says of the line.
     pub(super) fn set_flows(&mut self, send: bool, receive: bool) {
         if send != self.send || receive != self.receive {
@@ -209,7 +238,34 @@ impl CallVideo {
             log::info!("video: the far end's camera comes on SSRC {ssrc}");
             rtc.direct_api()
                 .expect_stream_rx(ssrc.into(), None, self.mid, None);
+            self.pair_rtx(rtc);
         }
+        if let Some(rtx) = self.rtx
+            && let Some(ssrc) = super::media::rtp_ssrc(data, rtx)
+            && self.seen_rtx.insert(ssrc)
+        {
+            log::info!("video: the far end resends lost packets on SSRC {ssrc}");
+            self.pair_rtx(rtc);
+        }
+    }
+
+    /// Tells str0m which stream carries the resends of the far end's
+    /// video, once both have come: one of each, as a 1:1 call has. The
+    /// pair is set once; str0m takes it again if it changes.
+    fn pair_rtx(&mut self, rtc: &mut Rtc) {
+        if self.seen.len() != 1 || self.seen_rtx.len() != 1 {
+            return;
+        }
+        let (Some(&video), Some(&rtx)) = (self.seen.iter().next(), self.seen_rtx.iter().next())
+        else {
+            return;
+        };
+        if self.paired_rtx == Some(rtx) {
+            return;
+        }
+        self.paired_rtx = Some(rtx);
+        rtc.direct_api()
+            .expect_stream_rx(video.into(), Some(rtx.into()), self.mid, None);
     }
 
     /// Whether `mid` is this line's.
@@ -239,8 +295,10 @@ impl CallVideo {
             let _ = self.tell.send(MediaEvent::FarVideo(true));
             self.want_pli = true;
         }
+        self.report.pictures += 1;
         if !data.contiguous {
             self.want_pli = true;
+            self.report.gaps += 1;
         }
         #[cfg(feature = "huddle-video")]
         {
@@ -291,6 +349,28 @@ impl CallVideo {
         {
             self.want_pli = false;
             self.last_pli = Some(now);
+            self.report.plis += 1;
+        }
+        if self.showing && self.report.since.is_none_or(|at| now >= at + REPORT_EVERY) {
+            if self.report.since.is_some() {
+                log::info!(
+                    "video: the far end's camera: {} pictures in {} s, {} after a loss, {} \
+                     keyframes asked for; resends {}",
+                    self.report.pictures,
+                    REPORT_EVERY.as_secs(),
+                    self.report.gaps,
+                    self.report.plis,
+                    if self.paired_rtx.is_some() {
+                        "on"
+                    } else {
+                        "not seen"
+                    },
+                );
+            }
+            self.report = Report {
+                since: Some(now),
+                ..Report::default()
+            };
         }
     }
 
@@ -302,7 +382,12 @@ impl CallVideo {
             .map(|at| at + FAR_STOPPED);
         let pli = (self.want_pli && self.showing)
             .then(|| self.last_pli.map_or_else(Instant::now, |at| at + PLI_EVERY));
-        [quiet, pli].into_iter().flatten().min()
+        let report = self
+            .report
+            .since
+            .filter(|_| self.showing)
+            .map(|at| at + REPORT_EVERY);
+        [quiet, pli, report].into_iter().flatten().min()
     }
 
     fn far_stopped(&mut self) {

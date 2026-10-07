@@ -183,6 +183,9 @@ pub struct MediaConfig {
 pub struct VideoLine {
     pub mid: String,
     pub pt: u8,
+    /// The retransmission's payload type, if lost packets are asked for
+    /// again.
+    pub rtx: Option<u8>,
 }
 
 /// Whether this build shows or sends video at all.
@@ -213,6 +216,7 @@ impl MediaConfig {
             video: HAS_VIDEO.then(|| VideoLine {
                 mid: VIDEO_MID.to_owned(),
                 pt: offer_video_pt(OPUS_PT),
+                rtx: Some(offer_video_pt(OPUS_PT) + 1),
             }),
         }
     }
@@ -235,6 +239,7 @@ impl MediaConfig {
                 .map(|(line, codec)| VideoLine {
                     mid: line.mid.clone(),
                     pt: codec.pt,
+                    rtx: codec.rtx,
                 }),
         }
     }
@@ -817,7 +822,7 @@ fn apply(rtc: &mut Rtc, applied: &mut Applied, plan: &Plan) -> Result<Vec<String
 }
 
 /// The peer: Opus alone at `opus_pt`, OpenSSL's DTLS, full ICE.
-fn new_rtc(opus_pt: u8, video_pt: Option<u8>, controlling: bool, now: Instant) -> Rtc {
+fn new_rtc(opus_pt: u8, video: Option<(u8, Option<u8>)>, controlling: bool, now: Instant) -> Rtc {
     let mut config = RtcConfig::new()
         .clear_codecs()
         .set_ice_lite(false)
@@ -836,13 +841,13 @@ fn new_rtc(opus_pt: u8, video_pt: Option<u8>, controlling: bool, now: Instant) -
             ..Default::default()
         },
     );
-    if let Some(pt) = video_pt {
+    if let Some((pt, rtx)) = video {
         // H.264 as our encoder makes it and the far end sends it:
         // packetization mode 1, constrained baseline, any level the other
         // side likes.
         config.codec_config().add_config(
             Pt::from(pt),
-            None,
+            rtx.map(Pt::from),
             Codec::H264,
             Frequency::NINETY_KHZ,
             None,
@@ -964,6 +969,7 @@ fn local_media(
         // No camera line until the session says it has one.
         video_ssrc: None,
         video_pt: offer_video_pt(opus_pt),
+        video_rtx: None,
         video_direction: Direction::SendRecv,
         // No data channel offered: audio only, the third attempt of §F.3.
         data_ssrc: None,
@@ -1104,8 +1110,8 @@ impl Session {
             .map_err(|e| failure(Stage::Gather, e.to_string()))?
             .port();
         let now = Instant::now();
-        let video_pt = config.video.as_ref().map(|v| v.pt);
-        let mut rtc = new_rtc(config.opus_pt, video_pt, config.controlling, now);
+        let video_codec = config.video.as_ref().map(|v| (v.pt, v.rtx));
+        let mut rtc = new_rtc(config.opus_pt, video_codec, config.controlling, now);
         let mid = Mid::from(config.audio_mid.as_str());
         // Any but zero, which libwebrtc keeps for its bandwidth probes.
         let ssrc = rand::random::<u32>().max(1);
@@ -1125,7 +1131,7 @@ impl Session {
             super::video::CallVideo::new(
                 &mut rtc,
                 Mid::from(line.mid.as_str()),
-                line.pt,
+                (line.pt, line.rtx),
                 video_ssrc,
                 video,
                 tell.clone(),
@@ -1307,6 +1313,7 @@ impl Session {
         if let Some(video) = &self.video {
             local.video_ssrc = Some(video.ssrc());
             local.video_pt = video.pt();
+            local.video_rtx = video.rtx();
         }
         log::info!(
             "gather: done after {:?}: {}",
@@ -2564,7 +2571,8 @@ mod tests {
                 config.video,
                 Some(VideoLine {
                     mid: "video_1".into(),
-                    pt: 107
+                    pt: 107,
+                    rtx: Some(99),
                 })
             );
         } else {

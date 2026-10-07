@@ -476,11 +476,15 @@ pub fn offer(local: &LocalMedia) -> String {
             && let Some(ssrc) = local.video_ssrc
         {
             let setup = setup_text(local.setup);
+            let codec = VideoCodec {
+                pt: local.video_pt,
+                rtx: local.video_rtx,
+            };
             camera_line(
                 &mut out,
                 local,
                 mid,
-                local.video_pt,
+                codec,
                 ssrc,
                 local.video_direction,
                 setup,
@@ -608,10 +612,15 @@ pub fn answer(local: &LocalMedia, remote: &RemoteMedia) -> String {
             }
             (LineKind::Video, _, _) => {
                 // `accepted` keeps the camera's line only with both.
-                if let (Some(codec), Some(ssrc)) = (remote.video, local.video_ssrc) {
+                if let (Some(offered), Some(ssrc)) = (remote.video, local.video_ssrc) {
                     let direction = answer_direction(local.video_direction, line.direction);
+                    // Resends only if both sides do them.
+                    let codec = VideoCodec {
+                        pt: offered.pt,
+                        rtx: offered.rtx.filter(|_| local.video_rtx.is_some()),
+                    };
                     camera_line(
-                        &mut out, local, &line.mid, codec.pt, ssrc, direction, setup, first,
+                        &mut out, local, &line.mid, codec, ssrc, direction, setup, first,
                     );
                 }
             }
@@ -638,11 +647,13 @@ fn answer_direction(ours: Direction, theirs: Direction) -> Direction {
     }
 }
 
-/// The camera's line (`main-video`): H.264 at `pt`, packetization mode
-/// 1, constrained baseline as our encoder makes it, the receiver free to
-/// send another level (`level-asymmetry-allowed`), as the web client's
-/// answers write it (§D.4). No retransmission is offered and no `nack`:
-/// a lost picture is mended by a keyframe (`nack pli`) instead.
+/// The camera's line (`main-video`): H.264 at `codec.pt`, packetization
+/// mode 1, constrained baseline as our encoder makes it, the receiver
+/// free to send another level (`level-asymmetry-allowed`), as the web
+/// client's answers write it (§D.4). With `codec.rtx`, lost packets are
+/// asked for again (`nack`) and come on the retransmission's payload
+/// type; a picture that cannot be mended asks for a keyframe (`nack
+/// pli`).
 #[expect(
     clippy::too_many_arguments,
     reason = "an m-line's parts, as `data_line` takes them"
@@ -651,14 +662,19 @@ fn camera_line(
     out: &mut String,
     local: &LocalMedia,
     mid: &str,
-    pt: u8,
+    codec: VideoCodec,
     ssrc: u32,
     direction: Direction,
     setup: &str,
     candidates: bool,
 ) {
     let (address, port) = media_address(local);
-    push(out, &format!("m=video {port} RTP/SAVP {pt}"));
+    let pt = codec.pt;
+    let payloads = match codec.rtx {
+        Some(rtx) => format!("{pt} {rtx}"),
+        None => pt.to_string(),
+    };
+    push(out, &format!("m=video {port} RTP/SAVP {payloads}"));
     push(out, &connection(address));
     push(out, "a=x-signaling-fb:* x-message app send:src recv:src,vc");
     push(out, &ssrc_range(ssrc));
@@ -669,9 +685,16 @@ fn camera_line(
             "a=fmtp:{pt} level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
         ),
     );
+    if let Some(rtx) = codec.rtx {
+        push(out, &format!("a=rtpmap:{rtx} rtx/90000"));
+        push(out, &format!("a=fmtp:{rtx} apt={pt}"));
+    }
     push(out, &format!("a=rtcp:{port}"));
     push(out, "a=rtcp-fb:* goog-remb");
     push(out, "a=rtcp-fb:* transport-cc");
+    if codec.rtx.is_some() {
+        push(out, "a=rtcp-fb:* nack");
+    }
     push(out, "a=rtcp-fb:* nack pli");
     push(out, &format!("a=setup:{setup}"));
     push(out, &format!("a=mid:{mid}"));
@@ -902,6 +925,7 @@ mod tests {
             audio_ssrc: 1234,
             video_ssrc: None,
             video_pt: 108,
+            video_rtx: Some(109),
             video_direction: Direction::SendRecv,
             opus_pt: 111,
             audio_direction: Direction::SendRecv,
@@ -1307,7 +1331,13 @@ mod tests {
         let camera = ours.camera().expect("a camera line");
         assert_eq!(camera.mid, "1");
         assert_eq!(camera.direction, Direction::SendRecv);
-        assert_eq!(ours.video.map(|v| v.pt), Some(108));
+        assert_eq!(
+            ours.video,
+            Some(VideoCodec {
+                pt: 108,
+                rtx: Some(109)
+            })
+        );
         assert!(offer(&local).contains("a=x-ssrc-range:77-77\r\n"));
 
         // To the native client's offer: its payload type and mid, both
@@ -1318,7 +1348,15 @@ mod tests {
         assert_eq!(camera.mid, "video_1");
         assert_ne!(camera.port, 0);
         assert_eq!(camera.direction, Direction::SendRecv);
-        assert_eq!(answered.video.map(|v| v.pt), Some(107));
+        assert_eq!(
+            answered.video,
+            Some(VideoCodec {
+                pt: 107,
+                rtx: Some(99)
+            }),
+            "lost packets asked for again on the offer's rtx"
+        );
+        assert!(sdp.contains("a=rtcp-fb:* nack\r\n"));
         assert!(sdp.contains("a=group:BUNDLE audio_0 video_1"));
 
         // A far end that only receives (010): we only send.
