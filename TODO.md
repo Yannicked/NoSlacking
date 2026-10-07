@@ -1105,6 +1105,63 @@ engineering, as for the rest of the session sign-in.
         pure-Rust path as the default and the fallback, and keep
         software encoding unless quality and keyframe control hold up
         (hardware encoders are often worse at call bitrates).
+        - Done (2026-10-07, docs/research/huddle-video.md §6): the
+          helper `noslacking-video` (crates/noslacking-video, a
+          workspace member; `unsafe` only in its libva and pipe
+          modules) and its protocol (crates/video-ipc: framed,
+          versioned, a hello with capabilities; open/decode/close, and
+          encode messages ready). The app starts it beside its own
+          executable or from PATH on the first stream start, kills it
+          after a 1 s timeout, restarts it at most 3 times, and decodes
+          in software for anything it cannot do, asking for a keyframe
+          when it switches. Settings → Huddles → "Decode video on the
+          graphics card", on by default. Linux back end: VA-API, libva
+          opened at run time (no build dependency), our own H.264
+          stateless state over cros-codecs' parser; bit-exact on both
+          fixtures. Ships in the tar.gz, .deb (recommends libva2 and a
+          driver), .rpm (suggests libva), Flatpak, the macOS bundle and
+          the Windows zip; elsewhere than Linux it reports no hardware.
+        - [ ] **Make the GPU path pay.** Measured here (Ryzen AI 7 350):
+              rusty_h264 decodes the 1080p fixture in 2.1 ms a frame;
+              VA-API takes 3.0 ms in process (1.8 decode, 1.3 copying
+              the surface back) and 3.9 ms through the helper, and the
+              pipe's copies cost more CPU than software decoding does.
+              Next: send the window's shrink factor with `Decode` so the
+              helper returns only what is shown (a quarter of the bytes
+              at half size), then a shared-memory picture (memfd or
+              /dev/shm, read with `pread` by the app), then measure on a
+              weak laptop before deciding the default.
+        - [ ] **VA-API encoding** (640×480@30, CBR ~1.8 Mbit/s, IDR on
+              request): `VAEntrypointEncSlice(LP)`, packed SPS/PPS/slice
+              headers (cros-codecs' `nalu_writer`/`synthesizer` without
+              features), `OpenEncoder`/`Encode`/`SetBitrate` are in the
+              protocol; compare quality with rusty_h264-encoder at call
+              bitrates before using it.
+        - [ ] **Vulkan Video** with `gpu-video` (MIT, safe API, H.264
+              decode and encode, Linux and Windows, NV12 bytes without
+              its wgpu feature): the Windows back end and Linux's second
+              where VA-API lacks H.264. Not usable on this machine:
+              Fedora's RADV has no H.264 (AV1 and VP9 only).
+        - [ ] **V4L2 on ARM Linux** with `v4l2r` (MIT; deny.toml needs
+              a clarify for its license-file): stateful decoders
+              (Qualcomm Venus/Iris, Raspberry Pi) take Annex B frames;
+              stateless ones (Rockchip, Hantro, MediaTek, Allwinner) take
+              the request API and reuse the helper's `h264.rs`. Detect
+              M2M devices under /dev/video* with H264 or H264_SLICE
+              OUTPUT and NV12 CAPTURE formats.
+        - [ ] **macOS: VideoToolbox** (`objc2-video-toolbox`,
+              `objc2-core-media`, `objc2-core-video`):
+              `VTDecompressionSession` from the SPS/PPS, AVCC samples,
+              `CVPixelBuffer` NV12 back; `VTCompressionSession` with
+              `kVTEncodeFrameOptionKey_ForceKeyFrame` for sending.
+        - [ ] **Windows: Media Foundation / D3D11 video** (`windows`
+              crate) if Vulkan Video does not cover a GPU: the H.264
+              decoder MFT with a D3D11 device manager, NV12 out; the
+              encoder MFT for sending. Snapdragon laptops included.
+        - Back ends by platform: desktop Linux → VA-API (done), Vulkan
+          Video (planned); ARM Linux → V4L2 stateful/stateless; Windows
+          (x86 and Snapdragon) → Vulkan Video, else Media Foundation;
+          macOS → VideoToolbox; software everywhere as the fallback.
 - **Microsoft Teams:** [docs/research/microsoft-teams.md](docs/research/microsoft-teams.md)
   (2026-10-06). Not being built: the official Graph route can't do live
   updates or calls, and the route other clients take signs in as
