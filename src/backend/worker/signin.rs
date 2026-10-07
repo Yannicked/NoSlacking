@@ -410,18 +410,23 @@ impl Worker {
     /// [`super::super::teams::sign_in`]); the answer comes back through
     /// `Internal::TeamsSignedIn`.
     #[cfg(feature = "teams")]
-    pub(super) fn start_teams_sign_in(&mut self, tenant: Option<String>) {
+    pub(super) fn start_teams_sign_in(&mut self, tenant: Option<String>, personal: bool) {
+        let account = if personal {
+            crate::teams::auth::Account::Personal
+        } else {
+            crate::teams::auth::Account::Work
+        };
         let sink = self.sink.clone();
         let internal = self.internal.clone();
         tokio::spawn(async move {
-            let result = super::super::teams::sign_in(tenant, sink).await;
+            let result = super::super::teams::sign_in(account, tenant, sink).await;
             let _ = internal.send(Internal::TeamsSignedIn(result));
         });
     }
 
     /// Without Teams in the build there is nothing to sign in to.
     #[cfg(not(feature = "teams"))]
-    pub(super) fn start_teams_sign_in(&mut self, _tenant: Option<String>) {
+    pub(super) fn start_teams_sign_in(&mut self, _tenant: Option<String>, _personal: bool) {
         self.sink
             .send(Event::SignIn(SignIn::Failed(Failure::Unsupported)));
     }

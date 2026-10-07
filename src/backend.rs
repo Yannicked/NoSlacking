@@ -62,8 +62,12 @@ pub enum Command {
     /// Opens Slack's sign-in page in the browser and, for a while, accepts
     /// the `slack://` link it hands back through the desktop.
     StartBrowserSignIn,
-    /// Starts Microsoft Teams Device Code sign-in.
-    StartTeamsSignIn(Option<String>),
+    /// Starts Microsoft Teams Device Code sign-in, to the tenant if given,
+    /// or to a personal account.
+    StartTeamsSignIn {
+        tenant: Option<String>,
+        personal: bool,
+    },
     SignOut(String),
     /// The conversation on screen, for polling when Socket Mode is down.
     Focus {
@@ -323,7 +327,10 @@ impl std::fmt::Debug for Command {
             Self::PasteToken(_) => f.debug_tuple("PasteToken").field(&REDACTED).finish(),
             Self::SignInLink(_) => f.debug_tuple("SignInLink").field(&REDACTED).finish(),
             Self::StartBrowserSignIn => f.write_str("StartBrowserSignIn"),
-            Self::StartTeamsSignIn(_) => f.write_str("StartTeamsSignIn"),
+            Self::StartTeamsSignIn { personal, .. } => f
+                .debug_struct("StartTeamsSignIn")
+                .field("personal", personal)
+                .finish_non_exhaustive(),
             Self::SignOut(team) => f.debug_tuple("SignOut").field(team).finish(),
             Self::Focus { team, channel } => f
                 .debug_struct("Focus")

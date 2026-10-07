@@ -2762,6 +2762,9 @@ msgstr "Code:"
 msgid "Open Microsoft Login"
 msgstr "Microsoft-aanmelding openen"
 
+msgid "Personal account (Teams free)"
+msgstr "Persoonlijk account (Teams gratis)"
+
 msgid "Organization / Tenant (optional):"
 msgstr "Organisatie / Tenant (optioneel):"
 

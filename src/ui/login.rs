@@ -235,6 +235,14 @@ fn teams_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 .color(palette.secondary),
         );
         ui.add_space(2.0);
+        ui.add_enabled_ui(!busy(app), |ui| {
+            ui.checkbox(
+                &mut app.setup.teams_personal,
+                t("Personal account (Teams free)"),
+            );
+        });
+        // A personal account has no organisation to name.
+        if !app.setup.teams_personal {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(t("Organization / Tenant (optional):"))
@@ -254,6 +262,7 @@ fn teams_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 .font(theme::regular(11.5))
                 .color(palette.dim),
         );
+        }
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.add_enabled_ui(!busy(app), |ui| {
@@ -263,7 +272,10 @@ fn teams_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                     } else {
                         Some(app.setup.teams_tenant.trim().to_owned())
                     };
-                    app.actions.push(Action::StartTeamsSignIn(tenant));
+                    app.actions.push(Action::StartTeamsSignIn {
+                        tenant,
+                        personal: app.setup.teams_personal,
+                    });
                 }
             });
             if busy(app) && theme::secondary_button(ui, palette, &t("Cancel")).clicked() {

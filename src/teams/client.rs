@@ -8,7 +8,9 @@ use std::sync::{Arc, RwLock};
 use futures_util::future::BoxFuture;
 
 use crate::failure::Failure;
-use crate::teams::auth::{AudienceToken, RESOURCE_CSA, RESOURCE_GRAPH, TeamsCredentials, now_secs};
+use crate::teams::auth::{
+    Account, AudienceToken, RESOURCE_CSA, RESOURCE_GRAPH, TeamsCredentials, now_secs,
+};
 use crate::teams::types::{
     Conversation, ConversationsResponse, Message, MessagesResponse, PostedMessage, Team,
     TeamsResponse, UserDetails,
@@ -55,11 +57,14 @@ impl ShortProfile {
     }
 }
 
-/// The MRI of a person by their object id: `8:orgid:{id}`, unless `id` is
-/// one already.
-fn user_mri(id: &str) -> String {
-    if id.contains(':') {
+/// The MRI of a person by the id messages name them by: a work object
+/// id is `8:orgid:{id}`, a personal `live:…` id is `8:live:…`, and an
+/// MRI stays as it is.
+pub fn user_mri(id: &str) -> String {
+    if id.starts_with("8:") {
         id.to_owned()
+    } else if id.contains(':') {
+        format!("8:{id}")
     } else {
         format!("8:orgid:{id}")
     }
@@ -268,23 +273,37 @@ impl TeamsClient {
         F: Fn(&reqwest::Client, &str) -> reqwest::RequestBuilder,
     {
         let token = self.skype_token()?;
-        let resp = make_request(&self.http, &token)
-            .send()
-            .await
-            .map_err(|e| Failure::Network(e.without_url().to_string()))?;
+        let resp = self
+            .send_as_account(make_request(&self.http, &token))
+            .await?;
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             log::info!("Teams API returned 401 Unauthorized, refreshing token...");
             if let Ok(new_creds) = self.force_refresh(&token).await
                 && let Some(new_token) = new_creds.skype_token
             {
-                return make_request(&self.http, &new_token)
-                    .send()
-                    .await
-                    .map_err(|e| Failure::Network(e.without_url().to_string()));
+                return self
+                    .send_as_account(make_request(&self.http, &new_token))
+                    .await;
             }
         }
         Ok(resp)
+    }
+
+    /// Sends `request` with what this kind of account's services expect:
+    /// the personal ones get the headers Teams' personal client sends.
+    async fn send_as_account(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, Failure> {
+        let request = match self.credentials().account {
+            Account::Work => request,
+            Account::Personal => crate::teams::auth::consumer_headers(request),
+        };
+        request
+            .send()
+            .await
+            .map_err(|e| Failure::Network(e.without_url().to_string()))
     }
 
     fn skype_token(&self) -> Result<String, Failure> {
@@ -454,6 +473,10 @@ impl TeamsClient {
     /// Fetches joined teams and channels from the chat service aggregator,
     /// which wants a bearer token of its own audience.
     pub async fn get_teams(&self) -> Result<Vec<Team>, Failure> {
+        // Teams free has chats only: no teams, and no list to ask.
+        if self.credentials().account == Account::Personal {
+            return Ok(Vec::new());
+        }
         let skype = self.credentials().skype_token;
         let resp = self
             .bearer(RESOURCE_CSA, |http, token| {
@@ -566,7 +589,16 @@ impl TeamsClient {
     /// Extracts user profile information from the JWT token claims if available.
     pub fn user_from_token(&self) -> Option<UserDetails> {
         let creds = self.credentials();
-        let claims = crate::teams::auth::parse_jwt_claims(&creds.access_token)?;
+        let Some(claims) = crate::teams::auth::parse_jwt_claims(&creds.access_token) else {
+            // A personal account's access token is opaque; its skype token
+            // says who you are (`skypeid`: `live:.cid.…`), if not your name.
+            let claims = crate::teams::auth::parse_jwt_claims(creds.skype_token.as_deref()?)?;
+            let id = claims.get("skypeid").and_then(|v| v.as_str())?;
+            return Some(UserDetails {
+                id: id.to_owned(),
+                ..UserDetails::default()
+            });
+        };
         let id = claims
             .get("oid")
             .or_else(|| claims.get("sub"))
@@ -784,6 +816,44 @@ mod tests {
         assert_eq!(people[1].display_name, None);
         assert_eq!(user_mri("a-1"), "8:orgid:a-1");
         assert_eq!(user_mri("8:live:x"), "8:live:x");
+        assert_eq!(user_mri("live:.cid.x"), "8:live:.cid.x");
+    }
+
+    #[test]
+    fn a_personal_account_is_known_by_its_skype_id() {
+        use base64::Engine as _;
+        let jwt = |claims: &str| {
+            let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims);
+            format!("eyJhbGciOiJub25lIn0.{body}.sig")
+        };
+        let client = TeamsClient::new(TeamsCredentials {
+            access_token: "EwA-opaque".into(),
+            skype_token: Some(jwt(r#"{"skypeid":"live:.cid.4a5b"}"#)),
+            account: Account::Personal,
+            ..TeamsCredentials::default()
+        });
+        let me = client.get_me().expect("who you are");
+        assert_eq!(me.id, "live:.cid.4a5b");
+        assert_eq!(me.display_name, None);
+
+        let work = TeamsClient::new(TeamsCredentials {
+            access_token: jwt(r#"{"oid":"o-1","name":"Ann"}"#),
+            ..TeamsCredentials::default()
+        });
+        let me = work.get_me().expect("who you are");
+        assert_eq!(
+            (me.id.as_str(), me.display_name.as_deref()),
+            ("o-1", Some("Ann"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_personal_account_has_no_teams_to_list() {
+        let client = TeamsClient::new(TeamsCredentials {
+            account: Account::Personal,
+            ..TeamsCredentials::default()
+        });
+        assert_eq!(client.get_teams().await, Ok(Vec::new()));
     }
 
     #[test]

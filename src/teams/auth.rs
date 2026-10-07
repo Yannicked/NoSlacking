@@ -53,6 +53,59 @@ pub const AUTHZ_URL_WORK: &str = "https://teams.microsoft.com/api/authsvc/v1.0/a
 /// Teams token authorization service for personal / consumer accounts.
 pub const AUTHZ_URL_PERSONAL: &str = "https://teams.live.com/api/auth/v1.0/authz/consumer";
 
+/// The only scope Microsoft gives the consumer client for the chat
+/// service; `https://api.spaces.skype.com/.default` is refused with
+/// AADSTS70011 (seen with `--teams-probe`, 2026-10-07).
+pub const SCOPE_PERSONAL: &str =
+    "service::api.fl.spaces.skype.com::MBI_SSL openid profile offline_access";
+
+/// Which kind of Microsoft account a Teams sign-in is: they share the
+/// chat protocol but sign in through different clients, scopes and
+/// services, and a token from one is no good to the other's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Account {
+    /// A work or school account (Entra ID), on teams.microsoft.com.
+    #[default]
+    Work,
+    /// A personal Microsoft account (Teams free), on teams.live.com.
+    Personal,
+}
+
+impl Account {
+    /// The first-party client id to sign in and refresh as.
+    pub fn client_id(self) -> &'static str {
+        match self {
+            Self::Work => TEAMS_CLIENT_ID,
+            Self::Personal => TEAMS_CONSUMER_CLIENT_ID,
+        }
+    }
+
+    /// The tenant to sign in through when none is given.
+    pub fn default_tenant(self) -> &'static str {
+        match self {
+            Self::Work => DEFAULT_TENANT,
+            Self::Personal => "consumers",
+        }
+    }
+
+    /// The scope that buys an access token for `resource`, if this kind of
+    /// account can have one: personal accounts reach the chat service only.
+    pub fn scope_for(self, resource: &str) -> Option<String> {
+        match self {
+            Self::Work => Some(format!("{resource}/.default offline_access")),
+            Self::Personal => (resource == RESOURCE_SPACES).then(|| SCOPE_PERSONAL.to_owned()),
+        }
+    }
+
+    /// Where the access token is traded for a skype token.
+    pub fn authz_url(self) -> &'static str {
+        match self {
+            Self::Work => AUTHZ_URL_WORK,
+            Self::Personal => AUTHZ_URL_PERSONAL,
+        }
+    }
+}
+
 /// Credentials held for an authenticated Teams session.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamsCredentials {
@@ -78,6 +131,9 @@ pub struct TeamsCredentials {
     /// audience, each minted when first wanted.
     #[serde(default)]
     pub audiences: std::collections::BTreeMap<String, AudienceToken>,
+    /// Which kind of account signed in; refreshes must use the same.
+    #[serde(default)]
+    pub account: Account,
 }
 
 impl std::fmt::Debug for TeamsCredentials {
@@ -95,6 +151,7 @@ impl std::fmt::Debug for TeamsCredentials {
             .field("expires_at", &self.expires_at)
             .field("tenant_id", &self.tenant_id)
             .field("audiences", &self.audiences)
+            .field("account", &self.account)
             .finish()
     }
 }
@@ -197,9 +254,45 @@ pub struct TokenResponse {
 /// Response from Teams `authsvc` token exchange.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthzResponse {
+    /// Where the work service puts the skype token.
     pub tokens: Option<AuthzTokens>,
+    /// Where the personal service puts it (`skypeToken.skypetoken`).
+    #[serde(default, rename = "skypeToken")]
+    pub consumer: Option<ConsumerToken>,
     #[serde(rename = "regionGtms")]
     pub region_gtms: Option<serde_json::Value>,
+}
+
+impl AuthzResponse {
+    /// The skype token, from whichever shape the service answered in.
+    pub fn skype_token(&self) -> Option<String> {
+        self.tokens
+            .as_ref()
+            .and_then(|t| t.skype_token.clone())
+            .or_else(|| self.consumer.as_ref().and_then(|t| t.skype_token.clone()))
+            .filter(|t| !t.is_empty())
+    }
+}
+
+/// The skype token as the personal service nests it.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsumerToken {
+    #[serde(default, rename = "skypetoken")]
+    pub skype_token: Option<String>,
+    #[serde(default, rename = "expiresIn")]
+    pub expires_in: Option<u64>,
+}
+
+impl std::fmt::Debug for ConsumerToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConsumerToken")
+            .field(
+                "skype_token",
+                &self.skype_token.as_ref().map(|_| crate::redact::REDACTED),
+            )
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 /// Tokens nested in `authsvc` response.
@@ -252,11 +345,14 @@ pub fn error_code(body: &str) -> String {
 /// Initiates the Azure AD device code authentication flow.
 pub async fn start_device_code_flow(
     http: &reqwest::Client,
+    account: Account,
     tenant: Option<&str>,
 ) -> Result<DeviceCodeResponse, Failure> {
-    let url = device_code_url(tenant.unwrap_or(DEFAULT_TENANT));
-    let scope = format!("{RESOURCE_SPACES}/.default offline_access");
-    let params = [("client_id", TEAMS_CLIENT_ID), ("scope", &scope)];
+    let url = device_code_url(tenant.unwrap_or(account.default_tenant()));
+    let scope = account
+        .scope_for(RESOURCE_SPACES)
+        .ok_or(Failure::Unsupported)?;
+    let params = [("client_id", account.client_id()), ("scope", &scope)];
     let resp = http
         .post(&url)
         .form(&params)
@@ -285,12 +381,13 @@ pub async fn start_device_code_flow(
 /// Polls Azure AD for completion of the device code flow until success, expiration, or error.
 pub async fn poll_device_code_token(
     http: &reqwest::Client,
+    account: Account,
     device_code: &str,
     mut interval: u64,
     expires_in: u64,
     tenant: Option<&str>,
 ) -> Result<TokenResponse, Failure> {
-    let url = token_url(tenant.unwrap_or(DEFAULT_TENANT));
+    let url = token_url(tenant.unwrap_or(account.default_tenant()));
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(expires_in);
 
@@ -306,7 +403,7 @@ pub async fn poll_device_code_token(
         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
 
         let params = [
-            ("client_id", TEAMS_CLIENT_ID),
+            ("client_id", account.client_id()),
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ("device_code", device_code),
         ];
@@ -361,79 +458,55 @@ pub async fn poll_device_code_token(
     }
 }
 
-/// Exchanges an Azure AD access token for a Teams SkypeToken and regional routing endpoints.
+/// Exchanges an access token for a Teams skype token and the regional
+/// routing endpoints, at the service for its kind of account. The token
+/// is bound to the client that signed in, so trying the other service
+/// would only be refused.
 pub async fn exchange_skype_token(
     http: &reqwest::Client,
-    aad_access_token: &str,
-    is_consumer: bool,
+    access_token: &str,
+    account: Account,
 ) -> Result<AuthzResponse, Failure> {
-    let primary_url = if is_consumer {
-        AUTHZ_URL_PERSONAL
-    } else {
-        AUTHZ_URL_WORK
-    };
-
-    log::debug!("exchanging AAD token for Skype token at {primary_url}...");
-
-    let resp = http
-        .post(primary_url)
-        .bearer_auth(aad_access_token)
-        .header("Content-Length", "0")
+    let url = account.authz_url();
+    log::debug!("exchanging the access token for a skype token at {url}");
+    let mut request = http
+        .post(url)
+        .bearer_auth(access_token)
+        .header("Content-Length", "0");
+    if account == Account::Personal {
+        request = consumer_headers(request);
+    }
+    let resp = request
         .send()
         .await
         .map_err(|e| Failure::Network(e.without_url().to_string()))?;
-
     let status = resp.status();
     let body = resp
         .text()
         .await
         .map_err(|e| Failure::Network(e.without_url().to_string()))?;
-
-    if status.is_success() {
-        let authz: AuthzResponse =
-            serde_json::from_str(&body).map_err(|e| Failure::Unexpected(e.to_string()))?;
-        return Ok(authz);
+    if !status.is_success() {
+        log::warn!(
+            "skype token exchange failed at {url}: HTTP {status} ({})",
+            error_code(&body)
+        );
+        return Err(Failure::Http(status.as_u16()));
     }
-
-    log::warn!(
-        "authsvc token exchange failed at {primary_url}: HTTP {status} ({})",
-        error_code(&body)
-    );
-
-    // If the primary endpoint failed with 401 or 403, try the fallback endpoint
-    // in case a consumer/personal Microsoft account was used or vice versa.
-    let fallback_url = if is_consumer {
-        AUTHZ_URL_WORK
-    } else {
-        AUTHZ_URL_PERSONAL
-    };
-
-    log::info!("attempting fallback authsvc endpoint at {fallback_url}...");
-    let fallback_resp = http
-        .post(fallback_url)
-        .bearer_auth(aad_access_token)
-        .header("Content-Length", "0")
-        .send()
-        .await
-        .map_err(|e| Failure::Network(e.without_url().to_string()))?;
-
-    let fallback_status = fallback_resp.status();
-    let fallback_body = fallback_resp
-        .text()
-        .await
-        .map_err(|e| Failure::Network(e.without_url().to_string()))?;
-
-    if fallback_status.is_success() {
-        let authz: AuthzResponse =
-            serde_json::from_str(&fallback_body).map_err(|e| Failure::Unexpected(e.to_string()))?;
-        return Ok(authz);
+    let authz: AuthzResponse =
+        serde_json::from_str(&body).map_err(|e| Failure::Unexpected(e.to_string()))?;
+    if authz.skype_token().is_none() {
+        return Err(Failure::Unexpected("no skype token in the answer".into()));
     }
+    Ok(authz)
+}
 
-    log::error!(
-        "fallback authsvc exchange failed at {fallback_url}: HTTP {fallback_status} ({})",
-        error_code(&fallback_body)
-    );
-    Err(Failure::Http(status.as_u16()))
+/// The headers Teams' personal web client sends, which the consumer
+/// services were seen to answer with them (`--teams-probe`).
+pub fn consumer_headers(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    request
+        .header("Accept", "application/json; ver=1.0")
+        .header("X-MS-Client-Consumer-Type", "teams4life")
+        .header("ms-ic3-product", "tfl")
 }
 
 /// Extracts claims JSON object from an unverified JWT token payload.
@@ -463,11 +536,16 @@ pub async fn redeem(
         .as_deref()
         .filter(|t| !t.is_empty())
         .ok_or(Failure::SignedOut)?;
-    let tenant = creds.tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
-    let scope = format!("{resource}/.default offline_access");
+    let account = creds.account;
+    let tenant = creds
+        .tenant_id
+        .as_deref()
+        .unwrap_or(account.default_tenant());
+    // A personal account has no token for anything but the chat service.
+    let scope = account.scope_for(resource).ok_or(Failure::Unsupported)?;
     log::info!("redeeming the Teams refresh token for {resource} in tenant {tenant}");
     let params = [
-        ("client_id", TEAMS_CLIENT_ID),
+        ("client_id", account.client_id()),
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
         ("scope", &scope),
@@ -505,36 +583,23 @@ pub async fn refresh_credentials(
     let now = now_secs();
 
     // 1. If access token is still fresh, try exchanging for Skype token first
-    if !creds.is_expired(now) && !creds.access_token.is_empty() {
-        let is_consumer = creds.tenant_id.as_deref() == Some("consumers");
-        if let Ok(authz) = exchange_skype_token(http, &creds.access_token, is_consumer).await
-            && let Some(st) = authz.tokens.and_then(|t| t.skype_token)
-        {
-            let mut refreshed = creds.clone();
-            refreshed.skype_token = Some(st);
-            if let Some(gtms) = authz.region_gtms {
-                refreshed.region_gtms = Some(gtms);
-            }
-            log::info!("Skype token renewed using existing AAD access token");
-            return Ok(refreshed);
+    if !creds.is_expired(now)
+        && !creds.access_token.is_empty()
+        && let Ok(authz) = exchange_skype_token(http, &creds.access_token, creds.account).await
+        && let Some(st) = authz.skype_token()
+    {
+        let mut refreshed = creds.clone();
+        refreshed.skype_token = Some(st);
+        if let Some(gtms) = authz.region_gtms {
+            refreshed.region_gtms = Some(gtms);
         }
+        log::info!("Skype token renewed using the current access token");
+        return Ok(refreshed);
     }
 
     // 2. Otherwise refresh AAD access token using refresh_token
     let token_resp = redeem(http, creds, RESOURCE_SPACES).await?;
-    let tenant = creds.tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
-    let is_consumer = tenant == "consumers"
-        || tenant == "personal"
-        || parse_jwt_claims(&token_resp.access_token)
-            .and_then(|c| {
-                c.get("tid").and_then(|t| {
-                    t.as_str()
-                        .map(|s| s == "9188040d-6c67-4c5b-b112-36a304b66dad")
-                })
-            })
-            .unwrap_or(false);
-
-    let authz = exchange_skype_token(http, &token_resp.access_token, is_consumer).await?;
+    let authz = exchange_skype_token(http, &token_resp.access_token, creds.account).await?;
 
     log::info!("Teams credentials successfully refreshed");
 
@@ -543,7 +608,7 @@ pub async fn refresh_credentials(
         refresh_token: token_resp
             .refresh_token
             .or_else(|| creds.refresh_token.clone()),
-        skype_token: authz.tokens.and_then(|t| t.skype_token),
+        skype_token: authz.skype_token(),
         expires_at: token_resp.expires_in.map(|s| now + s),
         region_gtms: authz.region_gtms.or_else(|| creds.region_gtms.clone()),
         ..creds.clone()
@@ -611,6 +676,42 @@ mod tests {
             gtms["chatService"].as_str(),
             Some("https://emea.ng.msg.teams.microsoft.com")
         );
+    }
+
+    #[test]
+    fn the_personal_service_nests_its_skype_token() {
+        let personal: AuthzResponse = serde_json::from_str(
+            r#"{"skypeToken":{"skypetoken":"secret-personal","expiresIn":86398,"skypeid":"live:.cid.1"},
+                "regionGtms":{"chatService":"https://msgapi.teams.live.com","middleTier":"https://teams.live.com/api/mt"}}"#,
+        )
+        .expect("valid authz");
+        assert_eq!(personal.skype_token().as_deref(), Some("secret-personal"));
+        assert!(!format!("{personal:?}").contains("secret-personal"));
+        let work: AuthzResponse =
+            serde_json::from_str(r#"{"tokens":{"skypeToken":"secret-work","expiresIn":86400}}"#)
+                .expect("valid authz");
+        assert_eq!(work.skype_token().as_deref(), Some("secret-work"));
+        assert_eq!(AuthzResponse::default().skype_token(), None);
+    }
+
+    #[test]
+    fn each_account_signs_in_its_own_way() {
+        assert_eq!(Account::Work.client_id(), TEAMS_CLIENT_ID);
+        assert_eq!(Account::Personal.client_id(), TEAMS_CONSUMER_CLIENT_ID);
+        assert_eq!(Account::Personal.default_tenant(), "consumers");
+        assert_eq!(
+            Account::Personal.scope_for(RESOURCE_SPACES).as_deref(),
+            Some(SCOPE_PERSONAL)
+        );
+        assert_eq!(Account::Personal.scope_for(RESOURCE_GRAPH), None);
+        assert_eq!(
+            Account::Work.scope_for(RESOURCE_CSA).as_deref(),
+            Some("https://chatsvcagg.teams.microsoft.com/.default offline_access")
+        );
+        // Saved before accounts had a kind: work.
+        let old: TeamsCredentials =
+            serde_json::from_str(r#"{"access_token":"a"}"#).expect("valid credentials");
+        assert_eq!(old.account, Account::Work);
     }
 
     #[test]

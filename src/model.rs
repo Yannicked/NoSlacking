@@ -1732,7 +1732,10 @@ pub enum Action {
     /// app from the current manifest.
     SignInUpdated,
     /// Starts Microsoft Teams Device Code sign-in with an optional tenant domain or ID.
-    StartTeamsSignIn(Option<String>),
+    StartTeamsSignIn {
+        tenant: Option<String>,
+        personal: bool,
+    },
     CancelSignIn,
     /// Opens a folder in the system's file manager.
     OpenFolder(PathBuf),

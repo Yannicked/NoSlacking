@@ -292,7 +292,19 @@ Feasible but unproven. What has to change:
   host and Trouter registration for consumers are unknown.
 - ost declares a personal configuration but never uses it.
 
-Next step: a spike against a real personal account.
+**Confirmed with `--teams-probe` against a real account (2026-10-07):**
+the consumer client id on tenant `consumers` with scope
+`service::api.fl.spaces.skype.com::MBI_SSL openid profile offline_access`
+signs in (the `.default` scope is AADSTS70011); the access token is
+opaque (`EwA…`); the consumer `authz` answers with the skype token at
+`skypeToken.skypetoken` (24 h) and a `regionGtms` whose `chatService` is
+`https://msgapi.teams.live.com` and `middleTier`
+`https://teams.live.com/api/mt`; the skype token is a JWT whose `skypeid`
+is `live:.cid.…`; the chat list, messages and Trouter negotiation all
+work with it. One-to-one chats are `19:uni01_…@thread.v2` here too.
+This is what the "Personal account (Teams free)" sign-in now does.
+Still unverified: the people lookup on the personal middle tier, and
+sending.
 
 ### 6.2 Audio and video calls
 

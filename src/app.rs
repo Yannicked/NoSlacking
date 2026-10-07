@@ -187,6 +187,8 @@ pub struct SetupForm {
     pub show_app: bool,
     /// Microsoft Teams tenant domain or ID (optional).
     pub teams_tenant: String,
+    /// Whether the Teams sign-in is for a personal account (Teams free).
+    pub teams_personal: bool,
 }
 
 /// The form holds secrets as they are typed; only the plain fields print.
@@ -197,6 +199,7 @@ impl std::fmt::Debug for SetupForm {
             .field("show_manual", &self.show_manual)
             .field("show_app", &self.show_app)
             .field("teams_tenant", &self.teams_tenant)
+            .field("teams_personal", &self.teams_personal)
             .finish_non_exhaustive()
     }
 }
@@ -1434,9 +1437,10 @@ impl App {
                 self.page = Page::SignIn;
                 self.start_sign_in();
             }
-            Action::StartTeamsSignIn(tenant) => {
+            Action::StartTeamsSignIn { tenant, personal } => {
                 self.sign_in = None;
-                self.backend.send(Command::StartTeamsSignIn(tenant));
+                self.backend
+                    .send(Command::StartTeamsSignIn { tenant, personal });
             }
             Action::CancelSignIn => {
                 self.backend.send(Command::CancelSignIn);

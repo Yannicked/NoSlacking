@@ -309,7 +309,7 @@ fn posted(id: Option<String>, post: &Post, html: String) -> Result<crate::model:
     let id = id.unwrap_or_else(|| ts_to_teams_id(&now()));
     translate_message(&crate::teams::types::Message {
         id,
-        from: Some(format!("8:orgid:{}", post.me)),
+        from: Some(crate::teams::client::user_mri(&post.me)),
         content: html,
         message_type: Some("RichText/Html".into()),
         client_message_id: post.client_msg_id.clone(),
@@ -364,11 +364,17 @@ pub async fn mark(client: TeamsClient, team: String, channel: String, ts: Ts) {
 /// it, and trades what Microsoft hands back for a skype token. Answers the
 /// workspace and its credentials, which the worker starts and saves.
 pub async fn sign_in(
+    account: auth::Account,
     tenant: Option<String>,
     sink: Sink,
 ) -> Result<(Workspace, TeamsCredentials), Failure> {
     let http = crate::slack::net::api();
-    let device = auth::start_device_code_flow(&http, tenant.as_deref()).await?;
+    // A personal account signs in through its own tenant only.
+    let tenant = match account {
+        auth::Account::Work => tenant,
+        auth::Account::Personal => None,
+    };
+    let device = auth::start_device_code_flow(&http, account, tenant.as_deref()).await?;
     sink.send(Event::SignIn(SignIn::TeamsDeviceCode {
         user_code: device.user_code.clone(),
         verification_uri: device.verification_uri.clone(),
@@ -379,6 +385,7 @@ pub async fn sign_in(
     }
     let token = auth::poll_device_code_token(
         &http,
+        account,
         &device.device_code,
         device.interval,
         device.expires_in,
@@ -395,37 +402,68 @@ pub async fn sign_in(
             .and_then(|v| v.as_str())
             .map(str::to_owned)
     };
-    let authz = auth::exchange_skype_token(&http, &token.access_token, false).await?;
+    let authz = auth::exchange_skype_token(&http, &token.access_token, account).await?;
     let creds = TeamsCredentials {
         expires_at: token.expires_in.map(|s| auth::now_secs() + s),
-        skype_token: authz.tokens.and_then(|t| t.skype_token),
+        skype_token: authz.skype_token(),
         tenant_id: tenant
             .or_else(|| claim("tid"))
-            .or_else(|| Some(auth::DEFAULT_TENANT.to_owned())),
+            .or_else(|| Some(account.default_tenant().to_owned())),
         region_gtms: authz.region_gtms,
         access_token: token.access_token,
         refresh_token: token.refresh_token,
+        account,
         ..TeamsCredentials::default()
     };
-    let me = TeamsClient::new(creds.clone()).get_me()?;
+    let client = TeamsClient::new(creds.clone());
+    let mut me = client.get_me()?;
+    // A personal token says who you are but not your name; the profile
+    // service may.
+    if me.display_name.is_none()
+        && let Ok(found) = client.get_users(std::slice::from_ref(&me.id)).await
+        && let Some(profile) = found.into_iter().next()
+    {
+        me.display_name = profile.display_name;
+    }
     log::info!(
-        "signed in to Microsoft Teams: tenant {}",
-        claim("tid").as_deref().unwrap_or("?")
+        "signed in to Microsoft Teams ({account:?}): tenant {}",
+        claim("tid").as_deref().unwrap_or("-")
     );
     let workspace = Workspace {
         service: Service::Teams,
-        team_id: format!("teams_{}", me.id),
-        name: me
-            .display_name
-            .clone()
-            .unwrap_or_else(|| Service::Teams.name().to_owned()),
-        domain: "teams.microsoft.com".into(),
+        team_id: workspace_id(&me.id),
+        name: me.display_name.clone().unwrap_or_else(|| match account {
+            auth::Account::Work => Service::Teams.name().to_owned(),
+            auth::Account::Personal => "Teams (personal)".to_owned(),
+        }),
+        domain: match account {
+            auth::Account::Work => "teams.microsoft.com",
+            auth::Account::Personal => "teams.live.com",
+        }
+        .into(),
         icon: None,
         user_id: me.id,
         sign_in: Default::default(),
         scopes: None,
     };
     Ok((workspace, creds))
+}
+
+/// The workspace id for the person `me`: `teams_` and their id, with
+/// anything but letters, digits and `-` made `_`, since a personal id
+/// (`live:.cid.…`) holds characters that other places would not take.
+fn workspace_id(me: &str) -> String {
+    let id: String = me
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("teams_{id}")
 }
 
 /// Keeps the Trouter connection open, reconnecting when it drops, and
@@ -613,6 +651,23 @@ mod tests {
             .map(|u| (u.id.as_str(), u.display_name.as_str()))
             .collect();
         assert_eq!(names, [("a", "Alice")]);
+    }
+
+    #[test]
+    fn workspace_ids_keep_to_plain_characters() {
+        assert_eq!(
+            workspace_id("094b41dd-eef6-4efd-8013-465e39c83d5a"),
+            "teams_094b41dd-eef6-4efd-8013-465e39c83d5a"
+        );
+        assert_eq!(workspace_id("live:.cid.4a5b"), "teams_live__cid_4a5b");
+    }
+
+    #[test]
+    fn a_personal_post_is_from_a_live_mri() {
+        let mut post = post(None);
+        post.me = "live:.cid.4a5b".into();
+        let message = posted(Some("1".into()), &post, "<p>hi</p>".into()).expect("a message");
+        assert_eq!(message.user.as_deref(), Some("live:.cid.4a5b"));
     }
 
     #[test]

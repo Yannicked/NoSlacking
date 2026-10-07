@@ -590,7 +590,9 @@ fn describe_token(what: &str, token: &str) {
 
 /// The kind of a conversation id, without the id.
 fn id_kind(id: &str) -> &'static str {
-    if id.starts_with("48:") {
+    if id.starts_with("19:uni01_") {
+        "19:uni01_… (one-to-one)"
+    } else if id.starts_with("48:") {
         "48: (notes, notifications)"
     } else if id.ends_with("@unq.gbl.spaces") {
         "19:…@unq.gbl.spaces (one-to-one)"
@@ -606,15 +608,27 @@ fn id_kind(id: &str) -> &'static str {
 }
 
 /// The kind of a user id (`8:live:…`, `8:orgid:…`), without the id.
+/// Anything else, such as a conversation sending its own system
+/// messages, is named by its kind only too.
 fn mri_kind(mri: &str) -> String {
     let id = mri.rsplit('/').next().unwrap_or(mri);
+    if id == "-" || id.is_empty() {
+        return "-".to_owned();
+    }
+    if id.starts_with("19:") {
+        return id_kind(id).to_owned();
+    }
     let mut parts = id.splitn(3, ':');
     match (parts.next(), parts.next()) {
-        (Some(first), Some(second)) if first.chars().all(|c| c.is_ascii_digit()) => {
+        (Some(first), Some(second))
+            if first.chars().all(|c| c.is_ascii_digit())
+                && second.chars().all(|c| c.is_ascii_alphabetic()) =>
+        {
             format!("{first}:{second}:…")
         }
-        (Some(first), Some(_)) => format!("{first}:…"),
-        _ if id == "-" || id.is_empty() => "-".to_owned(),
+        (Some(first), Some(_)) if first.chars().all(|c| c.is_ascii_alphabetic()) => {
+            format!("{first}:…")
+        }
         _ => "other".to_owned(),
     }
 }
@@ -632,6 +646,10 @@ mod tests {
         );
         assert_eq!(mri_kind("live:.cid.123"), "live:…");
         assert_eq!(mri_kind("-"), "-");
+        assert_eq!(
+            mri_kind("https://x/v1/users/ME/contacts/19:uni01_abc@thread.v2"),
+            "19:uni01_… (one-to-one)"
+        );
         assert_eq!(
             id_kind("19:a_b@unq.gbl.spaces"),
             "19:…@unq.gbl.spaces (one-to-one)"

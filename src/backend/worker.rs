@@ -906,7 +906,9 @@ impl Worker {
             Command::PasteToken(token) => self.paste_token(token),
             Command::SignInLink(link) => self.sign_in_link(&link),
             Command::StartBrowserSignIn => self.start_browser_sign_in(),
-            Command::StartTeamsSignIn(tenant) => self.start_teams_sign_in(tenant),
+            Command::StartTeamsSignIn { tenant, personal } => {
+                self.start_teams_sign_in(tenant, personal);
+            }
             Command::SignOut(team) => self.sign_out(&team),
             Command::Focus { team, channel } => {
                 self.focus = Some(Focus { team, channel });
