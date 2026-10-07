@@ -647,15 +647,29 @@ pub fn translate_team(team: &types::Team) -> (SidebarSection, Vec<Conversation>)
 /// The Teams key of a reaction by the name the interface knows it by:
 /// the reverse of how reactions are read, so a reaction sent from
 /// here reads back as itself.
-pub fn reaction_key(name: &str) -> &str {
+pub fn reaction_key(name: &str) -> String {
     match name {
-        "thumbsup" | "+1" => "like",
-        "heart" => "heart",
-        "joy" => "laugh",
-        "open_mouth" => "surprised",
-        "cry" => "sad",
-        "rage" => "angry",
-        other => other,
+        "thumbsup" | "+1" => "like".into(),
+        "heart" => "heart".into(),
+        "joy" => "laugh".into(),
+        "open_mouth" => "surprised".into(),
+        "cry" => "sad".into(),
+        "rage" => "angry".into(),
+        // Any other emoji as Teams writes it: its code points, then a name.
+        other => {
+            let (base, tone) = crate::emoji::split_tone(other);
+            match crate::emoji::unicode(base, tone) {
+                Some(emoji) => {
+                    let points: Vec<String> = emoji
+                        .chars()
+                        .filter(|&c| c != '\u{fe0f}')
+                        .map(|c| format!("{:x}", u32::from(c)))
+                        .collect();
+                    format!("{}_{base}", points.join("-"))
+                }
+                None => other.to_owned(),
+            }
+        }
     }
 }
 
@@ -667,8 +681,36 @@ fn map_emotion_to_reaction_name(key: &str) -> String {
         "surprised" => "open_mouth".into(),
         "sad" => "cry".into(),
         "angry" => "rage".into(),
-        other => other.to_string(),
+        other => emoji_key_name(other).unwrap_or_else(|| other.to_owned()),
     }
+}
+
+/// The shortcode for a key in Teams' newer form, `{code points}_{name}`
+/// (`1f440_eyes`, `1f44d-1f3fd_thumbsup`): found by the emoji itself, so
+/// it is the name the interface knows whatever Teams calls it, with a skin
+/// tone as Slack writes one. `None` for any other key.
+fn emoji_key_name(key: &str) -> Option<String> {
+    let (points, name) = key.split_once('_')?;
+    let chars: Vec<char> = points
+        .split('-')
+        .map(|p| u32::from_str_radix(p, 16).ok().and_then(char::from_u32))
+        .collect::<Option<_>>()?;
+    let is_tone = |c: char| (0x1f3fb..=0x1f3ff).contains(&u32::from(c));
+    // Skin tones (U+1F3FB to U+1F3FF) are Slack's tones 2 to 6.
+    let tone = chars
+        .iter()
+        .find(|&&c| is_tone(c))
+        .map(|&c| u32::from(c) - 0x1f3fb + 2);
+    let base: String = chars.iter().filter(|&&c| !is_tone(c)).collect();
+    let found = emojis::get(&base)
+        .or_else(|| emojis::get(&format!("{base}\u{fe0f}")))
+        .and_then(crate::emoji::shortcode)
+        .map(str::to_owned)
+        .or_else(|| crate::emoji::unicode(name, None).map(|_| name.to_owned()))?;
+    Some(match tone {
+        Some(tone) => format!("{found}::skin-tone-{tone}"),
+        None => found,
+    })
 }
 
 #[cfg(test)]
@@ -685,10 +727,25 @@ mod tests {
             "cry",
             "rage",
             "tada",
+            "eyes",
         ] {
-            assert_eq!(map_emotion_to_reaction_name(reaction_key(name)), name);
+            assert_eq!(map_emotion_to_reaction_name(&reaction_key(name)), name);
         }
         assert_eq!(reaction_key("+1"), "like");
+        assert_eq!(reaction_key("eyes"), "1f440_eyes");
+    }
+
+    #[test]
+    fn newer_teams_keys_read_as_their_emoji() {
+        assert_eq!(map_emotion_to_reaction_name("1f440_eyes"), "eyes");
+        // Named by the emoji, whatever Teams calls it.
+        assert_eq!(map_emotion_to_reaction_name("1f389_partypopper"), "tada");
+        assert_eq!(
+            map_emotion_to_reaction_name("1f44d-1f3fd_thumbsup"),
+            "+1::skin-tone-4"
+        );
+        // Not a code point: left as it came.
+        assert_eq!(map_emotion_to_reaction_name("zz_unknown"), "zz_unknown");
     }
 
     #[test]

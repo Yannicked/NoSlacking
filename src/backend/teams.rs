@@ -745,7 +745,7 @@ pub async fn change(
         }
         Change::React { ts, name, added } => {
             client
-                .react(&channel, &ts_to_teams_id(ts), reaction_key(name), *added)
+                .react(&channel, &ts_to_teams_id(ts), &reaction_key(name), *added)
                 .await
         }
     };
