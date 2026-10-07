@@ -507,7 +507,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             // Streams (and a camera turned on) from now on; one playing
             // keeps its decoder until its next keyframe after a loss,
             // and our camera its encoder until its size changes.
-            crate::huddle_audio::hardware::set_enabled(hardware);
+            crate::huddle_audio::helper::set_gpu(hardware);
             app.settings_changed();
         }
     });

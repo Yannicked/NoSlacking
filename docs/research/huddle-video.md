@@ -29,9 +29,15 @@ copied. Line refs are `file:line` at those commits.
   PipeWire portals. *(Stage 1 update: the spike found rusty_h264, pure
   Rust, bit-exact and fast enough for 1080p shares; it is what Stage 1
   uses. Real Slack sends H.264 CB, so VP8 is not needed.)*
+- **All decoding in a helper (§6.9, 2026-10-07):** the app decodes no
+  video itself any more; `noslacking-video` does, on the GPU when it can
+  and in software (rusty_h264, moved there) otherwise. Without the
+  helper there is no video. A decoder panic now ends the helper, which
+  restarts, not the app.
 - **Hardware decoding (§6, 2026-10-07):** a helper process,
   `noslacking-video`, decodes H.264 with VA-API on Linux, bit-exact,
-  with software as the fallback for anything it cannot do or any crash.
+  with software as the fallback for anything it cannot do or any crash
+  (in the app until §6.9, in the helper since).
   Pictures are scaled on the GPU to the size shown before they are
   copied back: for a share shown at half size that is 6 times less CPU
   than software; at full size software still wins. Off by default for
@@ -1002,7 +1008,7 @@ and nowhere in the app.
   the timeout (5 s for the hello, which opens the GPU; 1 s per frame).
   Its stderr goes to the app's debug log. It exits when its stdin
   closes, which happens when the app drops it or exits.
-- **Protocol (version 2; §6.2 for what 2 added).** Each frame is `u32` length, `u32` sequence
+- **Protocol (version 2; §6.2 for what 2 added, §6.9 for 3).** Each frame is `u32` length, `u32` sequence
   number (the reply repeats it), a tag and fields, little-endian; byte
   strings carry a `u32` length; frames over 32 MiB and pictures over
   4096 a side are refused before anything is allocated. `Hello{magic,
@@ -1021,7 +1027,7 @@ and nowhere in the app.
   against its size), and the app also refuses a picture larger than the
   helper's welcome promised. Malformed messages, cut frames and lying
   plane lengths are tested.
-- **Fallback is always software.** Hardware is tried only when the
+- **Fallback is always software** (in the app until §6.9, which moved it into the helper and made a lost helper mean no video). Hardware is tried only when the
   setting is on, the helper is there and its welcome covers H.264 at the
   stream's SPS size. A stream whose helper crashes, hangs (timeout →
   killed) or garbles a reply goes on in software at once if the frame in
@@ -1348,6 +1354,98 @@ Baseline (level 3.1 and 4.0), and against the sources give PSNR
 36.4 dB (camera, whole stream) and 49.8 dB (share), as rusty_h264's
 decoding of them does. Forced IDRs and the 4 s ones come where asked
 (ignored GPU test `vaapi_encodes_what_the_software_decoder_reads_back`).
+
+### 6.9 All decoding in the helper (step 1 of "All video in the helper", 2026-10-07)
+
+The app no longer links a decoder: rusty_h264-decoder and the
+whole-step shrink moved into `noslacking-video`, and every stream the
+call window shows is decoded there, on the GPU or in software. Why
+(TODO.md): release builds abort on any panic, and a decoder reads
+strangers' network data, so its bug should end the helper (which the
+app starts again) rather than the app; and one place holds the codec
+and hardware choices.
+
+- **Protocol 3.** `OpenDecoder` gains `hardware` (try the GPU: Settings
+  → Huddles → Use the graphics card for video, now GPU against
+  software *inside* the helper), and always opens. A picture
+  (`Decoded`) carries its stream's own size before shrinking and
+  whether the GPU decoded it; it is refused if larger than that
+  source. The welcome's capabilities stay the GPU's; software decoding
+  needs none. Version 2 and 3 do not mix: another version means no
+  video.
+- **In the helper** (`software.rs`, `backend::open_decoder`): software
+  is rusty_h264 made afresh after an error and waiting for a keyframe,
+  then `shrink.rs` to the box shown. With `hardware`, the GPU's decoder
+  goes first and software takes over (for that decoder) on
+  `Unsupported`, a device failure or a keyframe the GPU breaks on, the
+  keyframe in hand decoded at once, any other frame answered
+  `NeedKeyframe`. Bit-exact with ffmpeg on both fixtures (tests in the
+  helper and, through the helper's code on a thread, in the app).
+- **In the app** (`decode::H264`, `helper::RemoteDecoder`): each start
+  (a keyframe after waiting) opens a decoder in the helper. A picture
+  that came from software while the GPU was asked for marks the stream
+  software-only, so the next start does not try the GPU again; so does
+  a helper failure (crash, hang past 1 s, a garbled reply), since the
+  stream may have caused it: the stream waits for a keyframe (PLI) and
+  starts again, in software, in the restarted helper. After
+  `MAX_RESTARTS` failures, or with no helper installed or one of
+  another version, the call window says "No video" (translated) instead
+  of waiting, and camera tiles show faces without spinners.
+- **A helper per lane.** The share, the camera tiles and our own
+  encoding each get their own helper process (`helper::Lane`), so the
+  share's and the cameras' threads no longer wait for each other's
+  replies (§6.3's 3.1 ms camera pictures) and keep the parallelism the
+  two decoding threads had in the app. Each loads the GPU driver once
+  (a few hundred milliseconds on its first stream, some MB of memory).
+- **Builds.** `default-members` makes `cargo build` (and the CI demo
+  build) build the helper beside the app; `cargo run` alone does not,
+  so the demo shows "No video" until it is built. Every package
+  already shipped the helper; the macOS bundle script now requires it.
+  The app binary lost the decoder (52.3 → 51.4 MB, release, with demo
+  and huddle-video); the helper grew from 0.6 to 1.5 MB. App tests run
+  the helper's server on a thread (`helper::pretend::InThread`, the
+  helper crate as a dev-dependency), never the program.
+
+**Measured** (this machine as §6.3, release). `examples/bench.rs`, CPU
+of the bench and the helper together, per frame:
+
+| | in the app before (software) | helper, software | helper, GPU |
+| --- | --- | --- | --- |
+| 1080p share, full size | 2.0 ms (2.0 CPU) | 3.2 ms (3.5 CPU) | 5.1 ms (3.1 CPU) |
+| 1080p share shown 960 wide | 5.0 ms (4.9) | 5.7 ms (5.8) | 1.6 ms (0.6) |
+| 1080p share shown 640 wide | 3.5 ms (3.5) | 4.2 ms (4.2) | 1.4 ms (0.4) |
+| 480×480 camera, full size | 0.30 ms (0.29) | 0.42 ms (0.44) | 0.75 ms (0.36) |
+| 480×480 camera in a 240 tile | 0.60 ms (0.61) | 0.67 ms (0.68) | 0.70 ms (0.20) |
+
+The demo's call window (Xvfb 1600×1000; the 1080p share at 12 fps
+shown about 1580 wide, so not shrunk in software, and three 480×480
+cameras at 22 fps in tiles too large to shrink), CPU over 20 s, two
+runs each:
+
+| | app, all threads | of it, video threads | helpers | video in all |
+| --- | --- | --- | --- | --- |
+| before: software in the app | 6.9–7.4 s | 2.6–2.8 s (decoding, converting) | — | 2.6–2.8 s |
+| after: software in the helpers | 6.0–6.1 s | 1.3 s (converting 0.8, pipe 0.5) | 3.0 s | 4.3 s |
+| after: GPU in the helpers | 5.3 s | 0.9 s | 2.0 s | 2.9 s |
+
+So the app itself spends half what it did on video, and the rest of
+its time is drawing (llvmpipe under Xvfb). In software the whole costs
+about 1.6 s more per 20 s (8 % of a core), nearly all the pipe: a
+1080p picture at full size is 3 MB each way through the kernel, read
+on the app's `video-helper-out` thread (1.2 ms more a 1080p frame in the
+bench; 0.1 ms for a camera). Where pictures are shown smaller, the pipe
+carries the small one and the difference is small (0.7 ms at 960
+wide). Each 1080p picture also takes longer to arrive (7 ms against
+4.5 ms in the demo's log), still far inside a 12 fps frame.
+
+**For steps 2 and 3** (capture and encoding in the helper): the lane
+split already gives sending its own helper; a full-size 1080p picture
+over the pipe is the expensive case, both ways, so capture should hand
+the helper dmabufs or stay in the helper rather than send raw frames
+(the share path's 3 MB pictures in, §6.8, cost the same 2.6 ms);
+shared memory would also cut the full-size decoding cost above. A
+faster shrink (a 2× special case) now pays in the helper. The software
+encoder is the next thing to move, behind the same `hardware` switch.
 
 ## Sources
 - amazon-chime-sdk-js @ dea69d268c623ab2006169d3899981fea766fa8a (Apache-2.0), files as cited.

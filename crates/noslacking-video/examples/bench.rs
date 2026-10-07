@@ -1,14 +1,15 @@
 //! Measures decoding the 1080p and 480×480 fixtures at the sizes the
-//! app shows them: in software as the app does (rusty_h264, then a
-//! whole-step shrink), on the GPU in this process, and through the
-//! helper over its pipe as the app uses it, scaled on the GPU or (with
+//! app shows them: in software in this process (rusty_h264, then a
+//! whole-step shrink: what the app did itself before the helper took
+//! all decoding), on the GPU in this process, and through the helper
+//! over its pipe as the app uses it: on the GPU, scaled there or (with
 //! `NOSLACKING_VIDEO_GPU_SCALE=0` in the helper's environment) shrunk on
-//! its CPU.
+//! its CPU, or in software.
 //!
 //! `cargo build --release -p noslacking-video --examples --bins`, then
 //! `target/release/examples/bench all target/release/noslacking-video`
-//! (or `software`, `hardware`, `helper`, `helper-cpu` or `pipe` alone,
-//! to time one under `time`).
+//! (or `software`, `hardware`, `helper`, `helper-cpu`,
+//! `helper-software` or `pipe` alone, to time one under `time`).
 
 #![allow(clippy::print_stdout, reason = "the measurements are for the reader")]
 
@@ -16,8 +17,10 @@ use std::io::{BufReader, BufWriter};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use noslacking_video::shrink;
-use noslacking_video_ipc::{self as ipc, Codec, Planes, Reply, Request};
+use noslacking_video::backend::Decoder;
+use noslacking_video::nal;
+use noslacking_video::software::Software;
+use noslacking_video_ipc::{self as ipc, Codec, Reply, Request};
 
 const SCREEN: &[u8] = include_bytes!("../../../src/huddle_audio/fixtures/screen-1920x1080.h264");
 const CAMERA: &[u8] = include_bytes!("../../../src/huddle_audio/fixtures/camera-480x480.h264");
@@ -52,28 +55,7 @@ const ROUNDS: usize = 10;
 
 /// The stream cut into frames, each ending with its slice.
 fn frames(stream: &[u8]) -> Vec<Vec<u8>> {
-    let mut frames = Vec::new();
-    let mut frame: Vec<u8> = Vec::new();
-    let mut starts: Vec<usize> = stream
-        .windows(3)
-        .enumerate()
-        .filter(|(_, w)| *w == [0, 0, 1])
-        .map(|(i, _)| i + 3)
-        .collect();
-    starts.push(stream.len() + 3);
-    for pair in starts.windows(2) {
-        let mut end = pair[1] - 3;
-        while end > pair[0] && stream[end - 1] == 0 {
-            end -= 1;
-        }
-        let nal = &stream[pair[0]..end];
-        frame.extend_from_slice(&[0, 0, 0, 1]);
-        frame.extend_from_slice(nal);
-        if matches!(nal.first().map(|b| b & 0x1f), Some(1 | 5)) {
-            frames.push(std::mem::take(&mut frame));
-        }
-    }
-    frames
+    nal::access_units(stream)
 }
 
 /// CPU time (user and system) process `pid` has used so far, in
@@ -109,27 +91,24 @@ fn report(
     );
 }
 
-/// The app's software path: rusty_h264, then the whole-step shrink.
+/// Software in this process: rusty_h264, then the whole-step shrink.
 fn software() {
-    // Decode on one thread, as the app's decoder thread does.
-    println!("software (rusty_h264 and a whole-step shrink, as the app)");
+    // Decode on one thread, as a decoder thread does.
+    println!("software in this process (rusty_h264 and a whole-step shrink)");
     for (name, stream, _, fit) in CASES {
         let frames = frames(stream);
         let (started, before) = (Instant::now(), cpu_now(None));
         let mut size = (0, 0);
         for _ in 0..ROUNDS {
-            let mut decoder = rusty_h264_decoder::Decoder::new();
+            let mut decoder = Software::new();
+            decoder.set_output_size(fit.0, fit.1);
             for frame in &frames {
-                let picture = decoder.decode(frame).ok().flatten().expect("decodes");
-                let planes = Planes {
-                    width: u32::try_from(picture.width).unwrap_or(0),
-                    height: u32::try_from(picture.height).unwrap_or(0),
-                    y: picture.y,
-                    u: picture.u,
-                    v: picture.v,
-                };
-                let shrunk = shrink::shrink(planes, fit);
-                size = (shrunk.width, shrunk.height);
+                let decoded = decoder
+                    .decode(frame, nal::is_keyframe(frame))
+                    .ok()
+                    .flatten()
+                    .expect("decodes");
+                size = (decoded.planes.width, decoded.planes.height);
             }
         }
         report(name, started, before, None, ROUNDS * frames.len(), size);
@@ -150,19 +129,19 @@ fn in_process() {
         let mut size = (0, 0);
         for _ in 0..ROUNDS {
             for frame in &frames {
-                let picture = decoder
+                let decoded = decoder
                     .decode(frame, false)
                     .ok()
                     .flatten()
                     .expect("decodes");
-                size = (picture.width, picture.height);
+                size = (decoded.planes.width, decoded.planes.height);
             }
         }
         report(name, started, before, None, ROUNDS * frames.len(), size);
     }
 }
 
-fn through_the_helper(helper: &str, gpu_scale: bool) {
+fn through_the_helper(helper: &str, hardware: bool, gpu_scale: bool) {
     let mut child = Command::new(helper)
         .env(
             "NOSLACKING_VIDEO_GPU_SCALE",
@@ -189,11 +168,11 @@ fn through_the_helper(helper: &str, gpu_scale: bool) {
         version: ipc::VERSION,
     });
     println!(
-        "through the helper, shrunk {}",
-        if gpu_scale {
-            "on the GPU"
-        } else {
-            "on its CPU"
+        "through the helper, {}",
+        match (hardware, gpu_scale) {
+            (false, _) => "in software",
+            (true, true) => "on the GPU, shrunk there",
+            (true, false) => "on the GPU, shrunk on its CPU",
         }
     );
     for (name, stream, source, fit) in CASES {
@@ -202,6 +181,7 @@ fn through_the_helper(helper: &str, gpu_scale: bool) {
             codec: Codec::H264,
             width: source.0,
             height: source.1,
+            hardware,
         }) else {
             println!("  {name}: no decoder");
             continue;
@@ -217,13 +197,14 @@ fn through_the_helper(helper: &str, gpu_scale: bool) {
             for frame in &frames {
                 let reply = call(Request::Decode {
                     id,
-                    keyframe: false,
+                    keyframe: nal::is_keyframe(frame),
                     data: frame.clone(),
                 });
-                let Reply::Picture(picture) = reply else {
+                let Reply::Picture(decoded) = reply else {
                     panic!("{reply:?}");
                 };
-                size = (picture.width, picture.height);
+                assert_eq!(decoded.hardware, hardware, "decoded where asked");
+                size = (decoded.planes.width, decoded.planes.height);
             }
         }
         report(name, started, before, pid, ROUNDS * frames.len(), size);
@@ -276,10 +257,13 @@ fn main() {
     }
     if let Some(helper) = &helper {
         if matches!(what.as_str(), "all" | "helper") {
-            through_the_helper(helper, true);
+            through_the_helper(helper, true, true);
         }
         if matches!(what.as_str(), "all" | "helper-cpu") {
-            through_the_helper(helper, false);
+            through_the_helper(helper, true, false);
+        }
+        if matches!(what.as_str(), "all" | "helper-software") {
+            through_the_helper(helper, false, true);
         }
     }
     if matches!(what.as_str(), "all" | "pipe") {

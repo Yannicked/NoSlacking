@@ -12,7 +12,9 @@ pub mod va;
 use std::rc::Rc;
 
 use cros_codecs::codec::h264::parser::{Pps, SliceType, Sps};
-use noslacking_video_ipc::{Capability, Codec, Direction, FailKind, MAX_SIDE, Planes, output_size};
+use noslacking_video_ipc::{
+    Capability, Codec, Decoded, Direction, FailKind, MAX_SIDE, Planes, output_size,
+};
 
 use crate::backend::{Backend, Decoder, Encoder, Failure};
 use crate::h264::{FrontEnd, Picture, Reference};
@@ -364,7 +366,7 @@ impl Decoder for VaapiDecoder {
         self.fit = (width, height);
     }
 
-    fn decode(&mut self, frame: &[u8], _keyframe: bool) -> Result<Option<Planes>, Failure> {
+    fn decode(&mut self, frame: &[u8], _keyframe: bool) -> Result<Option<Decoded>, Failure> {
         let picture = match self.front.begin(frame) {
             Ok(Some(picture)) => picture,
             Ok(None) => return Ok(None),
@@ -381,7 +383,12 @@ impl Decoder for VaapiDecoder {
                     self.front.reset();
                     return Err(failure);
                 }
-                Ok(Some(planes))
+                let (_, _, width, height) = picture.visible()?;
+                Ok(Some(Decoded {
+                    planes,
+                    source: (width, height),
+                    hardware: true,
+                }))
             }
             Err(failure) => {
                 self.front.reset();
@@ -595,10 +602,13 @@ mod tests {
             let started = std::time::Instant::now();
             let frames = crate::h264::tests::frames(stream);
             for frame in &frames {
-                let picture = decoder
+                let decoded = decoder
                     .decode(frame, false)
                     .expect("decodes")
                     .expect("a picture");
+                assert!(decoded.hardware);
+                assert_eq!(decoded.source, size);
+                let picture = decoded.planes;
                 assert_eq!((picture.width, picture.height), size);
                 hash.update(&picture.y);
                 hash.update(&picture.u);
@@ -648,10 +658,12 @@ mod tests {
             let started = std::time::Instant::now();
             let mut worst = 0f64;
             for frame in &frames {
-                let picture = decoder
+                let decoded = decoder
                     .decode(frame, false)
                     .expect("decodes")
                     .expect("a picture");
+                assert_eq!(decoded.source, size);
+                let picture = decoded.planes;
                 assert_eq!((picture.width, picture.height), fit);
                 assert!(picture.check().is_ok());
                 let reference = software.decode(frame).expect("decodes").expect("a picture");

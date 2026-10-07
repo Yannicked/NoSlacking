@@ -3744,6 +3744,7 @@ dependencies = [
  "log",
  "md-5",
  "nokhwa",
+ "noslacking-video",
  "noslacking-video-ipc",
  "notify-rust",
  "objc2-core-graphics",

@@ -213,6 +213,41 @@ pub fn slice_header(slice: &Slice) -> (Vec<u8>, u32) {
     b.unit(if slice.idr { 0x65 } else { 0x61 })
 }
 
+/// Whether an access unit holds an IDR slice, where decoding can start.
+pub fn is_keyframe(unit: &[u8]) -> bool {
+    types(unit).contains(&5)
+}
+
+/// An Annex B stream cut into access units the way the app hands them
+/// over (as `str0m` does): each ends with its slice, parameter sets
+/// going with the slice after; each NAL unit behind a 4-byte start
+/// code. For tests and the benchmarks.
+pub fn access_units(stream: &[u8]) -> Vec<Vec<u8>> {
+    let mut starts: Vec<usize> = stream
+        .windows(3)
+        .enumerate()
+        .filter(|(_, w)| *w == [0, 0, 1])
+        .map(|(i, _)| i + 3)
+        .collect();
+    starts.push(stream.len() + 3);
+    let mut units = Vec::new();
+    let mut unit = Vec::new();
+    for pair in starts.windows(2) {
+        // The next start code's leading zeros belong to it.
+        let mut end = pair[1] - 3;
+        while end > pair[0] && stream[end - 1] == 0 {
+            end -= 1;
+        }
+        let nal = &stream[pair[0]..end];
+        unit.extend_from_slice(&[0, 0, 0, 1]);
+        unit.extend_from_slice(nal);
+        if matches!(nal.first().map(|b| b & 0x1f), Some(1 | 5)) {
+            units.push(std::mem::take(&mut unit));
+        }
+    }
+    units
+}
+
 /// The NAL unit types in an Annex B access unit, in order.
 pub fn types(unit: &[u8]) -> Vec<u8> {
     let mut types = Vec::new();

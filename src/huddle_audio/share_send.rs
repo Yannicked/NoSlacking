@@ -29,7 +29,7 @@ use super::camera_send::{
     EncodeCounts, RETUNE_EVERY, RETUNE_GPU_EVERY, SendControl, VideoFrame, rtp_time, step_within,
 };
 use super::chime::VideoSend;
-use super::hardware::{self, Helper};
+use super::helper::{self, Helper, Lane};
 use super::microphone::Running;
 use super::share::{FPS, Frames, MAX_SIZE, REDUCED_SIZE, ShareFrame, unchanged};
 use super::video_encoder::{EncodeTrouble, Encoded, Encoder, Limits, Settings};
@@ -135,7 +135,9 @@ impl Encoding {
         control: SendControl,
     ) -> Result<Self, String> {
         Self::spawn_with(latest, frames, control, || {
-            hardware::enabled().then(hardware::shared).flatten()
+            helper::gpu()
+                .then(|| helper::shared(Lane::Sending))
+                .flatten()
         })
     }
 
@@ -604,7 +606,7 @@ mod tests {
     /// shrunk to what software takes.
     #[test]
     fn a_gpu_shares_at_1080p() {
-        use super::super::hardware::pretend::{Act, Pretend, welcome};
+        use super::super::helper::pretend::{Act, Pretend, welcome};
         use noslacking_video_ipc::{Reply, Request};
         use std::sync::Mutex;
         // Width, height, frames a second, bitrate.

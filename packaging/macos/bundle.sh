@@ -1,28 +1,29 @@
 #!/bin/sh
-# Wraps a built noslacking binary, and its hardware video helper, in
+# Wraps a built noslacking binary, and its video helper, in
 # NoSlacking.app. Runs on macOS (it needs sips and iconutil for the icon,
 # and codesign for an ad-hoc signature).
 #
-#   packaging/macos/bundle.sh <binary> <version> <output dir> [helper]
+#   packaging/macos/bundle.sh <binary> <version> <output dir> <helper>
 #
 # For example, after `cargo build --release -p noslacking -p noslacking-video`:
 #
 #   packaging/macos/bundle.sh target/release/noslacking 0.1.0 dist target/release/noslacking-video
 #
-# The helper goes beside the app in Contents/MacOS, where the app looks.
+# The helper goes beside the app in Contents/MacOS, where the app looks;
+# huddle video is decoded only there.
 #
 # The bundle is signed ad hoc, not with a Developer ID, so Gatekeeper asks
 # before the first launch of a downloaded copy.
 set -eu
 
-if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
-    echo "usage: $0 <binary> <version> <output dir> [helper]" >&2
+if [ "$#" -ne 4 ]; then
+    echo "usage: $0 <binary> <version> <output dir> <helper>" >&2
     exit 2
 fi
 binary=$1
 version=$2
 out=$3
-helper=${4:-}
+helper=$4
 here=$(cd "$(dirname "$0")" && pwd)
 icons="$here/../icons/hicolor"
 
@@ -30,9 +31,7 @@ app="$out/NoSlacking.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/noslacking"
-if [ -n "$helper" ]; then
-    cp "$helper" "$app/Contents/MacOS/noslacking-video"
-fi
+cp "$helper" "$app/Contents/MacOS/noslacking-video"
 sed "s/@VERSION@/$version/g" "$here/Info.plist" > "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
 

@@ -6,10 +6,14 @@
 //! A back end takes whole frames (access units, Annex B) and gives whole
 //! I420 pictures, so stateful APIs (VideoToolbox, Media Foundation, V4L2
 //! stateful decoders) and stateless ones (VA-API, Vulkan Video, V4L2
-//! stateless decoders, which need [`crate::h264`]'s parsing and
-//! reference bookkeeping) fit the same shape.
+//! stateless decoders, which need the Linux build's `h264` module for
+//! parsing and reference bookkeeping) fit the same shape. So does the
+//! software decoder ([`crate::software`]), which [`open_decoder`] puts
+//! behind the GPU's, or in its place.
 
-use noslacking_video_ipc::{Capability, Codec, FailKind, Planes};
+use noslacking_video_ipc::{Capability, Codec, Decoded, FailKind, Planes};
+
+use crate::software::Software;
 
 /// Why a back end could not do what was asked; crosses the pipe as a
 /// failure reply.
@@ -92,7 +96,7 @@ pub trait Backend {
 pub trait Decoder {
     /// Decodes one frame: its picture, or none for a frame of parameter
     /// sets only. Shrunk to cover the output box, if one was set.
-    fn decode(&mut self, frame: &[u8], keyframe: bool) -> Result<Option<Planes>, Failure>;
+    fn decode(&mut self, frame: &[u8], keyframe: bool) -> Result<Option<Decoded>, Failure>;
     /// The box pictures from now on should cover
     /// (`noslacking_video_ipc::output_size`); 0×0 for their own size.
     fn set_output_size(&mut self, width: u32, height: u32);
@@ -104,6 +108,96 @@ pub trait Encoder {
     fn encode(&mut self, picture: &Planes, force_keyframe: bool) -> Result<Encoded, Failure>;
     /// A new target bit rate.
     fn set_bitrate(&mut self, bitrate: u32) -> Result<(), Failure>;
+}
+
+/// A decoder for one stream of `codec`, about `width`×`height`: the
+/// GPU's from `backend` if `hardware` is wanted and it has one for the
+/// stream, with software behind it; else software alone. Never fails:
+/// software decodes whatever the GPU cannot.
+pub fn open_decoder(
+    backend: &mut dyn Backend,
+    codec: Codec,
+    width: u32,
+    height: u32,
+    hardware: bool,
+) -> Box<dyn Decoder> {
+    let Codec::H264 = codec;
+    if !hardware {
+        return Box::new(Software::new());
+    }
+    match backend.open_decoder(codec, width, height) {
+        Ok(gpu) => Box::new(Fallback {
+            gpu: Some(gpu),
+            software: None,
+            fit: (0, 0),
+        }),
+        Err(failure) => {
+            eprintln!(
+                "noslacking-video: {width}x{height} in software ({})",
+                failure.detail
+            );
+            Box::new(Software::new())
+        }
+    }
+}
+
+/// The GPU's decoder, and software once it fails: on a frame it cannot
+/// decode (`Unsupported`), a device failure, or a keyframe it breaks on.
+/// The keyframe in hand then goes to software at once; any other frame
+/// asks for one. A broken frame between keyframes stays on the GPU,
+/// which starts over at the next keyframe as software would.
+struct Fallback {
+    gpu: Option<Box<dyn Decoder>>,
+    /// Made when the GPU fails.
+    software: Option<Software>,
+    fit: (u32, u32),
+}
+
+impl Decoder for Fallback {
+    fn decode(&mut self, frame: &[u8], keyframe: bool) -> Result<Option<Decoded>, Failure> {
+        if let Some(gpu) = &mut self.gpu {
+            let failure = match gpu.decode(frame, keyframe) {
+                Ok(decoded) => return Ok(decoded),
+                Err(failure) => failure,
+            };
+            let stay = match failure.kind {
+                FailKind::NeedKeyframe => true,
+                FailKind::Broken => !keyframe,
+                FailKind::Unsupported
+                | FailKind::Device
+                | FailKind::Protocol
+                | FailKind::UnknownId => false,
+            };
+            if stay {
+                return Err(failure);
+            }
+            eprintln!(
+                "noslacking-video: the GPU failed ({:?}: {}): software from here on",
+                failure.kind, failure.detail
+            );
+            self.gpu = None;
+            let mut software = Software::new();
+            software.set_output_size(self.fit.0, self.fit.1);
+            self.software = Some(software);
+            if !keyframe {
+                return Err(Failure::need_keyframe("software takes over at a keyframe"));
+            }
+        }
+        match &mut self.software {
+            Some(software) => software.decode(frame, keyframe),
+            None => Err(Failure::device("no decoder")),
+        }
+    }
+
+    fn set_output_size(&mut self, width: u32, height: u32) {
+        self.fit = (width, height);
+        if let Some(gpu) = &mut self.gpu {
+            gpu.set_output_size(width, height);
+        }
+        if let Some(software) = &mut self.software {
+            software.set_output_size(width, height);
+        }
+    }
 }
 
 /// The back end of a system with no usable hardware: it can do nothing,
