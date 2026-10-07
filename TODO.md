@@ -1103,9 +1103,9 @@ engineering, as for the rest of the session sign-in.
         sent; HuddleFM shows none)?
   - [ ] Shares: the portal's restore token kept across runs (persist mode
         2, stored in the state folder) once it is clear users want that;
-        thumbnails in the picker; DMA-BUF frames from PipeWire straight
-        into the helper's VA-API encoder (no copy, see "All video in the
-        helper"); try xcap on a real Mac and Windows machine (built here
+        thumbnails in the picker; (done: DMA-BUF frames from PipeWire straight
+        into the helper's VA-API encoder, §6.10);
+        try xcap on a real Mac and Windows machine (built here
         only against its signatures).
   - [ ] **All video in the helper (decided 2026-10-07).** The helper
         (`noslacking-video`) does everything that touches pixels; the app
@@ -1138,8 +1138,32 @@ engineering, as for the rest of the session sign-in.
              the cost (both ways), so capture should stay in the helper
              or hand it dmabufs; the `Sending` lane is ready; a 2×
              shrink special case now pays in the helper.
-        2. Screen capture + encoding in the helper (PipeWire dmabuf →
-           VA-API encode, software fallback), from the share branch.
+        2. [x] Screen capture + encoding in the helper. Done 2026-10-07
+           (`feat/video-helper-share`, research doc §6.10): protocol 4
+           (list sources, start a share, pull encoded frames), the
+           helper's own lane; portal + PipeWire (helper feature
+           `pipewire`), X11, xcap all in the helper; linear dma-bufs
+           imported into VA-API, converted and encoded without the
+           processor (1.3 % of a core for 1080p15, against about 4.4 %
+           before; the app's part ≈ 0); memory frames converted on the
+           GPU; software 720p otherwise. No helper, no sharing; a helper
+           crash ends the share with a message.
+           - [ ] Try it against a real portal on GNOME and KDE: does the
+                 compositor give linear dma-bufs (the log's "PipeWire
+                 format … dma-bufs (modifier 0x0)")? Then X11, the
+                 Flatpak, macOS and Windows (xcap only built in CI).
+           - [ ] Ship it: releases and the Flatpak build the helper with
+                 `--features noslacking-video/pipewire` (libpipewire and
+                 libclang) once `huddle-share` is on.
+           - [ ] Tiled modifiers as well as linear (ask VA-API which it
+                 imports), to spare the compositor its copy.
+           - Learned for 3: the capture thread must be the pipeline's
+             thread (dma-bufs are lent for a callback, libva's state
+             stays on one thread); pull with a long poll keeps the
+             request/reply framing and gives capture-to-packet latency
+             of the encoding time if the app paces from capture time;
+             the import path (DRM PRIME → video processing → encoder
+             input) takes PipeWire camera nodes as they are.
         3. The camera in the helper (capture + encode).
   - [ ] **Hardware video decoding (and maybe encoding), in a separate
         process.** Pure Rust in software costs little today (about 0.4 ms
@@ -1218,9 +1242,9 @@ engineering, as for the rest of the session sign-in.
               over to software with a keyframe for the session.
         - [ ] Try the GPU encoder against Slack, and on an Intel GPU
               (iHD lists packed headers and EncSliceLP; untested).
-        - [ ] Screen sharing on the GPU encoder (`feat/huddle-share`
-              plugs into `video_encoder::Encoder`; 1080p needs level 4.0
-              and software cannot send past 720p).
+        - [x] Screen sharing on the GPU encoder (in the helper since
+              §6.10; 1080p at level 4.0 on the GPU,
+              720p in software).
         - [ ] Skip the second 3 MB copy of a 1080p picture into the
               helper (shared memory, or the app's I420 moved instead of
               cloned): the pipe costs 2.6 ms of the 5.3.
