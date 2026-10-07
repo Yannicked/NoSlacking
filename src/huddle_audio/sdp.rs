@@ -103,6 +103,11 @@ impl Mids {
         }))
     }
 
+    /// The browser media id (its position) Chime knows our `mid` by.
+    pub fn position(&self, mid: &str) -> Option<usize> {
+        self.ours.iter().position(|m| m == mid)
+    }
+
     /// Our offer, as Chime takes it: browser media ids and a browser's
     /// origin line.
     pub fn offer_for_chime(&self, offer: &str) -> String {
@@ -162,6 +167,61 @@ fn once_per_payload(sdp: &str) -> String {
         }
         Some(line.to_owned())
     }))
+}
+
+/// One m-line's kind, media id, direction and SSRCs, as an SDP says.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MediaLine {
+    /// `audio`, `video`, …
+    pub kind: String,
+    /// Its `a=mid`.
+    pub mid: String,
+    /// `sendrecv`, `recvonly`, `sendonly` or `inactive`, if it says.
+    pub direction: String,
+    /// The SSRCs its `a=ssrc` lines name, each once, in order.
+    pub ssrcs: Vec<u32>,
+    /// Those that `a=ssrc-group:FID` names as another's retransmissions.
+    pub rtx: Vec<u32>,
+}
+
+/// The m-lines of an SDP, in order: in Chime's answer, the `a=ssrc` on a
+/// video m-line is the stream Chime sends us there.
+pub fn media_lines(sdp: &str) -> Vec<MediaLine> {
+    let mut out: Vec<MediaLine> = Vec::new();
+    for line in lines(sdp) {
+        if let Some(m) = line.strip_prefix("m=") {
+            out.push(MediaLine {
+                kind: m.split_whitespace().next().unwrap_or("?").to_owned(),
+                ..MediaLine::default()
+            });
+            continue;
+        }
+        let Some(current) = out.last_mut() else {
+            continue;
+        };
+        if let Some(mid) = line.strip_prefix("a=mid:") {
+            mid.clone_into(&mut current.mid);
+        } else if let Some(group) = line.strip_prefix("a=ssrc-group:FID ") {
+            current.rtx.extend(
+                group
+                    .split_whitespace()
+                    .skip(1)
+                    .filter_map(|s| s.parse::<u32>().ok()),
+            );
+        } else if let Some(dir @ ("sendrecv" | "sendonly" | "recvonly" | "inactive")) =
+            line.strip_prefix("a=")
+        {
+            dir.clone_into(&mut current.direction);
+        } else if let Some(ssrc) = line
+            .strip_prefix("a=ssrc:")
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|s| s.parse::<u32>().ok())
+            && !current.ssrcs.contains(&ssrc)
+        {
+            current.ssrcs.push(ssrc);
+        }
+    }
+    out
 }
 
 /// The addresses of an SDP's candidates, for TURN permissions.
@@ -343,6 +403,45 @@ a=inactive\r\n";
         // The same payload type in two sections is no repeat.
         let two = "m=audio 9 P 109\r\na=rtpmap:109 a/1\r\nm=video 9 P 109\r\na=rtpmap:109 b/1\r\n";
         assert_eq!(once_per_payload(two).matches("a=rtpmap:109").count(), 2);
+    }
+
+    #[test]
+    fn media_lines_name_their_ssrcs() {
+        let answer = "v=0\r\n\
+a=group:BUNDLE 0 1 2\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+a=mid:0\r\n\
+a=sendrecv\r\n\
+a=ssrc:100 cname:a\r\n\
+a=ssrc:100 msid:a b\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 108\r\n\
+a=mid:1\r\n\
+a=inactive\r\n\
+a=ssrc:200 cname:v\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 108 109\r\n\
+a=mid:2\r\n\
+a=sendonly\r\n\
+a=ssrc:300 cname:v\r\n\
+a=ssrc:301 cname:v\r\n\
+a=ssrc-group:FID 300 301\r\n";
+        let lines = media_lines(answer);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            lines[0],
+            MediaLine {
+                kind: "audio".into(),
+                mid: "0".into(),
+                direction: "sendrecv".into(),
+                ssrcs: vec![100],
+                rtx: vec![],
+            }
+        );
+        assert_eq!(lines[2].rtx, [301]);
+        assert_eq!(lines[1].direction, "inactive");
+        assert_eq!(
+            (lines[2].kind.as_str(), lines[2].ssrcs.as_slice()),
+            ("video", &[300, 301][..])
+        );
     }
 
     #[test]

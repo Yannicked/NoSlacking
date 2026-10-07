@@ -176,12 +176,16 @@ pub struct Subscribe {
     pub attendee_id: String,
     /// Whether to say the microphone is muted. A listener is.
     pub muted: bool,
+    /// The video streams wanted, one per video m-line in order; the
+    /// first (our send line) and every inactive one 0.
+    pub receive_stream_ids: Vec<u32>,
 }
 
 /// The SUBSCRIBE that asks to receive audio, like the JS SDK's
 /// `DefaultSignalingClient.subscribe` with an audio host and no video: one
-/// send stream for the audio m-line, receive-only service. HuddleFM also
-/// lists one receive stream id of 0 for its inactive video m-line.
+/// send stream for the audio m-line, receive-only service. HuddleFM
+/// lists one receive stream id of 0 for its inactive video m-line; the
+/// probe's video adds one per receiving m-line.
 pub fn subscribe(sub: &Subscribe, now_ms: u64) -> Frame {
     let mut frame = frame(FrameType::Subscribe, now_ms);
     frame.sub = Some(proto::SdkSubscribeFrame {
@@ -197,7 +201,7 @@ pub fn subscribe(sub: &Subscribe, now_ms: u64) -> Frame {
             media_type: Some(proto::SdkStreamMediaType::Audio as i32),
             ..Default::default()
         }],
-        receive_stream_ids: vec![0],
+        receive_stream_ids: sub.receive_stream_ids.clone(),
         sdp_offer: Some(sub.sdp_offer.clone()),
         audio_host: Some(sub.audio_host.clone()),
         audio_checkin: Some(false),
@@ -418,6 +422,7 @@ mod tests {
                 audio_host: "h.example:3478".into(),
                 attendee_id: "A1".into(),
                 muted: true,
+                receive_stream_ids: vec![0, 6],
             },
             5,
         );
@@ -427,6 +432,7 @@ mod tests {
         assert_eq!(body.duplex, Some(proto::SdkStreamServiceType::Rx as i32));
         assert_eq!(body.send_streams[0].attendee_id.as_deref(), Some("A1"));
         assert_eq!(body.audio_muted, Some(true));
+        assert_eq!(body.receive_stream_ids, [0, 6]);
         assert_eq!(round_trip(&leave(7)), leave(7));
         let mute = audio_control(true, 6);
         assert_eq!(round_trip(&mute), mute);

@@ -905,9 +905,21 @@ engineering, as for the rest of the session sign-in.
 
 - **Huddle video:** [docs/research/huddle-video.md](docs/research/huddle-video.md)
   (2026-10-07). Watching is realistic on the audio path; sending is much
-  more. Next: Stage 0, a probe that logs Chime's video sources and which
-  codec arrives (shares as `#content`?, does an H.264-only offer move
-  senders to H.264?) before any decoding.
+  more.
+  - [x] Stage 0 built, unproven against Slack: every `--huddle-probe`
+        run logs INDEX (sources, `#content` shares, the codec
+        intersection), PAUSE/RESUME, BITRATES and DATA_MESSAGE topics;
+        `--video N` renegotiates `recvonly` m-lines, re-SUBSCRIBEs and
+        logs codec, SPS, frames, keyframes and gaps per stream, and
+        whether audio kept flowing; `--video-h264-only` offers no VP8;
+        `--video-dump DIR` keeps the first 300 frames. What to run is in
+        the research note's Stage 0.
+  - [ ] Run it with a colleague's camera and screen share, plain, with
+        `--video 4` and with `--video 4 --video-h264-only`, and settle:
+        shares as `#content`?, which codec arrives and does it move to
+        H.264?, does Chime take the re-SUBSCRIBE with audio going on?,
+        keyframes after a PLI?, DATA_MESSAGE topics while drawing or
+        reacting? Then Stage 1.
 - **Microsoft Teams:** [docs/research/microsoft-teams.md](docs/research/microsoft-teams.md)
   (2026-10-06). Not being built: the official Graph route can't do live
   updates or calls, and the route other clients take signs in as

@@ -415,6 +415,63 @@ user who turns on their camera and then shares a screen:
 - What do the DATA_MESSAGE topics look like while someone draws or
   reacts?
 
+**Stage 0: built (2026-10-07); what to run.** All behind `huddle-audio`,
+in `src/huddle_audio/video.rs` (INDEX, the choice of streams, the slot
+table, SSRC → stream), `watch.rs` (renegotiation and counting in the
+session), `bitstream.rs` (a small SPS reader, the VP8 keyframe header,
+IVF) and `probe.rs`. No new crate; the SPS is read by hand.
+- Every probe run now logs, at info level and only when it changes (at
+  most every 2 s), each INDEX: its sources (stream, group, attendee
+  shortened and whether it is `#content`, the `U…`, media type, size,
+  fps, max/avg kbps, track label), paused ids, head count and
+  `supported_receive_codec_intersection`. Also PAUSE/RESUME, BITRATES
+  (every 20 s), DATA_MESSAGE topics, sizes and senders (never the
+  payload), REMOTE_VIDEO_UPDATE, and SUBSCRIBE_ACK's tracks and
+  allocations.
+- `--video N`: 2 s after DTLS is up, picks up to N streams (shares first,
+  then the highest-bitrate stream of each group, never ours), adds
+  `recvonly` m-lines with `str0m`, re-SUBSCRIBEs with
+  `receive_stream_ids = [0, s1, …]` and takes the new answer; again when
+  INDEX changes the choice (at most every 3 s; a re-SUBSCRIBE without an
+  answer in 10 s is given up). A stream that goes frees its m-line
+  (`inactive`), which a later stream reuses. Per stream it logs the
+  payload type and codec (with `profile-level-id`), the SSRC and whose it
+  is by SUBSCRIBE_ACK's tracks, the first keyframe's SPS (profile,
+  level, size) or VP8 header, frames, keyframes, gaps and PLIs sent (one
+  when a slot starts, one per gap, at most one a second), every 5 s.
+- `--video-h264-only` builds the peer without VP8, so every video m-line
+  offers only `str0m`'s H.264 profiles.
+- `--video-dump DIR` writes the first 300 frames of each stream to
+  `DIR/<stream>-<attendee>.h264` (Annex B) or `.ivf` (VP8). These hold
+  people's faces and screens.
+- The summary gives each stream (codec, frames, keyframes, size, gaps,
+  share or camera), each re-SUBSCRIBE with the audio frames counted from
+  it until 2 s after its answer, and whether audio stayed live through
+  all of them.
+- Offline: the loopback test plays a Chime that announces a share and our
+  own camera, answers the re-SUBSCRIBE with a track mapping and sends a
+  320×180 H.264 test pattern (`fixtures/test-pattern-320x180.h264`, made
+  with ffmpeg's `testsrc` and OpenH264); the probe receives only the
+  share, asks for a keyframe, reads the SPS, and audio goes on.
+
+Runs, in a huddle where a colleague on Slack's desktop app turns the
+camera on after about 20 s and starts sharing a screen after about 50 s
+(and, for the last question, reacts or draws during the share):
+
+```
+cargo run --release --features huddle-audio -- --huddle-probe TEAM CHANNEL --seconds 90
+cargo run --release --features huddle-audio -- --huddle-probe TEAM CHANNEL --seconds 90 --video 4
+cargo run --release --features huddle-audio -- --huddle-probe TEAM CHANNEL --seconds 90 --video 4 --video-h264-only
+cargo run --release --features huddle-audio -- --huddle-probe TEAM CHANNEL --seconds 90 --video 4 --video-dump probe-dumps
+```
+
+Not yet known, and what the logs will settle: whether Chime takes a
+re-SUBSCRIBE that adds m-lines (the JS SDK only ever adds or reuses
+them, as this does); whether its answer's `a=ssrc` per m-line matches
+SUBSCRIBE_ACK's tracks; whether `str0m` follows a slot whose SSRC
+changes; and whether the first keyframe arrives whole (the SPS is looked
+for until found, and keyframes without one are counted).
+
 **Stage 1: watch screen shares (2–3 weeks).**
 - Work: INDEX tracking, re-SUBSCRIBE, H.264 decode (openh264 from source,
   or a rusty_h264 spike first), the `yuv` conversion, and a call window

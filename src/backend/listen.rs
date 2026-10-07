@@ -251,6 +251,7 @@ async fn run(
         stopped,
         Some(live),
         Some(roster),
+        None,
     );
     tokio::pin!(listening);
     let mut connected = Some(connected);
