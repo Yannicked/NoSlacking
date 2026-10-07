@@ -174,6 +174,8 @@ impl App {
             picture: picture.texture.as_ref().map(|t| (t.id(), picture.source)),
             more: cameras.iter().filter(|c| !c.tile).count(),
             tiles,
+            no_video: screen.as_ref().is_some_and(huddles::Screen::no_video)
+                || gallery.as_ref().is_some_and(huddles::Gallery::no_video),
             controls,
         };
         #[cfg_attr(not(feature = "demo"), allow(unused_mut))]

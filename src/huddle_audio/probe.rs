@@ -207,7 +207,7 @@ async fn probe(
     // The app's "Use the graphics card for video" too.
     #[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
     {
-        super::hardware::set_enabled(settings.hardware_video);
+        super::helper::set_gpu(settings.hardware_video);
         log::info!(
             "probe: video on the graphics card {}",
             if settings.hardware_video {

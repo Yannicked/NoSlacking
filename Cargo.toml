@@ -13,11 +13,14 @@ keywords = ["slack", "chat", "egui", "client"]
 categories = ["gui"]
 
 [workspace]
-# The app, and its hardware video helper with the messages they share
-# (crates/; see crates/noslacking-video). `cargo build` at the root builds
-# the app alone; `--workspace` (or `-p noslacking-video`) builds the
-# helper too. Profiles and patches below apply to every member.
+# The app, and its video helper with the messages they share (crates/;
+# see crates/noslacking-video). Video is decoded only in the helper, so
+# `cargo build` at the root builds both, and the helper lands beside the
+# app where it looks first; `cargo run` builds the app alone, so build
+# once before running the demo's video. Profiles and patches below apply
+# to every member.
 members = [".", "crates/video-ipc", "crates/noslacking-video"]
+default-members = [".", "crates/noslacking-video"]
 
 [lib]
 name = "noslacking"
@@ -141,20 +144,18 @@ sonora-agc2 = "0.2.0"
 sonora-common-audio = "0.2.0"
 sonora-simd = "0.2.0"
 
-# Watching screen shares in a huddle (the `huddle-video` feature): H.264
-# decoded in pure Rust (rusty_h264, BSD-2-Clause; the decoder itself
-# forbids unsafe, its SIMD kernels in rusty_h264-accel, the `asm`
-# feature, are intrinsics behind runtime CPU checks, no assembly or C).
-# Its default features are off: they would install its own global
-# allocator in the app. The picture goes from I420 to RGBA with `yuv`
-# (BSD-3-Clause/Apache-2.0, SIMD chosen at run time; its unsafe is the
-# intrinsics), since eframe's glow cannot take a YUV shader without
-# unsafe in our crate. See docs/research/huddle-video.md.
-rusty_h264-decoder = { version = "0.16", default-features = false, features = ["std", "asm"], optional = true }
+# Watching screen shares and cameras in a huddle (the `huddle-video`
+# feature): H.264 is decoded in the noslacking-video helper process
+# (crates/noslacking-video, which ships beside the app), on the GPU or in
+# software, never in the app: a decoder reads strangers' streams, and a
+# panic aborts a release build. The picture comes back as I420 and goes
+# to RGBA with `yuv` (BSD-3-Clause/Apache-2.0, SIMD chosen at run time;
+# its unsafe is the intrinsics), since eframe's glow cannot take a YUV
+# shader without unsafe in our crate. See docs/research/huddle-video.md.
 yuv = { version = "0.8.19", optional = true }
-# Decoding and encoding on the GPU, in the noslacking-video helper process
-# (crates/noslacking-video, which ships beside the app): the messages
-# the two exchange. Plain std; the helper itself is not a dependency.
+# The messages the app and the helper exchange (decoding, and encoding
+# our camera on the GPU). Plain std; the helper itself is not a
+# dependency.
 noslacking-video-ipc = { path = "crates/video-ipc", optional = true }
 # Writes the RGBA straight into egui's pixels (already in the tree
 # through egui; no crate added).
@@ -233,6 +234,9 @@ zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-tokio-c
 [dev-dependencies]
 # The camera's tests decode what the encoder made, whatever the features.
 rusty_h264-decoder = { version = "0.16", default-features = false, features = ["std", "asm"] }
+# Tests decode through the helper's own code on a thread (its server with
+# no GPU back end), never the program itself, which would open the GPU.
+noslacking-video = { path = "crates/noslacking-video" }
 
 [build-dependencies]
 fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2", features = ["build"] }
@@ -260,7 +264,7 @@ depends = "$auto, libxkbcommon0, libegl1, libgl1"
 recommends = "libwayland-client0, libxkbcommon-x11-0, libva2, libva-drm2, mesa-va-drivers | intel-media-va-driver, xdg-desktop-portal, pipewire"
 assets = [
     ["target/release/noslacking", "usr/bin/", "755"],
-    # The hardware video helper, beside the app where it looks first.
+    # The video helper, beside the app where it looks first.
     ["target/release/noslacking-video", "usr/bin/", "755"],
     ["packaging/applications/cloud.yannick.NoSlacking.desktop", "usr/share/applications/", "644"],
     ["packaging/metainfo/cloud.yannick.NoSlacking.metainfo.xml", "usr/share/metainfo/", "644"],
@@ -280,7 +284,7 @@ auto-req = "auto"
 # By library, so the same package fits Fedora and openSUSE.
 requires = { "libxkbcommon.so.0()(64bit)" = "*", "libEGL.so.1()(64bit)" = "*", "libGL.so.1()(64bit)" = "*" }
 recommends = { "libwayland-client.so.0()(64bit)" = "*", "libxkbcommon-x11.so.0()(64bit)" = "*" }
-# libva for the hardware video helper (loaded at run time, so auto-req
+# libva for the video helper (loaded at run time, so auto-req
 # cannot see it); the driver comes with Mesa or intel-media-driver.
 suggests = { "libva.so.2()(64bit)" = "*", "libva-drm.so.2()(64bit)" = "*" }
 assets = [
@@ -309,10 +313,11 @@ default = ["highlight", "bundled-emoji"]
 bundled-emoji = []
 # Sample data and the screenshot flag; never part of a release build.
 demo = []
-# Watching screen shares in huddles: a call window with the share,
-# decoded on a thread of its own. Off until it has been tried against
+# Watching screen shares and cameras in huddles: a call window with the
+# share and the camera tiles, decoded by the noslacking-video helper
+# (which must ship beside the app). Off until it has been tried against
 # Slack.
-huddle-video = ["dep:rusty_h264-decoder", "dep:yuv", "dep:bytemuck", "dep:noslacking-video-ipc"]
+huddle-video = ["dep:yuv", "dep:bytemuck", "dep:noslacking-video-ipc"]
 # Sending your camera in huddles: the camera, opened only while it is
 # on, encoded to H.264 on a thread of its own, with a self-preview in the
 # call bar; on the GPU through the helper when it can. Independent of

@@ -1,27 +1,27 @@
-//! A screen share's H.264 turned into pictures (the `huddle-video`
-//! feature): the decoder, made safe to feed what the network brings,
-//! and the step from its I420 planes to the RGBA egui draws, at no more
-//! pixels than the window shows.
+//! A video stream's H.264 turned into pictures (the `huddle-video`
+//! feature): decoded in the helper process ([`super::helper`]), on the
+//! GPU or in software, at no more pixels than the window shows; then
+//! turned from I420 into the RGBA egui draws.
 //!
-//! The decoder is `rusty_h264`, pure Rust; why that one is in
-//! docs/research/huddle-video.md (Stage 1). It never panics on a broken
-//! frame, it returns an error; but once it has, it refuses every frame
-//! after, even the next keyframe. So [`H264`] starts it afresh on each
-//! keyframe after a loss or an error, and until that keyframe comes it
-//! decodes nothing and says a keyframe is wanted.
+//! No decoder runs in the app: decoders read strangers' network data,
+//! and a panic in a release build aborts the whole app, where in the
+//! helper it costs only the helper, which is started again. Without a
+//! helper there is no video ([`Trouble::NoHelper`]).
 //!
-//! Each new start (a keyframe after waiting) first tries the GPU through
-//! the helper process ([`super::hardware`]) when the helper is there,
-//! hardware decoding is on and the helper decodes the stream's size.
-//! When the helper fails, the stream goes on in software at once if the
-//! frame in hand is a keyframe, and else asks for one.
-
-use std::borrow::Cow;
+//! Each new start (a keyframe after waiting: the start, a loss, an
+//! error) opens a fresh decoder in the helper, on the GPU when Settings
+//! → Huddles allows it. The helper decodes in software whatever the GPU
+//! cannot; a stream it moved to software, or whose helper failed, asks
+//! for software from then on. When the helper fails, the stream waits
+//! for a keyframe (the session asks for one) and starts again in the
+//! helper started anew.
 
 use egui::{Color32, ColorImage};
 
 use super::bitstream;
-use super::hardware::{self, Helper, HwDecoder, HwTrouble};
+use super::helper::{self, Helper, HelperTrouble, Lane, RemoteDecoder};
+
+pub use super::helper::Picture;
 
 /// Why a frame gave no picture.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -37,6 +37,10 @@ pub enum Trouble {
     /// The picture could not be turned into RGBA.
     #[error("the picture could not be converted: {0}")]
     Convert(String),
+    /// The video helper is missing, of another version, or failed too
+    /// often: no video until the app starts again.
+    #[error("no video helper")]
+    NoHelper,
 }
 
 /// One decoded picture, in I420: a full-size luma plane and two chroma
@@ -72,22 +76,23 @@ impl Yuv {
     }
 }
 
-/// An H.264 stream's decoder that recovers from loss: give it every
-/// frame (one access unit, Annex B, as `str0m` hands them) in order.
+/// An H.264 stream's decoder in the helper that recovers from loss: give
+/// it every frame (one access unit, Annex B, as `str0m` hands them) in
+/// order.
 pub struct H264 {
-    decoder: rusty_h264_decoder::Decoder,
+    /// The helper; none when it is not installed.
+    helper: Option<Helper>,
+    /// This stream's decoder in the helper, from its last start.
+    decoder: Option<RemoteDecoder>,
     /// Until a keyframe comes: at the start, after a loss or an error.
     waiting: bool,
-    /// The helper to try the GPU through; none for software only.
-    helper: Option<Helper>,
-    /// This stream's decoder in the helper, while it decodes there.
-    hardware: Option<HwDecoder>,
-    /// The GPU cannot decode this stream (it said so, or failed on a
-    /// keyframe): software from here on.
+    /// The GPU, or not, whatever the setting says (tests); none to
+    /// follow Settings → Huddles at each start.
+    gpu: Option<bool>,
+    /// The helper moved this stream to software (the GPU cannot decode
+    /// it, or failed on it), or failed while decoding it: software from
+    /// here on.
     software_only: bool,
-    /// Whether Settings → Huddles turning the GPU off stops it at the
-    /// next start (a decoder made by [`H264::new`]).
-    follow_setting: bool,
     /// The size the pictures are shown at; 0×0 until known.
     fit: (usize, usize),
     /// The size the helper was last told to shrink to.
@@ -98,100 +103,43 @@ impl std::fmt::Debug for H264 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("H264")
             .field("waiting", &self.waiting)
-            .field("hardware", &self.hardware.is_some())
+            .field("software_only", &self.software_only)
             .finish_non_exhaustive()
     }
 }
 
-impl Default for H264 {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl H264 {
-    /// A decoder waiting for its first keyframe, which uses the GPU
-    /// when it can (Settings → Huddles).
-    pub fn new() -> Self {
-        let helper = if hardware::enabled() {
-            hardware::shared()
-        } else {
-            None
-        };
-        Self {
-            follow_setting: true,
-            ..Self::with_helper(helper)
-        }
+    /// A decoder waiting for its first keyframe, in `lane`'s helper, on
+    /// the GPU when Settings → Huddles allows it.
+    pub fn new(lane: Lane) -> Self {
+        Self::with_helper(helper::shared(lane), None)
     }
 
-    /// A decoder that tries the GPU through `helper` whatever the
-    /// setting says, or only software with none.
-    pub fn with_helper(helper: Option<Helper>) -> Self {
+    /// A decoder in `helper` (none: no video), on the GPU or not as
+    /// `gpu` says, or as the setting says if none.
+    pub fn with_helper(helper: Option<Helper>, gpu: Option<bool>) -> Self {
         Self {
-            follow_setting: false,
-            decoder: rusty_h264_decoder::Decoder::new(),
-            waiting: true,
             helper,
-            hardware: None,
+            decoder: None,
+            waiting: true,
+            gpu,
             software_only: false,
             fit: (0, 0),
             told: None,
         }
     }
 
-    /// Whether the stream decodes on the GPU at the moment.
-    pub fn on_hardware(&self) -> bool {
-        self.hardware.is_some()
+    /// Whether there is no helper to decode in, for good: the call window
+    /// then says there is no video, rather than waiting for it.
+    pub fn no_helper(&self) -> bool {
+        self.helper.as_ref().is_none_or(Helper::given_up)
     }
 
-    /// A decoder in the helper for the stream starting at keyframe
-    /// `unit`, if the helper decodes it.
-    fn open_hardware(&mut self, unit: &[u8]) -> Option<HwDecoder> {
-        if self.software_only || (self.follow_setting && !hardware::enabled()) {
-            return None;
-        }
-        let helper = self.helper.as_ref()?;
-        let sps = bitstream::sps_of_frame(unit)?;
-        if !helper.decodes(noslacking_video_ipc::Codec::H264, sps.width, sps.height) {
-            return None;
-        }
-        match helper.open_decoder(noslacking_video_ipc::Codec::H264, sps.width, sps.height) {
-            Ok(decoder) => {
-                log::debug!("video: {}x{} decodes on the GPU", sps.width, sps.height);
-                Some(decoder)
-            }
-            Err(lost) => {
-                log::debug!("video: no GPU decoder ({lost}): software");
-                None
-            }
-        }
-    }
-
-    /// The size the pictures are shown at, in pixels. On the GPU they
-    /// are shrunk to it there, so neither the copy back from the GPU nor
-    /// the pipe carries more than is shown; in software the caller
-    /// shrinks them ([`shrink`]), which then finds nothing to do for the
-    /// GPU's.
+    /// The size the pictures are shown at, in pixels: the helper shrinks
+    /// them to it, so neither a copy back from the GPU nor the pipe
+    /// carries more than is shown.
     pub fn set_fit(&mut self, width: usize, height: usize) {
         self.fit = (width, height);
-    }
-
-    /// Tells the helper the size to shrink to, if it changed.
-    fn tell_fit(&mut self) -> Result<(), HwTrouble> {
-        let Some(hardware) = &mut self.hardware else {
-            return Ok(());
-        };
-        if self.told == Some(self.fit) {
-            return Ok(());
-        }
-        let side = |n: usize| {
-            u32::try_from(n)
-                .unwrap_or(u32::MAX)
-                .min(noslacking_video_ipc::MAX_SIDE)
-        };
-        hardware.set_output_size(side(self.fit.0), side(self.fit.1))?;
-        self.told = Some(self.fit);
-        Ok(())
     }
 
     /// Frames went missing before the next one: what follows cannot be
@@ -205,93 +153,112 @@ impl H264 {
         self.waiting
     }
 
+    /// A decoder in the helper for the stream starting at keyframe
+    /// `unit`.
+    fn open(&self, unit: &[u8]) -> Result<RemoteDecoder, Trouble> {
+        let Some(helper) = &self.helper else {
+            return Err(Trouble::NoHelper);
+        };
+        let side = |n: u32| n.min(noslacking_video_ipc::MAX_SIDE);
+        let (width, height) =
+            bitstream::sps_of_frame(unit).map_or((0, 0), |sps| (side(sps.width), side(sps.height)));
+        let gpu = !self.software_only && self.gpu.unwrap_or_else(helper::gpu);
+        match helper.open_decoder(noslacking_video_ipc::Codec::H264, width, height, gpu) {
+            Ok(decoder) => {
+                log::debug!(
+                    "video: {width}x{height} decodes in the helper{}",
+                    if gpu {
+                        ", on the GPU if it can"
+                    } else {
+                        ", in software"
+                    }
+                );
+                Ok(decoder)
+            }
+            Err(_) if helper.given_up() => Err(Trouble::NoHelper),
+            Err(lost) => Err(Trouble::Broken(lost.to_string())),
+        }
+    }
+
+    /// Tells the helper the size to shrink to, if it changed.
+    fn tell_fit(&mut self) -> Result<(), HelperTrouble> {
+        let Some(decoder) = &mut self.decoder else {
+            return Ok(());
+        };
+        if self.told == Some(self.fit) {
+            return Ok(());
+        }
+        let side = |n: usize| {
+            u32::try_from(n)
+                .unwrap_or(u32::MAX)
+                .min(noslacking_video_ipc::MAX_SIDE)
+        };
+        decoder.set_output_size(side(self.fit.0), side(self.fit.1))?;
+        self.told = Some(self.fit);
+        Ok(())
+    }
+
     /// Decodes one frame: a picture, or none for a frame that carries
     /// only parameter sets.
-    pub fn decode(&mut self, unit: &[u8]) -> Result<Option<Yuv>, Trouble> {
+    pub fn decode(&mut self, unit: &[u8]) -> Result<Option<Picture>, Trouble> {
         let keyframe = is_keyframe(unit);
         if self.waiting {
             if !keyframe {
                 return Err(Trouble::NeedKeyframe);
             }
             // A decoder that failed once fails on: a new one for the new
-            // start, on the GPU if it can.
-            self.hardware = None;
+            // start.
+            self.decoder = None;
             self.told = None;
-            self.hardware = self.open_hardware(unit);
-            if self.hardware.is_none() {
-                self.decoder = rusty_h264_decoder::Decoder::new();
-            }
+            self.decoder = Some(self.open(unit)?);
             self.waiting = false;
         }
-        let told = self.tell_fit();
-        if let Some(hardware) = &mut self.hardware {
-            let decoded = match told {
-                Ok(()) => hardware.decode(unit, keyframe),
-                Err(trouble) => Err(trouble),
-            };
-            let trouble = match decoded {
-                Ok(Some(yuv)) if yuv.whole() => return Ok(Some(yuv)),
-                Ok(Some(yuv)) => {
-                    HwTrouble::Lost(format!("planes do not match {}x{}", yuv.width, yuv.height))
+        let decoded = match self.tell_fit() {
+            Ok(()) => match &mut self.decoder {
+                Some(decoder) => decoder.decode(unit, keyframe),
+                None => Err(HelperTrouble::Lost("no decoder".into())),
+            },
+            Err(trouble) => Err(trouble),
+        };
+        match decoded {
+            Ok(Some(picture)) if picture.yuv.whole() => {
+                if !picture.gpu && !self.software_only && self.gpu.unwrap_or_else(helper::gpu) {
+                    // The helper moved it to software: not the GPU again
+                    // at the next start either.
+                    log::info!("video: the GPU cannot decode this stream; software in the helper");
+                    self.software_only = true;
                 }
-                Ok(None) => return Ok(None),
-                Err(trouble) => trouble,
-            };
-            let unsupported = matches!(trouble, HwTrouble::Unsupported(_));
-            match trouble {
-                HwTrouble::NeedKeyframe => {
-                    self.waiting = true;
-                    return Err(Trouble::NeedKeyframe);
-                }
-                HwTrouble::Broken(why) => {
-                    self.waiting = true;
-                    if keyframe {
-                        // The GPU fails where a decoder should start:
-                        // software decodes this stream from here on.
-                        log::info!("video: the GPU failed on a keyframe ({why}): software");
-                        self.software_only = true;
-                    }
-                    return Err(Trouble::Broken(why));
-                }
-                HwTrouble::Unsupported(why) | HwTrouble::Lost(why) => {
-                    if unsupported {
-                        self.software_only = true;
-                    }
-                    log::info!("video: the GPU decoder is gone ({why}): software");
-                    self.hardware = None;
-                    self.decoder = rusty_h264_decoder::Decoder::new();
-                    if !keyframe {
-                        // Software needs a keyframe to start on.
-                        self.waiting = true;
-                        return Err(Trouble::NeedKeyframe);
-                    }
-                    // A keyframe in hand: software takes over with it.
-                }
+                Ok(Some(picture))
             }
-        }
-        match self.decoder.decode(unit) {
-            Ok(Some(frame)) => {
-                let yuv = Yuv {
-                    width: frame.width,
-                    height: frame.height,
-                    y: frame.y,
-                    u: frame.u,
-                    v: frame.v,
-                };
-                if yuv.whole() {
-                    Ok(Some(yuv))
-                } else {
-                    self.waiting = true;
-                    Err(Trouble::Broken(format!(
-                        "planes do not match {}x{}",
-                        yuv.width, yuv.height
-                    )))
-                }
+            Ok(Some(picture)) => {
+                self.waiting = true;
+                Err(Trouble::Broken(format!(
+                    "planes do not match {}x{}",
+                    picture.yuv.width, picture.yuv.height
+                )))
             }
             Ok(None) => Ok(None),
-            Err(error) => {
+            Err(HelperTrouble::NeedKeyframe) => {
                 self.waiting = true;
-                Err(Trouble::Broken(error.to_string()))
+                Err(Trouble::NeedKeyframe)
+            }
+            Err(HelperTrouble::Broken(why) | HelperTrouble::Unsupported(why)) => {
+                self.waiting = true;
+                Err(Trouble::Broken(why))
+            }
+            Err(HelperTrouble::Lost(why)) => {
+                // It may have been this stream that ended it: software
+                // in the next helper, which starts with the next
+                // keyframe.
+                log::info!("video: the helper failed ({why}); a keyframe is asked for");
+                self.decoder = None;
+                self.waiting = true;
+                self.software_only = true;
+                if self.no_helper() {
+                    Err(Trouble::NoHelper)
+                } else {
+                    Err(Trouble::NeedKeyframe)
+                }
             }
         }
     }
@@ -302,67 +269,6 @@ pub fn is_keyframe(unit: &[u8]) -> bool {
     bitstream::nal_units(unit)
         .iter()
         .any(|nal| bitstream::nal_type(nal) == Some(5))
-}
-
-/// By how much to shrink a `source`-sized picture shown at `fit`: the
-/// largest whole number that still leaves it at least as large as `fit`
-/// both ways, so text stays sharp and no more than about twice the
-/// pixels shown each way are converted and uploaded. 1 when the window
-/// is as large as the picture, or its size is not known yet (0).
-pub fn reduction(source: (usize, usize), fit: (usize, usize)) -> usize {
-    if fit.0 == 0 || fit.1 == 0 {
-        return 1;
-    }
-    (source.0 / fit.0).min(source.1 / fit.1).max(1)
-}
-
-/// The picture shrunk `by` times each way, each pixel the average of the
-/// block it stands for; even-sized, so its chroma halves exactly. The
-/// picture itself when `by` is 1.
-pub fn shrink(yuv: &Yuv, by: usize) -> Cow<'_, Yuv> {
-    if by <= 1 {
-        return Cow::Borrowed(yuv);
-    }
-    let width = ((yuv.width / by) & !1).max(2);
-    let height = ((yuv.height / by) & !1).max(2);
-    let (cw, ch) = yuv.chroma();
-    Cow::Owned(Yuv {
-        width,
-        height,
-        y: average(&yuv.y, yuv.width, yuv.height, width, height, by),
-        u: average(&yuv.u, cw, ch, width / 2, height / 2, by),
-        v: average(&yuv.v, cw, ch, width / 2, height / 2, by),
-    })
-}
-
-/// A plane of `width`×`height` averaged down by `by` to `out_w`×`out_h`;
-/// blocks past the edge are cut short.
-fn average(
-    plane: &[u8],
-    width: usize,
-    height: usize,
-    out_w: usize,
-    out_h: usize,
-    by: usize,
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(out_w * out_h);
-    let mut sums = vec![0u32; out_w];
-    for row in 0..out_h {
-        sums.fill(0);
-        let top = row * by;
-        let rows = by.min(height.saturating_sub(top));
-        for line in plane.chunks_exact(width).skip(top).take(rows) {
-            for (sum, block) in sums.iter_mut().zip(line.chunks(by)) {
-                *sum += block.iter().map(|&p| u32::from(p)).sum::<u32>();
-            }
-        }
-        for (col, sum) in sums.iter().enumerate() {
-            let cols = by.min(width.saturating_sub(col * by));
-            let count = u32::try_from((rows * cols).max(1)).unwrap_or(u32::MAX);
-            out.push(u8::try_from((sum + count / 2) / count).unwrap_or(u8::MAX));
-        }
-    }
-    out
 }
 
 /// The picture as egui's opaque pixels. H.264 from WebRTC senders is
@@ -405,35 +311,29 @@ pub fn to_image(yuv: &Yuv) -> Result<ColorImage, Trouble> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::huddle_audio::helper::pretend::{Act, Pretend, picture, welcome};
+    use noslacking_video_ipc::{FailKind, Reply, Request};
     use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::time::Duration;
 
     const SCREEN: &[u8] = include_bytes!("fixtures/screen-1920x1080.h264");
     const CAMERA: &[u8] = include_bytes!("fixtures/camera-480x480.h264");
 
-    /// A stream split into frames as `str0m` hands them: each ends after
-    /// its slice, the parameter sets going with the slice they precede.
-    fn frames(stream: &[u8]) -> Vec<Vec<u8>> {
-        let mut frames = Vec::new();
-        let mut frame = Vec::new();
-        for nal in bitstream::nal_units(stream) {
-            frame.extend_from_slice(&[0, 0, 0, 1]);
-            frame.extend_from_slice(nal);
-            if matches!(bitstream::nal_type(nal), Some(1 | 5)) {
-                frames.push(std::mem::take(&mut frame));
-            }
-        }
-        frames
-    }
-
-    /// Decodes every frame, hashing the pictures as ffmpeg writes them
-    /// (`-f rawvideo -pix_fmt yuv420p`).
+    /// Decodes every frame through the helper (its own code, on a
+    /// thread, in software: no GPU in tests), hashing the pictures as
+    /// ffmpeg writes them (`-f rawvideo -pix_fmt yuv420p`).
     fn decode_all(stream: &[u8]) -> (usize, (usize, usize), String) {
-        let mut decoder = H264::new();
+        let mut decoder = H264::new(Lane::Share);
         let mut hash = Sha256::new();
         let mut count = 0;
         let mut size = (0, 0);
-        for frame in frames(stream) {
-            let yuv = decoder.decode(&frame).expect("decodes").expect("a picture");
+        for frame in bitstream::access_units(stream) {
+            let picture = decoder.decode(&frame).expect("decodes").expect("a picture");
+            assert_eq!(picture.source, [picture.yuv.width, picture.yuv.height]);
+            assert!(!picture.gpu);
+            let yuv = picture.yuv;
             size = (yuv.width, yuv.height);
             hash.update(&yuv.y);
             hash.update(&yuv.u);
@@ -445,7 +345,8 @@ mod tests {
     }
 
     /// Both fixtures (OpenH264, constrained baseline, made with ffmpeg)
-    /// decode to exactly what ffmpeg's own decoder makes of them.
+    /// come back from the helper exactly as ffmpeg's own decoder makes
+    /// them.
     #[test]
     fn fixtures_decode_exactly_as_ffmpeg_does() {
         assert_eq!(
@@ -468,8 +369,8 @@ mod tests {
 
     #[test]
     fn nothing_decodes_before_a_keyframe_or_after_a_loss_until_the_next() {
-        let frames = frames(CAMERA);
-        let mut decoder = H264::new();
+        let frames = bitstream::access_units(CAMERA);
+        let mut decoder = H264::new(Lane::Cameras);
         // Joined mid-stream: a P frame first.
         assert_eq!(decoder.decode(&frames[3]), Err(Trouble::NeedKeyframe));
         assert!(decoder.decode(&frames[0]).expect("a keyframe").is_some());
@@ -483,203 +384,244 @@ mod tests {
         assert!(decoder.decode(&frames[45]).expect("and goes on").is_some());
     }
 
-    /// Broken frames are errors, never a panic (a panic would end the
-    /// app: release builds abort), and the next keyframe recovers.
+    /// Broken frames are errors in the app, never a panic, and the next
+    /// keyframe recovers; the helper's own tests break many more.
     #[test]
     fn broken_frames_are_errors_and_the_next_keyframe_recovers() {
-        let frames = frames(CAMERA);
-        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
-        let mut random = move |n: usize| {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            usize::try_from(seed % (n.max(1) as u64)).unwrap_or(0)
-        };
-        let mut broken = 0;
-        for round in 0..30 {
-            let mut decoder = H264::new();
-            for (i, frame) in frames.iter().enumerate() {
-                let mut frame = frame.clone();
-                if i % 7 == round % 7 {
-                    match round % 3 {
-                        0 => frame.truncate(random(frame.len())),
-                        1 => {
-                            for _ in 0..8 {
-                                let at = random(frame.len());
-                                frame[at] ^= 1 << random(8);
-                            }
-                        }
-                        _ => {
-                            let at = random(frame.len());
-                            for byte in &mut frame[at..] {
-                                *byte = u8::try_from(random(256)).unwrap_or(0);
-                            }
-                        }
-                    }
-                }
-                if let Err(Trouble::Broken(_)) = decoder.decode(&frame) {
-                    broken += 1;
-                }
+        let frames = bitstream::access_units(CAMERA);
+        let mut decoder = H264::new(Lane::Cameras);
+        assert!(decoder.decode(&frames[0]).expect("decodes").is_some());
+        let mut noticed = false;
+        for n in 1..40 {
+            let mut broken = frames[n].clone();
+            let end = broken.len();
+            for byte in &mut broken[8..end] {
+                *byte ^= 0x5a;
+            }
+            if let Err(Trouble::Broken(_)) = decoder.decode(&broken) {
+                noticed = true;
+                assert_eq!(decoder.decode(&frames[n + 1]), Err(Trouble::NeedKeyframe));
+                break;
             }
         }
-        assert!(broken > 0, "some of it must have been noticed");
+        assert!(noticed, "some of it must have been noticed");
+        assert!(decoder.decode(&frames[44]).expect("recovers").is_some());
         // Garbage of every length, and nothing at all.
-        let mut decoder = H264::new();
         for n in [0, 1, 4, 5, 100] {
             let mut junk = vec![0u8, 0, 0, 1, 0x65];
             junk.extend((0..n).map(|i| u8::try_from(i * 37 % 256).unwrap_or(0)));
             let _ = decoder.decode(&junk);
             let _ = decoder.decode(&junk[..n.min(junk.len())]);
         }
-        // And a clean keyframe afterwards decodes.
-        let mut decoder = H264::new();
-        let _ = decoder.decode(&[0, 0, 0, 1, 0x65, 0xff, 0xff]);
         assert!(decoder.decode(&frames[0]).expect("recovers").is_some());
     }
 
-    /// A pretend helper: decodes to grey pictures, but its `n`th decode
-    /// (counted over every launch) does `then`.
+    /// A pretend helper: its decodes give grey pictures at the size
+    /// shown, from the GPU if it was asked for, but its `n`th decode
+    /// (counted over every launch) does what `failing` says. Every open
+    /// is noted: whether it asked for the GPU.
     fn pretend_helper(
-        failing: impl Fn(usize) -> Option<super::super::hardware::pretend::Act> + Send + Sync + 'static,
-    ) -> (Helper, std::sync::Arc<std::sync::atomic::AtomicU32>) {
-        use super::super::hardware::pretend::{Act, Pretend, picture, welcome};
-        use noslacking_video_ipc::{Reply, Request};
-        let decodes = std::sync::atomic::AtomicUsize::new(0);
-        let fit = std::sync::Mutex::new((0, 0));
+        failing: impl Fn(usize) -> Option<Act> + Send + Sync + 'static,
+    ) -> (Helper, Arc<AtomicU32>, Arc<Mutex<Vec<bool>>>) {
+        let decodes = AtomicUsize::new(0);
+        let fit = Mutex::new((0, 0));
+        let gpu = Mutex::new(false);
+        let opens = Arc::new(Mutex::new(Vec::new()));
+        let noted = Arc::clone(&opens);
         let pretend = Pretend::new(move |request| match request {
             Request::Hello { .. } => Act::Reply(welcome()),
-            Request::OpenDecoder { .. } => Act::Reply(Reply::Opened { id: 1 }),
+            Request::OpenDecoder { hardware, .. } => {
+                *gpu.lock().unwrap_or_else(PoisonError::into_inner) = *hardware;
+                noted
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(*hardware);
+                Act::Reply(Reply::Opened { id: 1 })
+            }
             Request::SetOutputSize { width, height, .. } => {
-                *fit.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = (*width, *height);
+                *fit.lock().unwrap_or_else(PoisonError::into_inner) = (*width, *height);
                 Act::Reply(Reply::Done)
             }
             Request::Decode { .. } => {
-                let n = decodes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let n = decodes.fetch_add(1, Ordering::Relaxed);
                 let (width, height) = noslacking_video_ipc::output_size(
                     (480, 480),
-                    *fit.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    *fit.lock().unwrap_or_else(PoisonError::into_inner),
                 );
-                failing(n).unwrap_or_else(|| Act::Reply(picture(width, height, 200)))
+                let hardware = *gpu.lock().unwrap_or_else(PoisonError::into_inner);
+                failing(n).unwrap_or_else(|| {
+                    let Reply::Picture(decoded) = picture(width, height, 200) else {
+                        return Act::Crash;
+                    };
+                    Act::Reply(Reply::Picture(noslacking_video_ipc::Decoded {
+                        source: (480, 480),
+                        hardware,
+                        ..decoded
+                    }))
+                })
             }
             _ => Act::Reply(Reply::Done),
         });
-        let launches = std::sync::Arc::clone(&pretend.launches);
+        let launches = Arc::clone(&pretend.launches);
         let helper = Helper::with_timeouts(
-            std::sync::Arc::new(pretend),
-            std::time::Duration::from_secs(5),
-            std::time::Duration::from_millis(500),
+            Arc::new(pretend),
+            Duration::from_secs(5),
+            Duration::from_millis(500),
         );
-        (helper, launches)
+        (helper, launches, opens)
+    }
+
+    fn opened(opens: &Mutex<Vec<bool>>) -> Vec<bool> {
+        opens.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     #[test]
-    fn the_gpu_decodes_when_the_helper_can_and_a_crash_on_a_keyframe_goes_on_in_software() {
-        use super::super::hardware::pretend::Act;
-        let frames = frames(CAMERA);
-        // The helper's third decode crashes it; the restarted helper's
-        // first (the 44th frame, a keyframe) does too.
-        let (helper, launches) = pretend_helper(|n| matches!(n, 2 | 3).then_some(Act::Crash));
-        let mut decoder = H264::with_helper(Some(helper));
+    fn a_crashed_helper_starts_again_at_the_next_keyframe_in_software() {
+        let frames = bitstream::access_units(CAMERA);
+        // The helper's third decode crashes it.
+        let (helper, launches, opens) = pretend_helper(|n| (n == 2).then_some(Act::Crash));
+        let mut decoder = H264::with_helper(Some(helper), Some(true));
         let first = decoder
             .decode(&frames[0])
             .expect("decodes")
             .expect("a picture");
-        assert!(decoder.on_hardware());
-        assert_eq!(first.y[0], 200, "the helper's picture");
+        assert!(first.gpu);
+        assert_eq!(first.yuv.y[0], 200, "the helper's picture");
         assert!(decoder.decode(&frames[1]).expect("decodes").is_some());
         // Lost mid-stream: a keyframe is asked for (a PLI goes out).
         assert_eq!(decoder.decode(&frames[2]), Err(Trouble::NeedKeyframe));
-        assert!(!decoder.on_hardware());
         assert_eq!(decoder.decode(&frames[3]), Err(Trouble::NeedKeyframe));
-        // The keyframe: the helper starts again, crashes on it, and
-        // software decodes it at once.
+        assert!(!decoder.no_helper(), "it starts again");
+        // The keyframe: a new helper, asked for software this time.
         let picture = decoder
             .decode(&frames[44])
             .expect("decodes")
             .expect("a picture");
-        assert_eq!(launches.load(std::sync::atomic::Ordering::Relaxed), 2);
-        assert!(!decoder.on_hardware());
-        assert_ne!(
-            picture.y[0..16],
-            [200; 16],
-            "the real picture, from software"
-        );
-        assert!(
-            decoder
-                .decode(&frames[45])
-                .expect("software goes on")
-                .is_some()
-        );
+        assert!(!picture.gpu);
+        assert_eq!(launches.load(Ordering::Relaxed), 2);
+        assert_eq!(opened(&opens), [true, false]);
+        assert!(decoder.decode(&frames[45]).expect("goes on").is_some());
     }
 
     /// The helper is told the size the pictures are shown at, once and
-    /// again when it changes, and they come back at it: the caller's
-    /// shrink then has nothing left to do.
+    /// again when it changes, and they come back at it, with the
+    /// stream's own size beside them.
     #[test]
-    fn pictures_from_the_gpu_come_at_the_size_shown() {
-        let (helper, _) = pretend_helper(|_| None);
-        let frames = frames(CAMERA);
-        let mut decoder = H264::with_helper(Some(helper));
+    fn pictures_come_at_the_size_shown() {
+        let (helper, _, _) = pretend_helper(|_| None);
+        let frames = bitstream::access_units(CAMERA);
+        let mut decoder = H264::with_helper(Some(helper), Some(true));
         decoder.set_fit(240, 180);
         let picture = decoder
             .decode(&frames[0])
             .expect("decodes")
             .expect("a picture");
-        assert_eq!((picture.width, picture.height), (240, 240));
-        assert_eq!(
-            reduction((240, 240), (240, 180)),
-            1,
-            "nothing left to shrink"
-        );
+        assert_eq!((picture.yuv.width, picture.yuv.height), (240, 240));
+        assert_eq!(picture.source, [480, 480]);
         decoder.set_fit(160, 120);
         let picture = decoder
             .decode(&frames[1])
             .expect("decodes")
             .expect("a picture");
-        assert_eq!((picture.width, picture.height), (160, 160));
+        assert_eq!((picture.yuv.width, picture.yuv.height), (160, 160));
         decoder.set_fit(0, 0);
         let picture = decoder
             .decode(&frames[2])
             .expect("decodes")
             .expect("a picture");
         assert_eq!(
-            (picture.width, picture.height),
+            (picture.yuv.width, picture.yuv.height),
             (480, 480),
             "back to its own size"
         );
-        assert!(to_image(&picture).is_ok());
+        assert!(to_image(&picture.yuv).is_ok());
+    }
+
+    /// A stream the helper moved to software asks for software at its
+    /// next start; with the setting off, it asks for software at once.
+    #[test]
+    fn a_stream_moved_to_software_stays_there() {
+        let frames = bitstream::access_units(CAMERA);
+        // The helper answers its first decode from software, as when the
+        // GPU cannot decode the stream.
+        let software = Arc::new(AtomicU32::new(0));
+        let first = Arc::clone(&software);
+        let (helper, launches, opens) = pretend_helper(move |n| {
+            (n == 0).then(|| {
+                first.fetch_add(1, Ordering::Relaxed);
+                let Reply::Picture(decoded) = picture(480, 480, 9) else {
+                    return Act::Crash;
+                };
+                Act::Reply(Reply::Picture(noslacking_video_ipc::Decoded {
+                    hardware: false,
+                    ..decoded
+                }))
+            })
+        });
+        let mut decoder = H264::with_helper(Some(helper.clone()), Some(true));
+        let picture = decoder.decode(&frames[0]).expect("decodes").expect("one");
+        assert!(!picture.gpu);
+        decoder.lost();
+        assert!(decoder.decode(&frames[44]).expect("decodes").is_some());
+        assert_eq!(opened(&opens), [true, false], "not the GPU again");
+        assert_eq!(launches.load(Ordering::Relaxed), 1);
+        assert_eq!(software.load(Ordering::Relaxed), 1);
+        let mut off = H264::with_helper(Some(helper), Some(false));
+        assert!(off.decode(&frames[0]).expect("decodes").is_some());
+        assert_eq!(opened(&opens), [true, false, false]);
     }
 
     #[test]
-    fn a_stream_the_gpu_cannot_decode_stays_in_software() {
-        use super::super::hardware::pretend::Act;
-        use noslacking_video_ipc::{FailKind, Reply};
-        let (helper, launches) = pretend_helper(|_| {
+    fn helper_failures_become_what_the_stream_does_next() {
+        let (helper, launches, _) = pretend_helper(|n| {
+            let (kind, detail) = match n {
+                0 => (FailKind::Broken, "bad slice"),
+                _ => (FailKind::NeedKeyframe, "joined late"),
+            };
             Some(Act::Reply(Reply::Failed {
-                kind: FailKind::Unsupported,
-                detail: "B slices".into(),
+                kind,
+                detail: detail.into(),
             }))
         });
-        let frames = frames(CAMERA);
-        let mut decoder = H264::with_helper(Some(helper));
-        assert!(decoder.decode(&frames[0]).expect("software").is_some());
-        assert!(!decoder.on_hardware());
-        decoder.lost();
-        assert!(decoder.decode(&frames[44]).expect("software").is_some());
-        assert!(!decoder.on_hardware(), "not tried again for this stream");
-        assert_eq!(launches.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let frames = bitstream::access_units(CAMERA);
+        let mut decoder = H264::with_helper(Some(helper), None);
+        assert!(matches!(
+            decoder.decode(&frames[0]),
+            Err(Trouble::Broken(_))
+        ));
+        assert!(decoder.waiting());
+        assert_eq!(decoder.decode(&frames[0]), Err(Trouble::NeedKeyframe));
+        assert_eq!(
+            launches.load(Ordering::Relaxed),
+            1,
+            "not the helper's fault"
+        );
     }
 
     #[test]
-    fn without_a_helper_or_with_hardware_off_it_is_software() {
-        let frames = frames(CAMERA);
-        let mut decoder = H264::with_helper(None);
-        assert!(decoder.decode(&frames[0]).expect("decodes").is_some());
-        assert!(!decoder.on_hardware());
-        // H264::new() in tests never finds the real helper.
-        assert!(!H264::new().on_hardware());
+    fn without_a_helper_there_is_no_video() {
+        let frames = bitstream::access_units(CAMERA);
+        let mut decoder = H264::with_helper(None, None);
+        assert!(decoder.no_helper(), "said at once");
+        assert_eq!(decoder.decode(&frames[3]), Err(Trouble::NeedKeyframe));
+        assert_eq!(decoder.decode(&frames[0]), Err(Trouble::NoHelper));
+        // One that crashes on every frame is given up after its restarts.
+        let (helper, launches, _) = pretend_helper(|_| Some(Act::Crash));
+        let mut decoder = H264::with_helper(Some(helper), None);
+        let mut troubles = Vec::new();
+        for _ in 0..=helper::MAX_RESTARTS {
+            troubles.push(decoder.decode(&frames[0]));
+        }
+        assert!(
+            troubles[..troubles.len() - 1]
+                .iter()
+                .all(|t| *t == Err(Trouble::NeedKeyframe)),
+            "{troubles:?}"
+        );
+        assert_eq!(troubles.last(), Some(&Err(Trouble::NoHelper)));
+        assert!(decoder.no_helper());
+        assert_eq!(decoder.decode(&frames[0]), Err(Trouble::NoHelper));
+        assert_eq!(launches.load(Ordering::Relaxed), helper::MAX_RESTARTS + 1);
     }
 
     #[test]
@@ -720,38 +662,5 @@ mod tests {
             ..red
         };
         assert!(matches!(to_image(&short), Err(Trouble::Convert(_))));
-    }
-
-    #[test]
-    fn pictures_shrink_by_whole_steps_to_cover_the_window() {
-        assert_eq!(reduction((1920, 1080), (0, 0)), 1);
-        assert_eq!(reduction((1920, 1080), (1920, 1080)), 1);
-        assert_eq!(reduction((1920, 1080), (1400, 800)), 1);
-        assert_eq!(reduction((1920, 1080), (900, 500)), 2);
-        assert_eq!(reduction((1920, 1080), (640, 200)), 3);
-        assert_eq!(
-            reduction((1920, 1080), (300, 1000)),
-            1,
-            "the taller side decides"
-        );
-        let yuv = Yuv {
-            width: 6,
-            height: 4,
-            y: vec![
-                0, 10, 20, 30, 40, 50, //
-                10, 20, 30, 40, 50, 60, //
-                100, 100, 100, 100, 100, 100, //
-                0, 0, 0, 0, 255, 255,
-            ],
-            u: vec![10, 20, 30, 40, 50, 60],
-            v: vec![200; 6],
-        };
-        assert!(matches!(shrink(&yuv, 1), Cow::Borrowed(_)));
-        let half = shrink(&yuv, 2);
-        assert_eq!((half.width, half.height), (2, 2));
-        assert_eq!(half.y, [10, 30, 50, 50]);
-        assert_eq!(half.u, [30]);
-        assert_eq!(half.v, [200]);
-        assert!(to_image(&half).is_ok());
     }
 }

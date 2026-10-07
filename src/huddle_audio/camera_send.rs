@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 
 use super::camera::{FPS, I420, Latest, MAX_HEIGHT, MAX_WIDTH};
 use super::chime::VideoSend;
-use super::hardware::{self, Helper};
+use super::helper::{self, Helper, Lane};
 use super::microphone::Running;
 use super::video_encoder::{self, Encoder, Limits, Settings};
 
@@ -301,7 +301,9 @@ impl Encoding {
         preview: Option<Preview>,
     ) -> Result<Self, String> {
         Self::spawn_with(latest, frames, control, preview, || {
-            hardware::enabled().then(hardware::shared).flatten()
+            helper::gpu()
+                .then(|| helper::shared(Lane::Sending))
+                .flatten()
         })
     }
 
@@ -728,7 +730,7 @@ mod tests {
     /// gets one stream the decoder reads from start to end.
     #[test]
     fn the_encoder_thread_goes_on_in_software_when_the_gpu_fails() {
-        use super::super::hardware::pretend::{Act, Pretend, welcome};
+        use super::super::helper::pretend::{Act, Pretend, welcome};
         use noslacking_video_ipc::{Reply, Request};
         let gpu_encoder: Arc<Mutex<Option<video_encoder::VideoEncoder>>> = Arc::default();
         let encodes = Arc::new(AtomicU64::new(0));

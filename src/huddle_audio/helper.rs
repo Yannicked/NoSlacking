@@ -1,24 +1,27 @@
-//! Video decoded and encoded on the GPU (the `huddle-video` and
-//! `huddle-camera` features), through `noslacking-video`, a helper
-//! process (crates/noslacking-video).
+//! `noslacking-video`, the video helper process (crates/noslacking-video):
+//! every video stream we watch (the `huddle-video` feature) is decoded
+//! there, on the GPU or in software, and our camera and screen are
+//! encoded there on the GPU when it can (the `huddle-camera` feature).
 //!
-//! The platform video APIs are C libraries and GPU drivers, which take
-//! `unsafe` code this crate forbids, and a driver handed a stranger's
-//! malformed stream may crash or hang. So they run in the helper, which
-//! this module starts the first time a stream could use it and talks to
-//! over its standard input and output (`noslacking-video-ipc`'s
-//! messages). The helper is found next to this program, else on `PATH`;
-//! without it there is no hardware video, and nothing else changes.
+//! Decoders read strangers' streams, and the GPU's video APIs are C
+//! libraries and drivers that take `unsafe` code this crate forbids; a
+//! malformed stream may crash or hang either, and a panic aborts a
+//! release build. So they run in the helper, which this module starts
+//! the first time a stream needs it and talks to over its standard input
+//! and output (`noslacking-video-ipc`'s messages). The helper is found
+//! next to this program, else on `PATH`. Without it there is no video
+//! to watch: the call window says so, and the call goes on. Encoding
+//! falls back to software in the app (`video_encoder`).
 //!
-//! Software (rusty_h264: `decode` for streams in, `video_encoder` for our
-//! camera out) is always the fallback: hardware is used only for what the
-//! helper says it can do. A reply that does not come within a timeout
-//! counts as a crash; after a crash the helper is killed and started
-//! again on the next stream, at most [`MAX_RESTARTS`] times, and then
-//! never again until the app restarts. A stream that lost it asks for a
-//! keyframe and goes on in software; our camera goes on in software with
-//! a keyframe. Nothing from the helper is trusted: replies are checked
-//! field by field, a picture's planes against its size, before use.
+//! Each [`Lane`] has a helper of its own, so the share's decoding, the
+//! cameras' and our own encoding never wait for each other's replies.
+//! A reply that does not come within a timeout counts as a crash; after
+//! a crash the helper is killed and started again on the next stream, at
+//! most [`MAX_RESTARTS`] times, and then never again until the app
+//! restarts. A stream that lost it asks for a keyframe and starts again
+//! in the new helper; our camera goes on in software with a keyframe.
+//! Nothing from the helper is trusted: replies are checked field by
+//! field, a picture's planes against its size, before use.
 
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
@@ -33,8 +36,8 @@ use noslacking_video_ipc::{self as ipc, Capability, Codec, Direction, FailKind, 
 #[cfg(feature = "huddle-video")]
 use super::decode::Yuv;
 
-/// How many times a crashed or stuck helper is started again before
-/// hardware decoding is given up until the app restarts.
+/// How many times a crashed or stuck helper is started again before it
+/// is given up until the app restarts.
 pub const MAX_RESTARTS: u32 = 3;
 /// How long the helper may take to start and say what it can do: the
 /// first open of a GPU driver can take a few hundred milliseconds.
@@ -48,22 +51,22 @@ const HELPER: &str = "noslacking-video";
 /// Settings → Huddles → Use the graphics card for video, set from the
 /// settings at start-up (on by default there). Off until then, so tests
 /// that want it turn it on for themselves.
-static ENABLED: AtomicBool = AtomicBool::new(false);
+static GPU: AtomicBool = AtomicBool::new(false);
 
-/// Turns hardware video on or off for streams (and our camera) that
-/// start from now on.
-pub fn set_enabled(enabled: bool) {
-    ENABLED.store(enabled, Ordering::Relaxed);
+/// Lets streams (and our camera) that start from now on use the GPU, or
+/// not: the helper then decodes in software, and the camera encodes in
+/// software in the app.
+pub fn set_gpu(gpu: bool) {
+    GPU.store(gpu, Ordering::Relaxed);
 }
 
 /// Whether streams starting now may decode, and our camera encode, on
 /// the GPU.
-pub fn enabled() -> bool {
-    ENABLED.load(Ordering::Relaxed)
+pub fn gpu() -> bool {
+    GPU.load(Ordering::Relaxed)
 }
 
-/// Why the helper cannot serve a request: the stream goes on in
-/// software.
+/// Why the helper cannot serve a request.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct Lost(String);
@@ -152,26 +155,34 @@ pub fn find_helper() -> Option<PathBuf> {
     })
 }
 
-/// The process-wide helper, made the first time it is asked for; none
-/// when the program is not installed.
-pub fn shared() -> Option<Helper> {
-    // Tests never start the real helper: it would open the GPU.
-    if cfg!(test) {
-        return None;
-    }
-    static SHARED: OnceLock<Option<Helper>> = OnceLock::new();
-    SHARED
-        .get_or_init(|| match find_helper() {
-            Some(path) => {
-                log::info!("video: hardware decoding through {}", path.display());
-                Some(Helper::new(Arc::new(ProcessLauncher::new(path))))
-            }
-            None => {
-                log::info!("video: no {HELPER} beside the app or on PATH: software decoding");
-                None
-            }
-        })
-        .clone()
+/// What a helper process is for: each has its own, so one's work never
+/// waits for another's replies, and one that keeps failing costs only
+/// its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lane {
+    /// Decoding the screen share watched.
+    Share,
+    /// Decoding the camera tiles.
+    Cameras,
+    /// Encoding our camera and our screen on the GPU.
+    Sending,
+}
+
+/// The helper for `lane`, made the first time it is asked for and
+/// started the first time it is used; none when the program is not
+/// installed.
+pub fn shared(lane: Lane) -> Option<Helper> {
+    static SHARED: OnceLock<Option<[Helper; 3]>> = OnceLock::new();
+    let helpers = SHARED.get_or_init(|| {
+        let launcher = launcher()?;
+        Some([(); 3].map(|()| Helper::new(Arc::clone(&launcher))))
+    });
+    let index = match lane {
+        Lane::Share => 0,
+        Lane::Cameras => 1,
+        Lane::Sending => 2,
+    };
+    helpers.as_ref().map(|helpers| helpers[index].clone())
 }
 
 /// A running helper: a thread writes requests to it and another reads
@@ -202,8 +213,30 @@ struct State {
     capabilities: Vec<Capability>,
 }
 
-/// The app's side of the helper, shared by every decoder (cheap to
-/// clone). Requests go one at a time.
+/// Runs the installed program; none if it is not there.
+#[cfg(not(test))]
+fn launcher() -> Option<Arc<dyn Launcher>> {
+    match find_helper() {
+        Some(path) => {
+            log::info!("video: decoding through {}", path.display());
+            Some(Arc::new(ProcessLauncher::new(path)))
+        }
+        None => {
+            log::warn!("video: no {HELPER} beside the app or on PATH: no video");
+            None
+        }
+    }
+}
+
+/// Tests never start the real program, which would open the GPU: the
+/// helper's own code serves them on a thread.
+#[cfg(test)]
+fn launcher() -> Option<Arc<dyn Launcher>> {
+    Some(Arc::new(pretend::InThread))
+}
+
+/// The app's side of one helper, shared by the decoders and encoders of
+/// its lane (cheap to clone). Requests go one at a time.
 #[derive(Clone)]
 pub struct Helper {
     state: Arc<Mutex<State>>,
@@ -249,19 +282,10 @@ impl Helper {
         self.state().given_up
     }
 
-    /// Whether the helper decodes `codec` at `width`×`height`, starting
-    /// it if it is not running.
-    pub fn decodes(&self, codec: Codec, width: u32, height: u32) -> bool {
-        self.can(codec, Direction::Decode, width, height)
-    }
-
     /// Whether the helper encodes `codec` (for H.264, constrained
-    /// baseline) at `width`×`height`, starting it if it is not running.
+    /// baseline) on the GPU at `width`×`height`, starting it if it is not
+    /// running.
     pub fn encodes(&self, codec: Codec, width: u32, height: u32) -> bool {
-        self.can(codec, Direction::Encode, width, height)
-    }
-
-    fn can(&self, codec: Codec, direction: Direction, width: u32, height: u32) -> bool {
         let mut state = self.state();
         if self.ensure_started(&mut state).is_err() {
             return false;
@@ -269,13 +293,13 @@ impl Helper {
         state
             .capabilities
             .iter()
-            .any(|c| c.covers(codec, direction, width, height))
+            .any(|c| c.covers(codec, Direction::Encode, width, height))
     }
 
     /// Starts the helper if it is not running and says hello.
     fn ensure_started(&self, state: &mut State) -> Result<(), Lost> {
         if state.given_up {
-            return Err(Lost("hardware decoding was given up".into()));
+            return Err(Lost("the helper was given up".into()));
         }
         if state.live.is_some() {
             return Ok(());
@@ -284,7 +308,7 @@ impl Helper {
             Ok(link) => link,
             Err(error) => {
                 // Not there or not runnable: trying again will not help.
-                log::info!("video: the helper did not start ({error}): software decoding");
+                log::warn!("video: the helper did not start ({error}): no video");
                 state.given_up = true;
                 return Err(Lost(error.to_string()));
             }
@@ -300,15 +324,15 @@ impl Helper {
                 capabilities,
             }) if version == ipc::VERSION => {
                 log::info!(
-                    "video: helper back end {backend}; {} hardware capabilities",
+                    "video: helper back end {backend}; {} GPU capabilities",
                     capabilities.len()
                 );
                 state.capabilities = capabilities;
                 Ok(())
             }
             Ok(Reply::Welcome { version, .. }) => {
-                log::info!(
-                    "video: the helper speaks version {version}, not {}: software decoding",
+                log::warn!(
+                    "video: the helper speaks version {version}, not {}: no video",
                     ipc::VERSION
                 );
                 state.live = None;
@@ -356,7 +380,7 @@ impl Helper {
         if state.failures > MAX_RESTARTS {
             state.given_up = true;
             log::warn!(
-                "video: the helper failed ({why}), {} times now: software decoding from here on",
+                "video: the helper failed ({why}), {} times now: no more video from it",
                 state.failures
             );
         } else {
@@ -374,30 +398,32 @@ impl Helper {
         self.exchange(&mut state, request, self.call_timeout)
     }
 
-    /// Opens a decoder for a `codec` stream of about `width`×`height`.
-    pub fn open_decoder(&self, codec: Codec, width: u32, height: u32) -> Result<HwDecoder, Lost> {
+    /// Opens a decoder for a `codec` stream of about `width`×`height`, on
+    /// the GPU first if `gpu` (the helper decodes in software whatever
+    /// the GPU cannot).
+    pub fn open_decoder(
+        &self,
+        codec: Codec,
+        width: u32,
+        height: u32,
+        gpu: bool,
+    ) -> Result<RemoteDecoder, Lost> {
         let mut state = self.state();
         self.ensure_started(&mut state)?;
         let request = Request::OpenDecoder {
             codec,
             width,
             height,
-            hardware: true,
+            hardware: gpu,
         };
         let generation = state.generation;
         match self.exchange(&mut state, request, self.call_timeout)? {
-            Reply::Opened { id } => Ok(HwDecoder {
+            Reply::Opened { id } => Ok(RemoteDecoder {
                 helper: self.clone(),
                 id,
                 generation,
-                max: state
-                    .capabilities
-                    .iter()
-                    .filter(|c| c.codec == codec && c.direction == Direction::Decode)
-                    .map(|c| (c.max_width, c.max_height))
-                    .max()
-                    .unwrap_or((0, 0)),
             }),
+            // Too many open: this stream has none, the helper is fine.
             Reply::Failed { kind, detail } => Err(Lost(format!("{kind:?}: {detail}"))),
             other => Err(self.fail(&mut state, &format!("an answer to open: {other:?}"))),
         }
@@ -481,76 +507,92 @@ fn start(link: Link) -> Live {
     }
 }
 
-/// Why a frame did not decode in hardware.
+/// Why the helper gave no picture, or no encoded frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HwTrouble {
+pub enum HelperTrouble {
     /// Wait for a keyframe (a loss, or joined mid-stream).
     NeedKeyframe,
     /// The frame did not decode; the next keyframe starts over.
     Broken(String),
-    /// The GPU cannot decode this stream (a profile, a size, a feature
-    /// it lacks): software, for good.
+    /// The helper cannot do this: for our camera, software in the app.
     Unsupported(String),
-    /// The helper failed or went away: software, and the GPU again at
-    /// the next start if the helper comes back.
+    /// The helper failed or went away: a stream starts again in the next
+    /// helper at a keyframe; our camera goes on in software.
     Lost(String),
+}
+
+/// A picture back from the helper, checked.
+#[cfg(feature = "huddle-video")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Picture {
+    /// The picture, at most as large as the size shown asks
+    /// ([`RemoteDecoder::set_output_size`]).
+    pub yuv: Yuv,
+    /// The stream's own size, before any shrinking.
+    pub source: [usize; 2],
+    /// Whether the GPU decoded it.
+    pub gpu: bool,
 }
 
 /// One stream's decoder in the helper. Closed when dropped.
 #[derive(Debug)]
-pub struct HwDecoder {
+pub struct RemoteDecoder {
     helper: Helper,
     id: u32,
     generation: u64,
-    /// The largest picture the helper said it decodes.
-    #[cfg_attr(not(feature = "huddle-video"), allow(dead_code))]
-    max: (u32, u32),
 }
 
-impl HwDecoder {
+impl RemoteDecoder {
     /// Decodes one frame (an access unit, Annex B).
     #[cfg(feature = "huddle-video")]
-    pub fn decode(&mut self, unit: &[u8], keyframe: bool) -> Result<Option<Yuv>, HwTrouble> {
+    pub fn decode(
+        &mut self,
+        unit: &[u8],
+        keyframe: bool,
+    ) -> Result<Option<Picture>, HelperTrouble> {
         let request = Request::Decode {
             id: self.id,
             keyframe,
             data: unit.to_vec(),
         };
         match self.helper.call(self.generation, request) {
-            Ok(Reply::Picture(ipc::Decoded { planes, .. })) => {
-                // Checked against their size as they were read; and no
-                // larger than the helper said it decodes.
-                if planes.width > self.max.0 || planes.height > self.max.1 {
-                    return Err(HwTrouble::Lost("a picture larger than promised".into()));
-                }
+            Ok(Reply::Picture(decoded)) => {
+                // Checked as it was read: the planes against their size,
+                // which is no larger than the source, itself no larger
+                // than any picture may be.
                 let size = |n: u32| usize::try_from(n).unwrap_or(0);
-                Ok(Some(Yuv {
-                    width: size(planes.width),
-                    height: size(planes.height),
-                    y: planes.y,
-                    u: planes.u,
-                    v: planes.v,
+                let planes = decoded.planes;
+                Ok(Some(Picture {
+                    yuv: Yuv {
+                        width: size(planes.width),
+                        height: size(planes.height),
+                        y: planes.y,
+                        u: planes.u,
+                        v: planes.v,
+                    },
+                    source: [size(decoded.source.0), size(decoded.source.1)],
+                    gpu: decoded.hardware,
                 }))
             }
             Ok(Reply::NoPicture) => Ok(None),
             Ok(Reply::Failed { kind, detail }) => Err(match kind {
-                FailKind::NeedKeyframe => HwTrouble::NeedKeyframe,
-                FailKind::Broken => HwTrouble::Broken(detail),
-                FailKind::Unsupported => HwTrouble::Unsupported(detail),
+                FailKind::NeedKeyframe => HelperTrouble::NeedKeyframe,
+                FailKind::Broken => HelperTrouble::Broken(detail),
+                FailKind::Unsupported => HelperTrouble::Unsupported(detail),
                 FailKind::Device | FailKind::Protocol | FailKind::UnknownId => {
-                    HwTrouble::Lost(format!("{kind:?}: {detail}"))
+                    HelperTrouble::Lost(format!("{kind:?}: {detail}"))
                 }
             }),
-            Ok(other) => Err(HwTrouble::Lost(format!("an answer to decode: {other:?}"))),
-            Err(Lost(why)) => Err(HwTrouble::Lost(why)),
+            Ok(other) => Err(HelperTrouble::Lost(format!(
+                "an answer to decode: {other:?}"
+            ))),
+            Err(Lost(why)) => Err(HelperTrouble::Lost(why)),
         }
     }
-}
 
-impl HwDecoder {
     /// Asks the helper for pictures shrunk to cover `width`×`height`
     /// (0×0: their own size).
-    pub fn set_output_size(&mut self, width: u32, height: u32) -> Result<(), HwTrouble> {
+    pub fn set_output_size(&mut self, width: u32, height: u32) -> Result<(), HelperTrouble> {
         let request = Request::SetOutputSize {
             id: self.id,
             width,
@@ -558,15 +600,15 @@ impl HwDecoder {
         };
         match self.helper.call(self.generation, request) {
             Ok(Reply::Done) => Ok(()),
-            Ok(other) => Err(HwTrouble::Lost(format!(
+            Ok(other) => Err(HelperTrouble::Lost(format!(
                 "an answer to the output size: {other:?}"
             ))),
-            Err(Lost(why)) => Err(HwTrouble::Lost(why)),
+            Err(Lost(why)) => Err(HelperTrouble::Lost(why)),
         }
     }
 }
 
-impl Drop for HwDecoder {
+impl Drop for RemoteDecoder {
     fn drop(&mut self) {
         // Best effort: a helper that restarted has forgotten it anyway.
         let _ = self
@@ -607,9 +649,9 @@ impl HwEncoder {
         &mut self,
         picture: ipc::Planes,
         force_keyframe: bool,
-    ) -> Result<HwEncoded, HwTrouble> {
+    ) -> Result<HwEncoded, HelperTrouble> {
         if (picture.width, picture.height) != self.size {
-            return Err(HwTrouble::Unsupported("another size".into()));
+            return Err(HelperTrouble::Unsupported("another size".into()));
         }
         let request = Request::Encode {
             id: self.id,
@@ -622,28 +664,30 @@ impl HwEncoder {
             }
             Ok(Reply::Failed { kind, detail }) => Err(match kind {
                 FailKind::Device | FailKind::Protocol | FailKind::UnknownId => {
-                    HwTrouble::Lost(format!("{kind:?}: {detail}"))
+                    HelperTrouble::Lost(format!("{kind:?}: {detail}"))
                 }
-                _ => HwTrouble::Unsupported(format!("{kind:?}: {detail}")),
+                _ => HelperTrouble::Unsupported(format!("{kind:?}: {detail}")),
             }),
-            Ok(other) => Err(HwTrouble::Lost(format!("an answer to encode: {other:?}"))),
-            Err(Lost(why)) => Err(HwTrouble::Lost(why)),
+            Ok(other) => Err(HelperTrouble::Lost(format!(
+                "an answer to encode: {other:?}"
+            ))),
+            Err(Lost(why)) => Err(HelperTrouble::Lost(why)),
         }
     }
 
     /// Aims at `bitrate` bit/s from the next picture on, with no
     /// keyframe.
-    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<(), HwTrouble> {
+    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<(), HelperTrouble> {
         let request = Request::SetBitrate {
             id: self.id,
             bitrate,
         };
         match self.helper.call(self.generation, request) {
             Ok(Reply::Done) => Ok(()),
-            Ok(other) => Err(HwTrouble::Lost(format!(
+            Ok(other) => Err(HelperTrouble::Lost(format!(
                 "an answer to the bit rate: {other:?}"
             ))),
-            Err(Lost(why)) => Err(HwTrouble::Lost(why)),
+            Err(Lost(why)) => Err(HelperTrouble::Lost(why)),
         }
     }
 }
@@ -657,11 +701,37 @@ impl Drop for HwEncoder {
     }
 }
 
-/// The helper as a test sees it: what it does with each request.
+/// The helper as a test sees it: what it does with each request; or the
+/// helper's own code, on a thread.
 #[cfg(test)]
 #[cfg_attr(not(feature = "huddle-video"), allow(dead_code))]
 pub(crate) mod pretend {
     use super::*;
+
+    /// Runs the helper's own server, as the program would, on a thread
+    /// and over pipes: with no GPU back end, so it decodes in software
+    /// and encodes nothing.
+    pub struct InThread;
+
+    impl Launcher for InThread {
+        fn launch(&self) -> std::io::Result<Link> {
+            let (from_app, to_helper) = std::io::pipe()?;
+            let (from_helper, to_app) = std::io::pipe()?;
+            std::thread::Builder::new()
+                .name("video-helper-in-thread".into())
+                .spawn(move || {
+                    let mut input = std::io::BufReader::new(from_app);
+                    let mut output = BufWriter::new(to_app);
+                    let mut backend = noslacking_video::backend::Nothing::new("none: a test");
+                    let _ = noslacking_video::server::serve(&mut input, &mut output, &mut backend);
+                })?;
+            Ok(Link {
+                input: Box::new(to_helper),
+                output: Box::new(from_helper),
+                stop: Box::new(|| {}),
+            })
+        }
+    }
 
     /// What the pretend helper does with a request.
     pub enum Act {
@@ -794,21 +864,40 @@ mod tests {
         }
     }
 
+    const KEYFRAME: &[u8] = &[0, 0, 0, 1, 0x65];
+
     #[test]
     fn pictures_come_back_from_the_helper() {
-        let (helper, launches) = helper(Pretend::new(working));
-        assert!(helper.decodes(Codec::H264, 1920, 1080));
-        assert!(
-            !helper.decodes(Codec::H264, 2560, 1440),
-            "larger than it said"
-        );
-        let mut decoder = helper.open_decoder(Codec::H264, 64, 48).expect("opens");
-        let yuv = decoder
-            .decode(&[0, 0, 0, 1, 0x65], true)
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&asked);
+        let (helper, launches) = helper(Pretend::new(move |request| {
+            if let Request::OpenDecoder { hardware, .. } = request {
+                seen.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(*hardware);
+            }
+            working(request)
+        }));
+        let mut decoder = helper
+            .open_decoder(Codec::H264, 64, 48, true)
+            .expect("opens");
+        let picture = decoder
+            .decode(KEYFRAME, true)
             .expect("decodes")
             .expect("a picture");
-        assert_eq!((yuv.width, yuv.height, yuv.y[0]), (64, 48, 77));
+        assert_eq!(
+            (picture.yuv.width, picture.yuv.height, picture.yuv.y[0]),
+            (64, 48, 77)
+        );
+        assert_eq!(picture.source, [64, 48]);
+        assert!(picture.gpu);
         drop(decoder);
+        // The GPU, or not, as asked.
+        drop(helper.open_decoder(Codec::H264, 64, 48, false));
+        assert_eq!(
+            *asked.lock().unwrap_or_else(PoisonError::into_inner),
+            [true, false]
+        );
         assert_eq!(launches.load(Ordering::Relaxed), 1, "started once");
     }
 
@@ -820,21 +909,23 @@ mod tests {
         });
         let (helper, launches) = helper(pretend);
         for round in 1..=MAX_RESTARTS + 1 {
-            let mut decoder = helper.open_decoder(Codec::H264, 64, 48).expect("opens");
+            let mut decoder = helper
+                .open_decoder(Codec::H264, 64, 48, true)
+                .expect("opens");
             assert!(matches!(
-                decoder.decode(&[0, 0, 0, 1, 0x65], true),
-                Err(HwTrouble::Lost(_))
+                decoder.decode(KEYFRAME, true),
+                Err(HelperTrouble::Lost(_))
             ));
             assert_eq!(launches.load(Ordering::Relaxed), round);
             // The old decoder is gone with its helper.
             assert!(matches!(
-                decoder.decode(&[0, 0, 0, 1, 0x65], true),
-                Err(HwTrouble::Lost(_))
+                decoder.decode(KEYFRAME, true),
+                Err(HelperTrouble::Lost(_))
             ));
         }
         assert!(helper.given_up());
-        assert!(helper.open_decoder(Codec::H264, 64, 48).is_err());
-        assert!(!helper.decodes(Codec::H264, 64, 48));
+        assert!(helper.open_decoder(Codec::H264, 64, 48, true).is_err());
+        assert!(!helper.encodes(Codec::H264, 64, 48));
         assert_eq!(
             launches.load(Ordering::Relaxed),
             MAX_RESTARTS + 1,
@@ -851,11 +942,13 @@ mod tests {
             other => working(other),
         });
         let (helper, launches) = helper(pretend);
-        let mut decoder = helper.open_decoder(Codec::H264, 64, 48).expect("opens");
+        let mut decoder = helper
+            .open_decoder(Codec::H264, 64, 48, true)
+            .expect("opens");
         let started = std::time::Instant::now();
         assert!(matches!(
-            decoder.decode(&[0, 0, 0, 1, 0x65], true),
-            Err(HwTrouble::Lost(_))
+            decoder.decode(KEYFRAME, true),
+            Err(HelperTrouble::Lost(_))
         ));
         assert!(
             started.elapsed() < Duration::from_secs(3),
@@ -864,20 +957,24 @@ mod tests {
         assert!(!hung.load(Ordering::Relaxed));
         // The next stream gets a new helper, which works.
         let mut decoder = helper
-            .open_decoder(Codec::H264, 64, 48)
+            .open_decoder(Codec::H264, 64, 48, true)
             .expect("opens again");
-        assert!(decoder.decode(&[0, 0, 0, 1, 0x65], true).is_ok());
+        assert!(decoder.decode(KEYFRAME, true).is_ok());
         assert_eq!(launches.load(Ordering::Relaxed), 2);
     }
 
     #[test]
     fn pictures_whose_planes_do_not_match_are_refused() {
-        // A picture frame claiming 4×4 with a 3-byte luma plane.
+        // A picture frame from a 4×4 source claiming 4×4 with a 3-byte
+        // luma plane.
         let mut lying = Vec::new();
-        let body_length = 4 + 1 + 8 + 4 + 3 + 4 + 4 + 4 + 4;
+        let body_length = 4 + 1 + 8 + 1 + 8 + 4 + 3 + 4 + 4 + 4 + 4;
         lying.extend_from_slice(&u32::to_le_bytes(body_length));
         lying.extend_from_slice(&2u32.to_le_bytes());
         lying.push(3);
+        lying.extend_from_slice(&4u32.to_le_bytes());
+        lying.extend_from_slice(&4u32.to_le_bytes());
+        lying.push(0);
         lying.extend_from_slice(&4u32.to_le_bytes());
         lying.extend_from_slice(&4u32.to_le_bytes());
         lying.extend_from_slice(&3u32.to_le_bytes());
@@ -891,26 +988,37 @@ mod tests {
             other => working(other),
         });
         let (lying, _) = helper(pretend);
-        let mut decoder = lying.open_decoder(Codec::H264, 4, 4).expect("opens");
+        let mut decoder = lying.open_decoder(Codec::H264, 4, 4, true).expect("opens");
         assert!(matches!(
-            decoder.decode(&[0, 0, 0, 1, 0x65], true),
-            Err(HwTrouble::Lost(_))
+            decoder.decode(KEYFRAME, true),
+            Err(HelperTrouble::Lost(_))
         ));
-        // A well-formed picture larger than the helper said it decodes.
+        // A well-formed picture larger than the stream it says it came
+        // from.
         let pretend = Pretend::new(|request| match request {
-            Request::Decode { .. } => Act::Reply(picture(2048, 16, 0)),
+            Request::Decode { .. } => {
+                let Reply::Picture(decoded) = picture(64, 48, 0) else {
+                    return Act::Crash;
+                };
+                Act::Reply(Reply::Picture(ipc::Decoded {
+                    source: (32, 24),
+                    ..decoded
+                }))
+            }
             other => working(other),
         });
         let (larger, _) = helper(pretend);
-        let mut decoder = larger.open_decoder(Codec::H264, 64, 48).expect("opens");
+        let mut decoder = larger
+            .open_decoder(Codec::H264, 64, 48, true)
+            .expect("opens");
         assert!(matches!(
-            decoder.decode(&[0, 0, 0, 1, 0x65], true),
-            Err(HwTrouble::Lost(_))
+            decoder.decode(KEYFRAME, true),
+            Err(HelperTrouble::Lost(_))
         ));
     }
 
     #[test]
-    fn a_helper_of_another_version_or_none_at_all_means_software() {
+    fn a_helper_of_another_version_or_none_at_all_is_given_up() {
         let pretend = Pretend::new(|request| match request {
             Request::Hello { .. } => Act::Reply(Reply::Welcome {
                 version: ipc::VERSION + 1,
@@ -920,9 +1028,9 @@ mod tests {
             other => working(other),
         });
         let (helper, launches) = helper(pretend);
-        assert!(!helper.decodes(Codec::H264, 64, 48));
+        assert!(helper.open_decoder(Codec::H264, 64, 48, true).is_err());
         assert!(helper.given_up());
-        assert!(helper.open_decoder(Codec::H264, 64, 48).is_err());
+        assert!(helper.open_decoder(Codec::H264, 64, 48, true).is_err());
         assert_eq!(launches.load(Ordering::Relaxed), 1);
         struct Missing;
         impl Launcher for Missing {
@@ -931,7 +1039,8 @@ mod tests {
             }
         }
         let helper = Helper::new(Arc::new(Missing));
-        assert!(!helper.decodes(Codec::H264, 64, 48));
+        assert!(helper.open_decoder(Codec::H264, 64, 48, true).is_err());
+        assert!(!helper.encodes(Codec::H264, 64, 48));
         assert!(helper.given_up());
     }
 
@@ -944,10 +1053,6 @@ mod tests {
                 kind: FailKind::NeedKeyframe,
                 detail: "joined late".into(),
             }),
-            Request::Decode { data, .. } if data.len() > 5 => Act::Reply(Reply::Failed {
-                kind: FailKind::Unsupported,
-                detail: "B slices".into(),
-            }),
             Request::Decode { .. } => Act::Reply(Reply::Failed {
                 kind: FailKind::Broken,
                 detail: "bad slice".into(),
@@ -955,22 +1060,46 @@ mod tests {
             other => working(other),
         });
         let (helper, launches) = helper(pretend);
-        let mut decoder = helper.open_decoder(Codec::H264, 64, 48).expect("opens");
+        let mut decoder = helper
+            .open_decoder(Codec::H264, 64, 48, true)
+            .expect("opens");
         assert_eq!(
             decoder.decode(&[0, 0, 1, 0x41], false),
-            Err(HwTrouble::NeedKeyframe)
+            Err(HelperTrouble::NeedKeyframe)
         );
         assert!(matches!(
             decoder.decode(&[0, 0, 1, 0x65, 0], true),
-            Err(HwTrouble::Broken(_))
+            Err(HelperTrouble::Broken(_))
         ));
-        assert!(matches!(
-            decoder.decode(&[0, 0, 1, 0x65, 0, 0], true),
-            Err(HwTrouble::Unsupported(_))
-        ));
-        // None of these was the helper's fault: it is still the first.
+        // Neither was the helper's fault: it is still the first.
         assert_eq!(launches.load(Ordering::Relaxed), 1);
         assert!(!helper.given_up());
+    }
+
+    /// Each lane has a helper of its own, and tests get the helper's own
+    /// code on a thread, decoding in software.
+    #[test]
+    fn each_lane_has_its_own_helper() {
+        let share = shared(Lane::Share).expect("in tests, always");
+        let cameras = shared(Lane::Cameras).expect("in tests, always");
+        assert!(Arc::ptr_eq(
+            &share.state,
+            &shared(Lane::Share).expect("again").state
+        ));
+        assert!(!Arc::ptr_eq(&share.state, &cameras.state));
+        let frames =
+            super::super::bitstream::access_units(include_bytes!("fixtures/camera-480x480.h264"));
+        let mut decoder = cameras
+            .open_decoder(Codec::H264, 480, 480, true)
+            .expect("opens");
+        decoder.set_output_size(240, 180).expect("told");
+        let picture = decoder
+            .decode(&frames[0], true)
+            .expect("decodes")
+            .expect("a picture");
+        assert_eq!(picture.source, [480, 480]);
+        assert_eq!((picture.yuv.width, picture.yuv.height), (240, 240));
+        assert!(!picture.gpu, "no GPU in tests: software");
     }
 
     #[test]

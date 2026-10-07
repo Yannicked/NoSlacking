@@ -42,7 +42,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Formatting
         run: cargo fmt --all --check
-      # --workspace: the app, and the hardware video helper and its
+      # --workspace: the app, and the video helper and its
       # protocol under crates/.
       - name: Clippy (default features)
         run: cargo clippy --locked --workspace --all-targets -- -D warnings

@@ -144,8 +144,10 @@ fn main() -> eframe::Result<()> {
             } else {
                 settings::Appearance::Dark
             },
-            // The demo decodes in software, so screenshots don't depend on
-            // a GPU; this tries the GPU path against its share and cameras.
+            // The demo's helper decodes in software, so screenshots don't
+            // depend on a GPU; this tries the GPU against its share and
+            // cameras. Without the helper built beside the app (`cargo
+            // build`), the call window says there is no video.
             hardware_video: std::env::var_os("NOSLACKING_DEMO_HARDWARE_VIDEO").is_some(),
             ..settings::Settings::default()
         }

@@ -60,7 +60,7 @@ pub mod encoder;
 #[cfg(feature = "huddle-video")]
 pub mod gallery;
 #[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
-pub mod hardware;
+pub mod helper;
 pub mod jitter;
 pub mod join;
 pub mod media;

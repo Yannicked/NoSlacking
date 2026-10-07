@@ -2740,6 +2740,12 @@ msgstr "Scherm van {name} tonen"
 msgid "Waiting for the picture…"
 msgstr "Wachten op het beeld…"
 
+msgid "No video"
+msgstr "Geen video"
+
+msgid "NoSlacking's video helper is missing or keeps failing."
+msgstr "De videohulp van NoSlacking ontbreekt of loopt steeds vast."
+
 msgid "Your camera is off. Start video ({shortcut})"
 msgstr "Je camera staat uit. Start video ({shortcut})"
 

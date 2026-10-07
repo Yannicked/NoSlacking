@@ -14,6 +14,12 @@ cargo run                 # the real app
 cargo run --features demo # a pretend Slack, offline
 ```
 
+Huddle video (the `huddle-video` feature) is decoded only by the video
+helper, `noslacking-video` (crates/noslacking-video), which the app
+looks for beside its own binary. `cargo build` builds both; `cargo run`
+builds the app alone, so run `cargo build` (with the same features)
+first, or the call window says there is no video.
+
 Sound plays through ALSA on Linux (`libasound2-dev`, or
 `alsa-lib-devel`). Huddles' DTLS is OpenSSL's: Linux links the system's
 (`libssl-dev`, or `openssl-devel`), and macOS and Windows build it from
@@ -79,8 +85,9 @@ cargo build --release -p noslacking -p noslacking-video
 packaging/macos/bundle.sh target/release/noslacking 0.1.0 dist target/release/noslacking-video
 ```
 
-The last argument, the hardware video helper (crates/noslacking-video),
-is optional; without it the app decodes huddle video in software. Every
+The last argument, required, is the video helper (crates/noslacking-video), which
+decodes all huddle video (on the GPU when it can) and encodes the camera
+on the GPU; without it a build with huddle video shows none. Every
 package puts the helper beside the app's binary, where the app looks
 for it.
 

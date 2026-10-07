@@ -5,19 +5,21 @@
 //! The media session hands each frame of a camera with a tile to
 //! [`CameraDecoding`], one thread for every camera (a 480×480 camera
 //! decodes in well under a millisecond, so nine of them at 22 frames a
-//! second are about a tenth of one core), with a decoder per camera. Each
-//! picture is shrunk to the tile's size before it becomes RGBA, and the
-//! newest per camera waits in the [`Gallery`] for the window to take: an
-//! older one still waiting is dropped, never queued. The window is woken
-//! only when it had taken everything, so at most once a frame however
-//! many cameras play.
+//! second are about a tenth of one core), with a decoder per camera in
+//! the video helper (its own process, `helper::Lane::Cameras`, beside the
+//! share's). Each picture comes back shrunk to the tile's size and
+//! becomes RGBA here, and the newest per camera waits in the [`Gallery`]
+//! for the window to take: an older one still waiting is dropped, never
+//! queued. The window is woken only when it had taken everything, so at
+//! most once a frame however many cameras play.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use super::decode::{self, H264, Trouble};
+use super::helper::Lane;
 use super::screen::Picture;
 
 /// Frames of one camera waiting for the decoder at most: about a second.
@@ -42,6 +44,8 @@ struct Shared {
     /// The cameras whose decoder wants a keyframe: set by it, taken by
     /// the session.
     keyframes: Mutex<BTreeSet<String>>,
+    /// There is no video helper to decode with.
+    no_video: AtomicBool,
     /// Pictures put since the start, for tests and the demo.
     pictures: AtomicUsize,
     /// The demo's tint per camera, so one fixture looks like several
@@ -82,6 +86,7 @@ impl Gallery {
                 newest: Mutex::new(BTreeMap::new()),
                 fit: AtomicU64::new(0),
                 keyframes: Mutex::new(BTreeSet::new()),
+                no_video: AtomicBool::new(false),
                 pictures: AtomicUsize::new(0),
                 #[cfg(feature = "demo")]
                 tints: Mutex::new(BTreeMap::new()),
@@ -133,6 +138,17 @@ impl Gallery {
         let fit = self.shared.fit.load(Ordering::Relaxed);
         let unpack = |n: u64| usize::try_from(n & 0xffff_ffff).unwrap_or(0);
         (unpack(fit >> 32), unpack(fit))
+    }
+
+    /// Says whether there is a video helper to decode with.
+    pub fn set_no_video(&self, no_video: bool) {
+        self.shared.no_video.store(no_video, Ordering::Relaxed);
+    }
+
+    /// Whether the cameras cannot be shown: the video helper is missing
+    /// or failed too often. The tiles show faces instead.
+    pub fn no_video(&self) -> bool {
+        self.shared.no_video.load(Ordering::Relaxed)
     }
 
     /// `key`'s decoder needs a keyframe to go on.
@@ -333,7 +349,8 @@ impl Timings {
             let seconds = now.duration_since(since).as_secs_f64();
             log::info!(
                 "video: {cameras} cameras: {} pictures in {seconds:.0} s, shown at {}x{}: {:.2} ms \
-                 a picture decoding and converting, {:.1} % of a core; {} frames did not decode",
+                 a picture through the helper and converting, busy {:.1} % of the time; {} frames \
+                 did not decode",
                 self.pictures,
                 self.shown[0],
                 self.shown[1],
@@ -365,18 +382,14 @@ fn decode_one(
     let (width, height) = gallery.fit();
     decoder.set_fit(width, height);
     match decoder.decode(unit) {
-        Ok(Some(yuv)) => {
-            let source = [yuv.width, yuv.height];
-            let by = decode::reduction((yuv.width, yuv.height), gallery.fit());
+        Ok(Some(picture)) => {
+            gallery.set_no_video(false);
+            let source = picture.source;
+            #[cfg_attr(not(feature = "demo"), allow(unused_mut))]
+            let mut yuv = picture.yuv;
             #[cfg(feature = "demo")]
-            let shrunk = {
-                let mut shrunk = decode::shrink(&yuv, by).into_owned();
-                gallery.tinted(key, &mut shrunk);
-                shrunk
-            };
-            #[cfg(not(feature = "demo"))]
-            let shrunk = decode::shrink(&yuv, by);
-            match decode::to_image(&shrunk) {
+            gallery.tinted(key, &mut yuv);
+            match decode::to_image(&yuv) {
                 Ok(image) => {
                     timings.pictures += 1;
                     timings.shown = image.size;
@@ -397,6 +410,7 @@ fn decode_one(
         }
         Ok(None) => {}
         Err(Trouble::NeedKeyframe) => gallery.want_keyframe(key),
+        Err(Trouble::NoHelper) => gallery.set_no_video(true),
         Err(error) => {
             timings.errors += 1;
             log::debug!("video: camera: {error}");
@@ -415,7 +429,9 @@ fn run(jobs: &Jobs, gallery: &Gallery) {
                 gallery.clear(&key);
                 // A keyframe to start on, asked for by the session too.
                 gallery.want_keyframe(&key);
-                decoders.insert(key, H264::new());
+                let fresh = H264::new(Lane::Cameras);
+                gallery.set_no_video(fresh.no_helper());
+                decoders.insert(key, fresh);
             }
             Job::Stop(key) => {
                 decoders.remove(&key);
@@ -516,6 +532,9 @@ mod tests {
         gallery.want_keyframe("ana");
         assert!(!gallery.take_keyframe_wish("bob"));
         assert!(gallery.take_keyframe_wish("ana") && !gallery.take_keyframe_wish("ana"));
+        assert!(!gallery.no_video());
+        gallery.set_no_video(true);
+        assert!(gallery.clone().no_video(), "shared with its clones");
         assert_eq!(gallery.clone(), gallery);
         assert_ne!(Gallery::new(|| {}), gallery);
     }

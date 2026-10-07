@@ -32,7 +32,7 @@ use rusty_h264_common::YuvPlanes;
 use rusty_h264_encoder::{Encoder as Rusty, EncoderConfig, Preset};
 
 use super::camera::I420;
-use super::hardware::{Helper, HwEncoder};
+use super::helper::{Helper, HwEncoder};
 
 /// A keyframe at least this often, in seconds: what a receiver that
 /// missed the last one waits at most, if its PLI is lost too.
@@ -766,7 +766,7 @@ mod tests {
 mod gpu_tests {
     use super::*;
     use crate::huddle_audio::camera::pattern;
-    use crate::huddle_audio::hardware::pretend::{Act, Pretend, welcome};
+    use crate::huddle_audio::helper::pretend::{Act, Pretend, welcome};
     use noslacking_video_ipc::{
         self as ipc, Capability, Codec, Direction, FailKind, Reply, Request,
     };

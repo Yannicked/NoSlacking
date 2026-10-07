@@ -56,7 +56,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake desktop-file-utils appstream dpkg-dev
-      # The app and its hardware video helper (crates/noslacking-video).
+      # The app and its video helper (crates/noslacking-video), which
+      # decodes all huddle video.
       - name: Build
         run: cargo build --locked --release -p noslacking -p noslacking-video
       - name: Package

@@ -39,7 +39,7 @@ modules:
     buildsystem: simple
     build-commands:
       - cargo --offline fetch --manifest-path Cargo.toml --verbose
-      # The app and its hardware video helper. The runtime has libva and
+      # The app and its video helper. The runtime has libva and
       # its GL extension Mesa's VA-API drivers; --device=dri lets the
       # helper reach the GPU.
       - cargo --offline build --release --locked -p noslacking -p noslacking-video

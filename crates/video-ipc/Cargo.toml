@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.98"
 license = "MIT"
 publish = false
-description = "The messages between NoSlacking and its hardware video helper"
+description = "The messages between NoSlacking and its video helper"
 repository = "https://github.com/Yannicked/NoSlacking"
 
 # Plain std: both sides of the pipe link it, and neither should pull in
