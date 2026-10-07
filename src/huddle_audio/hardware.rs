@@ -42,9 +42,9 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(1);
 /// The helper's name, beside this program or on `PATH`.
 const HELPER: &str = "noslacking-video";
 
-/// Settings → Huddles → Hardware video decoding; off unless turned on
-/// (on this machine it did not yet beat software: research doc §6).
-/// Tests turn it on for themselves.
+/// Settings → Huddles → Hardware video decoding, set from the settings at
+/// start-up (on by default there). Off until then, so tests that want it
+/// turn it on for themselves.
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Turns hardware decoding on or off for streams that start from now on.

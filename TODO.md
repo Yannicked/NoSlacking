@@ -1115,7 +1115,7 @@ engineering, as for the rest of the session sign-in.
           after a 1 s timeout, restarts it at most 3 times, and decodes
           in software for anything it cannot do, asking for a keyframe
           when it switches. Settings → Huddles → "Decode video on the
-          graphics card", off by default (see below). Linux back end: VA-API, libva
+          graphics card", on by default since 2026-10-07. Linux back end: VA-API, libva
           opened at run time (no build dependency), our own H.264
           stateless state over cros-codecs' parser; bit-exact on both
           fixtures. Ships in the tar.gz, .deb (recommends libva2 and a
@@ -1131,8 +1131,10 @@ engineering, as for the rest of the session sign-in.
           full size software still wins (1.8 against 2.5). Off by
           default for now (decided with the user); the numbers say to
           turn it on.
-        - [ ] Turn GPU decoding on by default, after a look on a weaker
-              laptop and an Intel GPU.
+        - [x] Turn GPU decoding on by default (2026-10-07, the user's
+              call on the §6.3 numbers; software takes over on any
+              failure).
+        - [ ] Look at it on a weaker laptop and an Intel GPU.
         - [ ] Pipeline the helper's requests (or a helper per decoding
               thread): the share's and the cameras' threads wait for
               each other's replies (in the demo a camera picture took

@@ -143,8 +143,8 @@ fn main() -> eframe::Result<()> {
             } else {
                 settings::Appearance::Dark
             },
-            // To try the GPU path against the demo's share and cameras
-            // (the setting is off by default).
+            // The demo decodes in software, so screenshots don't depend on
+            // a GPU; this tries the GPU path against its share and cameras.
             hardware_video: std::env::var_os("NOSLACKING_DEMO_HARDWARE_VIDEO").is_some(),
             ..settings::Settings::default()
         }

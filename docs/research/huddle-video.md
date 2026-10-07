@@ -898,8 +898,9 @@ and nowhere in the app.
   interlace, a profile the driver lacks) and a GPU failure on a keyframe
   keep that stream in software without counting against the helper.
 - **Setting.** Settings → Huddles → "Decode video on the graphics card"
-  (`hardware_video`), for streams that start afterwards; off by default
-  until the measurements say otherwise (§6.3).
+  (`hardware_video`), for streams that start afterwards; on by default
+  since 2026-10-07, on the §6.3 numbers (off before GPU scaling, when
+  it did not yet beat software).
 
 ### 6.2 Moving pictures: the pipe, carrying only what is shown
 
