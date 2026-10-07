@@ -129,6 +129,10 @@ pub struct Settings {
     /// Direct messages closed in the sidebar, by workspace: each one's
     /// newest message when it was closed. Anything newer brings it back.
     pub closed: BTreeMap<String, BTreeMap<String, String>>,
+    /// Whether huddle video is decoded on the GPU when it can be (through
+    /// the `noslacking-video` helper); on by default, and software
+    /// decodes whenever the GPU cannot.
+    pub hardware_video: bool,
     /// Whether your Slack app is known to be made from an older manifest,
     /// which Slack would not authorize with the newer scopes: sign-ins
     /// then ask for the older set only (see [`crate::scopes::Request`]).
@@ -163,6 +167,7 @@ impl Default for Settings {
             proxy: crate::slack::net::ProxySettings::default(),
             spelling: crate::spell::SpellSettings::default(),
             closed: BTreeMap::new(),
+            hardware_video: true,
             older_app: false,
         }
     }
@@ -264,6 +269,7 @@ impl Settings {
             proxy,
             spelling,
             closed,
+            hardware_video,
             older_app,
         );
         // One damaged workspace must not sign you out of the others, so
@@ -672,6 +678,17 @@ mod tests {
         let old: Settings = serde_json::from_str("{}").expect("parses");
         assert_eq!(old.density, Density::Comfortable);
         assert!(old.inline_media);
+    }
+
+    #[test]
+    fn hardware_video_is_on_until_turned_off() {
+        let old: Settings = serde_json::from_str("{}").expect("parses");
+        assert!(old.hardware_video, "older files: on");
+        let off: Settings = serde_json::from_str(r#"{"hardware_video":false}"#).expect("parses");
+        assert!(!off.hardware_video);
+        let again: Settings =
+            serde_json::from_slice(&off.encode().expect("encodes")).expect("parses");
+        assert!(!again.hardware_video);
     }
 
     #[test]

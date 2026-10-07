@@ -3517,6 +3517,7 @@ dependencies = [
  "log",
  "md-5",
  "nokhwa",
+ "noslacking-video-ipc",
  "notify-rust",
  "open",
  "openssl",

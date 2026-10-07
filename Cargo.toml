@@ -152,6 +152,10 @@ sonora-simd = "0.2.0"
 # unsafe in our crate. See docs/research/huddle-video.md.
 rusty_h264-decoder = { version = "0.16", default-features = false, features = ["std", "asm"], optional = true }
 yuv = { version = "0.8.19", optional = true }
+# Decoding on the GPU, in the noslacking-video helper process
+# (crates/noslacking-video, which ships beside the app): the messages
+# the two exchange. Plain std; the helper itself is not a dependency.
+noslacking-video-ipc = { path = "crates/video-ipc", optional = true }
 # Writes the RGBA straight into egui's pixels (already in the tree
 # through egui; no crate added).
 bytemuck = { version = "1.25", optional = true }
@@ -277,7 +281,7 @@ demo = []
 # Watching screen shares in huddles: a call window with the share,
 # decoded on a thread of its own. Off until it has been tried against
 # Slack.
-huddle-video = ["dep:rusty_h264-decoder", "dep:yuv", "dep:bytemuck"]
+huddle-video = ["dep:rusty_h264-decoder", "dep:yuv", "dep:bytemuck", "dep:noslacking-video-ipc"]
 # Sending your camera in huddles: the camera, opened only while it is
 # on, encoded to H.264 on a thread of its own, with a self-preview in the
 # call bar. Independent of `huddle-video` (sending needs no decoder). Off

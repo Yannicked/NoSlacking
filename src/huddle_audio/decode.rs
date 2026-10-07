@@ -9,12 +9,19 @@
 //! after, even the next keyframe. So [`H264`] starts it afresh on each
 //! keyframe after a loss or an error, and until that keyframe comes it
 //! decodes nothing and says a keyframe is wanted.
+//!
+//! Each new start (a keyframe after waiting) first tries the GPU through
+//! the helper process ([`super::hardware`]) when the helper is there,
+//! hardware decoding is on and the helper decodes the stream's size.
+//! When the helper fails, the stream goes on in software at once if the
+//! frame in hand is a keyframe, and else asks for one.
 
 use std::borrow::Cow;
 
 use egui::{Color32, ColorImage};
 
 use super::bitstream;
+use super::hardware::{self, Helper, HwDecoder, HwTrouble};
 
 /// Why a frame gave no picture.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -71,12 +78,20 @@ pub struct H264 {
     decoder: rusty_h264_decoder::Decoder,
     /// Until a keyframe comes: at the start, after a loss or an error.
     waiting: bool,
+    /// The helper to try the GPU through; none for software only.
+    helper: Option<Helper>,
+    /// This stream's decoder in the helper, while it decodes there.
+    hardware: Option<HwDecoder>,
+    /// The GPU cannot decode this stream (it said so, or failed on a
+    /// keyframe): software from here on.
+    software_only: bool,
 }
 
 impl std::fmt::Debug for H264 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("H264")
             .field("waiting", &self.waiting)
+            .field("hardware", &self.hardware.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -88,11 +103,54 @@ impl Default for H264 {
 }
 
 impl H264 {
-    /// A decoder waiting for its first keyframe.
+    /// A decoder waiting for its first keyframe, which uses the GPU
+    /// when it can (Settings → Huddles).
     pub fn new() -> Self {
+        let helper = if hardware::enabled() {
+            hardware::shared()
+        } else {
+            None
+        };
+        Self::with_helper(helper)
+    }
+
+    /// A decoder that tries the GPU through `helper`, or only software
+    /// with none.
+    pub fn with_helper(helper: Option<Helper>) -> Self {
         Self {
             decoder: rusty_h264_decoder::Decoder::new(),
             waiting: true,
+            helper,
+            hardware: None,
+            software_only: false,
+        }
+    }
+
+    /// Whether the stream decodes on the GPU at the moment.
+    pub fn on_hardware(&self) -> bool {
+        self.hardware.is_some()
+    }
+
+    /// A decoder in the helper for the stream starting at keyframe
+    /// `unit`, if the helper decodes it.
+    fn open_hardware(&mut self, unit: &[u8]) -> Option<HwDecoder> {
+        if self.software_only || !hardware::enabled() {
+            return None;
+        }
+        let helper = self.helper.as_ref()?;
+        let sps = bitstream::sps_of_frame(unit)?;
+        if !helper.decodes(noslacking_video_ipc::Codec::H264, sps.width, sps.height) {
+            return None;
+        }
+        match helper.open_decoder(noslacking_video_ipc::Codec::H264, sps.width, sps.height) {
+            Ok(decoder) => {
+                log::debug!("video: {}x{} decodes on the GPU", sps.width, sps.height);
+                Some(decoder)
+            }
+            Err(lost) => {
+                log::debug!("video: no GPU decoder ({lost}): software");
+                None
+            }
         }
     }
 
@@ -110,14 +168,60 @@ impl H264 {
     /// Decodes one frame: a picture, or none for a frame that carries
     /// only parameter sets.
     pub fn decode(&mut self, unit: &[u8]) -> Result<Option<Yuv>, Trouble> {
+        let keyframe = is_keyframe(unit);
         if self.waiting {
-            if !is_keyframe(unit) {
+            if !keyframe {
                 return Err(Trouble::NeedKeyframe);
             }
             // A decoder that failed once fails on: a new one for the new
-            // start.
-            self.decoder = rusty_h264_decoder::Decoder::new();
+            // start, on the GPU if it can.
+            self.hardware = None;
+            self.hardware = self.open_hardware(unit);
+            if self.hardware.is_none() {
+                self.decoder = rusty_h264_decoder::Decoder::new();
+            }
             self.waiting = false;
+        }
+        if let Some(hardware) = &mut self.hardware {
+            let trouble = match hardware.decode(unit, keyframe) {
+                Ok(Some(yuv)) if yuv.whole() => return Ok(Some(yuv)),
+                Ok(Some(yuv)) => {
+                    HwTrouble::Lost(format!("planes do not match {}x{}", yuv.width, yuv.height))
+                }
+                Ok(None) => return Ok(None),
+                Err(trouble) => trouble,
+            };
+            let unsupported = matches!(trouble, HwTrouble::Unsupported(_));
+            match trouble {
+                HwTrouble::NeedKeyframe => {
+                    self.waiting = true;
+                    return Err(Trouble::NeedKeyframe);
+                }
+                HwTrouble::Broken(why) => {
+                    self.waiting = true;
+                    if keyframe {
+                        // The GPU fails where a decoder should start:
+                        // software decodes this stream from here on.
+                        log::info!("video: the GPU failed on a keyframe ({why}): software");
+                        self.software_only = true;
+                    }
+                    return Err(Trouble::Broken(why));
+                }
+                HwTrouble::Unsupported(why) | HwTrouble::Lost(why) => {
+                    if unsupported {
+                        self.software_only = true;
+                    }
+                    log::info!("video: the GPU decoder is gone ({why}): software");
+                    self.hardware = None;
+                    self.decoder = rusty_h264_decoder::Decoder::new();
+                    if !keyframe {
+                        // Software needs a keyframe to start on.
+                        self.waiting = true;
+                        return Err(Trouble::NeedKeyframe);
+                    }
+                    // A keyframe in hand: software takes over with it.
+                }
+            }
         }
         match self.decoder.decode(unit) {
             Ok(Some(frame)) => {
@@ -385,6 +489,102 @@ mod tests {
         let mut decoder = H264::new();
         let _ = decoder.decode(&[0, 0, 0, 1, 0x65, 0xff, 0xff]);
         assert!(decoder.decode(&frames[0]).expect("recovers").is_some());
+    }
+
+    /// A pretend helper: decodes to grey pictures, but its `n`th decode
+    /// (counted over every launch) does `then`.
+    fn pretend_helper(
+        failing: impl Fn(usize) -> Option<super::super::hardware::pretend::Act> + Send + Sync + 'static,
+    ) -> (Helper, std::sync::Arc<std::sync::atomic::AtomicU32>) {
+        use super::super::hardware::pretend::{Act, Pretend, picture, welcome};
+        use noslacking_video_ipc::{Reply, Request};
+        let decodes = std::sync::atomic::AtomicUsize::new(0);
+        let pretend = Pretend::new(move |request| match request {
+            Request::Hello { .. } => Act::Reply(welcome()),
+            Request::OpenDecoder { .. } => Act::Reply(Reply::Opened { id: 1 }),
+            Request::Decode { .. } => {
+                let n = decodes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                failing(n).unwrap_or_else(|| Act::Reply(picture(480, 480, 200)))
+            }
+            _ => Act::Reply(Reply::Done),
+        });
+        let launches = std::sync::Arc::clone(&pretend.launches);
+        let helper = Helper::with_timeouts(
+            std::sync::Arc::new(pretend),
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(500),
+        );
+        (helper, launches)
+    }
+
+    #[test]
+    fn the_gpu_decodes_when_the_helper_can_and_a_crash_on_a_keyframe_goes_on_in_software() {
+        use super::super::hardware::pretend::Act;
+        let frames = frames(CAMERA);
+        // The helper's third decode crashes it; the restarted helper's
+        // first (the 44th frame, a keyframe) does too.
+        let (helper, launches) = pretend_helper(|n| matches!(n, 2 | 3).then_some(Act::Crash));
+        let mut decoder = H264::with_helper(Some(helper));
+        let first = decoder
+            .decode(&frames[0])
+            .expect("decodes")
+            .expect("a picture");
+        assert!(decoder.on_hardware());
+        assert_eq!(first.y[0], 200, "the helper's picture");
+        assert!(decoder.decode(&frames[1]).expect("decodes").is_some());
+        // Lost mid-stream: a keyframe is asked for (a PLI goes out).
+        assert_eq!(decoder.decode(&frames[2]), Err(Trouble::NeedKeyframe));
+        assert!(!decoder.on_hardware());
+        assert_eq!(decoder.decode(&frames[3]), Err(Trouble::NeedKeyframe));
+        // The keyframe: the helper starts again, crashes on it, and
+        // software decodes it at once.
+        let picture = decoder
+            .decode(&frames[44])
+            .expect("decodes")
+            .expect("a picture");
+        assert_eq!(launches.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert!(!decoder.on_hardware());
+        assert_ne!(
+            picture.y[0..16],
+            [200; 16],
+            "the real picture, from software"
+        );
+        assert!(
+            decoder
+                .decode(&frames[45])
+                .expect("software goes on")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_stream_the_gpu_cannot_decode_stays_in_software() {
+        use super::super::hardware::pretend::Act;
+        use noslacking_video_ipc::{FailKind, Reply};
+        let (helper, launches) = pretend_helper(|_| {
+            Some(Act::Reply(Reply::Failed {
+                kind: FailKind::Unsupported,
+                detail: "B slices".into(),
+            }))
+        });
+        let frames = frames(CAMERA);
+        let mut decoder = H264::with_helper(Some(helper));
+        assert!(decoder.decode(&frames[0]).expect("software").is_some());
+        assert!(!decoder.on_hardware());
+        decoder.lost();
+        assert!(decoder.decode(&frames[44]).expect("software").is_some());
+        assert!(!decoder.on_hardware(), "not tried again for this stream");
+        assert_eq!(launches.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn without_a_helper_or_with_hardware_off_it_is_software() {
+        let frames = frames(CAMERA);
+        let mut decoder = H264::with_helper(None);
+        assert!(decoder.decode(&frames[0]).expect("decodes").is_some());
+        assert!(!decoder.on_hardware());
+        // H264::new() in tests never finds the real helper.
+        assert!(!H264::new().on_hardware());
     }
 
     #[test]

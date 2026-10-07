@@ -488,6 +488,27 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     spelling::show(app, ui, palette);
     network::show(app, ui, palette);
 
+    #[cfg(feature = "huddle-video")]
+    group(ui, palette, &t("Huddles"), |ui| {
+        let mut hardware = app.settings.hardware_video;
+        row(
+            ui,
+            palette,
+            &t("Decode video on the graphics card"),
+            &t("When it can. Off: shared screens and cameras are always decoded by the processor."),
+            |ui, name| {
+                ui.checkbox(&mut hardware, "").labelled_by(name);
+            },
+        );
+        if hardware != app.settings.hardware_video {
+            app.settings.hardware_video = hardware;
+            // Streams that start from now on; one playing keeps its
+            // decoder until its next keyframe after a loss.
+            crate::huddle_audio::hardware::set_enabled(hardware);
+            app.settings_changed();
+        }
+    });
+
     group(ui, palette, &t("Files"), |ui| {
         let folders = [
             (t("Settings and themes"), app.dirs.config.clone()),
