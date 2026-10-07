@@ -127,7 +127,10 @@ impl Hub {
             | Command::CheckHuddle { .. } => {
                 log::debug!("{command:?} needs the workspace's client");
             }
-            Command::ListenHuddle { .. } | Command::LeaveHuddle | Command::MuteHuddle { .. } => {
+            Command::ListenHuddle { .. }
+            | Command::Call { .. }
+            | Command::LeaveHuddle
+            | Command::MuteHuddle { .. } => {
                 log::debug!("{command:?} is the worker's");
             }
             #[cfg(feature = "huddle-video")]
@@ -555,6 +558,8 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
                 })
                 .collect()
         }
+        // The demo is a Slack workspace, which offers huddles, not calls.
+        Command::Call { .. } => Vec::new(),
         // Left at once; the demo has one huddle to leave, in #design.
         Command::LeaveHuddle => vec![Event::People {
             team: team.to_owned(),

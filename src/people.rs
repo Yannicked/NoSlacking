@@ -239,7 +239,11 @@ pub enum Command {
     /// Joins the huddle in `channel` and plays it, muted, leaving any
     /// other first (see [`crate::huddle_audio`]).
     ListenHuddle { channel: String },
-    /// Leaves the huddle being listened to.
+    /// Calls `user` from the one-to-one chat `channel`, ending any call
+    /// or huddle first (Microsoft Teams; see [`crate::teams::calling`]).
+    /// Mute and hang up as in a huddle: `MuteHuddle`, `LeaveHuddle`.
+    Call { channel: String, user: String },
+    /// Leaves the huddle being listened to, or hangs up the call.
     LeaveHuddle,
     /// Mutes (closing the microphone) or unmutes (opening it) in the
     /// huddle being listened to.

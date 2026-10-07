@@ -125,8 +125,12 @@ fn gather(
     Some(Bar {
         team: listening.team.clone(),
         channel: listening.channel.clone(),
-        title: huddles::title_text(place, listening.mic == crate::huddle_mic::Mic::Live),
-        status: huddles::status_text(&listening.phase, now),
+        title: if listening.is_call() {
+            huddles::call_title_text(&name, &listening.phase)
+        } else {
+            huddles::title_text(place, listening.mic == crate::huddle_mic::Mic::Live)
+        },
+        status: huddles::status_text(&listening.phase, listening.is_call(), now),
         workspace: (workspaces.len() > 1).then(|| workspace.info.name.clone()),
         faces,
         #[cfg(feature = "huddle-video")]
@@ -236,9 +240,14 @@ fn bar(
                             actions.push(Action::Huddle(huddles::Action::Leave));
                         }
                         if small_button(ui, palette, &t("Try again"), None).clicked() {
-                            actions.push(Action::Huddle(huddles::Action::Listen {
-                                team: bar.team.clone(),
-                                channel: bar.channel.clone(),
+                            let (team, channel) = (bar.team.clone(), bar.channel.clone());
+                            actions.push(Action::Huddle(match listening.callee.clone() {
+                                Some(user) => huddles::Action::Call {
+                                    team,
+                                    channel,
+                                    user,
+                                },
+                                None => huddles::Action::Listen { team, channel },
                             }));
                         }
                     } else {
@@ -395,7 +404,7 @@ fn status_row(ui: &mut egui::Ui, palette: &Palette, bar: &Bar, phase: &Phase, ti
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         match phase {
-            Phase::Joining => {
+            Phase::Joining | Phase::Ringing => {
                 ui.add(egui::Spinner::new().size(10.0).color(palette.secondary));
             }
             Phase::Live { .. } => {

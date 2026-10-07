@@ -20,6 +20,8 @@ mod search;
 #[cfg(feature = "teams")]
 pub mod teams;
 #[cfg(feature = "teams")]
+pub mod teams_call;
+#[cfg(feature = "teams")]
 pub mod teams_translate;
 mod translate;
 pub mod views;

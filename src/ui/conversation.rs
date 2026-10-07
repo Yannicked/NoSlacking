@@ -229,6 +229,20 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                             actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Members));
                         }
                     }
+                    if offers(Ability::Calls)
+                        && conversation.kind == ConversationKind::Direct
+                        && let Some(user) = &conversation.user
+                    {
+                        super::people::call_button(
+                            ui,
+                            &palette,
+                            workspace,
+                            &conversation.id,
+                            user,
+                            huddles.listening.as_ref(),
+                            actions,
+                        );
+                    }
                     if !offers(Ability::Huddles) {
                         return;
                     }

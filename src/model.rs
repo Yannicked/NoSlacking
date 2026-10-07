@@ -163,15 +163,15 @@ impl Service {
     }
 
     /// Whether workspaces of this service can do `ability` here. Slack
-    /// does everything; Teams reads, sends, edits, deletes, reacts and
+    /// does everything but calls, which are its huddles; Teams reads, sends, edits, deletes, reacts and
     /// marks read so far, so the interface leaves the rest out rather than
     /// offer what would only fail.
     pub fn offers(self, ability: Ability) -> bool {
         match self {
-            Self::Slack => true,
+            Self::Slack => ability != Ability::Calls,
             Self::Teams => match ability {
                 // Seen in recordings of the Teams web client and built.
-                Ability::Reactions | Ability::Edit | Ability::NewMessage => true,
+                Ability::Reactions | Ability::Edit | Ability::NewMessage | Ability::Calls => true,
                 Ability::Huddles
                 | Ability::CustomEmoji
                 | Ability::Threads
@@ -206,6 +206,8 @@ impl Service {
 pub enum Ability {
     /// Starting, joining and listening to huddles.
     Huddles,
+    /// Calling someone from a one-to-one chat (Teams; Slack has huddles).
+    Calls,
     /// Adding custom emoji.
     CustomEmoji,
     /// Adding and removing reactions.

@@ -186,7 +186,7 @@ pub fn check_due(last: Option<&Check>, now: Instant) -> Instant {
 mod listen;
 pub use listen::{
     ALONE_FOR, FAILED_FOR, Left, Listen, Listening, Person, Phase, Place, Roster, alone_since,
-    clock, faces, leave_alone, quit, status_text, title_text,
+    call_title_text, clock, faces, leave_alone, quit, status_text, title_text,
 };
 #[cfg(feature = "huddle-video")]
 pub use listen::{
@@ -296,7 +296,14 @@ pub enum Action {
     /// Answers an invitation by listening here: opens the huddle's
     /// conversation, where its Leave button is, and listens.
     ListenInvite { team: String, room: String },
-    /// Leaves the huddle being listened to.
+    /// Calls `user` from the one-to-one chat `channel` (Microsoft Teams),
+    /// ending any other call or huddle.
+    Call {
+        team: String,
+        channel: String,
+        user: String,
+    },
+    /// Leaves the huddle being listened to, or hangs up the call.
     Leave,
     /// Mutes or unmutes the microphone in the huddle being listened to.
     Microphone(crate::huddle_mic::MicAction),
@@ -353,6 +360,11 @@ pub fn apply(app: &mut App, action: Action) {
             }
         }
         Action::Listen { team, channel } => listen::listen(app, team, channel),
+        Action::Call {
+            team,
+            channel,
+            user,
+        } => listen::call(app, team, channel, user),
         Action::Microphone(action) => crate::huddle_mic::apply(app, action),
         Action::Leave => listen::leave(app),
         #[cfg(feature = "huddle-video")]
@@ -371,6 +383,13 @@ fn is_session(app: &App, team: &str) -> bool {
             && w.signed_out.is_none()
             && w.info.sign_in == crate::model::SignInKind::Session
     })
+}
+
+/// Whether `team` is signed in here, as a call needs.
+fn is_signed_in(app: &App, team: &str) -> bool {
+    app.workspaces
+        .iter()
+        .any(|w| w.info.team_id == team && w.signed_out.is_none())
 }
 
 /// Asks Slack who is in `huddle`, shown in `channel`, at `now`.

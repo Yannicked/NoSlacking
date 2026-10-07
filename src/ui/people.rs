@@ -415,6 +415,34 @@ pub fn listen_button(
     }
 }
 
+/// A phone in a one-to-one chat's header: calls `user`, or hangs up
+/// while in a call here.
+pub fn call_button(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    workspace: &crate::app::WorkspaceState,
+    channel: &str,
+    user: &str,
+    listening: Option<&crate::huddles::Listening>,
+    actions: &mut Vec<Action>,
+) {
+    let team = &workspace.info.team_id;
+    if listening.is_some_and(|l| l.is_call() && l.is(team, channel)) {
+        if theme::icon_button(ui, palette, theme::Icon::PhoneOff, 15.0, &t("Hang up")).clicked() {
+            actions.push(Action::Huddle(crate::huddles::Action::Leave));
+        }
+        return;
+    }
+    let tip = crate::i18n::tf("Call {name}", &[("name", &workspace.user_label(user))]);
+    if theme::icon_button(ui, palette, theme::Icon::Phone, 15.0, &tip).clicked() {
+        actions.push(Action::Huddle(crate::huddles::Action::Call {
+            team: team.clone(),
+            channel: channel.to_owned(),
+            user: user.to_owned(),
+        }));
+    }
+}
+
 /// A headphones menu in a conversation's header while no huddle goes on
 /// there: start one here (in a browser sign-in's workspace, joining
 /// muted), or else in Slack. A menu rather than one click, so a huddle

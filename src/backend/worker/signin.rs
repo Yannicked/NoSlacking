@@ -335,6 +335,8 @@ impl Worker {
 
     pub(super) fn sign_out(&mut self, team: &str) {
         self.huddle_audio.signed_out(team);
+        #[cfg(feature = "teams")]
+        self.teams_call.signed_out(team);
         self.stop_rtm(team);
         self.people.forget(team);
         let removed = self.workspaces.remove(team);

@@ -181,7 +181,7 @@ fn join_failure(error: &JoinFailure) -> Failure {
 /// Opens and closes the microphone as `wanted` says, until `done`,
 /// telling the session through `effective` and the interface through
 /// `tell`; closes it at the end whatever happened.
-async fn microphone(
+pub(super) async fn microphone(
     mut wanted: watch::Receiver<bool>,
     effective: watch::Sender<bool>,
     wiring: Wiring,

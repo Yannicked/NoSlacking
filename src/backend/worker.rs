@@ -340,6 +340,9 @@ pub struct Worker {
     people: super::people::Hub,
     /// The huddle being listened to.
     huddle_audio: super::listen::Listener,
+    /// The Teams call going on.
+    #[cfg(feature = "teams")]
+    teams_call: super::teams_call::Caller,
 }
 
 impl Worker {
@@ -371,6 +374,8 @@ impl Worker {
             uploads: HashMap::new(),
             people: super::people::Hub::default(),
             huddle_audio: super::listen::Listener::default(),
+            #[cfg(feature = "teams")]
+            teams_call: super::teams_call::Caller::default(),
         }
     }
 
@@ -1991,9 +1996,18 @@ impl Worker {
         // A Teams workspace has presence to watch; the rest (status,
         // huddles, typing over RTM) is Slack's.
         #[cfg(feature = "teams")]
-        if self.teams_session(&team).is_some() {
-            if let crate::people::Command::Watch { .. } = command {
-                self.people.command(&team, command);
+        if let Some(session) = self.teams_session(&team) {
+            match command {
+                crate::people::Command::Watch { .. } => self.people.command(&team, command),
+                crate::people::Command::Call { channel, user } => {
+                    let (client, sink) = (session.client.clone(), session.sink.clone());
+                    // One call or huddle at a time.
+                    self.huddle_audio.stop();
+                    self.teams_call.start(client, team, channel, user, sink);
+                }
+                crate::people::Command::LeaveHuddle => self.teams_call.stop(),
+                crate::people::Command::MuteHuddle { muted } => self.teams_call.set_muted(muted),
+                _ => {}
             }
             return;
         }
@@ -2003,6 +2017,8 @@ impl Worker {
         };
         let command = match command {
             crate::people::Command::ListenHuddle { channel } => {
+                #[cfg(feature = "teams")]
+                self.teams_call.stop();
                 self.huddle_audio.start(client, team, channel, sink);
                 return;
             }
