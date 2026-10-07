@@ -174,9 +174,9 @@ async fn boot(client: TeamsClient, workspace: Workspace, sink: Sink) {
 
     match client.get_conversations(PAGE).await {
         Ok(chats) => {
-            let (list, users) = chat_list(&client, &chats, &me).await;
+            let (list, users, profiles) = chat_list(&client, &chats, &me).await;
             if !users.is_empty() {
-                sink.send(people_event(&client, &team, users));
+                sink.send(people_event(&client, &team, users, &profiles));
             }
             sink.send(Event::Conversations {
                 team: team.clone(),
@@ -209,7 +209,12 @@ async fn boot(client: TeamsClient, workspace: Workspace, sink: Sink) {
     }
 
     match client.get_me() {
-        Ok(me) => sink.send(people_event(&client, &team, vec![translate_user(&me)])),
+        Ok(me) => sink.send(people_event(
+            &client,
+            &team,
+            vec![translate_user(&me)],
+            std::slice::from_ref(&me),
+        )),
         Err(err) => log::warn!("failed to read who is signed in to {team}: {err:?}"),
     }
 }
@@ -220,12 +225,16 @@ async fn boot(client: TeamsClient, workspace: Workspace, sink: Sink) {
 /// one-to-one chat becomes the other person's (named as a direct message
 /// is), a group is named after its people, and a chat with nobody else
 /// and no name, such as Teams' own streams, is left out. Answers the people
-/// it learned the names of too.
+/// it learned the names of too, and the profiles read of them.
 async fn chat_list(
     client: &TeamsClient,
     chats: &[crate::teams::types::Conversation],
     me: &str,
-) -> (Vec<crate::model::Conversation>, Vec<crate::model::User>) {
+) -> (
+    Vec<crate::model::Conversation>,
+    Vec<crate::model::User>,
+    Vec<crate::teams::types::UserDetails>,
+) {
     use crate::model::ConversationKind;
     let named = |chat: &crate::teams::types::Conversation| {
         chat.thread_properties
@@ -349,7 +358,7 @@ async fn chat_list(
     }
     users.sort_by(|a, b| a.id.cmp(&b.id));
     users.dedup_by(|a, b| a.id == b.id);
-    (list, users)
+    (list, users, found)
 }
 
 /// What Teams calls a group chat without a topic: its people's names, the
@@ -390,7 +399,7 @@ pub async fn history(
             let named: std::collections::HashSet<String> =
                 senders.iter().map(|u| u.id.clone()).collect();
             if !senders.is_empty() {
-                sink.send(people_event(&client, &team, senders));
+                sink.send(people_event(&client, &team, senders, &[]));
             }
             let translated: Vec<_> = page.messages.iter().filter_map(translate_message).collect();
             name_the_rest(&client, &team, &translated, &named, &sink);
@@ -441,7 +450,7 @@ pub async fn fetch_users(client: TeamsClient, team: String, ids: Vec<String>, si
         Ok(found) => {
             let users: Vec<_> = found.iter().map(translate_user).collect();
             if !users.is_empty() {
-                sink.send(people_event(&client, &team, users));
+                sink.send(people_event(&client, &team, users, &found));
             }
         }
         Err(error) => log::warn!(
@@ -458,7 +467,7 @@ pub async fn find_people(client: TeamsClient, team: String, query: String, sink:
         Ok(found) => {
             let users: Vec<_> = found.iter().map(translate_user).collect();
             if !users.is_empty() {
-                sink.send(people_event(&client, &team, users));
+                sink.send(people_event(&client, &team, users, &found));
             }
         }
         Err(error) => sink.send(Event::Convos {
@@ -564,14 +573,26 @@ fn mentions(text: &str) -> Vec<String> {
 
 /// People for the interface, each with their picture: Teams serves it
 /// from the middle tier by the person's MRI, fetched with the workspace's
-/// own sign-in (see [`crate::images`]).
-fn people_event(client: &TeamsClient, team: &str, mut users: Vec<crate::model::User>) -> Event {
+/// own sign-in (see [`crate::images`]). `profiles` are what was read of
+/// them, whose photo address (`imageUri`) the picture service needs for a
+/// personal account's own photo.
+fn people_event(
+    client: &TeamsClient,
+    team: &str,
+    mut users: Vec<crate::model::User>,
+    profiles: &[crate::teams::types::UserDetails],
+) -> Event {
     // Someone whose profile had no name would be named by their id, over
     // a name their messages gave: leave them as they were.
     users.retain(|user| user.display_name != user.id);
     if let Some(base) = client.credentials().middle_tier_url() {
         for user in users.iter_mut().filter(|u| u.avatar.is_none()) {
-            user.avatar = Some(crate::images::authed(team, &avatar_url(base, &user.id)));
+            let photo = profiles
+                .iter()
+                .find(|p| p.id == user.id)
+                .and_then(|p| p.image_uri.as_deref());
+            let url = avatar_url(base, &user.id, Some(&user.real_name), photo);
+            user.avatar = Some(crate::images::authed(team, &url));
         }
     }
     Event::Users {
@@ -581,13 +602,29 @@ fn people_event(client: &TeamsClient, team: &str, mut users: Vec<crate::model::U
 }
 
 /// Where the middle tier at `base` serves the picture of the person with
-/// id `id`, at the size the sidebar and messages draw it.
-fn avatar_url(base: &str, id: &str) -> String {
-    format!(
-        "{}/beta/users/{}/profilepicturev2?size=HR64x64",
+/// id `id`, at the size the sidebar and messages draw it, asked as the web
+/// client asks: with their `name` (for the initials when there is no
+/// photo) and their `photo`'s address when the profile gave one.
+fn avatar_url(base: &str, id: &str, name: Option<&str>, photo: Option<&str>) -> String {
+    let path = format!(
+        "{}/beta/users/{}/profilepicturev2",
         base.trim_end_matches('/'),
         crate::teams::client::user_mri(id)
-    )
+    );
+    let Ok(mut url) = reqwest::Url::parse(&path) else {
+        return format!("{path}?size=HR64x64");
+    };
+    {
+        let mut query = url.query_pairs_mut();
+        if let Some(name) = name.filter(|n| !n.is_empty()) {
+            query.append_pair("displayname", name);
+        }
+        if let Some(photo) = photo {
+            query.append_pair("imageUri", photo);
+        }
+        query.append_pair("size", "HR64x64");
+    }
+    url.into()
 }
 
 /// Asks for the presence of `users` at once and reports it, Teams'
@@ -664,11 +701,27 @@ async fn name_yourself(client: &TeamsClient, mut workspace: Workspace, sink: &Si
                     sink.send(Event::WorkspaceReady(workspace.clone()));
                 }
             }
-            let you = translate_user(&crate::teams::types::UserDetails {
-                id: workspace.user_id.clone(),
-                ..me
-            });
-            sink.send(people_event(client, &workspace.team_id, vec![you]));
+            // Messages name you by your MRI (`live:yourname`), the
+            // sign-in by your `live:.cid.…`: you are both, and your
+            // picture is asked by the MRI, as the web client asks it.
+            let mut you = translate_user(&me);
+            if let Some(base) = client.credentials().middle_tier_url() {
+                let url = avatar_url(
+                    base,
+                    &me.id,
+                    me.display_name.as_deref(),
+                    me.image_uri.as_deref(),
+                );
+                you.avatar = Some(crate::images::authed(&workspace.team_id, &url));
+            }
+            let mut also = you.clone();
+            also.id.clone_from(&workspace.user_id);
+            let people = if also.id == you.id {
+                vec![you]
+            } else {
+                vec![you, also]
+            };
+            sink.send(people_event(client, &workspace.team_id, people, &[]));
         }
         Err(error) => log::info!("could not read your own Teams profile: {error:?}"),
     }
@@ -1045,7 +1098,7 @@ fn live_message(
 ) {
     let channel = message.conversation_id.clone().unwrap_or_default();
     if let [sender] = senders(std::slice::from_ref(message)).as_slice() {
-        sink.send(people_event(client, team, vec![sender.clone()]));
+        sink.send(people_event(client, team, vec![sender.clone()], &[]));
     }
     let Some(translated) = translate_message(message) else {
         return;
@@ -1186,13 +1239,42 @@ mod tests {
     #[test]
     fn avatars_are_asked_by_mri() {
         assert_eq!(
-            avatar_url("https://teams.live.com/api/mt/", "live:.cid.4a5b"),
-            "https://teams.live.com/api/mt/beta/users/8:live:.cid.4a5b/profilepicturev2?size=HR64x64"
+            avatar_url("https://teams.live.com/api/mt/", "live:ana", None, None),
+            "https://teams.live.com/api/mt/beta/users/8:live:ana/profilepicturev2?size=HR64x64"
         );
         assert!(crate::teams::client::is_media_url(&avatar_url(
             "https://teams.live.com/api/mt",
-            "a-1"
+            "a-1",
+            None,
+            None
         )));
+    }
+
+    #[test]
+    fn a_photo_is_asked_with_its_address_as_the_web_client_asks() {
+        let url = avatar_url(
+            "https://teams.live.com/api/mt",
+            "live:ana",
+            Some("Ana de Wit"),
+            Some(
+                "https://substrate.office.com/profile/v1.0/users/cid:4A5B/image/$value?hashKey='x'",
+            ),
+        );
+        let url = reqwest::Url::parse(&url).expect("a URL");
+        let query: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+        assert_eq!(url.path(), "/api/mt/beta/users/8:live:ana/profilepicturev2");
+        assert_eq!(
+            query,
+            [
+                ("displayname".to_owned(), "Ana de Wit".to_owned()),
+                (
+                    "imageUri".to_owned(),
+                    "https://substrate.office.com/profile/v1.0/users/cid:4A5B/image/$value?hashKey='x'"
+                        .to_owned()
+                ),
+                ("size".to_owned(), "HR64x64".to_owned()),
+            ]
+        );
     }
 
     #[test]

@@ -40,6 +40,10 @@ pub struct UserDetails {
     /// The address; Graph calls it `mail`.
     #[serde(default, alias = "mail")]
     pub email: Option<String>,
+    /// Where a personal account's own photo is (`substrate.office.com`);
+    /// the middle tier's picture service needs it to find the photo.
+    #[serde(default, rename = "imageUri")]
+    pub image_uri: Option<String>,
 }
 
 /// User presence information from Teams presence service.

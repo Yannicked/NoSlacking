@@ -93,7 +93,13 @@ fn gather(
     let faces = huddles::faces(&listening.roster)
         .into_iter()
         .map(|person| {
-            let user = person.user.as_deref().and_then(|id| workspace.user(id));
+            // You are you, whether or not the call names you.
+            let id = match (&person.user, person.me) {
+                (Some(id), _) => Some(id.as_str()),
+                (None, true) => Some(workspace.info.user_id.as_str()),
+                (None, false) => None,
+            };
+            let user = id.and_then(|id| workspace.user(id));
             let name = match (&person.user, person.me) {
                 (_, true) if listening.mic == crate::huddle_mic::Mic::Live => tf(
                     "{name} (you, talking here)",
@@ -109,7 +115,7 @@ fn gather(
             Face {
                 name,
                 avatar: user.and_then(|u| u.avatar.clone()),
-                seed: person.user.clone().unwrap_or_default(),
+                seed: id.unwrap_or_default().to_owned(),
                 // Yours as it is here, not as Chime last said: the
                 // microphone is the truth, and Chime hears of it late.
                 muted: if person.me {

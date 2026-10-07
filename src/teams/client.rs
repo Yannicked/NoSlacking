@@ -240,6 +240,8 @@ struct ShortProfile {
     email: Option<String>,
     #[serde(default, rename = "userPrincipalName")]
     user_principal_name: Option<String>,
+    #[serde(default, rename = "imageUri")]
+    image_uri: Option<String>,
 }
 
 impl ShortProfile {
@@ -259,6 +261,7 @@ impl ShortProfile {
             display_name: self.display_name.filter(|n| !n.trim().is_empty()),
             email: self.email,
             user_principal_name: self.user_principal_name,
+            image_uri: self.image_uri.filter(|u| !u.is_empty()),
         })
     }
 }
@@ -1529,6 +1532,7 @@ impl TeamsClient {
             display_name,
             email,
             user_principal_name,
+            image_uri: None,
         })
     }
 
