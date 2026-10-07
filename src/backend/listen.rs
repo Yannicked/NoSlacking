@@ -583,6 +583,7 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
             on: on_rx,
             control,
             refused,
+            descriptor: crate::huddle_audio::camera_send::DESCRIPTOR,
         };
         (Some(uplink), task, close_camera)
     };

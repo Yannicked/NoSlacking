@@ -145,6 +145,11 @@ pub struct Report {
     pub silent_frames: u64,
     /// What the probe saw of video, when it looked.
     pub video: Option<video::Summary>,
+    /// The error status Chime refused the join or a SUBSCRIBE with, if it
+    /// ended the session (403, 409, 509, …), or 206 when it took no video
+    /// from us: a screen share learns from it that the meeting has all
+    /// the shares it takes.
+    pub refused_status: Option<u32>,
 }
 
 /// What a session sends besides silence: frames from the microphone, and
@@ -503,6 +508,9 @@ impl Session<'_> {
     fn end(&mut self, ending: Ending) {
         log::info!("signaling: over: {ending}");
         self.report.ending = Some(ending.to_string());
+        if let Ending::Refused { status, .. } = &ending {
+            self.report.refused_status = Some(*status);
+        }
         if self.over.is_some() {
             return;
         }
@@ -1492,6 +1500,8 @@ struct CameraSide {
     keyframe_requests: u64,
     /// The bandwidth estimate last heard, in bit/s.
     estimate: Option<u64>,
+    /// How SUBSCRIBE describes it.
+    descriptor: super::chime::VideoSend,
 }
 
 #[cfg(feature = "huddle-camera")]
@@ -1511,6 +1521,7 @@ impl CameraSide {
             held: 0,
             keyframe_requests: 0,
             estimate: None,
+            descriptor: uplink.descriptor,
         }
     }
 }
@@ -1586,7 +1597,7 @@ impl Session<'_> {
         if let (Some(camera), Some(watch)) = (&self.camera, &mut self.video)
             && camera.on
         {
-            watch.set_sending(Some(super::camera_send::DESCRIPTOR));
+            watch.set_sending(Some(camera.descriptor));
         }
     }
 
@@ -1615,10 +1626,10 @@ impl Session<'_> {
         camera.need_keyframe = true;
         log::info!("media: camera {}", if on { "on" } else { "off" });
         if let Some(watch) = &mut self.video {
-            watch.set_sending(on.then_some(super::camera_send::DESCRIPTOR));
+            watch.set_sending(on.then_some(camera.descriptor));
         }
         if on && let Some(rtc) = &mut self.rtc {
-            let desired = u64::from(super::video_encoder::MAX_BITRATE) + AUDIO_SHARE_BPS;
+            let desired = u64::from(camera.descriptor.max_kbps) * 1000 + AUDIO_SHARE_BPS;
             rtc.bwe()
                 .set_desired_bitrate(str0m::bwe::Bitrate::bps(desired));
         }
@@ -1738,6 +1749,7 @@ impl Session<'_> {
     /// Chime takes no video from us: the camera goes off, and the one who
     /// turned it on hears why.
     fn refused(&mut self) {
+        self.report.refused_status = Some(206);
         if let Some(watch) = &mut self.video {
             watch.refuse_sending();
         }
@@ -2677,6 +2689,7 @@ mod tests {
                     on: on_rx,
                     control,
                     refused,
+                    descriptor: super::super::camera_send::DESCRIPTOR,
                 }),
                 (encoding, pattern, on, refusals),
             )

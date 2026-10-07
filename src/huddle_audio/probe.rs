@@ -407,6 +407,7 @@ fn test_video() -> Result<(super::camera_send::CameraUplink, TestVideo), String>
             on: on_rx,
             control,
             refused,
+            descriptor: super::camera_send::DESCRIPTOR,
         },
         TestVideo {
             _pattern: pattern,

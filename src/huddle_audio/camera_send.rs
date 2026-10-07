@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use super::camera::{FPS, I420, Latest, MAX_HEIGHT, MAX_WIDTH};
 use super::chime::VideoSend;
 use super::microphone::Running;
-use super::video_encoder::{self, Settings, VideoEncoder};
+use super::video_encoder::{self, Backend, Encode, Encoded, Input, Limits, Settings};
 
 /// How SUBSCRIBE describes our camera: what it sends at most.
 pub const DESCRIPTOR: VideoSend = VideoSend {
@@ -66,6 +66,7 @@ pub struct VideoFrame {
 #[derive(Clone, Debug)]
 pub struct SendControl {
     shared: Arc<ControlShared>,
+    limits: Limits,
 }
 
 #[derive(Debug)]
@@ -74,34 +75,45 @@ struct ControlShared {
     bitrate: AtomicU32,
 }
 
+/// A camera's.
 impl Default for SendControl {
     fn default() -> Self {
-        Self {
-            shared: Arc::new(ControlShared {
-                keyframe: AtomicBool::new(false),
-                bitrate: AtomicU32::new(video_encoder::START_BITRATE),
-            }),
-        }
+        Self::new(Limits::CAMERA)
     }
 }
 
 impl SendControl {
+    /// The controls of an encoder kept within `limits`.
+    pub fn new(limits: Limits) -> Self {
+        Self {
+            shared: Arc::new(ControlShared {
+                keyframe: AtomicBool::new(false),
+                bitrate: AtomicU32::new(limits.bitrate(video_encoder::START_BITRATE)),
+            }),
+            limits,
+        }
+    }
+
+    /// What the encoder is kept within.
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
     /// The next picture should be a keyframe.
     pub fn want_keyframe(&self) {
         self.shared.keyframe.store(true, Ordering::Relaxed);
     }
 
     /// Whether a keyframe was asked for since the last call.
-    fn take_keyframe(&self) -> bool {
+    pub(crate) fn take_keyframe(&self) -> bool {
         self.shared.keyframe.swap(false, Ordering::Relaxed)
     }
 
     /// The bitrate to aim at, in bit/s, kept within what is sent.
     pub fn set_bitrate(&self, bitrate: u32) {
-        self.shared.bitrate.store(
-            bitrate.clamp(video_encoder::MIN_BITRATE, video_encoder::MAX_BITRATE),
-            Ordering::Relaxed,
-        );
+        self.shared
+            .bitrate
+            .store(self.limits.bitrate(bitrate), Ordering::Relaxed);
     }
 
     /// The bitrate aimed at now.
@@ -110,17 +122,22 @@ impl SendControl {
     }
 }
 
-/// The bitrate an encoder made for `wanted` uses: a few steps, so small
-/// swings of the estimate do not each cost a keyframe.
+/// The bitrate a camera's encoder made for `wanted` uses: a few steps, so
+/// small swings of the estimate do not each cost a keyframe.
 pub fn step(wanted: u32) -> u32 {
-    const STEPS: [u32; 7] = [
-        150_000, 250_000, 400_000, 600_000, 900_000, 1_300_000, 1_800_000,
+    step_within(wanted, video_encoder::MAX_BITRATE)
+}
+
+/// [`step`], up to `max` instead of the camera's most.
+pub fn step_within(wanted: u32, max: u32) -> u32 {
+    const STEPS: [u32; 8] = [
+        150_000, 250_000, 400_000, 600_000, 900_000, 1_300_000, 1_800_000, 2_500_000,
     ];
     STEPS
         .iter()
         .rev()
         .copied()
-        .find(|&s| s <= wanted)
+        .find(|&s| s <= wanted.min(max))
         .unwrap_or(STEPS[0])
 }
 
@@ -288,6 +305,178 @@ pub fn rtp_time(epoch: Instant, at: Instant) -> u64 {
     u64::try_from(micros * 9 / 100).unwrap_or(u64::MAX)
 }
 
+/// One encoder as a sending thread keeps it: made for the picture's size
+/// and the bitrate the estimate allows (moved in steps, at most every
+/// [`RETUNE_EVERY`] when the encoder cannot change it in place),
+/// keyframes as receivers ask (at most every [`KEYFRAME_EVERY`], a
+/// request too soon kept until its turn) and after anything was lost,
+/// and its numbers for the log. The camera's thread and the screen
+/// share's use it alike, whichever [`Encode`] it makes.
+#[derive(Default)]
+pub struct Sender {
+    backend: Backend,
+    /// What the log calls it: "camera" or "share".
+    label: &'static str,
+    encoder: Option<Box<dyn Encode>>,
+    retuned: Option<Instant>,
+    last_keyframe: Option<Instant>,
+    force_keyframe: bool,
+    counts: EncodeCounts,
+    busy: Duration,
+}
+
+impl std::fmt::Debug for Sender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sender")
+            .field("label", &self.label)
+            .field("settings", &self.encoder.as_ref().map(|e| e.settings()))
+            .field("counts", &self.counts)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Sender {
+    /// No encoder yet; `label` names it in the log.
+    pub fn new(backend: Backend, label: &'static str) -> Self {
+        Self {
+            backend,
+            label,
+            ..Self::default()
+        }
+    }
+
+    /// The next picture is a keyframe: the stream starts again.
+    pub fn restart(&mut self) {
+        self.force_keyframe = true;
+    }
+
+    /// Whether an encoder has been made.
+    pub fn started(&self) -> bool {
+        self.encoder.is_some()
+    }
+
+    /// When the last keyframe was made.
+    pub fn last_keyframe(&self) -> Option<Instant> {
+        self.last_keyframe
+    }
+
+    /// What it did so far.
+    pub fn counts(&self) -> EncodeCounts {
+        self.counts
+    }
+
+    /// Mean encoding time a picture so far, in milliseconds.
+    pub fn mean_ms(&self) -> f64 {
+        self.busy.as_secs_f64() * 1000.0 / self.counts.encoded.max(1) as f64
+    }
+
+    /// Counts a frame the session could not take: what follows would
+    /// refer to it, so the next is a keyframe.
+    pub fn dropped(&mut self) {
+        self.counts.dropped += 1;
+        self.force_keyframe = true;
+    }
+
+    /// Encodes `picture` at `fps` as `control` says, at `now`; `None` if
+    /// it could not (the next one tries afresh).
+    pub fn encode(
+        &mut self,
+        picture: &I420,
+        fps: u32,
+        control: &SendControl,
+        now: Instant,
+    ) -> Option<Encoded> {
+        let limits = control.limits();
+        let wanted = step_within(control.bitrate(), limits.max_bitrate);
+        let rebuild = match &mut self.encoder {
+            None => true,
+            Some(e) => {
+                let s = e.settings();
+                let due = self.retuned.is_none_or(|at| now >= at + RETUNE_EVERY);
+                (s.width, s.height) != (picture.width, picture.height)
+                    || (s.bitrate != wanted && !e.set_bitrate(wanted) && due)
+            }
+        };
+        if rebuild {
+            let settings = Settings {
+                width: picture.width,
+                height: picture.height,
+                fps,
+                bitrate: wanted,
+                limits,
+            };
+            match video_encoder::open(self.backend, settings) {
+                Ok(fresh) => {
+                    log::info!(
+                        "huddle {}: encoding {}x{} at {} kbit/s, {} fps ({})",
+                        self.label,
+                        settings.width,
+                        settings.height,
+                        fresh.settings().bitrate / 1000,
+                        fresh.settings().fps,
+                        fresh.name()
+                    );
+                    self.encoder = Some(fresh);
+                    self.retuned = Some(now);
+                }
+                Err(error) => {
+                    self.counts.failed += 1;
+                    if self.counts.failed == 1 {
+                        log::warn!("huddle {}: {error}", self.label);
+                    }
+                    return None;
+                }
+            }
+        }
+        let active = self.encoder.as_mut()?;
+        // A request too soon after the last keyframe waits for its turn
+        // rather than being lost.
+        if self
+            .last_keyframe
+            .is_none_or(|at| now >= at + KEYFRAME_EVERY)
+            && control.take_keyframe()
+        {
+            self.force_keyframe = true;
+        }
+        let keyframe = std::mem::take(&mut self.force_keyframe);
+        let started = Instant::now();
+        let encoded = match active.encode(Input::I420(picture), keyframe) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                self.counts.failed += 1;
+                log::debug!("huddle {}: {error}", self.label);
+                // The reference chain may be broken: start over.
+                self.encoder = None;
+                return None;
+            }
+        };
+        self.busy += started.elapsed();
+        self.counts.encoded += 1;
+        self.counts.bytes += encoded.data.len() as u64;
+        if encoded.keyframe {
+            self.counts.keyframes += 1;
+            self.last_keyframe = Some(now);
+        }
+        Some(encoded)
+    }
+}
+
+/// Hands `frame` to the session; false once it is gone.
+pub fn hand_over(
+    frames: &mpsc::Sender<VideoFrame>,
+    sender: &mut Sender,
+    frame: VideoFrame,
+) -> bool {
+    match frames.try_send(frame) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            sender.dropped();
+            true
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
+}
+
 /// The encoder's thread.
 fn encode(
     latest: &Latest,
@@ -296,21 +485,16 @@ fn encode(
     preview: Option<&Preview>,
     stop: &AtomicBool,
 ) {
-    let mut encoder: Option<VideoEncoder> = None;
+    let mut sender = Sender::new(Backend::Software, "camera");
     let mut epoch: Option<Instant> = None;
     let mut last_time = 0u64;
-    let mut retuned = Instant::now();
-    let mut last_keyframe: Option<Instant> = None;
-    let mut force_keyframe = false;
-    let mut counts = EncodeCounts::default();
-    let mut busy = Duration::ZERO;
     let mut next_report = Instant::now() + REPORT_EVERY;
     while !stop.load(Ordering::Relaxed) {
         let Some(frame) = latest.take(STALLED) else {
             // The camera is off or stalled; when it comes back the stream
             // starts again with a keyframe.
-            if encoder.is_some() {
-                force_keyframe = true;
+            if sender.started() {
+                sender.restart();
             }
             continue;
         };
@@ -323,95 +507,29 @@ fn encode(
         {
             preview.put(image);
         }
-        let wanted = step(control.bitrate());
-        let rebuild = match &encoder {
-            None => true,
-            Some(e) => {
-                let s = e.settings();
-                (s.width, s.height) != (picture.width, picture.height)
-                    || (s.bitrate != wanted && now >= retuned + RETUNE_EVERY)
-            }
-        };
-        if rebuild {
-            let settings = Settings {
-                width: picture.width,
-                height: picture.height,
-                fps: FPS,
-                bitrate: wanted,
-            };
-            match VideoEncoder::new(settings) {
-                Ok(fresh) => {
-                    log::info!(
-                        "huddle camera: encoding {}x{} at {} kbit/s",
-                        settings.width,
-                        settings.height,
-                        fresh.settings().bitrate / 1000
-                    );
-                    encoder = Some(fresh);
-                    retuned = now;
-                }
-                Err(error) => {
-                    counts.failed += 1;
-                    if counts.failed == 1 {
-                        log::warn!("huddle camera: {error}");
-                    }
-                    continue;
-                }
-            }
-        }
-        let Some(active) = encoder.as_mut() else {
+        let Some(encoded) = sender.encode(picture, FPS, control, now) else {
             continue;
         };
-        // A request too soon after the last keyframe waits for its turn
-        // rather than being lost.
-        if last_keyframe.is_none_or(|at| now >= at + KEYFRAME_EVERY) && control.take_keyframe() {
-            force_keyframe = true;
-        }
-        if std::mem::take(&mut force_keyframe) {
-            active.request_keyframe();
-        }
-        let started = Instant::now();
-        let encoded = match active.encode(picture) {
-            Ok(encoded) => encoded,
-            Err(error) => {
-                counts.failed += 1;
-                log::debug!("huddle camera: {error}");
-                // The reference chain may be broken: start over.
-                encoder = None;
-                continue;
-            }
-        };
-        busy += started.elapsed();
-        counts.encoded += 1;
-        counts.bytes += encoded.data.len() as u64;
-        if encoded.keyframe {
-            counts.keyframes += 1;
-            last_keyframe = Some(now);
-        }
         let epoch = *epoch.get_or_insert(frame.at);
         // Each picture a tick later than the last at least, should the
         // camera stamp two alike.
         let time = rtp_time(epoch, frame.at).max(last_time + 1);
         last_time = time;
-        match frames.try_send(VideoFrame {
+        let frame = VideoFrame {
             data: encoded.data,
             keyframe: encoded.keyframe,
             time,
             at: frame.at,
-        }) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                counts.dropped += 1;
-                force_keyframe = true;
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => break,
+        };
+        if !hand_over(frames, &mut sender, frame) {
+            break;
         }
         if Instant::now() >= next_report {
             next_report += REPORT_EVERY;
-            let ms = busy.as_secs_f64() * 1000.0 / counts.encoded.max(1) as f64;
             log::info!(
-                "huddle camera: {counts:?}; {ms:.1} ms a picture; {} pictures replaced before \
-                 encoding",
+                "huddle camera: {:?}; {:.1} ms a picture; {} pictures replaced before encoding",
+                sender.counts(),
+                sender.mean_ms(),
                 latest.replaced()
             );
         }
@@ -419,7 +537,7 @@ fn encode(
     if let Some(preview) = preview {
         preview.clear();
     }
-    log::info!("huddle camera: encoder stopped; {counts:?}");
+    log::info!("huddle camera: encoder stopped; {:?}", sender.counts());
 }
 
 /// Feeds `preview` from `latest` without encoding, every picture, until
@@ -455,6 +573,9 @@ pub struct CameraUplink {
     pub control: SendControl,
     /// Told when Chime takes no video from us (view only, its 206).
     pub refused: mpsc::Sender<()>,
+    /// How SUBSCRIBE describes what is sent: [`DESCRIPTOR`] for a camera,
+    /// the share's own for a screen share.
+    pub descriptor: VideoSend,
 }
 
 /// The test picture as a camera that is always on: for the probe's
