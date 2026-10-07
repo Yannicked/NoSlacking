@@ -134,6 +134,21 @@ sonora-agc2 = { version = "0.2.0", optional = true }
 sonora-common-audio = { version = "0.2.0", optional = true }
 sonora-simd = { version = "0.2.0", optional = true }
 
+# Watching screen shares in a huddle (the `huddle-video` feature): H.264
+# decoded in pure Rust (rusty_h264, BSD-2-Clause; the decoder itself
+# forbids unsafe, its SIMD kernels in rusty_h264-accel, the `asm`
+# feature, are intrinsics behind runtime CPU checks, no assembly or C).
+# Its default features are off: they would install its own global
+# allocator in the app. The picture goes from I420 to RGBA with `yuv`
+# (BSD-3-Clause/Apache-2.0, SIMD chosen at run time; its unsafe is the
+# intrinsics), since eframe's glow cannot take a YUV shader without
+# unsafe in our crate. See docs/research/huddle-video.md.
+rusty_h264-decoder = { version = "0.16", default-features = false, features = ["std", "asm"], optional = true }
+yuv = { version = "0.8.19", optional = true }
+# Writes the RGBA straight into egui's pixels (already in the tree
+# through egui; no crate added).
+bytemuck = { version = "1.25", optional = true }
+
 # The file viewer (src/viewer.rs): spreadsheets (MIT, pure Rust; only its
 # XML readers are used), CSV and TSV (Unlicense/MIT), and zip listings.
 # zip and quick-xml are calamine's own, at its versions and features, named
@@ -238,6 +253,10 @@ demo = []
 # has been tried more widely. Adds `noslacking --huddle-probe`. Needs
 # OpenSSL's headers on Linux (libssl-dev, openssl-devel).
 huddle-audio = ["audio", "dep:prost", "dep:str0m", "dep:openssl", "dep:opus-decoder", "dep:hmac", "dep:md-5", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:tracing", "tokio/signal", "dep:opus-rs", "dep:sonora", "dep:sonora-agc2", "dep:sonora-common-audio", "dep:sonora-simd"]
+# Watching screen shares in huddles: a call window with the share,
+# decoded on a thread of its own. Off until it has been tried against
+# Slack; needs `huddle-audio`.
+huddle-video = ["huddle-audio", "dep:rusty_h264-decoder", "dep:yuv", "dep:bytemuck"]
 # Colours code blocks that name their language (```` ```rust ````). Our own
 # small lexer, a few kilobytes; turn it off for plain code blocks.
 highlight = []
