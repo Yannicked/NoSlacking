@@ -287,7 +287,14 @@ async fn probe(settings: &std::path::Path) -> Reached {
 
     // 5. Live updates.
     let epid = crate::model::new_client_msg_id();
-    match super::socket::negotiate_trouter(&http, &skype.token, &epid).await {
+    match super::socket::negotiate_trouter(
+        &http,
+        super::socket::PERSONAL_TROUTER,
+        &skype.token,
+        &epid,
+    )
+    .await
+    {
         Ok(session) => {
             log::info!(
                 "trouter: session negotiated (registrar given: {})",

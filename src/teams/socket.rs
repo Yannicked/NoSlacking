@@ -252,13 +252,25 @@ fn conversation_of_link(link: &str) -> Option<String> {
     (!id.is_empty()).then(|| id.to_owned())
 }
 
-/// Negotiates a Trouter session via `https://go.trouter.teams.microsoft.com/v4/a`.
+/// Where a work account's live connection is negotiated.
+pub const WORK_TROUTER: &str = "https://go.trouter.teams.microsoft.com";
+
+/// Where a personal account's is: its chat events (`…/messaging`) and
+/// presence come on Skype's Trouter, not Teams' (recorded).
+pub const PERSONAL_TROUTER: &str = "https://go.trouter.skype.com";
+
+/// Where a personal account's live connection is registered for chat
+/// events.
+const PERSONAL_REGISTRAR: &str = "https://edge.skype.com/registrar/prod/v2/registrations";
+
+/// Negotiates a Trouter session at `host` (`{host}/v4/a`).
 pub async fn negotiate_trouter(
     http: &reqwest::Client,
+    host: &str,
     skype_token: &str,
     epid: &str,
 ) -> Result<SessionResponse, crate::failure::Failure> {
-    let url = format!("https://go.trouter.teams.microsoft.com/v4/a?epid={}", epid);
+    let url = format!("{host}/v4/a?epid={epid}");
 
     let resp = http
         .get(&url)
@@ -308,6 +320,49 @@ pub async fn obtain_session_id(
         .ok_or_else(|| crate::failure::Failure::Unexpected("Empty session response".into()))?;
 
     Ok(session_id.to_string())
+}
+
+/// Registers a personal account's live connection for chat events, as the
+/// personal web client does (recorded): the connection's own address,
+/// with a slash, as `TeamsCDLWebWorker` in the `TFL` product.
+pub async fn register_personal(
+    http: &reqwest::Client,
+    skype_token: &str,
+    trouter_surl: &str,
+) -> Result<(), crate::failure::Failure> {
+    let payload = serde_json::json!({
+        "clientDescription": {
+            "appId": "TeamsCDLWebWorker",
+            "aesKey": "",
+            "languageId": "en-US",
+            "platform": "chrome",
+            "templateKey": "TeamsCDLWebWorker_2.6",
+            "platformUIVersion": "1415/26091713344",
+            "productContext": "TFL"
+        },
+        "registrationId": crate::model::new_client_msg_id(),
+        "nodeId": "",
+        "transports": {
+            "TROUTER": [{
+                "context": "",
+                "path": format!("{}/", trouter_surl.trim_end_matches('/')),
+                "ttl": 3600
+            }]
+        }
+    });
+    let resp = http
+        .post(PERSONAL_REGISTRAR)
+        .header("X-Skypetoken", skype_token)
+        .header("X-MS-Migration", "True")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| crate::failure::Failure::Network(e.without_url().to_string()))?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(crate::failure::Failure::Http(resp.status().as_u16()))
+    }
 }
 
 /// Registers the endpoint with the Teams registrar service.

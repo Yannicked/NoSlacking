@@ -920,8 +920,14 @@ async fn trouter_once(
         error
     };
 
+    let personal = client.credentials().account == auth::Account::Personal;
+    let host = if personal {
+        socket::PERSONAL_TROUTER
+    } else {
+        socket::WORK_TROUTER
+    };
     let epid = crate::model::new_client_msg_id();
-    let session = match socket::negotiate_trouter(http, &skype_token, &epid).await {
+    let session = match socket::negotiate_trouter(http, host, &skype_token, &epid).await {
         Ok(session) => session,
         Err(error) => return Err(renew_on_401(error).await),
     };
@@ -929,7 +935,11 @@ async fn trouter_once(
         Ok(id) => id,
         Err(error) => return Err(renew_on_401(error).await),
     };
-    if let Some(registrar) = &session.registrar_url
+    if personal {
+        if let Err(error) = socket::register_personal(http, &skype_token, &session.surl).await {
+            log::warn!("Skype's registrar did not take {team}: {error:?}");
+        }
+    } else if let Some(registrar) = &session.registrar_url
         && let Err(error) =
             socket::register_endpoint(http, &skype_token, registrar, &session.surl).await
     {
