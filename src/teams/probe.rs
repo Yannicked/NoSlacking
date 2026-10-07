@@ -446,15 +446,59 @@ async fn authz(
         return Err(format!("HTTP {status} {}", super::auth::error_code(&text)));
     }
     let body: Value = serde_json::from_str(&text).map_err(|e| format!("not JSON: {e}"))?;
-    let token = body
-        .pointer("/tokens/skypeToken")
-        .and_then(Value::as_str)
-        .ok_or("no tokens.skypeToken in the answer")?
-        .to_owned();
+    let Some((path, token)) = SKYPE_TOKEN_PATHS.iter().find_map(|path| {
+        body.pointer(path)
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .map(|t| (*path, t.to_owned()))
+    }) else {
+        return Err(format!(
+            "HTTP {status} but no skype token where expected; the answer's shape: {}",
+            shape(&body)
+        ));
+    };
+    log::info!("authz: skype token found at {path}");
+    for path in ["/skypeToken/expiresIn", "/tokens/expiresIn", "/expiresIn"] {
+        if let Some(expires) = body.pointer(path) {
+            log::info!("authz: {path} = {expires}");
+        }
+    }
     Ok(Skype {
         token,
         region_gtms: body.get("regionGtms").cloned().unwrap_or(Value::Null),
     })
+}
+
+/// Where the skype token sits in an `authz` answer: the work service's
+/// shape, then the shapes the personal service is said to use.
+const SKYPE_TOKEN_PATHS: [&str; 4] = [
+    "/tokens/skypeToken",
+    "/skypeToken/skypetoken",
+    "/skypeToken/skypeToken",
+    "/skypeToken",
+];
+
+/// The keys of a JSON value and what kind each holds, nested, without any
+/// value: enough to see where a token sits, never the token.
+fn shape(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let fields: Vec<String> = map
+                .iter()
+                .map(|(key, value)| format!("{key}: {}", shape(value)))
+                .collect();
+            format!("{{{}}}", fields.join(", "))
+        }
+        Value::Array(items) => format!(
+            "[{} × {}]",
+            items.len(),
+            items.first().map_or("-".to_owned(), shape)
+        ),
+        Value::String(s) => format!("string({})", s.len()),
+        Value::Number(_) => "number".to_owned(),
+        Value::Bool(_) => "bool".to_owned(),
+        Value::Null => "null".to_owned(),
+    }
 }
 
 async fn chats(http: &reqwest::Client, host: &str, skype: &str) -> Result<Vec<String>, String> {
@@ -593,6 +637,24 @@ mod tests {
             "19:…@unq.gbl.spaces (one-to-one)"
         );
         assert_eq!(id_kind("48:notes"), "48: (notes, notifications)");
+    }
+
+    #[test]
+    fn shapes_name_keys_but_never_values() {
+        let answer: Value = serde_json::from_str(
+            r#"{"skypeToken":{"skypetoken":"eyJsecret","expiresIn":86399},"regionGtms":{"chatService":"https://x"},"list":[1,2]}"#,
+        )
+        .expect("JSON");
+        let shape = shape(&answer);
+        assert_eq!(
+            shape,
+            "{list: [2 × number], regionGtms: {chatService: string(9)}, skypeToken: {expiresIn: number, skypetoken: string(9)}}"
+        );
+        assert!(!shape.contains("secret"));
+        let found = SKYPE_TOKEN_PATHS
+            .iter()
+            .find_map(|p| answer.pointer(p).and_then(Value::as_str));
+        assert_eq!(found, Some("eyJsecret"));
     }
 
     #[test]
