@@ -66,6 +66,14 @@ impl Watch {
     }
 }
 
+/// What asks a workspace for presence: Slack one person at a time, Teams
+/// everyone due at once.
+pub enum Poller {
+    Slack(Client, Sink),
+    #[cfg(feature = "teams")]
+    Teams(crate::teams::client::TeamsClient, Sink),
+}
+
 /// Presence for every workspace.
 #[derive(Debug, Default)]
 pub struct Hub {
@@ -168,9 +176,9 @@ impl Hub {
     }
 
     /// Starts a round of polling for each workspace that has no live
-    /// socket and people not asked about lately. `team` gives a
-    /// workspace's client and sink, while it is signed in.
-    pub fn poll(&mut self, now: Instant, team: impl Fn(&str) -> Option<(Client, Sink)>) {
+    /// socket and people not asked about lately. `team` gives what asks a
+    /// workspace, while it is signed in.
+    pub fn poll(&mut self, now: Instant, team: impl Fn(&str) -> Option<Poller>) {
         for (id, watch) in &mut self.teams {
             if watch.live || watch.polling.as_ref().is_some_and(|t| !t.is_finished()) {
                 continue;
@@ -179,7 +187,7 @@ impl Hub {
             if due.is_empty() {
                 continue;
             }
-            let Some((client, sink)) = team(id) else {
+            let Some(poller) = team(id) else {
                 continue;
             };
             for user in &due {
@@ -188,7 +196,13 @@ impl Hub {
             watch
                 .polled
                 .retain(|user, _| watch.users.binary_search(user).is_ok());
-            watch.polling = Some(tokio::spawn(poll(client, id.clone(), due, sink)));
+            watch.polling = Some(match poller {
+                Poller::Slack(client, sink) => tokio::spawn(poll(client, id.clone(), due, sink)),
+                #[cfg(feature = "teams")]
+                Poller::Teams(client, sink) => {
+                    tokio::spawn(super::teams::presence(client, id.clone(), due, sink))
+                }
+            });
         }
     }
 }

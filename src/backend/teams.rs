@@ -538,6 +538,36 @@ fn avatar_url(base: &str, id: &str) -> String {
     )
 }
 
+/// Asks for the presence of `users` at once and reports it, Teams'
+/// availability made the interface's two states: there (available, busy,
+/// in a call or meeting, not to be disturbed) or away.
+pub async fn presence(client: TeamsClient, team: String, users: Vec<String>, sink: Sink) {
+    match client.get_presence(&users).await {
+        Ok(found) => {
+            let users: Vec<(String, crate::people::Presence)> = found
+                .into_iter()
+                .map(|(id, availability)| (id, presence_of(&availability)))
+                .collect();
+            if !users.is_empty() {
+                sink.send(Event::People {
+                    team,
+                    event: crate::people::Event::Presence { users },
+                });
+            }
+        }
+        Err(error) => log::debug!("could not read presence in {team}: {error:?}"),
+    }
+}
+
+/// The interface's presence for Teams' availability.
+fn presence_of(availability: &str) -> crate::people::Presence {
+    match availability {
+        "Available" | "Busy" | "DoNotDisturb" | "InACall" | "InAConferenceCall" | "InAMeeting"
+        | "Presenting" | "Focusing" => crate::people::Presence::Active,
+        _ => crate::people::Presence::Away,
+    }
+}
+
 /// A message to post to a Teams conversation.
 pub struct Post {
     pub team: String,
@@ -861,6 +891,10 @@ async fn trouter_once(
 
     log::info!("Trouter connected for {team}");
     report(Socket::Connected);
+    // Teams shows you offline unless an endpoint of yours says otherwise.
+    if let Err(error) = client.publish_presence(&epid).await {
+        log::info!("could not say you are here in {team}: {error:?}");
+    }
     let (mut write, mut read) = stream.split();
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
     heartbeat.tick().await;
@@ -1002,6 +1036,17 @@ mod tests {
             Some("Ann +1")
         );
         assert_eq!(group_name(&ids(&["x", "y"]), &names), None);
+    }
+
+    #[test]
+    fn availability_is_there_or_away() {
+        use crate::people::Presence;
+        for there in ["Available", "Busy", "DoNotDisturb", "InACall"] {
+            assert_eq!(presence_of(there), Presence::Active, "{there}");
+        }
+        for away in ["Away", "BeRightBack", "Offline", "PresenceUnknown", ""] {
+            assert_eq!(presence_of(away), Presence::Away, "{away}");
+        }
     }
 
     #[test]

@@ -1990,6 +1990,15 @@ impl Worker {
 
     /// Runs a command about people (see [`crate::people`]).
     fn people_command(&mut self, team: String, command: crate::people::Command) {
+        // A Teams workspace has presence to watch; the rest (status,
+        // huddles, typing over RTM) is Slack's.
+        #[cfg(feature = "teams")]
+        if self.teams_session(&team).is_some() {
+            if let crate::people::Command::Watch { .. } = command {
+                self.people.command(&team, command);
+            }
+            return;
+        }
         let Some((client, sink)) = self.slack(&team) else {
             self.skipped("acting on people", &team);
             return;
@@ -2023,12 +2032,15 @@ impl Worker {
     /// Asks about the presence of people on screen where nothing tells us
     /// when it changes.
     fn poll_presence(&mut self) {
-        let teams: HashMap<String, (Client, Sink)> = self
-            .slack_teams()
-            .map(|(id, t)| (id.clone(), (t.client.clone(), t.sink.clone())))
-            .collect();
-        self.people
-            .poll(std::time::Instant::now(), |team| teams.get(team).cloned());
+        use super::people::Poller;
+        let workspaces = &self.workspaces;
+        self.people.poll(std::time::Instant::now(), |team| {
+            match workspaces.get(team)? {
+                Backend::Slack(t) => Some(Poller::Slack(t.client.clone(), t.sink.clone())),
+                #[cfg(feature = "teams")]
+                Backend::Teams(s) => Some(Poller::Teams(s.client.clone(), s.sink.clone())),
+            }
+        });
     }
 
     /// What runs on each poll tick: the open conversation, then the watch

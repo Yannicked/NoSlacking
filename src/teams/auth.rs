@@ -39,6 +39,9 @@ pub const RESOURCE_GROUPS_PERSONAL: &str = "https://groupssvc.fl.teams.microsoft
 /// take as a bearer token (pictures on `asyncgw.teams.microsoft.com`).
 pub const RESOURCE_IC3: &str = "https://ic3.teams.office.com";
 
+/// The presence service's audience for work accounts.
+pub const RESOURCE_PRESENCE: &str = "https://presence.teams.microsoft.com";
+
 /// Microsoft Graph's audience, for looking people up by id.
 pub const RESOURCE_GRAPH: &str = "https://graph.microsoft.com";
 
