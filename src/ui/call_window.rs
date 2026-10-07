@@ -380,12 +380,13 @@ pub fn show(
             if layout.share.is_none() && view.tiles.is_empty() {
                 note(ui, area, &t("No one has their camera on"));
             } else if layout.share.is_none() && view.no_video {
-                // The tiles show faces; say why, over their foot.
-                let foot = Rect::from_min_max(
-                    egui::pos2(area.left(), area.bottom() - 64.0),
-                    area.right_bottom(),
+                // The tiles show faces; say why, over their tops, clear
+                // of the name plates at their foot.
+                let top = Rect::from_min_max(
+                    area.left_top(),
+                    egui::pos2(area.right(), area.top() + 64.0),
                 );
-                no_video(ui, foot, true);
+                no_video(ui, top, true);
             }
         });
     shown
