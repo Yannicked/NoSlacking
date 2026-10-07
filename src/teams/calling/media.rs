@@ -186,6 +186,20 @@ impl MediaConfig {
             host: None,
         }
     }
+
+    /// A configuration for answering the caller's `offer`: ICE controlled,
+    /// Opus at the payload type and the audio mid the offer gave.
+    pub fn answer(relay: Option<Relay>, offer: &RemoteMedia) -> Self {
+        Self {
+            relay,
+            controlling: false,
+            opus_pt: offer.opus_pt.unwrap_or(OPUS_PT),
+            audio_mid: offer
+                .audio()
+                .map_or_else(|| AUDIO_MID.to_owned(), |line| line.mid.clone()),
+            host: None,
+        }
+    }
 }
 
 /// Where the sound goes and comes from.
@@ -2396,5 +2410,18 @@ mod tests {
         );
         assert_eq!(MediaConfig::offer(None).opus_pt, OPUS_PT);
         assert!(MediaConfig::offer(None).controlling);
+    }
+
+    #[test]
+    fn an_answer_takes_the_callers_opus_and_mid() {
+        let offer = super::super::sdp::read(include_str!("fixtures/incoming_offer_020.sdp"))
+            .expect("the recorded offer reads");
+        let config = MediaConfig::answer(None, &offer);
+        assert!(!config.controlling, "the caller controls ICE");
+        assert_eq!(Some(config.opus_pt), offer.opus_pt);
+        assert_eq!(
+            Some(config.audio_mid.as_str()),
+            offer.audio().map(|l| l.mid.as_str())
+        );
     }
 }

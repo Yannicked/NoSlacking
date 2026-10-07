@@ -1,14 +1,20 @@
 //! Where call pushes go: the live connection hands every push for a call
-//! (`…/callAgent/{agent}/…`) to the call that made that callback, and
-//! tells calls the address their callbacks must name.
+//! (`…/callAgent/{agent}/…`) to the call that made that callback, an
+//! incoming call's notification to the ringer, and tells calls the
+//! address their callbacks must name.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use serde::Deserialize as _;
 use tokio::sync::mpsc;
 
+use super::call::Incoming;
 use super::links::read_push_path;
-use super::types::Push;
+use super::types::{IncomingNotification, Push};
+
+/// Who hears of an incoming call: the worker, which rings.
+pub type Ringer = Arc<dyn Fn(Incoming) + Send + Sync>;
 
 /// The open calls of one account and its live connection's address.
 /// Cheap to clone; every clone is the same router.
@@ -17,12 +23,24 @@ pub struct Router {
     inner: Arc<Mutex<Inner>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Inner {
     /// The live connection's address (`surl`), while it is connected.
     surl: Option<String>,
     /// Each open call's inbox, by its call agent id.
     calls: HashMap<String, mpsc::UnboundedSender<Push>>,
+    /// Who hears of incoming calls, once set.
+    ringer: Option<Ringer>,
+}
+
+impl std::fmt::Debug for Inner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inner")
+            .field("connected", &self.surl.is_some())
+            .field("calls", &self.calls.len())
+            .field("ringer", &self.ringer.is_some())
+            .finish()
+    }
 }
 
 impl Router {
@@ -36,6 +54,41 @@ impl Router {
     /// The address callbacks must name, while connected.
     pub fn surl(&self) -> Option<String> {
         self.inner.lock().ok().and_then(|inner| inner.surl.clone())
+    }
+
+    /// Who hears of incoming calls from now on.
+    pub fn set_ringer(&self, ringer: Ringer) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.ringer = Some(ringer);
+        }
+    }
+
+    /// Hands an incoming call's notification (`gp` decoded) to the
+    /// ringer. Answers whether it was a call that rang.
+    pub fn ring(&self, body: &serde_json::Value) -> bool {
+        let call = match IncomingNotification::deserialize(body) {
+            Ok(note) => Incoming::read(&note),
+            Err(error) => {
+                log::warn!("could not read a call notification: {error}");
+                None
+            }
+        };
+        let Some(call) = call else {
+            log::info!("a call notification that is not a 1:1 call; not rung");
+            return false;
+        };
+        let ringer = self
+            .inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.ringer.clone());
+        match ringer {
+            Some(ringer) => {
+                ringer(call);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Opens an inbox for the call with `call_agent_id`.

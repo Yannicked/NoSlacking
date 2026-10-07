@@ -404,6 +404,15 @@ Timeline of files 020–040:
 | 31.7 | 039 | ← | `call/end` (the caller hung up) |
 | 31.9 | 040 | ← | `conversation/conversationEnd` |
 
+Where the notification goes: the personal web client keeps a second
+Trouter connection (`go.trouter.teams.microsoft.com`) registered at
+`https://teams.microsoft.com/registrar/prod/v2/registrations` as
+`appId: SkypeSpacesWeb`, `templateKey: TFLSkypeSpacesWeb_2.0`, transport
+`context: "TFL"`, `ttl: 3600`. Both recorded notifications and every call
+callback arrived on that connection; the chat connection
+(`TeamsCDLWebWorker` at `edge.skype.com`) got none. We register our one
+connection both ways and renew both before the hour is up.
+
 ### B.1 The notification (file 020)
 
 A Trouter POST to the bare `{surl}` path. Headers: `User-Agent:

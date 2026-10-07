@@ -101,8 +101,11 @@ pub struct Listening {
     pub alone_since: Option<Instant>,
     /// The microphone: muted on joining a huddle, opening on a call.
     pub mic: crate::huddle_mic::Mic,
-    /// Who was called, when this is a call rather than a huddle.
+    /// Who was called (or called), when this is a call rather than a
+    /// huddle.
     pub callee: Option<String>,
+    /// Whether the call was answered here rather than placed.
+    pub answered: bool,
     /// Who shares their screen, as last told.
     #[cfg(feature = "huddle-video")]
     pub shares: Vec<Share>,
@@ -144,6 +147,7 @@ impl Listening {
             alone_since: None,
             mic: crate::huddle_mic::Mic::Muted,
             callee: None,
+            answered: false,
             #[cfg(feature = "huddle-video")]
             shares: Vec::new(),
             #[cfg(feature = "huddle-video")]
@@ -264,11 +268,12 @@ pub fn title_text(place: Place<'_>, talking: bool) -> String {
 }
 
 /// The call bar's title for a call with `name`: "Calling Ana" until
-/// they pick up, "In a call with Ana" after.
-pub fn call_title_text(name: &str, phase: &Phase) -> String {
+/// they pick up, "In a call with Ana" after, and at once for a call
+/// `answered` here.
+pub fn call_title_text(name: &str, phase: &Phase, answered: bool) -> String {
     match phase {
-        Phase::Joining | Phase::Ringing => tf("Calling {name}", &[("name", name)]),
-        Phase::Live { .. } | Phase::Failed { .. } => tf("In a call with {name}", &[("name", name)]),
+        Phase::Joining | Phase::Ringing if !answered => tf("Calling {name}", &[("name", name)]),
+        _ => tf("In a call with {name}", &[("name", name)]),
     }
 }
 
@@ -351,6 +356,47 @@ pub fn call(app: &mut App, team: String, channel: String, user: String) {
     app.backend.send(backend::Command::People {
         team,
         command: people::Command::Call { channel, user },
+    });
+}
+
+/// Picks up the incoming call `call` of `team` (its invitation's room):
+/// opens the chat it rang in and shows the call there, ending any other
+/// call or huddle.
+pub fn answer(app: &mut App, team: String, call: String) {
+    let Some(invite) = app.huddles.invites.answered(&team, &call) else {
+        return;
+    };
+    app.withdraw_invite_note(&team, &invite.channel);
+    if let Some(last) = app.huddles.listening.take()
+        && last.team != team
+        && last.in_huddle()
+    {
+        app.backend.send(backend::Command::People {
+            team: last.team,
+            command: people::Command::LeaveHuddle,
+        });
+    }
+    let known = app
+        .workspaces
+        .iter()
+        .any(|w| w.info.team_id == team && w.conversation(&invite.channel).is_some());
+    app.actions
+        .push(crate::model::Action::SelectWorkspace(team.clone()));
+    if known {
+        app.actions.push(crate::model::Action::OpenConversation(
+            invite.channel.clone(),
+        ));
+    }
+    app.huddles.listening = Some(Listening {
+        answered: true,
+        ..Listening::call(&team, &invite.channel, &invite.from)
+    });
+    app.backend.send(backend::Command::People {
+        team,
+        command: people::Command::AnswerCall {
+            channel: invite.channel,
+            call,
+        },
     });
 }
 
@@ -676,9 +722,16 @@ mod tests {
         };
         assert!(status_text(&failed, false, now).starts_with("Could not listen: "));
         assert!(status_text(&failed, true, now).starts_with("Call ended: "));
-        assert_eq!(call_title_text("Ana", &Phase::Ringing), "Calling Ana");
         assert_eq!(
-            call_title_text("Ana", &Phase::Live { since: now }),
+            call_title_text("Ana", &Phase::Ringing, false),
+            "Calling Ana"
+        );
+        assert_eq!(
+            call_title_text("Ana", &Phase::Live { since: now }, false),
+            "In a call with Ana"
+        );
+        assert_eq!(
+            call_title_text("Ana", &Phase::Joining, true),
             "In a call with Ana"
         );
     }

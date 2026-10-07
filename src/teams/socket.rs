@@ -408,36 +408,58 @@ pub async fn obtain_session_id(
     Ok(session_id.to_string())
 }
 
-/// Registers a personal account's live connection for chat events, as the
-/// personal web client does (recorded): the connection's own address,
-/// with a slash, as `TeamsCDLWebWorker` in the `TFL` product.
-pub async fn register_personal(
+/// How long a personal account's registrations last; they are renewed
+/// before then.
+pub const PERSONAL_REGISTRATION_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Where a personal account's live connection is registered for calls
+/// (recorded: the web client's calling connection).
+const CALLS_REGISTRAR: &str = "https://teams.microsoft.com/registrar/prod/v2/registrations";
+
+/// One registration of a live connection with a registrar.
+struct Registration<'a> {
+    registrar: &'a str,
+    app_id: &'a str,
+    template_key: &'a str,
+    /// The client's product, `TFL` for chat; left out for calls.
+    product_context: Option<&'a str>,
+    /// The transport's context: `TFL` for calls, empty for chat.
+    context: &'a str,
+}
+
+/// Registers `trouter_surl` (with a slash, as the web client does) as
+/// `registration` says.
+async fn register(
     http: &reqwest::Client,
     skype_token: &str,
     trouter_surl: &str,
+    registration: &Registration<'_>,
 ) -> Result<(), crate::failure::Failure> {
+    let mut description = serde_json::json!({
+        "appId": registration.app_id,
+        "aesKey": "",
+        "languageId": "en-US",
+        "platform": "chrome",
+        "templateKey": registration.template_key,
+        "platformUIVersion": "1415/26091713344",
+    });
+    if let Some(product) = registration.product_context {
+        description["productContext"] = product.into();
+    }
     let payload = serde_json::json!({
-        "clientDescription": {
-            "appId": "TeamsCDLWebWorker",
-            "aesKey": "",
-            "languageId": "en-US",
-            "platform": "chrome",
-            "templateKey": "TeamsCDLWebWorker_2.6",
-            "platformUIVersion": "1415/26091713344",
-            "productContext": "TFL"
-        },
+        "clientDescription": description,
         "registrationId": crate::model::new_client_msg_id(),
         "nodeId": "",
         "transports": {
             "TROUTER": [{
-                "context": "",
+                "context": registration.context,
                 "path": format!("{}/", trouter_surl.trim_end_matches('/')),
-                "ttl": 3600
+                "ttl": PERSONAL_REGISTRATION_TTL.as_secs()
             }]
         }
     });
     let resp = http
-        .post(PERSONAL_REGISTRAR)
+        .post(registration.registrar)
         .header("X-Skypetoken", skype_token)
         .header("X-MS-Migration", "True")
         .json(&payload)
@@ -449,6 +471,43 @@ pub async fn register_personal(
     } else {
         Err(crate::failure::Failure::Http(resp.status().as_u16()))
     }
+}
+
+/// Registers a personal account's live connection for chat events, as the
+/// personal web client does (recorded): the connection's own address,
+/// with a slash, as `TeamsCDLWebWorker` in the `TFL` product.
+pub async fn register_personal(
+    http: &reqwest::Client,
+    skype_token: &str,
+    trouter_surl: &str,
+) -> Result<(), crate::failure::Failure> {
+    let chat = Registration {
+        registrar: PERSONAL_REGISTRAR,
+        app_id: "TeamsCDLWebWorker",
+        template_key: "TeamsCDLWebWorker_2.6",
+        product_context: Some("TFL"),
+        context: "",
+    };
+    register(http, skype_token, trouter_surl, &chat).await
+}
+
+/// Registers a personal account's live connection for incoming calls, as
+/// the personal web client registers its calling connection (recorded):
+/// `SkypeSpacesWeb` on Teams' registrar, in the `TFL` context. Without it
+/// no call notification arrives.
+pub async fn register_personal_calls(
+    http: &reqwest::Client,
+    skype_token: &str,
+    trouter_surl: &str,
+) -> Result<(), crate::failure::Failure> {
+    let calls = Registration {
+        registrar: CALLS_REGISTRAR,
+        app_id: "SkypeSpacesWeb",
+        template_key: "TFLSkypeSpacesWeb_2.0",
+        product_context: None,
+        context: "TFL",
+    };
+    register(http, skype_token, trouter_surl, &calls).await
 }
 
 /// Registers the endpoint with the Teams registrar service.

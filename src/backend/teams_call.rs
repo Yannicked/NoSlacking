@@ -1,16 +1,20 @@
-//! The worker's side of a Teams call: one at a time, placed through
-//! [`crate::teams::calling::call::outgoing`] with the huddle's speaker
-//! and microphone, ended when asked, on sign-out, or when another call or
+//! The worker's side of Teams calls: one at a time, placed through
+//! [`crate::teams::calling::call::outgoing`] or answered through
+//! [`crate::teams::calling::call::incoming`] with the huddle's speaker and
+//! microphone, ended when asked, on sign-out, or when another call or
 //! huddle starts.
 //!
 //! It speaks to the interface as a huddle does, through
 //! [`crate::people::Event::Listening`] and
 //! [`crate::people::Event::Microphone`], so the call bar shows it as it
-//! shows a huddle. Unlike a huddle, a call starts unmuted: you rang
-//! someone to talk.
+//! shows a huddle. Unlike a huddle, a call starts unmuted: you are in it
+//! to talk. An incoming call rings as a huddle invitation does
+//! ([`crate::people::Event::HuddleInvite`], the call id as its room), and
+//! stops ringing as one is cancelled.
 
+use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot, watch};
@@ -26,7 +30,7 @@ use crate::huddle_audio::speaker::Speaker;
 use crate::huddle_audio::uplink::Outgoing;
 use crate::huddles::{Left, Listen};
 use crate::people;
-use crate::teams::calling::call::{CallEvent, Control, outgoing};
+use crate::teams::calling::call::{Answer, CallEvent, Control, Incoming, incoming, outgoing};
 use crate::teams::calling::media::Audio;
 use crate::teams::client::TeamsClient;
 
@@ -76,10 +80,49 @@ struct Running {
     muted: watch::Sender<bool>,
 }
 
-/// The one Teams call there may be.
+/// An incoming call ringing here, waiting for the person to decide.
+#[derive(Debug)]
+struct Ringing {
+    /// Its call id, the invitation's room.
+    call_id: String,
+    /// What it becomes once picked up.
+    running: Running,
+    decide: oneshot::Sender<Decision>,
+}
+
+/// What the person decided about an incoming call.
+#[derive(Debug)]
+enum Decision {
+    /// Pick up, the call shown in `channel`.
+    Accept {
+        channel: String,
+    },
+    Decline,
+}
+
+/// The one Teams call there may be, and the incoming one that rings.
 #[derive(Debug, Default)]
 pub struct Caller {
     running: Option<Running>,
+    ringing: Option<Ringing>,
+}
+
+/// A call's controls: for the caller to keep, and for the call's task.
+fn controls() -> (
+    Running,
+    mpsc::UnboundedReceiver<Control>,
+    watch::Receiver<bool>,
+) {
+    let (control, controls) = mpsc::unbounded_channel();
+    let (muted, wanted) = watch::channel(true);
+    // Unmuted from the start: the microphone task opens it on this.
+    let _ = muted.send(false);
+    let running = Running {
+        team: String::new(),
+        control,
+        muted,
+    };
+    (running, controls, wanted)
 }
 
 impl Caller {
@@ -94,14 +137,12 @@ impl Caller {
         sink: Sink,
     ) {
         self.stop();
-        let (control, controls) = mpsc::unbounded_channel();
-        let (muted, wanted) = watch::channel(true);
-        // Unmuted from the start: the microphone task opens it on this.
-        let _ = muted.send(false);
+        let (mut running, controls, wanted) = controls();
+        running.team.clone_from(&team);
         tokio::spawn(run(
             client,
             Place {
-                team: team.clone(),
+                team,
                 channel,
                 callee,
             },
@@ -109,11 +150,52 @@ impl Caller {
             wanted,
             sink,
         ));
-        self.running = Some(Running {
-            team,
-            control,
-            muted,
+        self.running = Some(running);
+    }
+
+    /// Rings for the incoming `call` in `team`: the interface shows it as
+    /// an invitation. A call already ringing is declined: one rings at a
+    /// time.
+    pub fn ring(&mut self, client: TeamsClient, team: String, call: Incoming, sink: Sink) {
+        if let Some(old) = self.ringing.take() {
+            let _ = old.decide.send(Decision::Decline);
+        }
+        let (mut running, controls, wanted) = controls();
+        running.team.clone_from(&team);
+        let (decide, decisions) = oneshot::channel();
+        let call_id = call.call_id.clone();
+        tokio::spawn(ring(client, team, call, decisions, controls, wanted, sink));
+        self.ringing = Some(Ringing {
+            call_id,
+            running,
+            decide,
         });
+    }
+
+    /// Picks up the incoming call `call_id` of `team`, shown in `channel`,
+    /// ending any other call first. Answers whether it was still ringing.
+    pub fn answer(&mut self, team: &str, call_id: &str, channel: String) -> bool {
+        let Some(ringing) = self.take_ringing(team, call_id) else {
+            return false;
+        };
+        self.stop();
+        if ringing.decide.send(Decision::Accept { channel }).is_err() {
+            return false;
+        }
+        self.running = Some(ringing.running);
+        true
+    }
+
+    /// Declines the incoming call `call_id` of `team`, if it still rings.
+    pub fn decline(&mut self, team: &str, call_id: &str) {
+        if let Some(ringing) = self.take_ringing(team, call_id) {
+            let _ = ringing.decide.send(Decision::Decline);
+        }
+    }
+
+    fn take_ringing(&mut self, team: &str, call_id: &str) -> Option<Ringing> {
+        self.ringing
+            .take_if(|r| r.running.team == team && r.call_id == call_id)
     }
 
     /// Mutes or unmutes the microphone in the call, if there is one.
@@ -131,18 +213,22 @@ impl Caller {
         }
     }
 
-    /// Hangs up if the call is in `team`, which signed out.
+    /// Hangs up, and declines what rings, if in `team`, which signed out.
     pub fn signed_out(&mut self, team: &str) {
         if self.running.as_ref().is_some_and(|r| r.team == team) {
             self.stop();
         }
+        if let Some(ringing) = self.ringing.take_if(|r| r.running.team == team) {
+            let _ = ringing.decide.send(Decision::Decline);
+        }
     }
 }
 
-/// Where a call is, and to whom.
+/// Where a call is, and with whom.
 struct Place {
     team: String,
     channel: String,
+    /// The one called, or calling: by the id the interface knows.
     callee: String,
 }
 
@@ -188,7 +274,194 @@ fn ending(result: Result<(), Failure>) -> Result<Left, Failure> {
     result.map(|()| Left::Ended)
 }
 
-/// One call, from ringing to its end.
+/// The speaker and microphone of a call, open.
+struct Devices {
+    speaker: Speaker,
+    mic: tokio::task::JoinHandle<()>,
+    close_mic: oneshot::Sender<()>,
+    passing: tokio::task::JoinHandle<()>,
+    /// How loud the far end plays.
+    meter: crate::huddle_audio::speaker::Feed,
+    /// Whether you spoke since last asked.
+    spoke: Arc<AtomicBool>,
+}
+
+impl Devices {
+    /// Opens the speaker and the microphone (as `wanted` says) for the
+    /// call in `place`, and answers the sound the call is to use.
+    async fn open(
+        place: &Place,
+        wanted: watch::Receiver<bool>,
+        sink: &Sink,
+    ) -> Result<(Self, Audio), Failure> {
+        let tap = RenderTap::default();
+        let speaker_tap = tap.clone();
+        let (speaker, feed) =
+            match tokio::task::spawn_blocking(move || Speaker::open(Some(speaker_tap))).await {
+                Ok(Ok(opened)) => opened,
+                Ok(Err(why)) => {
+                    log::warn!("Teams call: {why}");
+                    return Err(Failure::Huddle(HuddleTrouble::NoSound));
+                }
+                Err(error) => {
+                    log::warn!("Teams call: the device thread failed: {error}");
+                    return Err(Failure::Huddle(HuddleTrouble::NoSound));
+                }
+            };
+        let (frames, mut spoken) = mpsc::channel::<Outgoing>(25);
+        let (to_call, frames_in) = mpsc::channel(25);
+        // The microphone's frames pass by on the way to the call, saying
+        // whether you spoke.
+        let spoke = Arc::new(AtomicBool::new(false));
+        let heard_you = spoke.clone();
+        let passing = tokio::spawn(async move {
+            while let Some(frame) = spoken.recv().await {
+                if frame.voice {
+                    heard_you.store(true, Ordering::Relaxed);
+                }
+                if to_call.send(frame).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let (effective, muted) = watch::channel(true);
+        let (close_mic, mic_done) = oneshot::channel();
+        let mic_sink = sink.clone();
+        let (mic_team, mic_channel) = (place.team.clone(), place.channel.clone());
+        let mic = tokio::spawn(microphone(
+            wanted,
+            effective,
+            Wiring {
+                frames,
+                render: tap,
+            },
+            mic_done,
+            move |news| {
+                mic_sink.send(Event::People {
+                    team: mic_team.clone(),
+                    event: people::Event::Microphone {
+                        channel: mic_channel.clone(),
+                        news,
+                    },
+                });
+            },
+        ));
+        let audio = Audio {
+            feed: Some(feed.clone()),
+            uplink: Some(Uplink {
+                frames: frames_in,
+                muted,
+            }),
+        };
+        let devices = Self {
+            speaker,
+            mic,
+            close_mic,
+            passing,
+            meter: feed,
+            spoke,
+        };
+        Ok((devices, audio))
+    }
+
+    /// Closes the microphone, then the speaker.
+    async fn close(self) {
+        let _ = self.close_mic.send(());
+        let _ = self.mic.await;
+        self.passing.abort();
+        let speaker = self.speaker;
+        // Stopping the device waits for its thread; not on this one.
+        let _ = tokio::task::spawn_blocking(move || drop(speaker)).await;
+    }
+}
+
+/// What tells the interface where the call in `place` is.
+fn teller(place: &Place, sink: &Sink) -> impl Fn(Listen) + Clone + Send + 'static {
+    let (sink, team, channel) = (sink.clone(), place.team.clone(), place.channel.clone());
+    move |state: Listen| {
+        sink.send(Event::People {
+            team: team.clone(),
+            event: people::Event::Listening {
+                channel: channel.clone(),
+                state,
+            },
+        });
+    }
+}
+
+/// What the bar shows of a call, and where its changes are told.
+struct Shown<'a, T: Fn(Listen)> {
+    far: FarEnd,
+    callee: &'a str,
+    tell: &'a T,
+    /// How the call ended, once it has.
+    ended: Option<Result<(), Failure>>,
+}
+
+impl<T: Fn(Listen)> Shown<'_, T> {
+    /// Changes what is shown of who is in the call, telling the bar the
+    /// whole of it if that changed anything.
+    fn change(&mut self, change: impl FnOnce(&mut FarEnd)) {
+        let was = self.far;
+        change(&mut self.far);
+        if self.far != was {
+            (self.tell)(Listen::Roster(roster(self.callee, self.far)));
+        }
+    }
+
+    /// Takes in the call's news.
+    fn heard(&mut self, event: CallEvent) {
+        match event {
+            CallEvent::Ringing => (self.tell)(Listen::Ringing),
+            CallEvent::Live => (self.tell)(Listen::Live),
+            CallEvent::AudioFlowing => {}
+            CallEvent::FarEndMuted(muted) => self.change(|far| far.muted = muted),
+            CallEvent::Ended { result, .. } => self.ended = Some(result),
+        }
+    }
+}
+
+/// Follows a call with its devices open until `call` (its task) is done:
+/// tells the interface its news and who speaks. Answers how it ended.
+async fn follow(
+    mut call: Pin<&mut impl Future<Output = ()>>,
+    events: &mut mpsc::UnboundedReceiver<CallEvent>,
+    devices: &Devices,
+    callee: &str,
+    tell: &impl Fn(Listen),
+) -> Result<(), Failure> {
+    let mut shown = Shown {
+        far: FarEnd::default(),
+        callee,
+        tell,
+        ended: None,
+    };
+    let (mut speech, mut your_speech) = (Speech::default(), Speech::default());
+    let mut looks = tokio::time::interval(LISTEN_EVERY);
+    looks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = &mut call => break,
+            Some(event) = events.recv() => shown.heard(event),
+            _ = looks.tick() => {
+                let now = Instant::now();
+                if let Some(speaking) = speech.heard(devices.meter.take_loudness() >= SPEECH_RMS, now) {
+                    shown.change(|far| far.speaking = speaking);
+                }
+                if let Some(speaking) = your_speech.heard(devices.spoke.swap(false, Ordering::Relaxed), now) {
+                    shown.change(|far| far.me_speaking = speaking);
+                }
+            }
+        }
+    }
+    // The call's last words (its end) came before its task was done.
+    while let Ok(event) = events.try_recv() {
+        shown.heard(event);
+    }
+    shown.ended.unwrap_or(Ok(()))
+}
+
+/// One call we place, from ringing to its end.
 async fn run(
     client: TeamsClient,
     place: Place,
@@ -196,148 +469,116 @@ async fn run(
     wanted: watch::Receiver<bool>,
     sink: Sink,
 ) {
-    let Place {
-        team,
-        channel,
-        callee,
-    } = place;
-    let tell = {
-        let (sink, team, channel) = (sink.clone(), team.clone(), channel.clone());
-        move |state: Listen| {
-            sink.send(Event::People {
-                team: team.clone(),
-                event: people::Event::Listening {
-                    channel: channel.clone(),
-                    state,
-                },
-            });
-        }
-    };
+    let tell = teller(&place, &sink);
     tell(Listen::Joining);
-    tell(Listen::Roster(roster(&callee, FarEnd::default())));
-    let tap = RenderTap::default();
-    let speaker_tap = tap.clone();
-    let (speaker, feed) =
-        match tokio::task::spawn_blocking(move || Speaker::open(Some(speaker_tap))).await {
-            Ok(Ok(opened)) => opened,
-            Ok(Err(why)) => {
-                log::warn!("Teams call: {why}");
-                tell(Listen::Ended(Err(Failure::Huddle(HuddleTrouble::NoSound))));
-                return;
-            }
-            Err(error) => {
-                log::warn!("Teams call: the device thread failed: {error}");
-                tell(Listen::Ended(Err(Failure::Huddle(HuddleTrouble::NoSound))));
-                return;
-            }
-        };
-    let (frames, mut spoken) = mpsc::channel::<Outgoing>(25);
-    let (to_call, frames_in) = mpsc::channel(25);
-    // The microphone's frames pass by on the way to the call, saying
-    // whether you spoke.
-    let spoke = Arc::new(AtomicBool::new(false));
-    let heard_you = spoke.clone();
-    let passing = tokio::spawn(async move {
-        while let Some(frame) = spoken.recv().await {
-            if frame.voice {
-                heard_you.store(true, Ordering::Relaxed);
-            }
-            if to_call.send(frame).await.is_err() {
-                break;
-            }
+    tell(Listen::Roster(roster(&place.callee, FarEnd::default())));
+    let (devices, audio) = match Devices::open(&place, wanted, &sink).await {
+        Ok(opened) => opened,
+        Err(failure) => {
+            tell(Listen::Ended(Err(failure)));
+            return;
         }
-    });
-    let (effective, muted) = watch::channel(true);
-    let (close_mic, mic_done) = oneshot::channel();
-    let mic_sink = sink.clone();
-    let (mic_team, mic_channel) = (team.clone(), channel.clone());
-    let mic = tokio::spawn(microphone(
-        wanted,
-        effective,
-        Wiring {
-            frames,
-            render: tap,
-        },
-        mic_done,
-        move |news| {
-            mic_sink.send(Event::People {
-                team: mic_team.clone(),
-                event: people::Event::Microphone {
-                    channel: mic_channel.clone(),
-                    news,
-                },
-            });
-        },
-    ));
-    let meter = feed.clone();
-    let audio = Audio {
-        feed: Some(feed),
-        uplink: Some(Uplink {
-            frames: frames_in,
-            muted,
-        }),
     };
+    let (told, mut events) = mpsc::unbounded_channel();
+    let call = outgoing(
+        client,
+        place.callee.clone(),
+        audio,
+        controls,
+        move |event| {
+            let _ = told.send(event);
+        },
+    );
+    tokio::pin!(call);
+    let result = follow(call, &mut events, &devices, &place.callee, &tell).await;
     // The end is told only once the devices are closed, so nothing of
     // this call follows it.
-    let ended: Arc<Mutex<Option<Result<(), Failure>>>> = Arc::default();
-    let slot = ended.clone();
-    // The far end as the bar shows it, changed by the call's news (mute)
-    // and the sound (speaking), each telling the bar the whole of it.
-    let far = Arc::new(Mutex::new(FarEnd::default()));
-    let show = {
-        let (far, tell, them) = (far.clone(), tell.clone(), callee.clone());
-        move |change: &dyn Fn(&mut FarEnd)| {
-            let Ok(mut far) = far.lock() else {
+    devices.close().await;
+    tell(Listen::Ended(ending(result)));
+}
+
+/// One incoming call, from ringing here to its end.
+async fn ring(
+    client: TeamsClient,
+    team: String,
+    call: Incoming,
+    decisions: oneshot::Receiver<Decision>,
+    controls: mpsc::UnboundedReceiver<Control>,
+    wanted: watch::Receiver<bool>,
+    sink: Sink,
+) {
+    let call_id = call.call_id.clone();
+    // The caller as the interface knows people: `live:…` or an object id.
+    let caller = crate::backend::teams_translate::clean_teams_user_id(&call.caller.id)
+        .unwrap_or_else(|| call.caller.id.clone());
+    let invite = |event: people::Event| {
+        sink.send(Event::People {
+            team: team.clone(),
+            event,
+        });
+    };
+    // Shown in the chat with the caller, which the interface finds.
+    invite(people::Event::HuddleInvite {
+        channel: caller.clone(),
+        room: call_id.clone(),
+        from: caller.clone(),
+    });
+    let stopped_ringing = || {
+        invite(people::Event::HuddleInviteCancelled {
+            channel: None,
+            room: Some(call_id.clone()),
+        });
+    };
+    let (answer, answered) = oneshot::channel();
+    let (told, mut events) = mpsc::unbounded_channel();
+    let driving = incoming(client, call, answered, controls, move |event| {
+        let _ = told.send(event);
+    });
+    tokio::pin!(driving);
+    let mut decisions = decisions;
+    let channel = loop {
+        tokio::select! {
+            // Ended while ringing: the caller gave up, or it failed.
+            () = &mut driving => {
+                stopped_ringing();
                 return;
-            };
-            let was = *far;
-            change(&mut far);
-            if *far != was {
-                tell(Listen::Roster(roster(&them, *far)));
             }
+            decided = &mut decisions => match decided {
+                Ok(Decision::Accept { channel }) => break channel,
+                Ok(Decision::Decline) | Err(_) => {
+                    let _ = answer.send(Answer::Decline);
+                    driving.await;
+                    stopped_ringing();
+                    return;
+                }
+            },
+            // Its news while it rings changes nothing shown.
+            Some(_) = events.recv() => {}
         }
     };
-    let told = tell.clone();
-    let show_mute = show.clone();
-    let call = outgoing(client, callee, audio, controls, move |event| match event {
-        CallEvent::Ringing => told(Listen::Ringing),
-        CallEvent::Live => told(Listen::Live),
-        CallEvent::AudioFlowing => {}
-        CallEvent::FarEndMuted(muted) => show_mute(&|far| far.muted = muted),
-        CallEvent::Ended { result, .. } => {
-            if let Ok(mut slot) = slot.lock() {
-                *slot = Some(result);
-            }
+    let place = Place {
+        team: team.clone(),
+        channel,
+        callee: caller,
+    };
+    let tell = teller(&place, &sink);
+    tell(Listen::Roster(roster(&place.callee, FarEnd::default())));
+    let (devices, audio) = match Devices::open(&place, wanted, &sink).await {
+        Ok(opened) => opened,
+        Err(failure) => {
+            let _ = answer.send(Answer::Decline);
+            driving.await;
+            tell(Listen::Ended(Err(failure)));
+            return;
         }
-    });
-    tokio::pin!(call);
-    let (mut speech, mut your_speech) = (Speech::default(), Speech::default());
-    let mut looks = tokio::time::interval(LISTEN_EVERY);
-    looks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            () = &mut call => break,
-            _ = looks.tick() => {
-                let now = Instant::now();
-                if let Some(speaking) = speech.heard(meter.take_loudness() >= SPEECH_RMS, now) {
-                    show(&|far| far.speaking = speaking);
-                }
-                if let Some(speaking) = your_speech.heard(spoke.swap(false, Ordering::Relaxed), now) {
-                    show(&|far| far.me_speaking = speaking);
-                }
-            }
-        }
+    };
+    if answer.send(Answer::Accept(audio)).is_err() {
+        devices.close().await;
+        tell(Listen::Ended(Ok(Left::Ended)));
+        return;
     }
-    let _ = close_mic.send(());
-    let _ = mic.await;
-    passing.abort();
-    // Stopping the device waits for its thread; not on this one.
-    let _ = tokio::task::spawn_blocking(move || drop(speaker)).await;
-    let result = ended
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.take())
-        .unwrap_or(Ok(()));
+    let result = follow(driving, &mut events, &devices, &place.callee, &tell).await;
+    devices.close().await;
     tell(Listen::Ended(ending(result)));
 }
 

@@ -87,6 +87,12 @@ enum Internal {
         generation: u64,
         status: Socket,
     },
+    /// A call rings for the Teams workspace `team`.
+    #[cfg(feature = "teams")]
+    IncomingCall {
+        team: String,
+        call: crate::teams::calling::call::Incoming,
+    },
     /// From the Socket Mode task started as `generation`.
     Socket {
         generation: u64,
@@ -699,6 +705,15 @@ impl Worker {
     ) {
         let generation = self.generation();
         let report = self.trouter_report(&workspace.team_id, generation);
+        // Incoming calls ring through the worker, which has the one call.
+        let internal = self.internal.clone();
+        let team = workspace.team_id.clone();
+        client.calls().set_ringer(Arc::new(move |call| {
+            let _ = internal.send(Internal::IncomingCall {
+                team: team.clone(),
+                call,
+            });
+        }));
         let session =
             super::teams::Session::start(workspace.clone(), client, gated, generation, report);
         if let Some(old) = self
@@ -1865,6 +1880,13 @@ impl Worker {
                 }
                 self.report_socket();
             }
+            #[cfg(feature = "teams")]
+            Internal::IncomingCall { team, call } => {
+                if let Some(session) = self.teams_session(&team) {
+                    let (client, sink) = (session.client.clone(), session.sink.clone());
+                    self.teams_call.ring(client, team, call, sink);
+                }
+            }
             Internal::Socket { generation, event } => {
                 if self.socket.as_ref().map(|live| live.generation) == Some(generation) {
                     self.socket_event(event);
@@ -2004,6 +2026,26 @@ impl Worker {
                     // One call or huddle at a time.
                     self.huddle_audio.stop();
                     self.teams_call.start(client, team, channel, user, sink);
+                }
+                crate::people::Command::AnswerCall { channel, call } => {
+                    let sink = session.sink.clone();
+                    self.huddle_audio.stop();
+                    if !self.teams_call.answer(&team, &call, channel.clone()) {
+                        // Too late: the interface lets the call go.
+                        log::info!("a Teams call stopped ringing before it was picked up");
+                        sink.send(Event::People {
+                            team,
+                            event: crate::people::Event::Listening {
+                                channel,
+                                state: crate::huddles::Listen::Ended(Ok(
+                                    crate::huddles::Left::Ended,
+                                )),
+                            },
+                        });
+                    }
+                }
+                crate::people::Command::DeclineHuddle { room, .. } => {
+                    self.teams_call.decline(&team, &room);
                 }
                 crate::people::Command::LeaveHuddle => self.teams_call.stop(),
                 crate::people::Command::MuteHuddle { muted } => self.teams_call.set_muted(muted),

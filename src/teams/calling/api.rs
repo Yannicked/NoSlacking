@@ -14,10 +14,11 @@ use std::time::{Duration, Instant};
 use crate::failure::Failure;
 use crate::teams::calling::links::{Callbacks, Scope};
 use crate::teams::calling::types::{
-    AcknowledgementLinks, AnswerDebug, CallInvitation, CancelDiagnostics, ConversationRequest,
-    CpconvAnswer, CpconvRequest, Decline, EndpointMetadata, EndpointState, Leave, MediaContent,
-    MuteState, OurMediaAnswer, Participant, Participants, RenegotiationAnswer, Roster,
-    TransactionEnd, UpdateEndpointMetadata, UpdateEndpointState,
+    AcceptAnswer, AcceptanceAcknowledgement, AcknowledgementLinks, AnswerDebug, AttachAnswer,
+    CallInvitation, CancelDiagnostics, ConversationRequest, CpconvAnswer, CpconvRequest, Decline,
+    EndpointMetadata, EndpointState, Leave, MediaContent, MuteState, OurMediaAnswer, Participant,
+    Participants, RenegotiationAnswer, Roster, TransactionEnd, UpdateEndpointMetadata,
+    UpdateEndpointState,
 };
 use crate::teams::client::{TeamsClient, refused};
 
@@ -53,6 +54,17 @@ const CALL_EVENTS: &[&str] = &[
     "acceptance",
     "redirection",
     "end",
+];
+
+/// The conversation callbacks the web client gives when it joins an
+/// incoming call's conversation (B.2).
+const JOIN_EVENTS: &[&str] = &[
+    "conversationEnd",
+    "conversationUpdate",
+    "localParticipantUpdate",
+    "addParticipantSuccess",
+    "addParticipantFailure",
+    "receiveMessage",
 ];
 
 /// The callbacks for the media controller, in `cpconv` and every answer.
@@ -102,6 +114,18 @@ impl CallIds {
             callee_participant_id: uuid(),
             media_leg_id: uuid().replace('-', "").to_uppercase(),
             call_agent_id: uuid(),
+        }
+    }
+}
+
+impl CallIds {
+    /// The ids of an incoming call: the notification's `call_id` as the
+    /// chain id and the `participant_id` it gave us; the rest fresh.
+    pub fn incoming(endpoint_id: &str, call_id: &str, participant_id: &str) -> Self {
+        Self {
+            call_id: call_id.to_owned(),
+            participant_id: participant_id.to_owned(),
+            ..Self::new(endpoint_id)
         }
     }
 }
@@ -234,6 +258,85 @@ pub fn acceptance_acknowledgement(callbacks: &Callbacks) -> serde_json::Value {
     })
 }
 
+/// What `POST {attach}` sends for an incoming call (B.2): ties our
+/// endpoint to the ringing leg and joins the `conversation` in one go.
+pub fn attach_request(
+    me: &Participant,
+    callbacks: &Callbacks,
+    conversation: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "attach": {
+            "requireMediaContent": false,
+            "links": {"end": callbacks.link(Scope::Call, "end")},
+            "locationContent": null,
+            "networkContent": null,
+            "areaContent": null,
+            "applicationType": "TFL",
+        },
+        "capabilities": null,
+        "endpointCapabilities": ENDPOINT_CAPABILITIES,
+        "additionalActions": [{
+            "input": {
+                "capabilities": null,
+                "endpointCapabilities": ENDPOINT_CAPABILITIES,
+                "conversationRequest": {
+                    "applicationType": "TFL",
+                    "roster": {
+                        "type": "Delta",
+                        "rosterUpdate": callbacks.link(Scope::Conversation, "rosterUpdate"),
+                    },
+                    "links": callbacks.links(Scope::Conversation, JOIN_EVENTS),
+                },
+                "endpointMetadata": {},
+                "participants": {"from": me},
+            },
+            "name": "join",
+            "url": conversation,
+            "waitForResponse": true,
+        }],
+    })
+}
+
+/// What `POST {progress}` sends while an incoming call rings here (B.3):
+/// the caller hears it ring.
+pub fn ringing_body(me: &Participant) -> serde_json::Value {
+    serde_json::json!({
+        "callProgress": {"sender": me, "status": "ringing", "phrase": "ringing"}
+    })
+}
+
+/// What `POST {acceptance}` sends when we pick up (B.5): our `answer` to
+/// the caller's offer on their media leg, and our callbacks.
+pub fn acceptance_body(
+    me: &Participant,
+    callbacks: &Callbacks,
+    answer: &str,
+    media_leg_id: &str,
+) -> serde_json::Value {
+    let mut media_content = MediaContent::ours(answer.to_owned(), media_leg_id.to_owned());
+    media_content.client_location = Some("NL".to_owned());
+    serde_json::json!({
+        "callAcceptance": {
+            "acceptedBy": me,
+            "acceptedCallModalities": ["Audio"],
+            "capabilities": null,
+            "endpointCapabilities": ENDPOINT_CAPABILITIES,
+            "clientEndpointCapabilities": CLIENT_ENDPOINT_CAPABILITIES,
+            "links": callbacks.links(Scope::Call, ACKNOWLEDGED_EVENTS),
+            "clientContentForMediaController": callbacks.links(Scope::Call, MEDIA_CONTROLLER_EVENTS),
+            "mediaContent": media_content,
+            "pstnContent": {
+                "emergencyCallCountry": "",
+                "platformName": client_header(),
+                "publicApiCall": false,
+            },
+            "callKeepAliveInterval": null,
+            "applicationType": "TFL",
+        }
+    })
+}
+
 /// Our mute state, numbered `sequence` (C.3).
 pub fn endpoint_state(me: &Participant, sequence: u64, muted: bool) -> UpdateEndpointState {
     UpdateEndpointState {
@@ -325,6 +428,16 @@ impl CallApi {
             callbacks,
             sequence: AtomicU64::new(1),
             started: Instant::now(),
+        }
+    }
+
+    /// For an incoming call, whose first mute state is numbered 1: no
+    /// `cpconv` sent one.
+    #[must_use]
+    pub fn incoming(self) -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+            ..self
         }
     }
 
@@ -481,6 +594,48 @@ impl CallApi {
         self.send(reqwest::Method::POST, leave_url, Some(body), "hang up")
             .await
             .map(drop)
+    }
+
+    /// Attaches to an incoming call and joins its `conversation` (B.2):
+    /// answers the leg's links and the conversation's.
+    pub async fn attach(&self, url: &str, conversation: &str) -> Result<AttachAnswer, Failure> {
+        let body = attach_request(&self.me, &self.callbacks, conversation);
+        let resp = self
+            .send(reqwest::Method::POST, url, Some(body), "attach to a call")
+            .await?;
+        resp.json::<AttachAnswer>()
+            .await
+            .map_err(|e| Failure::Unexpected(e.without_url().to_string()))
+    }
+
+    /// Says the call rings here (B.3).
+    pub async fn ringing(&self, progress_url: &str) -> Result<(), Failure> {
+        self.send(
+            reqwest::Method::POST,
+            progress_url,
+            Some(ringing_body(&self.me)),
+            "say a call rings",
+        )
+        .await
+        .map(drop)
+    }
+
+    /// Picks up with our SDP `answer` on the caller's `media_leg_id`
+    /// (B.5): answers the live leg's links.
+    pub async fn accept(
+        &self,
+        url: &str,
+        answer: &str,
+        media_leg_id: &str,
+    ) -> Result<AcceptanceAcknowledgement, Failure> {
+        let body = acceptance_body(&self.me, &self.callbacks, answer, media_leg_id);
+        let resp = self
+            .send(reqwest::Method::POST, url, Some(body), "pick up a call")
+            .await?;
+        resp.json::<AcceptAnswer>()
+            .await
+            .map(|answer| answer.call_acceptance_acknowledgement)
+            .map_err(|e| Failure::Unexpected(e.without_url().to_string()))
     }
 
     /// Declines an incoming call: `DELETE` to the attach answer's

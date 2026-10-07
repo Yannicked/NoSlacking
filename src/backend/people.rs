@@ -129,6 +129,7 @@ impl Hub {
             }
             Command::ListenHuddle { .. }
             | Command::Call { .. }
+            | Command::AnswerCall { .. }
             | Command::LeaveHuddle
             | Command::MuteHuddle { .. } => {
                 log::debug!("{command:?} is the worker's");
@@ -559,7 +560,7 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
                 .collect()
         }
         // The demo is a Slack workspace, which offers huddles, not calls.
-        Command::Call { .. } => Vec::new(),
+        Command::Call { .. } | Command::AnswerCall { .. } => Vec::new(),
         // Left at once; the demo has one huddle to leave, in #design.
         Command::LeaveHuddle => vec![Event::People {
             team: team.to_owned(),

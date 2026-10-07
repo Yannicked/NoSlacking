@@ -898,6 +898,29 @@ pub(crate) async fn trouter(team: String, client: TeamsClient, sink: Sink, repor
     }
 }
 
+/// Registers a personal account's live connection for chat events and
+/// incoming calls, with a token fresh enough for it.
+async fn register_personal(team: &str, client: &TeamsClient, http: &reqwest::Client, surl: &str) {
+    use crate::teams::socket;
+
+    let token = match client.ensure_fresh_tokens().await {
+        Ok(tokens) => tokens.skype_token.filter(|t| !t.is_empty()),
+        Err(error) => {
+            log::info!("no token to register {team} with: {error:?}");
+            return;
+        }
+    };
+    let Some(token) = token else {
+        return;
+    };
+    if let Err(error) = socket::register_personal(http, &token, surl).await {
+        log::warn!("Skype's registrar did not take {team}: {error:?}");
+    }
+    if let Err(error) = socket::register_personal_calls(http, &token, surl).await {
+        log::warn!("Teams' registrar did not take {team} for calls: {error:?}");
+    }
+}
+
 /// One Trouter connection, from negotiation until it closes.
 async fn trouter_once(
     team: &str,
@@ -939,9 +962,7 @@ async fn trouter_once(
         Err(error) => return Err(renew_on_401(error).await),
     };
     if personal {
-        if let Err(error) = socket::register_personal(http, &skype_token, &session.surl).await {
-            log::warn!("Skype's registrar did not take {team}: {error:?}");
-        }
+        register_personal(team, client, http, &session.surl).await;
     } else if let Some(registrar) = &session.registrar_url
         && let Err(error) =
             socket::register_endpoint(http, &skype_token, registrar, &session.surl).await
@@ -970,9 +991,15 @@ async fn trouter_once(
     let (mut write, mut read) = stream.split();
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
     heartbeat.tick().await;
+    // A personal account's registrations lapse; renewed well before.
+    let mut renew = tokio::time::interval(socket::PERSONAL_REGISTRATION_TTL * 5 / 6);
+    renew.tick().await;
 
     loop {
         tokio::select! {
+            _ = renew.tick(), if personal => {
+                register_personal(team, client, http, &session.surl).await;
+            }
             _ = heartbeat.tick() => {
                 write
                     .send(WsMessage::Text("2::".into()))
@@ -990,6 +1017,9 @@ async fn trouter_once(
                         }
                         Some(TrouterEvent::Call { path, body }) => {
                             client.calls().deliver(&path, &body);
+                        }
+                        Some(TrouterEvent::CallNotification(body)) => {
+                            client.calls().ring(&body);
                         }
                         _ => {}
                     }

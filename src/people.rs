@@ -243,6 +243,10 @@ pub enum Command {
     /// or huddle first (Microsoft Teams; see [`crate::teams::calling`]).
     /// Mute and hang up as in a huddle: `MuteHuddle`, `LeaveHuddle`.
     Call { channel: String, user: String },
+    /// Picks up the incoming call `call` (its invitation's room), shown
+    /// in `channel`, ending any call or huddle first (Microsoft Teams).
+    /// Declined as a huddle invitation is: `DeclineHuddle`.
+    AnswerCall { channel: String, call: String },
     /// Leaves the huddle being listened to, or hangs up the call.
     LeaveHuddle,
     /// Mutes (closing the microphone) or unmutes (opening it) in the

@@ -191,6 +191,18 @@ impl App {
         if workspace.desktop.dnd.quiet(now_seconds()) || workspace.desktop.is_muted(channel) {
             return None;
         }
+        // A Teams call rings: answered here, not in Slack.
+        if workspace.info.offers(crate::model::Ability::Calls) {
+            let (title, body) = crate::huddles::call_text(&workspace.user_label(from));
+            return Some(Note {
+                team: team.to_owned(),
+                channel: channel.to_owned(),
+                title,
+                body,
+                sound: settings.sound,
+                link: None,
+            });
+        }
         let place = workspace
             .conversation(channel)
             .filter(|c| !c.kind.is_dm())

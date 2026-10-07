@@ -25,6 +25,9 @@ use crate::people::{self, Huddle};
 /// How long an invitation shows. Slack rings for about 30 seconds and the
 /// invitation says nothing of it, so a little longer, for a late look.
 pub const RING_FOR: Duration = Duration::from_secs(45);
+/// How long an incoming Teams call's invitation shows: as long as the
+/// worker lets it ring, which ends it sooner when the caller gives up.
+pub const CALL_RINGS_FOR: Duration = Duration::from_secs(65);
 /// How often the participants of a huddle on screen are asked of Slack.
 pub const CHECK_EVERY: Duration = Duration::from_secs(3 * 60);
 /// The longest wait between two checks after failures.
@@ -92,6 +95,17 @@ impl Invites {
             .iter()
             .position(|i| i.team == team && i.room == room)?;
         Some(self.list.remove(at))
+    }
+
+    /// Keeps the invitation to `room` showing until `until`.
+    pub fn ring_until(&mut self, team: &str, room: &str, until: Instant) {
+        if let Some(invite) = self
+            .list
+            .iter_mut()
+            .find(|i| i.team == team && i.room == room)
+        {
+            invite.until = until;
+        }
     }
 
     /// A huddle in `channel` changed or ended (`None`): its invitation
@@ -322,6 +336,11 @@ pub enum Action {
 pub fn apply(app: &mut App, action: Action) {
     match action {
         Action::Join { team, room } => {
+            // A Teams call is picked up here.
+            if offers_calls(app, &team) {
+                listen::answer(app, team, room);
+                return;
+            }
             // A browser sign-in joins here; only the others hand the
             // huddle to Slack.
             if is_session(app, &team) {
@@ -383,6 +402,14 @@ fn is_session(app: &App, team: &str) -> bool {
             && w.signed_out.is_none()
             && w.info.sign_in == crate::model::SignInKind::Session
     })
+}
+
+/// Whether `team` is a workspace whose service has calls (Teams), whose
+/// invitations are calls ringing.
+fn offers_calls(app: &App, team: &str) -> bool {
+    app.workspaces
+        .iter()
+        .any(|w| w.info.team_id == team && w.info.offers(crate::model::Ability::Calls))
 }
 
 /// Whether `team` is signed in here, as a call needs.
@@ -467,8 +494,19 @@ pub fn handle(app: &mut App, team: &str, event: people::Event) -> Option<people:
                 .huddles
                 .invites
                 .cancelled(team, channel.as_deref(), room.as_deref());
+            let calls = offers_calls(app, team);
             for invite in gone {
                 app.withdraw_invite_note(team, &invite.channel);
+                // A call that stopped ringing unanswered was missed.
+                if calls {
+                    let name = app
+                        .workspaces
+                        .iter()
+                        .find(|w| w.info.team_id == team)
+                        .map(|w| w.user_label(&invite.from))
+                        .unwrap_or_default();
+                    app.toast(tf("Missed call from {name}", &[("name", &name)]), false);
+                }
             }
             None
         }
@@ -578,6 +616,18 @@ fn invited(app: &mut App, team: &str, channel: &str, room: &str, from: &str, now
     let Some(workspace) = app.workspaces.iter().find(|w| w.info.team_id == team) else {
         return;
     };
+    // A Teams call names the caller, not a chat: it shows in the chat
+    // with them, if there is one.
+    let found;
+    let channel = if workspace.conversation(channel).is_none()
+        && let Some(chat) = workspace.conversations.iter().find(|c| {
+            c.kind == crate::model::ConversationKind::Direct && c.user.as_deref() == Some(from)
+        }) {
+        found = chat.id.clone();
+        found.as_str()
+    } else {
+        channel
+    };
     let me = &workspace.info.user_id;
     // Your own ring, or a huddle you are in already.
     if from == me
@@ -592,10 +642,25 @@ fn invited(app: &mut App, team: &str, channel: &str, room: &str, from: &str, now
     if !app.huddles.invites.add(team, channel, room, from, now) {
         return;
     }
-    app.waker.wake_after(RING_FOR);
+    let calls = offers_calls(app, team);
+    if calls {
+        app.huddles
+            .invites
+            .ring_until(team, room, now + CALL_RINGS_FOR);
+    }
+    app.waker
+        .wake_after(if calls { CALL_RINGS_FOR } else { RING_FOR });
     if let Some(note) = app.invite_note(team, channel, from) {
         app.notify(note);
     }
+}
+
+/// What an incoming call says: who calls.
+pub fn call_text(name: &str) -> (String, String) {
+    (
+        tf("{name} is calling you", &[("name", name)]),
+        t("Microsoft Teams call").into_owned(),
+    )
 }
 
 /// What an invitation says: who rings, and where.

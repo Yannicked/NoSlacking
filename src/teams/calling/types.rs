@@ -586,11 +586,57 @@ pub struct NotificationDebug {
     pub call_id: Option<String>,
 }
 
-/// What `POST {attach}` answers (B.2): the links of the incoming leg.
+/// What `POST {attach}` answers (B.2): the links of the incoming leg,
+/// and what joining the conversation answered.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AttachAnswer {
     pub call_invitation: Option<IncomingInvitation>,
+    #[serde(deserialize_with = "nullable")]
+    pub additional_action_responses: Vec<ActionResponse>,
+}
+
+impl AttachAnswer {
+    /// The conversation's links, from the `join` done with the attach.
+    pub fn conversation(&self) -> Option<&ConversationLinks> {
+        self.additional_action_responses
+            .iter()
+            .find_map(|r| r.output.as_ref())
+            .map(|output| &output.links)
+    }
+}
+
+/// One of the actions done with an attach, answered.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ActionResponse {
+    pub output: Option<JoinOutput>,
+}
+
+/// What joining the conversation answered: its links, as `cpconv`'s.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct JoinOutput {
+    #[serde(deserialize_with = "nullable")]
+    pub links: ConversationLinks,
+}
+
+/// What `POST {acceptance}` answers (B.5): the live leg's links.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AcceptAnswer {
+    #[serde(deserialize_with = "nullable")]
+    pub call_acceptance_acknowledgement: AcceptanceAcknowledgement,
+}
+
+/// See [`AcceptAnswer`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AcceptanceAcknowledgement {
+    #[serde(deserialize_with = "nullable")]
+    pub links: AcceptanceLinks,
+    /// In seconds.
+    pub call_keep_alive_interval: Option<u64>,
 }
 
 /// See [`AttachAnswer`].

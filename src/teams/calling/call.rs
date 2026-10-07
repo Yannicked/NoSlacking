@@ -1,25 +1,33 @@
-//! An outgoing 1:1 Teams call, from ringing to its end: the signalling of
-//! `docs/research/teams-calls.md` §A and §C driving a [`MediaSession`].
+//! A 1:1 Teams call, from ringing to its end: the signalling of
+//! `docs/research/teams-calls.md` §A (outgoing), §B (incoming) and §C
+//! driving a [`MediaSession`].
 //!
-//! [`outgoing`] runs the whole call on its task. What happens is told
-//! through a callback as [`CallEvent`]s, and the caller steers it with
-//! [`Control`]s (mute, hang up). It never waits on the network to stop:
+//! [`outgoing`] and [`incoming`] run the whole call on its task. What
+//! happens is told through a callback as [`CallEvent`]s, and the caller
+//! steers it with [`Control`]s (mute, hang up); an incoming call also
+//! waits for an [`Answer`]. It never waits on the network to stop:
 //! hanging up closes the media at once and sends `leave` on the way out.
 
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::api::{CallApi, CallIds, own_participant, relay_credentials, relay_servers};
 use super::codes::{self, Ending};
 use super::media::{self, Audio, MediaConfig, MediaEvent, MediaSession, Relay};
-use super::types::{CpconvAnswer, Push, RosterUpdate};
+use super::types::{
+    CpconvAnswer, IncomingInvitation, IncomingNotification, MediaContent, Participant, Push,
+    RosterUpdate,
+};
 use super::{LocalMedia, RemoteMedia, sdp};
 use crate::failure::Failure;
 use crate::teams::client::TeamsClient;
 
 /// How long an unanswered call rings before we give up.
 const RING_FOR: Duration = Duration::from_secs(60);
+/// How long an incoming call rings here before it counts as missed; the
+/// caller usually gives up first.
+const RINGS_HERE_FOR: Duration = Duration::from_secs(60);
 /// How long a hang-up's `leave` may take before the call is ended anyway.
 const LEAVE_WITHIN: Duration = Duration::from_secs(5);
 
@@ -35,7 +43,7 @@ pub enum Control {
 /// What a call tells as it goes; the last is always [`CallEvent::Ended`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallEvent {
-    /// The call was placed: it rings at the far end.
+    /// The call was placed: it rings at the far end (or, incoming, here).
     Ringing,
     /// Picked up, and the media is up: the call can be heard.
     Live,
@@ -128,6 +136,117 @@ async fn run(
     ended
 }
 
+/// An incoming call, as its notification tells it. Its links let anyone
+/// act on the call, so `Debug` shows its id only.
+#[derive(Clone)]
+pub struct Incoming {
+    /// The chain id of every request for this call.
+    pub call_id: String,
+    /// Who calls.
+    pub caller: Participant,
+    /// Our id in this call, which the notification gave.
+    participant_id: String,
+    attach: String,
+    /// The conversation to join.
+    conversation: String,
+    /// The caller's offer.
+    offer: MediaContent,
+}
+
+impl std::fmt::Debug for Incoming {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Incoming")
+            .field("call_id", &self.call_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Incoming {
+    /// Reads a call notification (B.1); `None` for one that is not a 1:1
+    /// call we could answer.
+    pub fn read(note: &IncomingNotification) -> Option<Self> {
+        let gp = note.gp.as_ref()?;
+        let call = gp.call_notification.as_ref()?;
+        let invitation = gp.conversation_invitation.as_ref()?;
+        if invitation.is_multi_party {
+            return None;
+        }
+        Some(Self {
+            call_id: gp.debug_content.as_ref()?.call_id.clone()?,
+            caller: call.from.clone()?,
+            participant_id: call.to.as_ref()?.participant_id.clone()?,
+            attach: call.links.attach.clone()?,
+            conversation: invitation.conversation_controller.clone()?,
+            offer: call.media_content.clone().filter(|m| !m.blob.is_empty())?,
+        })
+    }
+
+    /// Who calls, by the name the notification gave.
+    pub fn caller_name(&self) -> Option<&str> {
+        self.caller
+            .display_name
+            .as_deref()
+            .filter(|n| !n.is_empty())
+    }
+}
+
+/// What the person decided about an incoming call.
+#[derive(Debug)]
+pub enum Answer {
+    /// Pick up, with this sound.
+    Accept(Audio),
+    /// Decline.
+    Decline,
+}
+
+/// Rings for the incoming `call` until `answer` says what to do, then
+/// runs it until it ends. Every step is told through `tell`; `control`
+/// steers it once picked up. Declined, or given up on by the caller, it
+/// ends `Ok` without ever being live.
+pub async fn incoming(
+    client: TeamsClient,
+    call: Incoming,
+    answer: oneshot::Receiver<Answer>,
+    control: mpsc::UnboundedReceiver<Control>,
+    tell: impl Fn(CallEvent) + Send,
+) {
+    let mut counts = media::Counts::default();
+    let result = run_incoming(&client, call, answer, control, &tell, &mut counts).await;
+    if let Err(error) = &result {
+        log::warn!("Teams call ended with a failure: {error:?}");
+    }
+    tell(CallEvent::Ended { result, counts });
+}
+
+async fn run_incoming(
+    client: &TeamsClient,
+    call: Incoming,
+    answer: oneshot::Receiver<Answer>,
+    mut control: mpsc::UnboundedReceiver<Control>,
+    tell: &(impl Fn(CallEvent) + Send),
+    counts: &mut media::Counts,
+) -> Result<(), Failure> {
+    let surl = client
+        .calls()
+        .surl()
+        .ok_or_else(|| Failure::CallFailed("the live connection is not up".into()))?;
+    let endpoint = client
+        .endpoint_id()
+        .unwrap_or_else(crate::model::new_client_msg_id);
+    let ids = CallIds::incoming(&endpoint, &call.call_id, &call.participant_id);
+    let me = own_participant(client, &ids)
+        .ok_or_else(|| Failure::CallFailed("who you are is not known".into()))?;
+    let mut inbox = client.calls().register(&ids.call_agent_id);
+    let agent = ids.call_agent_id.clone();
+    let mut this = Call::with(CallApi::new(client.clone(), ids, me, &surl).incoming());
+    this.callee = call.caller.id.clone();
+    let ended = this
+        .ring_here(client, call, answer, &mut inbox, &mut control, tell, counts)
+        .await;
+    client.calls().forget(&agent);
+    ended
+}
+
 /// The signalling side of one call.
 struct Call {
     api: CallApi,
@@ -183,9 +302,13 @@ async fn keep_alive_due(keep_alive: Option<&KeepAlive>) {
 }
 
 impl Call {
-    fn new(client: &TeamsClient, ids: CallIds, me: super::types::Participant, surl: &str) -> Self {
+    fn new(client: &TeamsClient, ids: CallIds, me: Participant, surl: &str) -> Self {
+        Self::with(CallApi::new(client.clone(), ids, me, surl))
+    }
+
+    fn with(api: CallApi) -> Self {
         Self {
-            api: CallApi::new(client.clone(), ids, me, surl),
+            api,
             conversation: None,
             accepted: false,
             connected: false,
@@ -209,7 +332,19 @@ impl Call {
         self.conversation = Some(self.api.create_call(callee, &offer).await?);
         log::info!("Teams call: placed, ringing");
         tell(CallEvent::Ringing);
+        self.talk(session, local, inbox, control, tell).await
+    }
 
+    /// Runs the call until it ends: rings until picked up (for a call we
+    /// placed), then talks.
+    async fn talk(
+        &mut self,
+        session: &mut MediaSession,
+        local: &mut LocalMedia,
+        inbox: &mut mpsc::UnboundedReceiver<Push>,
+        control: &mut mpsc::UnboundedReceiver<Control>,
+        tell: &(impl Fn(CallEvent) + Send),
+    ) -> Result<(), Failure> {
         let ringing = tokio::time::sleep(RING_FOR);
         tokio::pin!(ringing);
         loop {
@@ -257,6 +392,175 @@ impl Call {
                     return Err(Failure::CallNotAnswered);
                 }
             }
+        }
+    }
+
+    /// Attaches to an incoming call and rings until the person answers
+    /// or the caller gives up; picked up, talks until the end.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the call's parts, as `run` has them"
+    )]
+    async fn ring_here(
+        &mut self,
+        client: &TeamsClient,
+        call: Incoming,
+        mut answer: oneshot::Receiver<Answer>,
+        inbox: &mut mpsc::UnboundedReceiver<Push>,
+        control: &mut mpsc::UnboundedReceiver<Control>,
+        tell: &(impl Fn(CallEvent) + Send),
+        counts: &mut media::Counts,
+    ) -> Result<(), Failure> {
+        let attached = self.api.attach(&call.attach, &call.conversation).await?;
+        let invitation = attached.call_invitation.clone().unwrap_or_default();
+        self.conversation = Some(CpconvAnswer {
+            conversation_controller: call.conversation.clone(),
+            links: attached.conversation().cloned().unwrap_or_default(),
+        });
+        if let Some(url) = &invitation.links.progress
+            && let Err(error) = self.api.ringing(url).await
+        {
+            log::info!("Teams call: ringing not told to the caller: {error:?}");
+        }
+        log::info!("Teams call: an incoming call rings");
+        tell(CallEvent::Ringing);
+
+        let ringing = tokio::time::sleep(RINGS_HERE_FOR);
+        tokio::pin!(ringing);
+        let audio = loop {
+            tokio::select! {
+                decided = &mut answer => match decided {
+                    Ok(Answer::Accept(audio)) => break audio,
+                    // Declined, or whoever would answer is gone.
+                    Ok(Answer::Decline) | Err(_) => {
+                        self.decline(&invitation).await;
+                        return Ok(());
+                    }
+                },
+                push = inbox.recv() => match push {
+                    Some(Push::CallEnd(end)) => {
+                        log::info!("Teams call: the caller gave up ({}, {})", end.code, end.phrase);
+                        return Ok(());
+                    }
+                    Some(Push::ConversationEnd(_)) => return Ok(()),
+                    Some(_) => {}
+                    None => return Err(Failure::CallFailed("the call's pushes stopped".into())),
+                },
+                asked = control.recv() => {
+                    if matches!(asked, Some(Control::HangUp) | None) {
+                        self.decline(&invitation).await;
+                        return Ok(());
+                    }
+                }
+                () = &mut ringing => {
+                    log::info!("Teams call: nobody picked up here");
+                    return Ok(());
+                }
+            }
+        };
+
+        log::info!("Teams call: picking up");
+        let remote = sdp::read(&call.offer.blob).map_err(|error| {
+            log::warn!("Teams call: unreadable SDP from the caller: {error}");
+            Failure::CallFailed("the caller's media could not be used".into())
+        })?;
+        let relay = match relay_credentials(client).await {
+            Ok(credentials) => Some(Relay::new(&relay_servers(client).await, credentials)),
+            Err(error) => {
+                log::warn!("no Teams relay for the call: {error:?}");
+                None
+            }
+        };
+        let (mut session, mut local) =
+            MediaSession::start(MediaConfig::answer(relay, &remote), audio)
+                .await
+                .map_err(media_failure)?;
+        let ended = self
+            .pick_up(
+                &call,
+                &invitation,
+                &remote,
+                &mut session,
+                &mut local,
+                inbox,
+                control,
+                tell,
+            )
+            .await;
+        session.stop();
+        *counts = session.counts();
+        ended
+    }
+
+    /// Answers the caller's offer and talks until the end.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the call's parts, as `run` has them"
+    )]
+    async fn pick_up(
+        &mut self,
+        call: &Incoming,
+        invitation: &IncomingInvitation,
+        remote: &RemoteMedia,
+        session: &mut MediaSession,
+        local: &mut LocalMedia,
+        inbox: &mut mpsc::UnboundedReceiver<Push>,
+        control: &mut mpsc::UnboundedReceiver<Control>,
+        tell: &(impl Fn(CallEvent) + Send),
+    ) -> Result<(), Failure> {
+        session.apply_remote(remote).map_err(media_failure)?;
+        let answer = sdp::answer(local, remote);
+        // As the web client does before picking up: not muted.
+        if let Some(url) = self
+            .conversation
+            .as_ref()
+            .and_then(|c| c.links.update_endpoint_state.clone())
+            && let Err(error) = self.api.update_endpoint_state(&url, false).await
+        {
+            log::info!("Teams call: mute state not told: {error:?}");
+        }
+        let url = invitation
+            .links
+            .acceptance
+            .as_deref()
+            .ok_or_else(|| Failure::CallFailed("the call cannot be picked up".into()))?;
+        let acknowledged = self
+            .api
+            .accept(url, &answer, &call.offer.media_leg_id)
+            .await?;
+        log::info!("Teams call: picked up here");
+        self.accepted = true;
+        if let (Some(call_leg), Some(interval)) = (
+            acknowledged.links.call_leg.clone(),
+            acknowledged.call_keep_alive_interval,
+        ) {
+            let every = keep_alive_every(interval);
+            self.keep_alive = Some(KeepAlive {
+                call_leg,
+                every,
+                next: tokio::time::Instant::now() + every,
+            });
+        }
+        if let Some(url) = self
+            .conversation
+            .as_ref()
+            .and_then(|c| c.links.update_endpoint_metadata.clone())
+            && let Err(error) = self.api.update_endpoint_metadata(&url).await
+        {
+            log::info!("Teams call: endpoint metadata not taken: {error:?}");
+        }
+        self.talk(session, local, inbox, control, tell).await
+    }
+
+    /// Declines an incoming call, without waiting long.
+    async fn decline(&self, invitation: &IncomingInvitation) {
+        let Some(url) = invitation.links.decline() else {
+            return;
+        };
+        match tokio::time::timeout(LEAVE_WITHIN, self.api.decline(url)).await {
+            Ok(Ok(())) => log::info!("Teams call: declined"),
+            Ok(Err(error)) => log::info!("Teams call: decline refused: {error:?}"),
+            Err(_) => log::info!("Teams call: decline took too long"),
         }
     }
 
@@ -452,6 +756,18 @@ mod tests {
         // Someone the delta leaves out, and an older version, say nothing.
         assert_eq!(far_end(&update, "8:live:ana", None), None);
         assert_eq!(far_end(&update, "8:live:me", Some((5, false))), None);
+    }
+
+    #[test]
+    fn a_call_notification_reads_as_an_incoming_call() {
+        let note: IncomingNotification =
+            serde_json::from_str(include_str!("fixtures/call_notification.json")).expect("reads");
+        let call = Incoming::read(&note).expect("a 1:1 call");
+        assert!(!call.call_id.is_empty());
+        assert!(call.caller.id.starts_with("8:"));
+        assert!(call.offer.blob.starts_with("v=0"));
+        // Its links stay out of the log.
+        assert!(!format!("{call:?}").contains("http"));
     }
 
     #[test]

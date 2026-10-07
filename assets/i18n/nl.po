@@ -2880,3 +2880,18 @@ msgstr "Het gesprek is beëindigd"
 
 msgid "Hang up"
 msgstr "Ophangen"
+
+msgid "Accept"
+msgstr "Opnemen"
+
+msgid "Microsoft Teams call"
+msgstr "Microsoft Teams-gesprek"
+
+msgid "Missed call from {name}"
+msgstr "Gemiste oproep van {name}"
+
+msgid "Pick up the call here"
+msgstr "Neem het gesprek hier op"
+
+msgid "{name} is calling you"
+msgstr "{name} belt je"

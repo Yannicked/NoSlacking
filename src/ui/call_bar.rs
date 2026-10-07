@@ -126,7 +126,7 @@ fn gather(
         team: listening.team.clone(),
         channel: listening.channel.clone(),
         title: if listening.is_call() {
-            huddles::call_title_text(&name, &listening.phase)
+            huddles::call_title_text(&name, &listening.phase, listening.answered)
         } else {
             huddles::title_text(place, listening.mic == crate::huddle_mic::Mic::Live)
         },
