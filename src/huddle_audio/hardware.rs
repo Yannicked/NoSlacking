@@ -382,6 +382,7 @@ impl Helper {
             codec,
             width,
             height,
+            hardware: true,
         };
         let generation = state.generation;
         match self.exchange(&mut state, request, self.call_timeout)? {
@@ -516,7 +517,7 @@ impl HwDecoder {
             data: unit.to_vec(),
         };
         match self.helper.call(self.generation, request) {
-            Ok(Reply::Picture(planes)) => {
+            Ok(Reply::Picture(ipc::Decoded { planes, .. })) => {
                 // Checked against their size as they were read; and no
                 // larger than the helper said it decodes.
                 if planes.width > self.max.0 || planes.height > self.max.1 {
@@ -712,12 +713,16 @@ pub(crate) mod pretend {
     pub fn picture(width: u32, height: u32, grey: u8) -> Reply {
         let (cw, ch) = ipc::chroma_size(width, height);
         let n = |w: u32, h: u32| usize::try_from(w * h).unwrap_or(0);
-        Reply::Picture(ipc::Planes {
-            width,
-            height,
-            y: vec![grey; n(width, height)],
-            u: vec![128; n(cw, ch)],
-            v: vec![128; n(cw, ch)],
+        Reply::Picture(ipc::Decoded {
+            planes: ipc::Planes {
+                width,
+                height,
+                y: vec![grey; n(width, height)],
+                u: vec![128; n(cw, ch)],
+                v: vec![128; n(cw, ch)],
+            },
+            source: (width, height),
+            hardware: true,
         })
     }
 

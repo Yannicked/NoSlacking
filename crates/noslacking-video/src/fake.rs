@@ -1,10 +1,10 @@
 //! A back end with no hardware behind it, for tests: it "decodes" a
-//! frame into a flat grey picture of the size it was opened at, and
-//! "encodes" a picture into a made-up NAL unit. Chosen with
-//! `NOSLACKING_VIDEO_BACKEND=fake`.
+//! frame into a flat grey picture of the size it was opened at, as if
+//! on the GPU, and "encodes" a picture into a made-up NAL unit. Chosen
+//! with `NOSLACKING_VIDEO_BACKEND=fake`.
 
 use noslacking_video_ipc::{
-    Capability, Codec, Direction, MAX_SIDE, Planes, chroma_size, output_size,
+    Capability, Codec, Decoded, Direction, MAX_SIDE, Planes, chroma_size, output_size,
 };
 
 use crate::backend::{Backend, Decoder, Encoded, Encoder, Failure};
@@ -73,7 +73,7 @@ struct FakeDecoder {
 }
 
 impl Decoder for FakeDecoder {
-    fn decode(&mut self, frame: &[u8], keyframe: bool) -> Result<Option<Planes>, Failure> {
+    fn decode(&mut self, frame: &[u8], keyframe: bool) -> Result<Option<Decoded>, Failure> {
         if !frame.starts_with(&[0, 0, 1]) && !frame.starts_with(&[0, 0, 0, 1]) {
             self.started = false;
             return Err(Failure::broken("no start code"));
@@ -88,12 +88,16 @@ impl Decoder for FakeDecoder {
         let (width, height) = output_size((self.width, self.height), self.fit);
         let (cw, ch) = chroma_size(width, height);
         let size = |w: u32, h: u32| usize::try_from(w * h).unwrap_or(0);
-        Ok(Some(Planes {
-            width,
-            height,
-            y: vec![self.frames; size(width, height)],
-            u: vec![128; size(cw, ch)],
-            v: vec![128; size(cw, ch)],
+        Ok(Some(Decoded {
+            planes: Planes {
+                width,
+                height,
+                y: vec![self.frames; size(width, height)],
+                u: vec![128; size(cw, ch)],
+                v: vec![128; size(cw, ch)],
+            },
+            source: (self.width, self.height),
+            hardware: true,
         }))
     }
 
