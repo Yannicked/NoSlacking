@@ -109,6 +109,11 @@ impl SendControl {
         self.shared.keyframe.swap(false, Ordering::Relaxed)
     }
 
+    /// Whether a keyframe has been asked for and not yet made.
+    pub fn keyframe_wanted(&self) -> bool {
+        self.shared.keyframe.load(Ordering::Relaxed)
+    }
+
     /// The bitrate to aim at, in bit/s, kept within what is sent.
     pub fn set_bitrate(&self, bitrate: u32) {
         self.shared

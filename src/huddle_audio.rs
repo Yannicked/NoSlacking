@@ -72,6 +72,10 @@ pub mod roster;
 #[cfg(feature = "huddle-video")]
 pub mod screen;
 pub mod sdp;
+#[cfg(feature = "huddle-share")]
+pub mod share;
+#[cfg(feature = "huddle-share")]
+pub mod share_send;
 pub mod signaling;
 pub mod speaker;
 pub mod turn;

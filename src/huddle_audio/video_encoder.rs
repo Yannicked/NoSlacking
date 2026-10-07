@@ -639,6 +639,7 @@ mod tests {
     /// the picture still, a band changing each frame.
     #[test]
     #[ignore = "a measurement; run in release"]
+    #[allow(clippy::print_stdout, reason = "the measurement is for the reader")]
     fn share_encode_cost() {
         for (width, height, bitrate, whole) in [
             (1920, 1080, 2_500_000, false),
