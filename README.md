@@ -150,7 +150,8 @@ file, and never written to the log.
 cargo run --release
 ```
 
-You need a Rust toolchain and the egui build dependencies; see
+You need a Rust toolchain, the egui build dependencies and, for huddles,
+OpenSSL's headers on Linux or Perl on macOS and Windows; see
 [`CONTRIBUTING.md`](CONTRIBUTING.md). To try the interface without a Slack
 account, run the demo:
 
