@@ -78,6 +78,9 @@ struct Running {
     control: mpsc::UnboundedSender<Control>,
     /// Whether the interface wants the microphone muted.
     muted: watch::Sender<bool>,
+    /// Whether the interface wants the camera on.
+    #[cfg(feature = "huddle-camera")]
+    camera: watch::Sender<bool>,
 }
 
 /// An incoming call ringing here, waiting for the person to decide.
@@ -107,20 +110,35 @@ pub struct Caller {
     ringing: Option<Ringing>,
 }
 
-/// A call's controls: for the caller to keep, and for the call's task.
-fn controls() -> (
-    Running,
-    mpsc::UnboundedReceiver<Control>,
-    watch::Receiver<bool>,
-) {
+/// What a call's devices are steered by: the microphone and the camera
+/// as the interface wants them.
+struct Wanted {
+    microphone: watch::Receiver<bool>,
+    #[cfg(feature = "huddle-camera")]
+    camera: watch::Receiver<bool>,
+}
+
+/// A call's controls: for the caller to keep, and for the call's task
+/// (hang-up and mute for the call, and what its devices should do).
+fn controls() -> (Running, mpsc::UnboundedReceiver<Control>, Wanted) {
     let (control, controls) = mpsc::unbounded_channel();
-    let (muted, wanted) = watch::channel(true);
+    let (muted, microphone) = watch::channel(true);
     // Unmuted from the start: the microphone task opens it on this.
     let _ = muted.send(false);
+    // The camera starts off.
+    #[cfg(feature = "huddle-camera")]
+    let (camera_sender, camera) = watch::channel(false);
     let running = Running {
         team: String::new(),
         control,
         muted,
+        #[cfg(feature = "huddle-camera")]
+        camera: camera_sender,
+    };
+    let wanted = Wanted {
+        microphone,
+        #[cfg(feature = "huddle-camera")]
+        camera,
     };
     (running, controls, wanted)
 }
@@ -206,6 +224,14 @@ impl Caller {
         }
     }
 
+    /// Turns the camera on or off in the call, if there is one.
+    #[cfg(feature = "huddle-camera")]
+    pub fn set_camera(&mut self, on: bool) {
+        if let Some(running) = &self.running {
+            let _ = running.camera.send(on);
+        }
+    }
+
     /// Hangs up; the call says when it has ended.
     pub fn stop(&mut self) {
         if let Some(running) = self.running.take() {
@@ -280,20 +306,40 @@ struct Devices {
     mic: tokio::task::JoinHandle<()>,
     close_mic: oneshot::Sender<()>,
     passing: tokio::task::JoinHandle<()>,
+    #[cfg(feature = "huddle-camera")]
+    camera: CameraTask,
     /// How loud the far end plays.
     meter: crate::huddle_audio::speaker::Feed,
     /// Whether you spoke since last asked.
     spoke: Arc<AtomicBool>,
 }
 
+/// The camera's task: closed until turned on, its pictures encoded on a
+/// thread of its own, its preview for the call bar.
+#[cfg(feature = "huddle-camera")]
+struct CameraTask {
+    task: tokio::task::JoinHandle<()>,
+    close: oneshot::Sender<()>,
+    /// Held open: a call is never refused video, as a huddle can be, and
+    /// the task stops when this closes.
+    _refusals: mpsc::Sender<()>,
+}
+
 impl Devices {
     /// Opens the speaker and the microphone (as `wanted` says) for the
-    /// call in `place`, and answers the sound the call is to use.
+    /// call in `place`, readies the camera and the far end's tile, and
+    /// answers the sound and pictures the call is to use.
     async fn open(
         place: &Place,
-        wanted: watch::Receiver<bool>,
+        wanted: Wanted,
         sink: &Sink,
+        tell: &impl Fn(Listen),
     ) -> Result<(Self, Audio), Failure> {
+        let Wanted {
+            microphone: wanted,
+            #[cfg(feature = "huddle-camera")]
+                camera: camera_wanted,
+        } = wanted;
         let tap = RenderTap::default();
         let speaker_tap = tap.clone();
         let (speaker, feed) =
@@ -346,18 +392,39 @@ impl Devices {
                 });
             },
         ));
+        // The far end's camera's tile.
+        #[cfg(feature = "huddle-video")]
+        let gallery = {
+            let waker = sink.waker();
+            let gallery = crate::huddle_audio::gallery::Gallery::new(move || waker.wake());
+            tell(Listen::Gallery(gallery.clone()));
+            gallery
+        };
+        #[cfg(feature = "huddle-camera")]
+        let (camera, camera_feed) = camera_task(place, camera_wanted, sink, tell);
+        #[cfg(not(any(feature = "huddle-video", feature = "huddle-camera")))]
+        let _ = tell;
+        let video = crate::teams::calling::video::Video {
+            #[cfg(feature = "huddle-video")]
+            gallery: Some(gallery),
+            #[cfg(feature = "huddle-camera")]
+            camera: Some(camera_feed),
+        };
         let audio = Audio {
             feed: Some(feed.clone()),
             uplink: Some(Uplink {
                 frames: frames_in,
                 muted,
             }),
+            video,
         };
         let devices = Self {
             speaker,
             mic,
             close_mic,
             passing,
+            #[cfg(feature = "huddle-camera")]
+            camera,
             meter: feed,
             spoke,
         };
@@ -366,6 +433,11 @@ impl Devices {
 
     /// Closes the microphone, then the speaker.
     async fn close(self) {
+        #[cfg(feature = "huddle-camera")]
+        {
+            let _ = self.camera.close.send(());
+            let _ = self.camera.task.await;
+        }
         let _ = self.close_mic.send(());
         let _ = self.mic.await;
         self.passing.abort();
@@ -373,6 +445,62 @@ impl Devices {
         // Stopping the device waits for its thread; not on this one.
         let _ = tokio::task::spawn_blocking(move || drop(speaker)).await;
     }
+}
+
+/// Starts the camera's task for the call in `place`, the camera opening
+/// and closing as `wanted` says; answers the task and what the call
+/// sends from.
+#[cfg(feature = "huddle-camera")]
+fn camera_task(
+    place: &Place,
+    wanted: watch::Receiver<bool>,
+    sink: &Sink,
+    tell: &impl Fn(Listen),
+) -> (CameraTask, crate::teams::calling::video::CameraFeed) {
+    use crate::huddle_audio::camera_send::{QUEUE, SendControl};
+
+    let waker = sink.waker();
+    let preview = crate::huddle_camera::Preview::new(move || waker.wake());
+    tell(Listen::Preview(preview.clone()));
+    let (frames, frames_in) = mpsc::channel(QUEUE);
+    let control = SendControl::default();
+    let (refusals_sender, refusals) = mpsc::channel(1);
+    let (on, on_rx) = watch::channel(false);
+    let (close, done) = oneshot::channel();
+    let camera_sink = sink.clone();
+    let (team, channel) = (place.team.clone(), place.channel.clone());
+    let task = tokio::spawn(super::listen::camera(
+        wanted,
+        on,
+        super::listen::CameraWiring {
+            latest: crate::huddle_audio::camera::Latest::default(),
+            frames,
+            control: control.clone(),
+            preview,
+        },
+        refusals,
+        done,
+        move |news| {
+            camera_sink.send(Event::People {
+                team: team.clone(),
+                event: people::Event::Camera {
+                    channel: channel.clone(),
+                    news,
+                },
+            });
+        },
+    ));
+    let task = CameraTask {
+        task,
+        close,
+        _refusals: refusals_sender,
+    };
+    let feed = crate::teams::calling::video::CameraFeed {
+        frames: frames_in,
+        on: on_rx,
+        control,
+    };
+    (task, feed)
 }
 
 /// What tells the interface where the call in `place` is.
@@ -399,6 +527,26 @@ struct Shown<'a, T: Fn(Listen)> {
 }
 
 impl<T: Fn(Listen)> Shown<'_, T> {
+    /// The far end's camera started or stopped: its tile comes or goes.
+    fn far_video(&self, on: bool) {
+        #[cfg(feature = "huddle-video")]
+        {
+            let cameras = if on {
+                vec![crate::huddle_audio::cameras::Camera {
+                    key: crate::teams::calling::video::FAR_CAMERA.to_owned(),
+                    user: Some(self.callee.to_owned()),
+                    paused: false,
+                    tile: true,
+                }]
+            } else {
+                Vec::new()
+            };
+            (self.tell)(Listen::Cameras(cameras));
+        }
+        #[cfg(not(feature = "huddle-video"))]
+        let _ = on;
+    }
+
     /// Changes what is shown of who is in the call, telling the bar the
     /// whole of it if that changed anything.
     fn change(&mut self, change: impl FnOnce(&mut FarEnd)) {
@@ -416,6 +564,7 @@ impl<T: Fn(Listen)> Shown<'_, T> {
             CallEvent::Live => (self.tell)(Listen::Live),
             CallEvent::AudioFlowing => {}
             CallEvent::FarEndMuted(muted) => self.change(|far| far.muted = muted),
+            CallEvent::FarEndVideo(on) => self.far_video(on),
             CallEvent::Ended { result, .. } => self.ended = Some(result),
         }
     }
@@ -466,13 +615,13 @@ async fn run(
     client: TeamsClient,
     place: Place,
     controls: mpsc::UnboundedReceiver<Control>,
-    wanted: watch::Receiver<bool>,
+    wanted: Wanted,
     sink: Sink,
 ) {
     let tell = teller(&place, &sink);
     tell(Listen::Joining);
     tell(Listen::Roster(roster(&place.callee, FarEnd::default())));
-    let (devices, audio) = match Devices::open(&place, wanted, &sink).await {
+    let (devices, audio) = match Devices::open(&place, wanted, &sink, &tell).await {
         Ok(opened) => opened,
         Err(failure) => {
             tell(Listen::Ended(Err(failure)));
@@ -504,7 +653,7 @@ async fn ring(
     call: Incoming,
     decisions: oneshot::Receiver<Decision>,
     controls: mpsc::UnboundedReceiver<Control>,
-    wanted: watch::Receiver<bool>,
+    wanted: Wanted,
     sink: Sink,
 ) {
     let call_id = call.call_id.clone();
@@ -563,7 +712,7 @@ async fn ring(
     };
     let tell = teller(&place, &sink);
     tell(Listen::Roster(roster(&place.callee, FarEnd::default())));
-    let (devices, audio) = match Devices::open(&place, wanted, &sink).await {
+    let (devices, audio) = match Devices::open(&place, wanted, &sink, &tell).await {
         Ok(opened) => opened,
         Err(failure) => {
             let _ = answer.send(Answer::Decline);

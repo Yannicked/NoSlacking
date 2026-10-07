@@ -1221,6 +1221,27 @@ hang up, and see their hang-up. First as a probe, then in the app.
 - **Stage 5, sending the camera.** The huddle camera pipeline at the
   answered profile and `max-fs`/`max-mbps`; `controlVideoStreaming` pushes
   (not seen yet) probably ask for a resolution.
+- **Stages 4 and 5 as built** (`src/teams/calling/video.rs`). A 1:1
+  call's video is the SDP alone: the source requests and data-channel
+  messages of the web client's calling bundle (`sr`,
+  `controlVideoStreaming`, the `main-channel` handshake) belong to its
+  server-mixed path and never appear in a 1:1 capture. So the camera line
+  is kept `sendrecv` from the first SDP of the call to the last, and our
+  camera sends only while it is on: turning it on needs no
+  renegotiation of ours, which was never captured (`POST
+  {mediaRenegotiation}` with a `mediaNegotiation` body, glare handling).
+  The far end renegotiates when its own camera starts (`recvonly`
+  dropped, `callModalities` gaining `video`), which the call answers. Its
+  video, like its audio, names no SSRC we can use and is learnt from the
+  first packet at the line's H.264 payload type; a camera quiet for 3 s
+  counts as off. The picture is decoded by the video helper into the
+  huddle's `Gallery`; ours comes from the huddle's camera and encoder.
+  H.264 is registered with str0m at the call's one number (ours, 108, in
+  an offer; the offerer's in an answer), which the native client keeps
+  through its renegotiations. No `nack` and no `rtx`: a loss asks for a
+  keyframe. Open: the native client's first offer limits what we send to
+  `max-fs=240` (about 320×192) and raises it later; our camera sends
+  640×480 regardless.
 - **Stage 6, screen share and group calls.** `applicationsharing-video`
   and the conversation-level links (`addParticipant`, the broker) are out
   of scope until 1:1 works.

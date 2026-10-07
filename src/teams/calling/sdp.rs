@@ -13,7 +13,10 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-use super::{Candidate, CandidateKind, Direction, Line, LineKind, LocalMedia, RemoteMedia, Setup};
+use super::{
+    CAMERA_LABEL, Candidate, CandidateKind, Direction, Line, LineKind, LocalMedia, RemoteMedia,
+    Setup, VideoCodec,
+};
 
 /// Why an SDP could not be read.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -166,6 +169,18 @@ pub fn read(sdp: &str) -> Result<RemoteMedia, SdpError> {
             .find_map(|(_, v)| opus_rtpmap(v))
     });
 
+    // The camera's line: labelled `main-video`, else the first video
+    // line without a label.
+    let camera = raw
+        .iter()
+        .filter(|l| l.media == "video" && l.port != 0)
+        .find(|l| l.attr("label") == Some(CAMERA_LABEL))
+        .or_else(|| {
+            raw.iter()
+                .find(|l| l.media == "video" && l.port != 0 && l.attr("label").is_none())
+        });
+    let video = camera.and_then(h264_of);
+
     let session_direction = direction_in(&session);
     let lines = raw
         .iter()
@@ -194,7 +209,55 @@ pub fn read(sdp: &str) -> Result<RemoteMedia, SdpError> {
         setup,
         candidates,
         opus_pt,
+        video,
         lines,
+    })
+}
+
+/// The first H.264 at packetization mode 1 a video line lists, and its
+/// retransmission's payload type.
+fn h264_of(line: &RawLine<'_>) -> Option<VideoCodec> {
+    let fmtp = |pt: &str| {
+        line.attrs
+            .iter()
+            .filter(|(n, _)| *n == "fmtp")
+            .find_map(|(_, v)| v.strip_prefix(pt).and_then(|rest| rest.strip_prefix(' ')))
+    };
+    let pt = line
+        .attrs
+        .iter()
+        .filter(|(n, _)| *n == "rtpmap")
+        .filter_map(|(_, v)| v.split_once(' '))
+        .filter(|(_, codec)| {
+            codec
+                .split('/')
+                .next()
+                .is_some_and(|name| name.eq_ignore_ascii_case("H264"))
+        })
+        .map(|(pt, _)| pt)
+        .find(|pt| {
+            fmtp(pt).is_some_and(|params| {
+                params
+                    .split(';')
+                    .any(|p| p.trim().eq_ignore_ascii_case("packetization-mode=1"))
+            })
+        })?;
+    let rtx = line
+        .attrs
+        .iter()
+        .filter(|(n, _)| *n == "rtpmap")
+        .filter_map(|(_, v)| v.split_once(' '))
+        .filter(|(_, codec)| {
+            codec
+                .split('/')
+                .next()
+                .is_some_and(|name| name.eq_ignore_ascii_case("rtx"))
+        })
+        .find(|(rtx, _)| fmtp(rtx).is_some_and(|p| p.trim() == format!("apt={pt}")))
+        .and_then(|(rtx, _)| rtx.parse().ok());
+    Some(VideoCodec {
+        pt: pt.parse().ok()?,
+        rtx,
     })
 }
 
@@ -338,8 +401,10 @@ pub fn answer_setup(offer: Setup) -> Setup {
 /// second attempt of §F.3 4b). The candidates are listed on the audio
 /// line, and every line's port and `c=` are those of the relay candidate.
 ///
-/// The video lines are offered `inactive`, with a single H.264 codec,
-/// rather than left out or rejected with port 0. The web client's share
+/// With `local.video_ssrc` set, the camera's line (`1`) carries our
+/// camera: H.264 constrained baseline, `sendrecv`. Otherwise, and always for the share
+/// line, the video lines are offered `inactive`, with a single H.264
+/// codec, rather than left out or rejected with port 0. The web client's share
 /// line is offered just so, and Microsoft answers it in kind, so this is
 /// a shape its side is known to take; a port-0 line in an offer is legal
 /// but never seen in the capture, and leaving lines out would change the
@@ -405,7 +470,24 @@ pub fn offer(local: &LocalMedia) -> String {
     } else {
         (108, 109)
     };
-    for (mid, label) in [("1", "main-video"), ("2", "applicationsharing-video")] {
+    for (mid, label) in [("1", CAMERA_LABEL), ("2", "applicationsharing-video")] {
+        // The camera's line carries our camera when this build has video.
+        if label == CAMERA_LABEL
+            && let Some(ssrc) = local.video_ssrc
+        {
+            let setup = setup_text(local.setup);
+            camera_line(
+                &mut out,
+                local,
+                mid,
+                local.video_pt,
+                ssrc,
+                local.video_direction,
+                setup,
+                false,
+            );
+            continue;
+        }
         push(&mut out, &format!("m=video {port} RTP/SAVP {h264} {rtx}"));
         push(&mut out, &connection(address));
         push(
@@ -447,8 +529,10 @@ pub fn offer(local: &LocalMedia) -> String {
 /// The answer has the offer's mids, in its order and number. Audio is
 /// accepted with Opus alone, at the offerer's payload type, and our
 /// candidates; if the offer has no Opus the audio line is rejected too,
-/// and the call cannot go on. Every other line is rejected as the web
-/// client rejects the share line, `m=video 0 RTP/SAVP 34` (H.263's number
+/// and the call cannot go on. The camera's line is kept, at the offer's
+/// H.264 payload type, while `local.video_ssrc` is set and the offer has
+/// H.264 we can use. Every other line is rejected as the web client
+/// rejects the share line, `m=video 0 RTP/SAVP 34` (H.263's number
 /// as a placeholder) followed only by its label, except the data line
 /// while `local.data_ssrc` is set, which is kept as the web client keeps
 /// it. The bundle groups the lines we keep.
@@ -463,12 +547,18 @@ pub fn answer(local: &LocalMedia, remote: &RemoteMedia) -> String {
         .lines
         .iter()
         .position(|l| l.kind == LineKind::Audio && l.port != 0);
+    let camera_mid = remote.camera().map(|l| l.mid.as_str());
     let accepted = |i: usize, line: &Line| -> bool {
         line.port != 0
             && match line.kind {
                 LineKind::Audio => Some(i) == audio_index && remote.opus_pt.is_some(),
                 LineKind::Data => local.data_ssrc.is_some(),
-                LineKind::Video | LineKind::Other => false,
+                LineKind::Video => {
+                    Some(line.mid.as_str()) == camera_mid
+                        && local.video_ssrc.is_some()
+                        && remote.video.is_some()
+                }
+                LineKind::Other => false,
             }
     };
     let kept: Vec<&str> = remote
@@ -516,6 +606,15 @@ pub fn answer(local: &LocalMedia, remote: &RemoteMedia) -> String {
             (LineKind::Data, _, Some(ssrc)) => {
                 data_line(&mut out, local, &line.mid, ssrc, setup, first);
             }
+            (LineKind::Video, _, _) => {
+                // `accepted` keeps the camera's line only with both.
+                if let (Some(codec), Some(ssrc)) = (remote.video, local.video_ssrc) {
+                    let direction = answer_direction(local.video_direction, line.direction);
+                    camera_line(
+                        &mut out, local, &line.mid, codec.pt, ssrc, direction, setup, first,
+                    );
+                }
+            }
             // `accepted` keeps nothing else.
             _ => reject(&mut out, line),
         }
@@ -537,6 +636,49 @@ fn answer_direction(ours: Direction, theirs: Direction) -> Direction {
         (false, true) => Direction::RecvOnly,
         (false, false) => Direction::Inactive,
     }
+}
+
+/// The camera's line (`main-video`): H.264 at `pt`, packetization mode
+/// 1, constrained baseline as our encoder makes it, the receiver free to
+/// send another level (`level-asymmetry-allowed`), as the web client's
+/// answers write it (§D.4). No retransmission is offered and no `nack`:
+/// a lost picture is mended by a keyframe (`nack pli`) instead.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "an m-line's parts, as `data_line` takes them"
+)]
+fn camera_line(
+    out: &mut String,
+    local: &LocalMedia,
+    mid: &str,
+    pt: u8,
+    ssrc: u32,
+    direction: Direction,
+    setup: &str,
+    candidates: bool,
+) {
+    let (address, port) = media_address(local);
+    push(out, &format!("m=video {port} RTP/SAVP {pt}"));
+    push(out, &connection(address));
+    push(out, "a=x-signaling-fb:* x-message app send:src recv:src,vc");
+    push(out, &ssrc_range(ssrc));
+    push(out, &format!("a=rtpmap:{pt} H264/90000"));
+    push(
+        out,
+        &format!(
+            "a=fmtp:{pt} level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+        ),
+    );
+    push(out, &format!("a=rtcp:{port}"));
+    push(out, "a=rtcp-fb:* goog-remb");
+    push(out, "a=rtcp-fb:* transport-cc");
+    push(out, "a=rtcp-fb:* nack pli");
+    push(out, &format!("a=setup:{setup}"));
+    push(out, &format!("a=mid:{mid}"));
+    push(out, direction_text(direction));
+    transport_part(out, local, candidates);
+    push(out, "a=rtcp-rsize");
+    push(out, &format!("a=label:{CAMERA_LABEL}"));
 }
 
 /// A rejected line, as the web client writes one: port 0, a placeholder
@@ -758,6 +900,9 @@ mod tests {
                 },
             ],
             audio_ssrc: 1234,
+            video_ssrc: None,
+            video_pt: 108,
+            video_direction: Direction::SendRecv,
             opus_pt: 111,
             audio_direction: Direction::SendRecv,
             data_ssrc: Some(5678),
@@ -1127,6 +1272,63 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn the_camera_lines_h264_is_read_past_microsofts_own_codecs() {
+        // The native client lists AV1 and H.264 UC first; plain H.264 at
+        // packetization mode 1 is the one to use.
+        let incoming = read(INCOMING_020).expect("020 reads");
+        assert_eq!(
+            incoming.video,
+            Some(VideoCodec {
+                pt: 107,
+                rtx: Some(99)
+            })
+        );
+        assert_eq!(incoming.camera().map(|l| l.mid.as_str()), Some("video_1"));
+        let renegotiation = read(RENEGOTIATION_010).expect("010 reads");
+        assert_eq!(
+            renegotiation.video,
+            Some(VideoCodec {
+                pt: 102,
+                rtx: Some(103)
+            })
+        );
+    }
+
+    #[test]
+    fn with_a_camera_its_line_is_offered_and_answered() {
+        let local = LocalMedia {
+            video_ssrc: Some(77),
+            ..local()
+        };
+        let ours = read(&offer(&local)).expect("our offer reads back");
+        let camera = ours.camera().expect("a camera line");
+        assert_eq!(camera.mid, "1");
+        assert_eq!(camera.direction, Direction::SendRecv);
+        assert_eq!(ours.video.map(|v| v.pt), Some(108));
+        assert!(offer(&local).contains("a=x-ssrc-range:77-77\r\n"));
+
+        // To the native client's offer: its payload type and mid, both
+        // ways.
+        let sdp = answer(&local, &read(INCOMING_020).expect("020 reads"));
+        let answered = read(&sdp).expect("our answer reads back");
+        let camera = answered.camera().expect("the camera line kept");
+        assert_eq!(camera.mid, "video_1");
+        assert_ne!(camera.port, 0);
+        assert_eq!(camera.direction, Direction::SendRecv);
+        assert_eq!(answered.video.map(|v| v.pt), Some(107));
+        assert!(sdp.contains("a=group:BUNDLE audio_0 video_1"));
+
+        // A far end that only receives (010): we only send.
+        let sdp = answer(&local, &read(RENEGOTIATION_010).expect("010 reads"));
+        let camera = read(&sdp)
+            .expect("reads back")
+            .camera()
+            .cloned()
+            .expect("kept");
+        assert_eq!(camera.direction, Direction::SendOnly);
     }
 
     #[test]

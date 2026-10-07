@@ -75,6 +75,8 @@ const STATS_EVERY: Duration = Duration::from_secs(5);
 const AUDIO_TICK: Duration = Duration::from_millis(20);
 /// The audio m-line's mid in our offer (§D.1).
 pub const AUDIO_MID: &str = "0";
+/// Our camera line's mid in an offer, as the web client's (§D.1).
+pub const VIDEO_MID: &str = "1";
 /// Our Opus payload type in an offer, as the web client's (§D.1).
 pub const OPUS_PT: u8 = 111;
 /// The largest datagram read: more than any Ethernet MTU.
@@ -171,6 +173,30 @@ pub struct MediaConfig {
     /// address the system would send to the internet from; tests set it
     /// to the loopback address.
     pub host: Option<IpAddr>,
+    /// The camera line, in a build with video: its mid and H.264 payload
+    /// type (ours in an offer, the offerer's in an answer).
+    pub video: Option<VideoLine>,
+}
+
+/// The camera's m-line, as a media session is started with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoLine {
+    pub mid: String,
+    pub pt: u8,
+}
+
+/// Whether this build shows or sends video at all.
+const HAS_VIDEO: bool = cfg!(any(feature = "huddle-video", feature = "huddle-camera"));
+
+/// The H.264 payload type of our offer's camera line: the web client's
+/// constrained baseline number, moved aside if Opus has it (in a bundle a
+/// payload type must not mean two codecs).
+pub fn offer_video_pt(opus_pt: u8) -> u8 {
+    if opus_pt == 108 || opus_pt == 109 {
+        118
+    } else {
+        108
+    }
 }
 
 impl MediaConfig {
@@ -184,6 +210,10 @@ impl MediaConfig {
             opus_pt: OPUS_PT,
             audio_mid: AUDIO_MID.to_owned(),
             host: None,
+            video: HAS_VIDEO.then(|| VideoLine {
+                mid: VIDEO_MID.to_owned(),
+                pt: offer_video_pt(OPUS_PT),
+            }),
         }
     }
 
@@ -198,6 +228,14 @@ impl MediaConfig {
                 .audio()
                 .map_or_else(|| AUDIO_MID.to_owned(), |line| line.mid.clone()),
             host: None,
+            video: offer
+                .camera()
+                .zip(offer.video)
+                .filter(|_| HAS_VIDEO)
+                .map(|(line, codec)| VideoLine {
+                    mid: line.mid.clone(),
+                    pt: codec.pt,
+                }),
         }
     }
 }
@@ -212,6 +250,8 @@ pub struct Audio {
     /// `backend/listen.rs` wires them for a huddle; without one we stay
     /// muted and send silence.
     pub uplink: Option<Uplink>,
+    /// Where the far end's camera is shown and ours comes from.
+    pub video: super::video::Video,
 }
 
 /// The probe's quiet 440 Hz tone in place of the microphone, through the
@@ -289,6 +329,8 @@ pub enum MediaEvent {
     Connected,
     /// Audio has gone out and come in: the call can be heard both ways.
     AudioFlowing,
+    /// The far end's camera started (`true`) or stopped showing.
+    FarVideo(bool),
     /// The media broke; nothing more comes.
     Failed(Failure),
     /// Stopped as asked.
@@ -359,6 +401,9 @@ struct Plan {
     /// Whether to send audio, and whether to play what comes.
     send: bool,
     receive: bool,
+    /// Whether to send our camera and show the far end's, if the
+    /// description has a camera line.
+    video: Option<(bool, bool)>,
 }
 
 impl std::fmt::Debug for Plan {
@@ -705,6 +750,10 @@ fn plan(remote: &RemoteMedia, opus_pt: u8) -> Result<Plan, String> {
         return Err("no candidate to reach".into());
     }
     let (send, receive) = flows(audio.direction);
+    let video = remote
+        .camera()
+        .filter(|_| remote.video.is_some())
+        .map(|line| flows(line.direction));
     Ok(Plan {
         creds: IceCreds {
             ufrag: remote.ice_ufrag.clone(),
@@ -716,6 +765,7 @@ fn plan(remote: &RemoteMedia, opus_pt: u8) -> Result<Plan, String> {
         permits: permissions(remote, true),
         send,
         receive,
+        video,
     })
 }
 
@@ -767,7 +817,7 @@ fn apply(rtc: &mut Rtc, applied: &mut Applied, plan: &Plan) -> Result<Vec<String
 }
 
 /// The peer: Opus alone at `opus_pt`, OpenSSL's DTLS, full ICE.
-fn new_rtc(opus_pt: u8, controlling: bool, now: Instant) -> Rtc {
+fn new_rtc(opus_pt: u8, video_pt: Option<u8>, controlling: bool, now: Instant) -> Rtc {
     let mut config = RtcConfig::new()
         .clear_codecs()
         .set_ice_lite(false)
@@ -786,6 +836,24 @@ fn new_rtc(opus_pt: u8, controlling: bool, now: Instant) -> Rtc {
             ..Default::default()
         },
     );
+    if let Some(pt) = video_pt {
+        // H.264 as our encoder makes it and the far end sends it:
+        // packetization mode 1, constrained baseline, any level the other
+        // side likes.
+        config.codec_config().add_config(
+            Pt::from(pt),
+            None,
+            Codec::H264,
+            Frequency::NINETY_KHZ,
+            None,
+            FormatParams {
+                level_asymmetry_allowed: Some(true),
+                packetization_mode: Some(1),
+                profile_level_id: Some(0x42e01f),
+                ..Default::default()
+            },
+        );
+    }
     let mut rtc = config.build(now);
     rtc.direct_api().set_ice_controlling(controlling);
     rtc
@@ -801,7 +869,7 @@ fn declare_audio(rtc: &mut Rtc, mid: Mid, ssrc: u32) {
 /// The SSRC of an RTP packet carrying payload type `pt`; `None` for
 /// anything else (STUN, DTLS, RTCP, other payloads). SRTP leaves the
 /// header in the clear, so this reads it before str0m decrypts it.
-fn rtp_ssrc(data: &[u8], pt: u8) -> Option<u32> {
+pub(super) fn rtp_ssrc(data: &[u8], pt: u8) -> Option<u32> {
     let [first, second, _, _, _, _, _, _, a, b, c, d, ..] = *data else {
         return None;
     };
@@ -893,6 +961,10 @@ fn local_media(
         audio_ssrc,
         opus_pt,
         audio_direction: Direction::SendRecv,
+        // No camera line until the session says it has one.
+        video_ssrc: None,
+        video_pt: offer_video_pt(opus_pt),
+        video_direction: Direction::SendRecv,
         // No data channel offered: audio only, the third attempt of §F.3.
         data_ssrc: None,
         session_id: rand::random::<u64>() >> 1,
@@ -1001,6 +1073,8 @@ struct Session {
     next_stats: Instant,
     outbound: Outbound,
     feed: Option<Feed>,
+    /// The camera line, in a build with video.
+    video: Option<super::video::CallVideo>,
     frames: Option<mpsc::Receiver<Outgoing>>,
     muted_rx: Option<watch::Receiver<bool>>,
     /// The microphone's mute.
@@ -1030,11 +1104,33 @@ impl Session {
             .map_err(|e| failure(Stage::Gather, e.to_string()))?
             .port();
         let now = Instant::now();
-        let mut rtc = new_rtc(config.opus_pt, config.controlling, now);
+        let video_pt = config.video.as_ref().map(|v| v.pt);
+        let mut rtc = new_rtc(config.opus_pt, video_pt, config.controlling, now);
         let mid = Mid::from(config.audio_mid.as_str());
         // Any but zero, which libwebrtc keeps for its bandwidth probes.
         let ssrc = rand::random::<u32>().max(1);
         declare_audio(&mut rtc, mid, ssrc);
+        let Audio {
+            feed,
+            uplink,
+            video,
+        } = audio;
+        let video = config.video.as_ref().map(|line| {
+            let video_ssrc = loop {
+                let candidate = rand::random::<u32>().max(1);
+                if candidate != ssrc {
+                    break candidate;
+                }
+            };
+            super::video::CallVideo::new(
+                &mut rtc,
+                Mid::from(line.mid.as_str()),
+                line.pt,
+                video_ssrc,
+                video,
+                tell.clone(),
+            )
+        });
         let mut candidates = Vec::new();
         let host = config
             .host
@@ -1075,7 +1171,7 @@ impl Session {
             }
             None => (None, VecDeque::new()),
         };
-        let (frames, mut muted_rx) = match audio.uplink {
+        let (frames, mut muted_rx) = match uplink {
             Some(uplink) => (Some(uplink.frames), Some(uplink.muted)),
             None => (None, None),
         };
@@ -1112,7 +1208,8 @@ impl Session {
             next_audio: None,
             next_stats: now + STATS_EVERY,
             outbound: Outbound::default(),
-            feed: audio.feed,
+            feed,
+            video,
             frames,
             muted_rx,
             uplink_muted,
@@ -1200,13 +1297,17 @@ impl Session {
         }
         let creds = self.rtc.direct_api().local_ice_credentials();
         let fingerprint = self.rtc.direct_api().local_dtls_fingerprint().bytes.clone();
-        let local = local_media(
+        let mut local = local_media(
             &creds,
             &fingerprint,
             self.candidates.clone(),
             self.ssrc,
             self.opus_pt,
         );
+        if let Some(video) = &self.video {
+            local.video_ssrc = Some(video.ssrc());
+            local.video_pt = video.pt();
+        }
         log::info!(
             "gather: done after {:?}: {}",
             self.since(),
@@ -1359,6 +1460,9 @@ impl Session {
         bump(&self.counters.packets_in, 1);
         bump(&self.counters.bytes_in, data.len());
         expect_remote(&mut self.rtc, self.mid, self.opus_pt, &mut self.seen, data);
+        if let Some(video) = &mut self.video {
+            video.learn(&mut self.rtc, data);
+        }
         let Ok(receive) = Receive::new(Protocol::Udp, source, destination, data) else {
             log::debug!(
                 "connect: {} bytes from {source} that WebRTC does not read",
@@ -1510,6 +1614,19 @@ impl Session {
                 }
                 self.check_flowing();
             }
+            RtcEvent::MediaData(data) => {
+                if let Some(video) = &mut self.video
+                    && video.is(data.mid)
+                {
+                    video.data(&data, Instant::now());
+                    self.rtc_timeout = Some(Instant::now());
+                }
+            }
+            RtcEvent::KeyframeRequest(request) => {
+                if let Some(video) = &mut self.video {
+                    video.keyframe_request(&request);
+                }
+            }
             _ => {}
         }
     }
@@ -1594,6 +1711,9 @@ impl Session {
         }
         self.send = plan.send;
         self.receive = plan.receive;
+        if let (Some(video), Some((send, receive))) = (&mut self.video, plan.video) {
+            video.set_flows(send, receive);
+        }
         for ip in &plan.permits {
             if !self.permits.contains(ip) {
                 self.permits.push(*ip);
@@ -1660,6 +1780,9 @@ impl Session {
             self.flight.resend_at.filter(|_| !self.connected),
             self.disconnected_at.map(|at| at + RECONNECT_GRACE),
             self.next_audio,
+            self.video
+                .as_ref()
+                .and_then(super::video::CallVideo::deadline),
         ]
         .into_iter()
         .flatten()
@@ -1685,6 +1808,9 @@ impl Session {
         }
         if !self.connected && self.flight.due(now) {
             self.resend_flight(now).await;
+        }
+        if let Some(video) = &mut self.video {
+            video.on_time(&mut self.rtc, now);
         }
         if self.connect_deadline.is_some_and(|at| at <= now) {
             log::warn!("connect: gave up; paths: {}", self.paths.line());
@@ -1812,6 +1938,14 @@ async fn mute_change(
 }
 
 /// The session, gathering to stopping.
+/// What the camera side has next; never without a camera line.
+async fn next_video(video: &mut Option<super::video::CallVideo>) -> super::video::Input {
+    match video {
+        Some(video) => video.next().await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn run(mut session: Session, mut commands: mpsc::UnboundedReceiver<Command>) {
     session.next_relay().await;
     let mut buf = vec![0u8; DATAGRAM];
@@ -1849,6 +1983,12 @@ async fn run(mut session: Session, mut commands: mpsc::UnboundedReceiver<Command
                 }
             },
             command = commands.recv() => session.command(command),
+            input = next_video(&mut session.video) => {
+                let connected = session.connected;
+                if let Some(video) = &mut session.video {
+                    video.input(&mut session.rtc, input, connected);
+                }
+            }
             frame = next_frame(&mut session.frames) => match frame {
                 Some(frame) => session.send_frame(frame),
                 // The microphone's side is gone: silence from here.
@@ -1933,6 +2073,7 @@ mod tests {
                 ),
             ],
             opus_pt: Some(111),
+            video: None,
             lines: vec![
                 audio_line(Direction::SendRecv),
                 Line {
@@ -2245,7 +2386,7 @@ mod tests {
     impl Side {
         fn new(at: &str, controlling: bool, opus_pt: u8, ssrc: u32, now: Instant) -> Self {
             let at = addr(at);
-            let mut rtc = new_rtc(opus_pt, controlling, now);
+            let mut rtc = new_rtc(opus_pt, None, controlling, now);
             let mid = Mid::from(AUDIO_MID);
             declare_audio(&mut rtc, mid, ssrc);
             rtc.add_local_candidate(IceCandidate::host(at, "udp").expect("a candidate"));
@@ -2282,6 +2423,7 @@ mod tests {
                 setup,
                 candidates: local.candidates,
                 opus_pt: Some(local.opus_pt),
+                video: None,
                 lines: vec![audio_line(Direction::SendRecv)],
             }
         }
@@ -2410,6 +2552,26 @@ mod tests {
         );
         assert_eq!(MediaConfig::offer(None).opus_pt, OPUS_PT);
         assert!(MediaConfig::offer(None).controlling);
+    }
+
+    #[test]
+    fn an_answer_takes_the_callers_camera_line_in_a_build_with_video() {
+        let offer = super::super::sdp::read(include_str!("fixtures/incoming_offer_020.sdp"))
+            .expect("the recorded offer reads");
+        let config = MediaConfig::answer(None, &offer);
+        if HAS_VIDEO {
+            assert_eq!(
+                config.video,
+                Some(VideoLine {
+                    mid: "video_1".into(),
+                    pt: 107
+                })
+            );
+        } else {
+            assert_eq!(config.video, None);
+        }
+        assert_eq!(offer_video_pt(111), 108);
+        assert_eq!(offer_video_pt(108), 118, "Opus's number is not H.264's too");
     }
 
     #[test]

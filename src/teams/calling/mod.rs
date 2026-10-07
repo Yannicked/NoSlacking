@@ -20,6 +20,7 @@ pub mod media;
 pub mod router;
 pub mod sdp;
 pub mod types;
+pub mod video;
 
 use std::net::SocketAddr;
 
@@ -106,6 +107,9 @@ pub struct RemoteMedia {
     pub candidates: Vec<Candidate>,
     /// The Opus payload type, if audio offers or answers Opus.
     pub opus_pt: Option<u8>,
+    /// The H.264 the camera line (`main-video`) offers or answers, if it
+    /// has one we can use.
+    pub video: Option<VideoCodec>,
     /// Every m-line, in order.
     pub lines: Vec<Line>,
 }
@@ -115,6 +119,28 @@ impl RemoteMedia {
     pub fn audio(&self) -> Option<&Line> {
         self.lines.iter().find(|l| l.kind == LineKind::Audio)
     }
+
+    /// The camera's m-line: the video line labelled `main-video`, or the
+    /// first video line when none is labelled.
+    pub fn camera(&self) -> Option<&Line> {
+        let video = || self.lines.iter().filter(|l| l.kind == LineKind::Video);
+        video()
+            .find(|l| l.label.as_deref() == Some(CAMERA_LABEL))
+            .or_else(|| video().find(|l| l.label.is_none()))
+    }
+}
+
+/// The label of the camera's video line, which Microsoft keys it by.
+pub const CAMERA_LABEL: &str = "main-video";
+
+/// An H.264 codec on a video line: packetization mode 1, the only one
+/// str0m and our encoder speak.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoCodec {
+    /// Its payload type.
+    pub pt: u8,
+    /// Its retransmission's (`rtx` with `apt=` it), if listed.
+    pub rtx: Option<u8>,
 }
 
 /// What our SDP says about us: what [`sdp`] writes an offer or an answer
@@ -136,6 +162,17 @@ pub struct LocalMedia {
     /// Whether we send audio (unmuted or not, the line stays `sendrecv`;
     /// this is for holding a call, later).
     pub audio_direction: Direction,
+    /// The SSRC our camera goes out on, or `None` to offer the camera
+    /// line `inactive` and reject it in an answer (a build without
+    /// video).
+    pub video_ssrc: Option<u32>,
+    /// The camera line's H.264 payload type: ours in an offer, the
+    /// offerer's in an answer.
+    pub video_pt: u8,
+    /// Whether we send and receive on the camera line. Kept `sendrecv`
+    /// for the whole call, the camera sending only while it is on, so
+    /// turning it on needs no renegotiation.
+    pub video_direction: Direction,
     /// The SSRC of the data m-line (`m=x-data`), or `None` to leave the
     /// data line out of an offer and reject it in an answer. Nothing
     /// speaks SCTP over it yet; offering it is only to look like the web

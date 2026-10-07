@@ -51,6 +51,8 @@ pub enum CallEvent {
     AudioFlowing,
     /// The one called muted (`true`) or unmuted their microphone.
     FarEndMuted(bool),
+    /// The far end's camera started (`true`) or stopped showing.
+    FarEndVideo(bool),
     /// The call is over: normally (`Ok`) or because something failed.
     Ended {
         result: Result<(), Failure>,
@@ -365,6 +367,7 @@ impl Call {
                             tell(CallEvent::Live);
                         }
                     }
+                    Some(MediaEvent::FarVideo(on)) => tell(CallEvent::FarEndVideo(on)),
                     Some(MediaEvent::AudioFlowing) => {
                         log::info!("Teams call: audio flows both ways");
                         tell(CallEvent::AudioFlowing);

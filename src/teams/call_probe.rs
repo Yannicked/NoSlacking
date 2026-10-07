@@ -106,6 +106,7 @@ async fn probe(options: &Options, handle: tokio::runtime::Handle) -> i32 {
     let audio = Audio {
         feed: None,
         uplink: Some(uplink),
+        video: Default::default(),
     };
     let (control, steer) = tokio::sync::mpsc::unbounded_channel();
     let (events, mut told) = tokio::sync::mpsc::unbounded_channel();
@@ -136,6 +137,9 @@ async fn probe(options: &Options, handle: tokio::runtime::Handle) -> i32 {
                 Some(CallEvent::AudioFlowing) => {
                     flowing = true;
                     log::info!("teams call probe: audio flows both ways");
+                }
+                Some(CallEvent::FarEndVideo(on)) => {
+                    log::info!("teams call probe: the far end's camera {}", if on { "shows" } else { "stopped" });
                 }
                 Some(CallEvent::FarEndMuted(muted)) => {
                     log::info!("teams call probe: the far end {}", if muted { "muted" } else { "unmuted" });

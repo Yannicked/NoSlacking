@@ -261,11 +261,11 @@ pub(super) async fn microphone(
 /// What the camera's task needs: where the camera's pictures go, and
 /// what the encoder thread sends from.
 #[cfg(feature = "huddle-camera")]
-struct CameraWiring {
-    latest: crate::huddle_audio::camera::Latest,
-    frames: mpsc::Sender<crate::huddle_audio::camera_send::VideoFrame>,
-    control: crate::huddle_audio::camera_send::SendControl,
-    preview: crate::huddle_camera::Preview,
+pub(super) struct CameraWiring {
+    pub(super) latest: crate::huddle_audio::camera::Latest,
+    pub(super) frames: mpsc::Sender<crate::huddle_audio::camera_send::VideoFrame>,
+    pub(super) control: crate::huddle_audio::camera_send::SendControl,
+    pub(super) preview: crate::huddle_camera::Preview,
 }
 
 /// What a camera that would not open tells the interface.
@@ -285,7 +285,7 @@ fn camera_failure(error: &crate::huddle_audio::camera::CameraError) -> Failure {
 /// whatever happened. The encoder's thread runs from the first time the
 /// camera opens until the end.
 #[cfg(feature = "huddle-camera")]
-async fn camera(
+pub(super) async fn camera(
     mut wanted: watch::Receiver<bool>,
     on: watch::Sender<bool>,
     wiring: CameraWiring,
