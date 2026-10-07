@@ -45,6 +45,7 @@ pub mod signaling;
 pub mod speaker;
 pub mod turn;
 pub mod uplink;
+pub mod video;
 
 /// The host of `url`, for the log: what a protocol mismatch needs to
 /// know, without the path or query a URL could carry a secret in.
