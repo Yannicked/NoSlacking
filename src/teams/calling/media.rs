@@ -962,6 +962,9 @@ struct Session {
     /// The TURN credentials, while there are servers left to try.
     turn: Option<(String, String)>,
     attempts: VecDeque<Server>,
+    /// Whether a relay already sent us elsewhere: a second redirect is
+    /// not followed.
+    redirected: bool,
     relay: Option<Link>,
     relay_deadline: Option<Instant>,
     /// The far end's addresses the relay must let through.
@@ -1078,6 +1081,7 @@ impl Session {
             receive: true,
             turn,
             attempts,
+            redirected: false,
             relay: None,
             relay_deadline: None,
             permits: Vec::new(),
@@ -1288,6 +1292,21 @@ impl Session {
                 turn::Event::Failed(why) => {
                     let allocated = link.relayed.is_some();
                     log::warn!("relay: {}: {why}", link.server);
+                    // Sent elsewhere (300 Try Alternate): ask there next,
+                    // over UDP, once, before falling back to TCP.
+                    if !allocated
+                        && link.server.transport == Transport::Udp
+                        && let Some(alternate) = link.client.alternate()
+                        && !self.redirected
+                    {
+                        log::info!("relay: sent to {alternate}");
+                        self.redirected = true;
+                        self.attempts.push_front(turn::Server {
+                            host: alternate.ip().to_string(),
+                            port: alternate.port(),
+                            transport: Transport::Udp,
+                        });
+                    }
                     if allocated {
                         // The call may still go on a direct path; ICE
                         // says if it does not.
