@@ -47,6 +47,7 @@ const BROWSER_SIGN_IN_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// One workspace's saved sign-in, as read from the keyring at start-up.
 enum Stored {
     Token(Token),
+    TeamsCreds(crate::teams::auth::TeamsCredentials),
     Missing,
     /// The keyring failed while reading this one.
     Failed(crate::credentials::Error),
@@ -70,6 +71,10 @@ enum Internal {
     TeamAdded {
         meta: Workspace,
         token: Token,
+    },
+    TeamsAdded {
+        meta: Workspace,
+        creds: crate::teams::auth::TeamsCredentials,
     },
     /// From the Socket Mode task started as `generation`.
     Socket {
@@ -240,6 +245,7 @@ pub struct Worker {
     images: ImageLoader,
     app: Option<AppCredentials>,
     teams: HashMap<String, Team>,
+    teams_sessions: HashMap<String, super::teams::TeamsSession>,
     flow: Option<Flow>,
     /// When the user started a browser sign-in: until it is
     /// [`BROWSER_SIGN_IN_WINDOW`] old, a `slack://` sign-in link handed over
@@ -292,6 +298,7 @@ impl Worker {
             images,
             app: None,
             teams: HashMap::new(),
+            teams_sessions: HashMap::new(),
             flow: None,
             browser_sign_in: None,
             claiming: None,
@@ -361,6 +368,15 @@ impl Worker {
             for meta in workspaces {
                 let token = if failed {
                     Stored::Skipped
+                } else if meta.service == crate::model::Service::Teams {
+                    match credentials.load_teams_token(&meta.team_id).await {
+                        Ok(Some(creds)) => Stored::TeamsCreds(creds),
+                        Ok(None) => Stored::Missing,
+                        Err(error) => {
+                            failed = true;
+                            Stored::Failed(error)
+                        }
+                    }
                 } else {
                     match credentials.load_token(&meta.team_id).await {
                         Ok(Some(token)) => Stored::Token(token),
@@ -412,6 +428,7 @@ impl Worker {
             let reason = match stored {
                 Stored::Token(token) => {
                     let workspace = Workspace {
+                        service: meta.service,
                         team_id: meta.team_id,
                         name: meta.name,
                         domain: meta.domain,
@@ -421,6 +438,20 @@ impl Worker {
                         scopes: meta.scopes,
                     };
                     self.add_team(workspace, token);
+                    continue;
+                }
+                Stored::TeamsCreds(creds) => {
+                    let workspace = Workspace {
+                        service: meta.service,
+                        team_id: meta.team_id,
+                        name: meta.name,
+                        domain: meta.domain,
+                        icon: meta.icon,
+                        user_id: meta.user_id,
+                        sign_in: Default::default(),
+                        scopes: meta.scopes,
+                    };
+                    self.add_teams_workspace(workspace, creds);
                     continue;
                 }
                 Stored::Missing => Failure::NoSavedSignIn,
@@ -536,6 +567,62 @@ impl Worker {
             self.people.rtm_gone(&workspace.team_id);
         }
         self.report_socket();
+    }
+
+    fn add_teams_workspace(
+        &mut self,
+        workspace: Workspace,
+        creds: crate::teams::auth::TeamsCredentials,
+    ) {
+        let (sink, gate) = self.sink.gated();
+        let client = crate::teams::client::TeamsClient::new(creds.clone());
+
+        let creds_store = self.credentials.clone();
+        let team_id_for_save = workspace.team_id.clone();
+        client.set_on_token_refreshed(move |new_creds| {
+            let store = creds_store.clone();
+            let tid = team_id_for_save.clone();
+            tokio::spawn(async move {
+                if let Err(e) = store.save_teams_token(&tid, &new_creds).await {
+                    log::warn!("could not persist refreshed teams token: {e}");
+                }
+            });
+        });
+
+        self.sink.send(Event::WorkspaceReady(workspace.clone()));
+
+        let boot_client = client.clone();
+        let boot_team_id = workspace.team_id.clone();
+        let boot_user_id = workspace.user_id.clone();
+        let boot_sink = sink.clone();
+
+        let boot_task = tokio::spawn(async move {
+            super::teams::boot_teams(boot_client, boot_team_id, boot_user_id, boot_sink).await;
+        });
+
+        let trouter_team_id = workspace.team_id.clone();
+        let trouter_client = client.clone();
+        let trouter_sink = sink.clone();
+        let trouter_task = tokio::spawn(async move {
+            super::teams::trouter_loop(trouter_team_id, trouter_client, trouter_sink).await;
+        });
+
+        let session = super::teams::TeamsSession {
+            client,
+            workspace: workspace.clone(),
+            sink,
+            gate,
+            creds,
+            boot_task: boot_task.abort_handle(),
+            trouter_task: Some(trouter_task.abort_handle()),
+        };
+
+        if let Some(old) = self
+            .teams_sessions
+            .insert(workspace.team_id.clone(), session)
+        {
+            old.shut();
+        }
     }
 
     /// Starts a workspace's start-up work; see [`boot`] for `retry`.
@@ -719,8 +806,24 @@ impl Worker {
             Command::PasteToken(token) => self.paste_token(token),
             Command::SignInLink(link) => self.sign_in_link(&link),
             Command::StartBrowserSignIn => self.start_browser_sign_in(),
+            Command::StartTeamsSignIn(tenant) => self.start_teams_sign_in(tenant),
             Command::SignOut(team) => self.sign_out(&team),
             Command::Focus { team, channel } => {
+                if let Some(session) = self.teams_sessions.get(&team)
+                    && let Some(ref ch) = channel
+                {
+                    let client = session.client.clone();
+                    let ch_clone = ch.clone();
+                    tokio::spawn(async move {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        let _ = client
+                            .set_consumption_horizon(&ch_clone, &now_ms.to_string())
+                            .await;
+                    });
+                }
                 self.focus = Some(Focus { team, channel });
                 self.report_socket();
             }
@@ -957,6 +1060,36 @@ impl Worker {
                 false,
                 sink,
             ));
+        } else if let Some(session) = self.teams_sessions.get(&team) {
+            let client = session.client.clone();
+            let sink = session.sink.clone();
+            let older = cursor.is_some();
+            tokio::spawn(async move {
+                match client.get_messages(&channel, 50).await {
+                    Ok(messages) => {
+                        let msgs: Vec<crate::model::Message> = messages
+                            .iter()
+                            .map(crate::backend::teams_translate::translate_message)
+                            .collect();
+                        sink.send(Event::History {
+                            team,
+                            channel,
+                            messages: msgs,
+                            has_more: false,
+                            cursor: None,
+                            older,
+                            polled: false,
+                        });
+                    }
+                    Err(err) => {
+                        sink.send(Event::HistoryFailed {
+                            team,
+                            channel,
+                            error: err,
+                        });
+                    }
+                }
+            });
         } else {
             self.history_unavailable(team, channel);
         }
@@ -972,15 +1105,74 @@ impl Worker {
 
     /// Posts a message; the answer settles the interface's optimistic copy.
     fn send(&self, outgoing: Outgoing) {
-        let Some((client, sink)) = self.team(&outgoing.team) else {
-            // Fail the optimistic message, or it stays pending.
-            self.sink.send(Event::Sent {
-                team: outgoing.team,
-                channel: outgoing.channel,
-                local: outgoing.local,
-                result: Err(Failure::NotSignedIn),
-            });
-            return;
+        let (client, sink) = match self.team(&outgoing.team) {
+            Some(pair) => pair,
+            None => {
+                if let Some(session) = self.teams_sessions.get(&outgoing.team) {
+                    let client = session.client.clone();
+                    let sink = session.sink.clone();
+                    tokio::spawn(async move {
+                        let html = crate::teams::html::text_to_teams_html(&outgoing.text);
+                        match client.send_message(&outgoing.channel, &html).await {
+                            Ok(text) => {
+                                let translated = if let Ok(parsed) =
+                                    serde_json::from_str::<crate::teams::types::Message>(&text)
+                                {
+                                    crate::backend::teams_translate::translate_message(&parsed)
+                                } else {
+                                    crate::model::Message {
+                                        ts: crate::backend::teams_translate::teams_id_to_ts(&text),
+                                        user: Some(String::new()),
+                                        username: None,
+                                        bot_icon: None,
+                                        bot_id: None,
+                                        text: outgoing.text,
+                                        thread_ts: None,
+                                        reply_count: 0,
+                                        replies_known: true,
+                                        reply_users: Vec::new(),
+                                        latest_reply: None,
+                                        reactions: Vec::new(),
+                                        files: Vec::new(),
+                                        attachments: Vec::new(),
+                                        blocks: Vec::new(),
+                                        edited: false,
+                                        subtype: None,
+                                        delivery: crate::model::Delivery::Sent,
+                                        broadcast: false,
+                                        pinned: false,
+                                        client_msg_id: outgoing.client_msg_id,
+                                        subscribed: None,
+                                    }
+                                };
+                                sink.send(Event::Sent {
+                                    team: outgoing.team,
+                                    channel: outgoing.channel,
+                                    local: outgoing.local,
+                                    result: Ok(translated),
+                                });
+                            }
+                            Err(err) => {
+                                sink.send(Event::Sent {
+                                    team: outgoing.team,
+                                    channel: outgoing.channel,
+                                    local: outgoing.local,
+                                    result: Err(err),
+                                });
+                            }
+                        }
+                    });
+                    return;
+                }
+                // Fail the optimistic message, or it stays pending.
+                self.sink.send(Event::Sent {
+                    team: outgoing.team,
+                    channel: outgoing.channel,
+                    local: outgoing.local,
+                    result: Err(Failure::NotSignedIn),
+                });
+                return;
+            }
         };
         tokio::spawn(async move {
             let Outgoing {
@@ -1019,30 +1211,45 @@ impl Worker {
     /// and always answers with [`Event::Settled`] so a refused change can
     /// be undone, even for a workspace that is not signed in.
     fn change(&self, team: String, channel: String, change: Change) {
-        let Some((client, sink)) = self.team(&team) else {
+        if let Some((client, sink)) = self.team(&team) {
+            tokio::spawn(async move {
+                let (method, params, ignore) = request(&channel, &change);
+                let result = match act_with_blocks::<Value>(&client, method, &params).await {
+                    Ok(_) => Ok(()),
+                    // Already as asked: nothing to undo.
+                    Err(SlackError::Api(code)) if ignore.contains(&code.as_str()) => Ok(()),
+                    Err(error) => Err(failure(&error)),
+                };
+                sink.send(Event::Settled {
+                    team,
+                    channel,
+                    change,
+                    result,
+                });
+            });
+        } else if let Some(session) = self.teams_sessions.get(&team) {
+            let client = session.client.clone();
+            let sink = session.sink.clone();
+            tokio::spawn(async move {
+                let result = match &change {
+                    Change::Delete { ts, .. } => client.delete_message(&channel, ts.as_str()).await,
+                    _ => Ok(()),
+                };
+                sink.send(Event::Settled {
+                    team,
+                    channel,
+                    change,
+                    result,
+                });
+            });
+        } else {
             self.sink.send(Event::Settled {
                 team,
                 channel,
                 change,
                 result: Err(Failure::NotSignedIn),
             });
-            return;
-        };
-        tokio::spawn(async move {
-            let (method, params, ignore) = request(&channel, &change);
-            let result = match act_with_blocks::<Value>(&client, method, &params).await {
-                Ok(_) => Ok(()),
-                // Already as asked: nothing to undo.
-                Err(SlackError::Api(code)) if ignore.contains(&code.as_str()) => Ok(()),
-                Err(error) => Err(failure(&error)),
-            };
-            sink.send(Event::Settled {
-                team,
-                channel,
-                change,
-                result,
-            });
-        });
+        }
     }
 
     /// `files.delete`, answered with [`Event::FileDeleteSettled`] either
@@ -1540,6 +1747,20 @@ impl Worker {
                     self.restart_socket();
                 }
             }
+            Internal::TeamsAdded { meta, creds } => {
+                let name = meta.name.clone();
+                let team_id = meta.team_id.clone();
+                let credentials = self.credentials.clone();
+                let creds_to_save = creds.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = credentials.save_teams_token(&team_id, &creds_to_save).await
+                    {
+                        log::warn!("could not store teams token: {error}");
+                    }
+                });
+                self.add_teams_workspace(meta, creds);
+                self.sink.send(Event::SignIn(SignIn::Done(name)));
+            }
             Internal::Socket { generation, event } => {
                 if self.socket.as_ref().map(|live| live.generation) == Some(generation) {
                     self.socket_event(event);
@@ -2033,6 +2254,7 @@ mod tests {
             outcome: Arc::new(OnceLock::from(Boot::Done)),
         };
         let workspace = Workspace {
+            service: crate::model::Service::Slack,
             team_id: id.to_owned(),
             name: id.to_owned(),
             domain: String::new(),
@@ -2172,6 +2394,7 @@ mod tests {
     async fn a_keyring_failure_leaves_no_workspace_waiting() {
         let (mut worker, events) = worker();
         let meta = |id: &str| WorkspaceMeta {
+            service: crate::model::Service::Slack,
             team_id: id.into(),
             name: id.into(),
             domain: String::new(),
@@ -2437,6 +2660,7 @@ mod tests {
         worker.sign_out("TA");
         // A task that outlived the sign-out reports a late WorkspaceReady.
         sink.send(Event::WorkspaceReady(Workspace {
+            service: crate::model::Service::Slack,
             team_id: "TA".into(),
             name: "A".into(),
             domain: String::new(),

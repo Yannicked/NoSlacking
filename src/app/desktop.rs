@@ -610,6 +610,7 @@ mod tests {
     #[test]
     fn unread_adds_up_every_workspace() {
         let mut one = WorkspaceState::new(crate::model::Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "One".into(),
             domain: String::new(),
@@ -662,6 +663,7 @@ mod tests {
     #[test]
     fn muted_conversations_are_unread_only_for_mentions() {
         let mut w = WorkspaceState::new(crate::model::Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "One".into(),
             domain: String::new(),
@@ -698,6 +700,7 @@ mod tests {
     #[test]
     fn notifications_name_user_groups_even_without_a_label() {
         let mut w = WorkspaceState::new(crate::model::Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "One".into(),
             domain: String::new(),

@@ -18,6 +18,8 @@ pub mod listen;
 pub mod people;
 mod poll;
 mod search;
+pub mod teams;
+pub mod teams_translate;
 mod translate;
 pub mod views;
 pub mod worker;
@@ -58,6 +60,8 @@ pub enum Command {
     /// Opens Slack's sign-in page in the browser and, for a while, accepts
     /// the `slack://` link it hands back through the desktop.
     StartBrowserSignIn,
+    /// Starts Microsoft Teams Device Code sign-in.
+    StartTeamsSignIn(Option<String>),
     SignOut(String),
     /// The conversation on screen, for polling when Socket Mode is down.
     Focus {
@@ -317,6 +321,7 @@ impl std::fmt::Debug for Command {
             Self::PasteToken(_) => f.debug_tuple("PasteToken").field(&REDACTED).finish(),
             Self::SignInLink(_) => f.debug_tuple("SignInLink").field(&REDACTED).finish(),
             Self::StartBrowserSignIn => f.write_str("StartBrowserSignIn"),
+            Self::StartTeamsSignIn(_) => f.write_str("StartTeamsSignIn"),
             Self::SignOut(team) => f.debug_tuple("SignOut").field(team).finish(),
             Self::Focus { team, channel } => f
                 .debug_struct("Focus")
@@ -629,6 +634,12 @@ pub enum Change {
 pub enum SignIn {
     /// The browser is open on this URL.
     Waiting(String),
+    /// Microsoft Teams Device Code flow prompt.
+    TeamsDeviceCode {
+        user_code: String,
+        verification_uri: String,
+        message: String,
+    },
     Exchanging,
     Failed(Failure),
     Done(String),

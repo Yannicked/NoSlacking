@@ -46,6 +46,7 @@ pub(super) async fn emoji(client: &Client, team: &str, sink: &Sink) {
 /// A workspace's name, domain and icon.
 pub(super) async fn workspace_details(client: &Client, team: &str, user: &str) -> Workspace {
     let mut workspace = Workspace {
+        service: crate::model::Service::Slack,
         team_id: team.to_owned(),
         name: team.to_owned(),
         domain: String::new(),

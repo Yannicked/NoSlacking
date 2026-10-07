@@ -1958,6 +1958,7 @@ mod tests {
 
     fn workspace() -> WorkspaceState {
         WorkspaceState::new(Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: "acme".into(),

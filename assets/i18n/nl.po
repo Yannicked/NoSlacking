@@ -2712,3 +2712,31 @@ msgstr "Hier meedoen aan de huddle, met je microfoon uit"
 
 msgid "Join the huddle here: {names}"
 msgstr "Hier meedoen aan de huddle: {names}"
+
+# Microsoft Teams sign-in
+msgid "Sign in to Microsoft Teams"
+msgstr "Aanmelden bij Microsoft Teams"
+
+msgid "Connect your Microsoft Teams account using official Microsoft device code authentication."
+msgstr "Verbind je Microsoft Teams-account met officiële Microsoft-apparaatcode-authenticatie."
+
+msgid "Sign in with Microsoft Teams"
+msgstr "Aanmelden met Microsoft Teams"
+
+msgid "Enter code {code} at {url}"
+msgstr "Voer code {code} in op {url}"
+
+msgid "Code:"
+msgstr "Code:"
+
+msgid "Open Microsoft Login"
+msgstr "Microsoft-aanmelding openen"
+
+msgid "Organization / Tenant (optional):"
+msgstr "Organisatie / Tenant (optioneel):"
+
+msgid "e.g. company.onmicrosoft.com or Tenant ID"
+msgstr "bijv. bedrijf.onmicrosoft.com of Tenant-ID"
+
+msgid "Required for guest accounts: enter the inviting company's domain or tenant ID."
+msgstr "Vereist voor gastaccounts: voer het domein of de tenant-ID van het uitnodigende bedrijf in."

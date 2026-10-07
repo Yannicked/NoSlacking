@@ -1255,6 +1255,7 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
         ("TDEMO2", "Open Source", SignInKind::App),
     ] {
         sink.send(Event::WorkspaceReady(Workspace {
+            service: crate::model::Service::Slack,
             team_id: id.into(),
             name: name.into(),
             domain: name.to_lowercase().replace(' ', "-"),

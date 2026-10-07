@@ -1177,6 +1177,7 @@ mod tests {
 
     fn workspace() -> WorkspaceState {
         let mut w = WorkspaceState::new(crate::model::Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: "acme".into(),

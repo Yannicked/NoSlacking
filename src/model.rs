@@ -134,9 +134,33 @@ fn plain_dot(ts: &str) -> Option<usize> {
     ((1..=19).contains(&dot) && fraction.iter().all(u8::is_ascii_digit)).then_some(dot)
 }
 
+/// The chat service backing a workspace.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum Service {
+    /// Slack, via Web API and RTM / Socket Mode.
+    #[default]
+    Slack,
+    /// Microsoft Teams, via native Skype Spaces / Trouter APIs.
+    Teams,
+}
+
+impl Service {
+    /// The human-readable name of the service.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Slack => "Slack",
+            Self::Teams => "Microsoft Teams",
+        }
+    }
+}
+
 /// A signed-in workspace.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Workspace {
+    /// Which service backs this workspace.
+    pub service: Service,
     pub team_id: String,
     pub name: String,
     pub domain: String,
@@ -151,10 +175,23 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Whether this workspace is backed by Microsoft Teams.
+    pub fn is_teams(&self) -> bool {
+        self.service == Service::Teams
+    }
+
+    /// Whether this workspace is backed by Slack.
+    pub fn is_slack(&self) -> bool {
+        self.service == Service::Slack
+    }
+
     /// Whether this sign-in may use `feature`: always for a session, and
     /// for an app sign-in when Slack granted its scope (or when what it
     /// granted is not known yet, so the call is tried).
     pub fn can(&self, feature: crate::scopes::Feature) -> bool {
+        if self.service == Service::Teams {
+            return false;
+        }
         crate::scopes::allows(
             self.scopes.as_ref(),
             self.sign_in == SignInKind::Session,
@@ -1598,6 +1635,8 @@ pub enum Action {
     /// Starts OAuth asking for every scope again, after you updated your
     /// app from the current manifest.
     SignInUpdated,
+    /// Starts Microsoft Teams Device Code sign-in with an optional tenant domain or ID.
+    StartTeamsSignIn(Option<String>),
     CancelSignIn,
     /// Opens a folder in the system's file manager.
     OpenFolder(PathBuf),

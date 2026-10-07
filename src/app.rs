@@ -183,6 +183,8 @@ pub struct SetupForm {
     pub session_link: String,
     /// Whether the "use your own Slack app" section is expanded.
     pub show_app: bool,
+    /// Microsoft Teams tenant domain or ID (optional).
+    pub teams_tenant: String,
 }
 
 /// The form holds secrets as they are typed; only the plain fields print.
@@ -192,6 +194,7 @@ impl std::fmt::Debug for SetupForm {
             .field("client_id", &self.client_id)
             .field("show_manual", &self.show_manual)
             .field("show_app", &self.show_app)
+            .field("teams_tenant", &self.teams_tenant)
             .finish_non_exhaustive()
     }
 }
@@ -482,6 +485,7 @@ impl App {
         let mut workspaces = Vec::new();
         for meta in &settings.workspaces {
             let mut state = WorkspaceState::new(Workspace {
+                service: meta.service,
                 team_id: meta.team_id.clone(),
                 name: meta.name.clone(),
                 domain: meta.domain.clone(),
@@ -1427,6 +1431,10 @@ impl App {
                 self.settings_changed();
                 self.page = Page::SignIn;
                 self.start_sign_in();
+            }
+            Action::StartTeamsSignIn(tenant) => {
+                self.sign_in = None;
+                self.backend.send(Command::StartTeamsSignIn(tenant));
             }
             Action::CancelSignIn => {
                 self.backend.send(Command::CancelSignIn);

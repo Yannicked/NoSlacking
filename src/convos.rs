@@ -1549,6 +1549,7 @@ mod tests {
     #[test]
     fn suggestions_follow_the_query_and_new_people() {
         let mut workspace = WorkspaceState::new(Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: "acme".into(),
@@ -1577,6 +1578,7 @@ mod tests {
     #[test]
     fn one_person_reuses_the_dm_you_have() {
         let mut workspace = WorkspaceState::new(Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: "acme".into(),
@@ -1613,6 +1615,7 @@ mod tests {
     #[test]
     fn pinning_marks_every_loaded_copy() {
         let mut workspace = WorkspaceState::new(Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: "acme".into(),
@@ -1706,6 +1709,7 @@ mod tests {
     #[test]
     fn a_name_you_already_have_is_taken() {
         let mut workspace = WorkspaceState::new(Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: "acme".into(),
@@ -1984,6 +1988,7 @@ mod tests {
     #[test]
     fn the_fingerprint_follows_what_pickers_list() {
         let mut workspace = WorkspaceState::new(Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: "acme".into(),

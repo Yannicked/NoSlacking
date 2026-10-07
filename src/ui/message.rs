@@ -856,6 +856,7 @@ mod tests {
     #[test]
     fn copied_text_names_user_groups() {
         let mut w = WorkspaceState::new(crate::model::Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "One".into(),
             domain: String::new(),

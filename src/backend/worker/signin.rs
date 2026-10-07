@@ -332,6 +332,21 @@ impl Worker {
     }
 
     pub(super) fn sign_out(&mut self, team: &str) {
+        if let Some(removed) = self.teams_sessions.remove(team) {
+            removed.shut();
+            let credentials = self.credentials.clone();
+            let team_str = team.to_owned();
+            tokio::spawn(async move {
+                if let Err(error) = credentials.delete_teams_token(&team_str).await {
+                    log::warn!("could not delete teams token: {error}");
+                }
+            });
+            self.sink.send(Event::SignedOut {
+                team: team.to_owned(),
+                reason: None,
+            });
+            return;
+        }
         #[cfg(feature = "huddle-audio")]
         self.huddle_audio.signed_out(team);
         self.stop_rtm(team);
@@ -377,6 +392,142 @@ impl Worker {
             self.restart_socket();
         }
         self.report_socket();
+    }
+
+    /// Starts Microsoft Teams Device Code authentication.
+    pub(super) fn start_teams_sign_in(&mut self, tenant: Option<String>) {
+        let http = crate::slack::net::api();
+        let sink = self.sink.clone();
+        let internal = self.internal.clone();
+        tokio::spawn(async move {
+            let tenant_ref = tenant.as_deref();
+            match crate::teams::auth::start_device_code_flow(&http, tenant_ref).await {
+                Ok(device_resp) => {
+                    let user_code = device_resp.user_code.clone();
+                    let verification_uri = device_resp.verification_uri.clone();
+                    let message = device_resp.message.clone();
+
+                    sink.send(Event::SignIn(SignIn::TeamsDeviceCode {
+                        user_code,
+                        verification_uri: verification_uri.clone(),
+                        message,
+                    }));
+
+                    let _ = open::that_detached(&verification_uri);
+
+                    match crate::teams::auth::poll_device_code_token(
+                        &http,
+                        &device_resp.device_code,
+                        device_resp.interval,
+                        device_resp.expires_in,
+                        tenant_ref,
+                    )
+                    .await
+                    {
+                        Ok(token_resp) => {
+                            sink.send(Event::SignIn(SignIn::Exchanging));
+
+                            let claims =
+                                crate::teams::auth::parse_jwt_claims(&token_resp.access_token);
+                            if let Some(ref c) = claims {
+                                log::info!(
+                                    "Teams token acquired: tid={}, oid={}, upn={}",
+                                    c.get("tid").and_then(|v| v.as_str()).unwrap_or("?"),
+                                    c.get("oid").and_then(|v| v.as_str()).unwrap_or("?"),
+                                    c.get("upn")
+                                        .or_else(|| c.get("preferred_username"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("?")
+                                );
+                            }
+
+                            match crate::teams::auth::exchange_skype_token(
+                                &http,
+                                &token_resp.access_token,
+                                false,
+                            )
+                            .await
+                            {
+                                Ok(authz) => {
+                                    let now_sec = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs())
+                                        .unwrap_or(0);
+                                    let tenant_id = tenant
+                                        .clone()
+                                        .or_else(|| {
+                                            claims.as_ref().and_then(|c| {
+                                                c.get("tid")
+                                                    .and_then(|t| t.as_str())
+                                                    .map(String::from)
+                                            })
+                                        })
+                                        .or_else(|| {
+                                            Some(crate::teams::auth::DEFAULT_TENANT.to_string())
+                                        });
+                                    let creds = crate::teams::auth::TeamsCredentials {
+                                        access_token: token_resp.access_token,
+                                        refresh_token: token_resp.refresh_token,
+                                        skype_token: authz
+                                            .tokens
+                                            .as_ref()
+                                            .and_then(|t| t.skype_token.clone()),
+                                        expires_at: token_resp.expires_in.map(|exp| now_sec + exp),
+                                        tenant_id,
+                                        region_gtms: authz.region_gtms,
+                                    };
+
+                                    let client =
+                                        crate::teams::client::TeamsClient::new(creds.clone());
+                                    match client.get_me().await {
+                                        Ok(me) => {
+                                            let team_id = format!("teams_{}", me.id);
+                                            let name = me
+                                                .display_name
+                                                .clone()
+                                                .unwrap_or_else(|| "Microsoft Teams".into());
+                                            let workspace = crate::model::Workspace {
+                                                service: crate::model::Service::Teams,
+                                                team_id: team_id.clone(),
+                                                name: name.clone(),
+                                                domain: "teams.microsoft.com".into(),
+                                                icon: None,
+                                                user_id: me.id.clone(),
+                                                sign_in: Default::default(),
+                                                scopes: None,
+                                            };
+                                            let _ = internal.send(Internal::TeamsAdded {
+                                                meta: workspace,
+                                                creds,
+                                            });
+                                            sink.send(Event::SignIn(SignIn::Done(name)));
+                                        }
+                                        Err(err) => {
+                                            log::error!(
+                                                "failed to fetch Teams user profile: {err:?}"
+                                            );
+                                            sink.send(Event::SignIn(SignIn::Failed(err)));
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    log::error!("exchange_skype_token failed: {err:?}");
+                                    sink.send(Event::SignIn(SignIn::Failed(err)));
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            log::error!("poll_device_code_token failed: {err:?}");
+                            sink.send(Event::SignIn(SignIn::Failed(err)));
+                        }
+                    }
+                }
+                Err(err) => {
+                    log::error!("start_device_code_flow failed: {err:?}");
+                    sink.send(Event::SignIn(SignIn::Failed(err)));
+                }
+            }
+        });
     }
 }
 

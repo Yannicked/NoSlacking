@@ -6,6 +6,7 @@
 //! - `app`: the Slack app's client id, client secret and app-level token;
 //! - `workspace:<team id>`: that workspace's user token, and its refresh
 //!   token when the app rotates tokens;
+//! - `teams:<team id>`: Microsoft Teams credentials (access, refresh, skype tokens);
 //! - `cache-key`: the random key the offline cache is encrypted with (see
 //!   [`crate::offline`]).
 //!
@@ -270,6 +271,29 @@ impl Credentials {
         let key = format!("workspace:{team}");
         self.run(move |store| store.delete(&key)).await
     }
+
+    /// Loads Microsoft Teams credentials for a workspace or tenant.
+    pub async fn load_teams_token(
+        &self,
+        team: &str,
+    ) -> Result<Option<crate::teams::auth::TeamsCredentials>, Error> {
+        self.read_json(format!("teams:{team}")).await
+    }
+
+    /// Saves Microsoft Teams credentials for a workspace or tenant.
+    pub async fn save_teams_token(
+        &self,
+        team: &str,
+        creds: &crate::teams::auth::TeamsCredentials,
+    ) -> Result<(), Error> {
+        self.write_json(format!("teams:{team}"), creds).await
+    }
+
+    /// Deletes Microsoft Teams credentials for a workspace or tenant.
+    pub async fn delete_teams_token(&self, team: &str) -> Result<(), Error> {
+        let key = format!("teams:{team}");
+        self.run(move |store| store.delete(&key)).await
+    }
 }
 
 #[cfg(test)]
@@ -299,5 +323,27 @@ mod tests {
         assert_eq!(credentials.load_token("T1").await, Ok(Some(token)));
         credentials.delete_token("T1").await.expect("deletes");
         assert_eq!(credentials.load_token("T1").await, Ok(None));
+
+        let teams_creds = crate::teams::auth::TeamsCredentials {
+            access_token: "teams_access".into(),
+            refresh_token: Some("teams_refresh".into()),
+            skype_token: Some("skype_tok".into()),
+            expires_at: Some(1800000000),
+            tenant_id: Some("tenant-1".into()),
+            region_gtms: None,
+        };
+        credentials
+            .save_teams_token("tenant-1", &teams_creds)
+            .await
+            .expect("saves teams creds");
+        assert_eq!(
+            credentials.load_teams_token("tenant-1").await,
+            Ok(Some(teams_creds))
+        );
+        credentials
+            .delete_teams_token("tenant-1")
+            .await
+            .expect("deletes teams creds");
+        assert_eq!(credentials.load_teams_token("tenant-1").await, Ok(None));
     }
 }
