@@ -232,9 +232,13 @@ extended-description = "One window for your Slack workspaces: channels, direct m
 # ALSA is linked, so $auto finds it (as libasound2t64 on newer releases);
 # the others are loaded at run time and must be named.
 depends = "$auto, libxkbcommon0, libegl1, libgl1"
-recommends = "libwayland-client0, libxkbcommon-x11-0"
+# libva and a VA-API driver: noslacking-video loads them at run time to
+# decode huddle video on the GPU; without them it decodes in software.
+recommends = "libwayland-client0, libxkbcommon-x11-0, libva2, libva-drm2, mesa-va-drivers | intel-media-va-driver"
 assets = [
     ["target/release/noslacking", "usr/bin/", "755"],
+    # The hardware video helper, beside the app where it looks first.
+    ["target/release/noslacking-video", "usr/bin/", "755"],
     ["packaging/applications/cloud.yannick.NoSlacking.desktop", "usr/share/applications/", "644"],
     ["packaging/metainfo/cloud.yannick.NoSlacking.metainfo.xml", "usr/share/metainfo/", "644"],
     ["packaging/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
@@ -253,8 +257,12 @@ auto-req = "auto"
 # By library, so the same package fits Fedora and openSUSE.
 requires = { "libxkbcommon.so.0()(64bit)" = "*", "libEGL.so.1()(64bit)" = "*", "libGL.so.1()(64bit)" = "*" }
 recommends = { "libwayland-client.so.0()(64bit)" = "*", "libxkbcommon-x11.so.0()(64bit)" = "*" }
+# libva for the hardware video helper (loaded at run time, so auto-req
+# cannot see it); the driver comes with Mesa or intel-media-driver.
+suggests = { "libva.so.2()(64bit)" = "*", "libva-drm.so.2()(64bit)" = "*" }
 assets = [
     { source = "target/release/noslacking", dest = "/usr/bin/noslacking", mode = "755" },
+    { source = "target/release/noslacking-video", dest = "/usr/bin/noslacking-video", mode = "755" },
     { source = "packaging/applications/cloud.yannick.NoSlacking.desktop", dest = "/usr/share/applications/cloud.yannick.NoSlacking.desktop", mode = "644" },
     { source = "packaging/metainfo/cloud.yannick.NoSlacking.metainfo.xml", dest = "/usr/share/metainfo/cloud.yannick.NoSlacking.metainfo.xml", mode = "644" },
     { source = "packaging/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg", dest = "/usr/share/icons/hicolor/scalable/apps/cloud.yannick.NoSlacking.svg", mode = "644" },
