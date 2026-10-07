@@ -1043,7 +1043,15 @@ engineering, as for the rest of the session sign-in.
         (`cargo run --release --features huddle-video`, press Watch):
         how soon the picture comes, minutes of clean decoding, Watch
         switching between two shares, closing and the share ending, CPU.
-  - [ ] Stage 2: camera tiles.
+  - [x] Stage 2 built, behind `huddle-video`, not yet tried against
+        Slack: camera tiles in the call window (up to 9, as many as fit),
+        recent speakers first with stable places, the layer by tile size,
+        paused cameras shown by their face, one decoder thread for all
+        cameras (3 % of a core for 4, 8 % for 9). Details in the
+        research note's Stage 2.
+  - [ ] Try Stage 2 with colleagues' cameras on (press Video in the
+        call bar): faces match names, tiles follow who speaks, cameras
+        turned off and on, pause and resume, 5 or more cameras.
 - **Microsoft Teams:** [docs/research/microsoft-teams.md](docs/research/microsoft-teams.md)
   (2026-10-06). Not being built: the official Graph route can't do live
   updates or calls, and the route other clients take signs in as
