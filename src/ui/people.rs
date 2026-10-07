@@ -370,14 +370,16 @@ pub fn listen_button(
     listening: Option<&crate::huddles::Listening>,
     actions: &mut Vec<Action>,
 ) {
-    if !workspace.people.huddles.contains_key(channel)
+    let team = &workspace.info.team_id;
+    // The same state as the call bar: a failure there offers Listen again.
+    let here = listening.filter(|l| l.is(team, channel));
+    // A huddle we start shows Joining… and Leave here before Slack's news
+    // of it arrives.
+    if (here.is_none() && !workspace.people.huddles.contains_key(channel))
         || workspace.info.sign_in != crate::model::SignInKind::Session
     {
         return;
     }
-    let team = &workspace.info.team_id;
-    // The same state as the call bar: a failure there offers Listen again.
-    let here = listening.filter(|l| l.is(team, channel));
     let (label, tip) = match here.map(|l| &l.phase) {
         Some(crate::huddles::Phase::Joining) => (t("Joining…"), t("Leave the huddle")),
         Some(_) => (t("Leave"), t("Leave the huddle")),
@@ -407,6 +409,63 @@ pub fn listen_button(
             }
         }));
     }
+}
+
+/// A headphones menu in a conversation's header while no huddle goes on
+/// there: start one here (with huddle audio, in a browser sign-in's
+/// workspace, joining muted) or in Slack. A menu rather than one click,
+/// so a huddle that tells a whole channel is never started by accident.
+pub fn start_huddle_menu(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    workspace: &crate::app::WorkspaceState,
+    channel: &str,
+    #[cfg(feature = "huddle-audio")] listening: Option<&crate::huddles::Listening>,
+    actions: &mut Vec<Action>,
+) {
+    let team = &workspace.info.team_id;
+    if workspace.people.huddles.contains_key(channel) {
+        return;
+    }
+    #[cfg(feature = "huddle-audio")]
+    if listening.is_some_and(|l| l.is(team, channel)) {
+        return;
+    }
+    let menu = ui
+        .menu_image_text_button(
+            theme::Icon::Headphones.image(palette.secondary, 14.0),
+            RichText::new(t("Huddle"))
+                .font(theme::regular(12.5))
+                .color(palette.text),
+            |ui| {
+                #[cfg(feature = "huddle-audio")]
+                if workspace.info.sign_in == crate::model::SignInKind::Session
+                    && ui
+                        .button(t("Start a huddle here"))
+                        .on_hover_text(t(
+                            "Start a huddle and join it here, with your microphone off",
+                        ))
+                        .clicked()
+                {
+                    actions.push(Action::Huddle(crate::huddles::Action::Listen {
+                        team: team.clone(),
+                        channel: channel.to_owned(),
+                    }));
+                    ui.close();
+                }
+                if ui
+                    .button(t("Start a huddle in Slack"))
+                    .on_hover_text(t("Open Slack's huddle for this conversation"))
+                    .clicked()
+                {
+                    actions.push(Action::OpenUrl(people::huddle_url(team, channel)));
+                    ui.close();
+                }
+            },
+        )
+        .response;
+    menu.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(t("Start a huddle"));
 }
 
 /// What the globe beside an external conversation or person says.

@@ -2701,3 +2701,21 @@ msgstr "er kon geen microfoon worden geopend; kijk of de privacyinstellingen van
 # The shortcut sheet's line for it.
 msgid "Mute / unmute the microphone"
 msgstr "Microfoon dempen / dempen opheffen"
+
+msgid "Huddle"
+msgstr "Huddle"
+
+msgid "Open Slack's huddle for this conversation"
+msgstr "De huddle van Slack voor dit gesprek openen"
+
+msgid "Start a huddle"
+msgstr "Een huddle starten"
+
+msgid "Start a huddle and join it here, with your microphone off"
+msgstr "Een huddle starten en hier meedoen, met je microfoon uit"
+
+msgid "Start a huddle here"
+msgstr "Hier een huddle starten"
+
+msgid "Start a huddle in Slack"
+msgstr "Een huddle starten in Slack"
