@@ -16,6 +16,38 @@ use crate::teams::types::{
     TeamsResponse, UserDetails,
 };
 
+/// The chat service's `clientmessageid` for one of ours: the service
+/// wants digits, where ours is a UUID, so it is the UUID's first 64 bits
+/// as a number. The same UUID always gives the same number.
+fn numeric_message_id(id: &str) -> String {
+    if id.bytes().all(|b| b.is_ascii_digit()) {
+        return id.to_owned();
+    }
+    let hex: String = id
+        .chars()
+        .filter(char::is_ascii_hexdigit)
+        .take(16)
+        .collect();
+    u64::from_str_radix(&hex, 16).map_or_else(|_| id.to_owned(), |n| n.to_string())
+}
+
+/// Logs why the chat service refused `what`, by its own error code and
+/// message (it does not echo what was sent), and answers the failure.
+async fn refused(resp: reqwest::Response, what: &str) -> Failure {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    let message = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_owned))
+        .unwrap_or_default();
+    log::warn!(
+        "Teams refused to {what}: HTTP {status} ({}) {}",
+        crate::teams::auth::error_code(&body),
+        message.chars().take(200).collect::<String>()
+    );
+    Failure::Http(status.as_u16())
+}
+
 /// What `fetchShortProfile` answers.
 #[derive(serde::Deserialize)]
 struct ShortProfiles {
@@ -314,6 +346,16 @@ impl TeamsClient {
             .ok_or(Failure::NoSavedSignIn)
     }
 
+    /// A conversation's address on the chat service; its id holds `:` and
+    /// `@`, so it is escaped, as the messages page always was.
+    fn conversation_url(&self, chat_id: &str) -> String {
+        format!(
+            "{}/v1/users/ME/conversations/{}",
+            self.chat_service_url(),
+            percent_encoding::utf8_percent_encode(chat_id, percent_encoding::NON_ALPHANUMERIC)
+        )
+    }
+
     fn chat_service_url(&self) -> String {
         self.credentials()
             .chat_service_url()
@@ -389,8 +431,7 @@ impl TeamsClient {
         html_content: &str,
         client_message_id: Option<&str>,
     ) -> Result<Option<String>, Failure> {
-        let base = self.chat_service_url();
-        let url = format!("{}/v1/users/ME/conversations/{}/messages", base, chat_id);
+        let url = format!("{}/messages", self.conversation_url(chat_id));
 
         let mut body = serde_json::json!({
             "content": html_content,
@@ -398,7 +439,7 @@ impl TeamsClient {
             "contenttype": "text"
         });
         if let Some(id) = client_message_id {
-            body["clientmessageid"] = id.into();
+            body["clientmessageid"] = numeric_message_id(id).into();
         }
 
         let resp = self
@@ -410,7 +451,7 @@ impl TeamsClient {
             .await?;
 
         if !resp.status().is_success() {
-            return Err(Failure::Http(resp.status().as_u16()));
+            return Err(refused(resp, "send").await);
         }
 
         let posted: PostedMessage = resp.json().await.unwrap_or_default();
@@ -419,10 +460,10 @@ impl TeamsClient {
 
     /// Deletes a message (soft-delete).
     pub async fn delete_message(&self, chat_id: &str, message_id: &str) -> Result<(), Failure> {
-        let base = self.chat_service_url();
         let url = format!(
-            "{}/v1/users/ME/conversations/{}/messages/{}?behavior=softDelete",
-            base, chat_id, message_id
+            "{}/messages/{}?behavior=softDelete",
+            self.conversation_url(chat_id),
+            message_id
         );
 
         let resp = self
@@ -435,7 +476,7 @@ impl TeamsClient {
         if resp.status().is_success() {
             Ok(())
         } else {
-            Err(Failure::Http(resp.status().as_u16()))
+            Err(refused(resp, "delete").await)
         }
     }
 
@@ -445,10 +486,9 @@ impl TeamsClient {
         chat_id: &str,
         message_id: &str,
     ) -> Result<(), Failure> {
-        let base = self.chat_service_url();
         let url = format!(
-            "{}/v1/users/ME/conversations/{}/properties?name=consumptionhorizon",
-            base, chat_id
+            "{}/properties?name=consumptionhorizon",
+            self.conversation_url(chat_id)
         );
 
         let body = serde_json::json!({
@@ -466,7 +506,7 @@ impl TeamsClient {
         if resp.status().is_success() {
             Ok(())
         } else {
-            Err(Failure::Http(resp.status().as_u16()))
+            Err(refused(resp, "mark read").await)
         }
     }
 
@@ -854,6 +894,23 @@ mod tests {
             ..TeamsCredentials::default()
         });
         assert_eq!(client.get_teams().await, Ok(Vec::new()));
+    }
+
+    #[test]
+    fn client_message_ids_are_numbers() {
+        let id = numeric_message_id("8d6f1c2a-0b3e-4f5a-9c7d-1e2f3a4b5c6d");
+        assert!(id.bytes().all(|b| b.is_ascii_digit()), "{id}");
+        assert_eq!(
+            id,
+            numeric_message_id("8d6f1c2a-0b3e-4f5a-9c7d-1e2f3a4b5c6d")
+        );
+        assert_eq!(
+            id,
+            u64::from_str_radix("8d6f1c2a0b3e4f5a", 16)
+                .expect("hex")
+                .to_string()
+        );
+        assert_eq!(numeric_message_id("12345"), "12345");
     }
 
     #[test]
