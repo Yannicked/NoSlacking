@@ -959,6 +959,58 @@ engineering, as for the rest of the session sign-in.
       > final mask, so the output matched a `u32` build bit for bit over
       > 20,000 random packets. The panic is the only harm, but it takes
       > down the audio thread of whatever is decoding.
+- [ ] **File upstream, and weigh a patched copy: a malformed hybrid
+      packet panics opus-decoder in release builds too.** Found by
+      fuzzing while fixing the above: about 1 in 80,000 random packets.
+      Our release builds abort on a panic, so any huddle participant (or
+      Chime) sending such a packet closes NoSlacking for everyone
+      listening; SRTP rules out corruption on the way, not a hostile
+      sender. Debug builds catch it now (`audio::guard`). Until upstream
+      fixes it, the choices are a `[patch.crates-io]` copy with the
+      two-line check below, or living with it. To file:
+
+      > **Hybrid redundancy longer than the frame: `range start index
+      > out of range` (lib.rs:676 and :724)**
+      >
+      > In `OpusMode::Hybrid`, `redundancy_bytes = ec.dec_uint(256) + 2`
+      > is read from the packet and then used as
+      > `&frame[frame.len() - redundancy_bytes..]` without checking it
+      > against `frame.len()`. A frame shorter than the redundancy it
+      > claims underflows the subtraction and panics ("range start index
+      > 18446744073709551534 out of range for slice of length 76" in a
+      > release build).
+      >
+      > libopus (`src/opus_decoder.c`, `opus_decode_frame`) checks
+      > right after reading it:
+      >
+      > ```c
+      > len -= redundancy_bytes;
+      > /* This is a sanity check. It should never happen for a valid
+      >    packet, so the exact behaviour is not normative. */
+      > if (len*8 < ec_tell(&dec))
+      > {
+      >    len = 0;
+      >    redundancy_bytes = 0;
+      >    redundancy = 0;
+      > }
+      > ```
+      >
+      > Reproduce with a fresh `OpusDecoder::new(48_000, 1)` and
+      > `decode_float(.., false)`, release or debug, on this 153-byte
+      > packet (TOC 0x69, two 76-byte hybrid frames):
+      >
+      > ```
+      > 69 af 0e e6 85 96 57 1b b5 8c c1 a2 21 35 a5 94 3d 0d 19 d1 c8 e7
+      > 7c d0 63 03 bd c4 31 df 4e 76 64 f8 27 93 e6 c1 2e 44 06 6c 2e a8
+      > df a2 5d 8f b0 e1 a8 8f ce 1f d7 8a 47 af 68 f8 71 37 f5 9e 65 a3
+      > 2a 18 28 26 82 e1 88 a7 b8 27 ad 60 fa 63 9d 18 42 b4 b7 92 e3 60
+      > 34 5e 40 7e 7c ee 8b 98 8f 1c de 63 ad 44 ce 75 0b 2f 15 f7 be 4f
+      > 2d a3 9e 57 bb a8 dd bc f9 0a 3a 14 c2 73 f7 34 98 bb 54 28 c4 db
+      > fe 4d 7f 97 0a 58 92 0b 47 59 37 15 85 30 e0 b1 78 d8 9f 26 72
+      > ```
+      >
+      > A decoder fed by the network should turn this into an error (or
+      > libopus's behaviour), never a panic.
 
 ## Research notes
 

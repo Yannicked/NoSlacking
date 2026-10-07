@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::jitter::{CLOCK, Counts, FRAME, Jitter, Pull};
+use super::jitter::{CLOCK, Counts, FRAME, Jitter, Pull, opus_samples};
 use super::processing::RenderTap;
 use crate::audio::guard::{self, Health};
 
@@ -211,14 +211,16 @@ impl Decoded {
                 self.samples.truncate(per_channel * usize::from(CHANNELS));
             }
             // A frame that does not decode, or concealment with nothing
-            // before it: a frame's worth of silence keeps the time.
+            // before it: its length in silence keeps the time.
             Some(_) | None => {
-                if matches!(pull, Pull::Frame(_)) {
+                let mut length = FRAME;
+                if let Pull::Frame(payload) = &pull {
                     *lock(&self.shared.broken) += 1;
+                    length = opus_samples(payload).unwrap_or(FRAME);
                 }
                 self.samples.clear();
                 self.samples
-                    .resize(FRAME as usize * usize::from(CHANNELS), 0.0);
+                    .resize(length as usize * usize::from(CHANNELS), 0.0);
             }
         }
     }
@@ -506,6 +508,38 @@ mod tests {
         assert_eq!((played.broken, played.restarts), (1, 1));
         assert_eq!(device.health.caught(), 1);
         drop(decoded);
+        assert!(!device.health.thread_gone());
+    }
+
+    #[test]
+    fn a_hybrid_frame_that_panics_opus_decoder_is_lost_not_fatal() {
+        // Two 76-byte hybrid frames claiming more redundancy than they
+        // hold: opus-decoder 0.1.1 slices out of range on it (TODO.md).
+        const BAD_HYBRID: [u8; 153] = [
+            0x69, 0xaf, 0x0e, 0xe6, 0x85, 0x96, 0x57, 0x1b, 0xb5, 0x8c, 0xc1, 0xa2, 0x21, 0x35,
+            0xa5, 0x94, 0x3d, 0x0d, 0x19, 0xd1, 0xc8, 0xe7, 0x7c, 0xd0, 0x63, 0x03, 0xbd, 0xc4,
+            0x31, 0xdf, 0x4e, 0x76, 0x64, 0xf8, 0x27, 0x93, 0xe6, 0xc1, 0x2e, 0x44, 0x06, 0x6c,
+            0x2e, 0xa8, 0xdf, 0xa2, 0x5d, 0x8f, 0xb0, 0xe1, 0xa8, 0x8f, 0xce, 0x1f, 0xd7, 0x8a,
+            0x47, 0xaf, 0x68, 0xf8, 0x71, 0x37, 0xf5, 0x9e, 0x65, 0xa3, 0x2a, 0x18, 0x28, 0x26,
+            0x82, 0xe1, 0x88, 0xa7, 0xb8, 0x27, 0xad, 0x60, 0xfa, 0x63, 0x9d, 0x18, 0x42, 0xb4,
+            0xb7, 0x92, 0xe3, 0x60, 0x34, 0x5e, 0x40, 0x7e, 0x7c, 0xee, 0x8b, 0x98, 0x8f, 0x1c,
+            0xde, 0x63, 0xad, 0x44, 0xce, 0x75, 0x0b, 0x2f, 0x15, 0xf7, 0xbe, 0x4f, 0x2d, 0xa3,
+            0x9e, 0x57, 0xbb, 0xa8, 0xdd, 0xbc, 0xf9, 0x0a, 0x3a, 0x14, 0xc2, 0x73, 0xf7, 0x34,
+            0x98, 0xbb, 0x54, 0x28, 0xc4, 0xdb, 0xfe, 0x4d, 0x7f, 0x97, 0x0a, 0x58, 0x92, 0x0b,
+            0x47, 0x59, 0x37, 0x15, 0x85, 0x30, 0xe0, 0xb1, 0x78, 0xd8, 0x9f, 0x26, 0x72,
+        ];
+        let (feed, device, mut decoded) = decoded(None, opus_decoder);
+        feed.push(0, &BAD_HYBRID);
+        feed.push(2 * FRAME, &SILENT_FRAME);
+        feed.push(3 * FRAME, &SILENT_FRAME);
+        // The bad packet's 40 ms in silence, then the two frames.
+        let samples = decoded.by_ref().take(4 * 960 * 2).count();
+        assert_eq!(samples, 4 * 960 * 2);
+        let played = feed.played();
+        assert_eq!(played.jitter.played, 3);
+        assert_eq!(played.broken, 1);
+        // Once opus-decoder refuses it instead, nothing restarts.
+        assert!(played.restarts <= 1);
         assert!(!device.health.thread_gone());
     }
 
