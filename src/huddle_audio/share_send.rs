@@ -5,9 +5,10 @@
 //! the newest, and if it differs from the last one (a screen is mostly
 //! still, and PipeWire under GNOME sends a frame only when something
 //! changed) shrinks it to at most 1920×1080 keeping its shape, encodes it
-//! with the camera's [`Sender`] (the same encoder interface, with a
-//! share's limits: level 4.0, up to 2.5 Mbit/s as the bandwidth estimate
-//! allows) and hands it to the session. At most [`FPS`] pictures a
+//! with the camera's [`Encoder`] (on the GPU through the video helper
+//! when it can, else in software, which takes 1280×720 at most; up to
+//! 2.5 Mbit/s as the bandwidth estimate allows) and hands it to the
+//! session. At most [`FPS`] pictures a
 //! second; a still screen still sends its picture again once a second,
 //! so the stream never looks stalled, and as a keyframe every
 //! [`IDR_EVERY`] and whenever a receiver asks (PLI or FIR; Chime also
@@ -531,12 +532,12 @@ mod tests {
         assert!((14..=16).contains(&sent), "{sent} sent");
     }
 
-    /// The test screen through the share's encoder thread: 1080p H.264,
+    /// The test screen through the share's encoder thread, no GPU: 720p H.264,
     /// a keyframe first, still pictures skipped (the test screen's clock
     /// moves, so here every picture is new), RTP time going up, and
     /// nothing once it stops.
     #[test]
-    fn the_test_screen_goes_out_as_1080p_h264() {
+    fn the_test_screen_goes_out_as_720p_h264_in_software() {
         let latest = Frames::default();
         let (frames, mut out) = mpsc::channel(8);
         let control = SendControl::new(Limits::SHARE);
