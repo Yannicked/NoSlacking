@@ -6,9 +6,10 @@
 //! starts with the first sound and stops with the app.
 
 use std::io::Cursor;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+use super::guard::{self, Guarded, Health};
 use super::{Bytes, Order, Report, TICK, Why};
 use crate::backend::Waker;
 
@@ -101,7 +102,25 @@ struct Loaded {
     mimetype: String,
     /// The device and what plays on it, while it plays or is paused;
     /// let go of once it ends.
-    output: Option<(rodio::MixerDeviceSink, rodio::Player)>,
+    output: Option<Output>,
+}
+
+/// An open device and the player on it.
+struct Output {
+    /// Always there until dropped; an `Option` so `Drop` can hand it to
+    /// [`guard::let_go`].
+    sink: Option<rodio::MixerDeviceSink>,
+    player: rodio::Player,
+    /// Whether the sound's decoder panicked, or the device's thread died.
+    health: Arc<Health>,
+}
+
+impl Drop for Output {
+    fn drop(&mut self) {
+        if let Some(sink) = self.sink.take() {
+            guard::let_go(sink, &self.health);
+        }
+    }
 }
 
 /// Takes orders until the app goes, telling how far a playing sound got
@@ -112,7 +131,7 @@ fn run(inbox: &mpsc::Receiver<Order>, out: &Out) {
         let playing = loaded
             .as_ref()
             .and_then(|l| l.output.as_ref())
-            .is_some_and(|(_, player)| !player.is_paused());
+            .is_some_and(|output| !output.player.is_paused());
         let order = if playing {
             match inbox.recv_timeout(TICK) {
                 Ok(order) => Some(order),
@@ -158,14 +177,14 @@ fn run(inbox: &mpsc::Receiver<Order>, out: &Out) {
                         loaded = None;
                         continue;
                     }
-                    if let Some((_, player)) = &sound.output {
-                        player.play();
+                    if let Some(output) = &sound.output {
+                        output.player.play();
                     }
                 }
             }
             Some(Order::Pause) => {
-                if let Some((_, player)) = loaded.as_ref().and_then(|l| l.output.as_ref()) {
-                    player.pause();
+                if let Some(output) = loaded.as_ref().and_then(|l| l.output.as_ref()) {
+                    output.player.pause();
                 }
             }
             Some(Order::Seek(position)) => {
@@ -178,20 +197,30 @@ fn run(inbox: &mpsc::Receiver<Order>, out: &Out) {
     }
 }
 
-/// Says how far the playing sound got, or that it ended.
+/// Says how far the playing sound got, or that it ended, or that its
+/// decoder broke down.
 fn tick(loaded: &mut Option<Loaded>, out: &Out) {
     let Some(sound) = loaded else { return };
-    let Some((_, player)) = &sound.output else {
+    let Some(output) = &sound.output else {
         return;
     };
-    if player.empty() {
+    if output.health.caught() > 0 || output.health.thread_gone() {
+        // The decoder panicked (caught: the sound ended early) or took
+        // the device's thread with it (nothing more will play).
+        let id = sound.id;
+        *loaded = None;
+        out.send(Report::Failed {
+            id,
+            why: Why::Unreadable,
+        });
+    } else if output.player.empty() {
         // Let go of the device; the bytes stay for playing it again.
         sound.output = None;
         out.send(Report::Ended { id: sound.id });
     } else {
         out.send(Report::Position {
             id: sound.id,
-            position: player.get_pos(),
+            position: output.player.get_pos(),
         });
     }
 }
@@ -212,8 +241,13 @@ impl Loaded {
         })?;
         sink.log_on_drop(false);
         let player = rodio::Player::connect_new(sink.mixer());
-        player.append(source);
-        self.output = Some((sink, player));
+        let health = Arc::new(Health::default());
+        player.append(Guarded::new(source, health.clone()));
+        self.output = Some(Output {
+            sink: Some(sink),
+            player,
+            health,
+        });
         Ok(duration)
     }
 
@@ -225,17 +259,17 @@ impl Loaded {
                 out.send(Report::Failed { id: self.id, why });
                 return;
             }
-            if let Some((_, player)) = &self.output {
-                player.pause();
+            if let Some(output) = &self.output {
+                output.player.pause();
             }
         }
-        if let Some((_, player)) = &self.output {
-            if let Err(error) = player.try_seek(position) {
+        if let Some(output) = &self.output {
+            if let Err(error) = output.player.try_seek(position) {
                 log::warn!("could not seek: {error}");
             }
             out.send(Report::Position {
                 id: self.id,
-                position: player.get_pos(),
+                position: output.player.get_pos(),
             });
         }
     }
