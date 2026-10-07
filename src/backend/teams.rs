@@ -239,7 +239,11 @@ async fn chat_list(
     let wanted: Vec<usize> = chats
         .iter()
         .enumerate()
-        .filter(|(i, chat)| list[*i].kind != ConversationKind::Channel && !named(chat))
+        // Only chat threads have members to list; Teams' own streams
+        // (`48:…`) are refused.
+        .filter(|(i, chat)| {
+            chat.id.starts_with("19:") && list[*i].kind != ConversationKind::Channel && !named(chat)
+        })
         .map(|(i, _)| i)
         .collect();
     let members: Vec<Vec<String>> = futures_util::future::join_all(wanted.iter().map(|&i| {

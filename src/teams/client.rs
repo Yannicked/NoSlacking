@@ -248,7 +248,11 @@ fn id_of_mri(mri: &str) -> String {
 /// id is `8:orgid:{id}`, a personal `live:…` id is `8:live:…`, and an
 /// MRI stays as it is.
 pub fn user_mri(id: &str) -> String {
-    if id.starts_with("8:") {
+    // An MRI already: `8:…` for people, `28:…` for bots.
+    let typed = id
+        .split_once(':')
+        .is_some_and(|(kind, _)| !kind.is_empty() && kind.bytes().all(|b| b.is_ascii_digit()));
+    if typed {
         id.to_owned()
     } else if id.contains(':') {
         format!("8:{id}")
@@ -812,18 +816,42 @@ impl TeamsClient {
         if self.credentials().account == Account::Personal {
             return self.personal_profiles(ids).await;
         }
-        match self.short_profiles(ids).await {
-            Ok(found) => Ok(found),
+        // As the work web client does: `fetchShortProfile` names your own
+        // organisation's people; `fetch` the rest, such as people from
+        // other organisations and bots (recorded).
+        let mut found = match self.short_profiles("fetchShortProfile", ids).await {
+            Ok(found) => found,
             Err(error) => {
-                log::info!("Teams people lookup failed ({error:?}), trying Graph");
-                self.graph_users(ids).await
+                log::info!("Teams short profiles failed ({error:?})");
+                Vec::new()
+            }
+        };
+        let missing: Vec<String> = ids
+            .iter()
+            .filter(|id| !found.iter().any(|f| &f.id == *id))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            match self.short_profiles("fetch", &missing).await {
+                Ok(more) => found.extend(more),
+                Err(error) => log::info!("Teams profiles failed ({error:?})"),
             }
         }
+        if found.is_empty() {
+            return self.graph_users(ids).await;
+        }
+        Ok(found)
     }
 
-    /// `fetchShortProfile` of the middle tier, with the chat service's own
-    /// token: what the Teams client names people with.
-    async fn short_profiles(&self, ids: &[String]) -> Result<Vec<UserDetails>, Failure> {
+    /// People from the middle tier's `endpoint` (`fetchShortProfile` or
+    /// `fetch`), with the chat service's own token. Someone it does not
+    /// know is left out; asked about alone, they get a 404, which means
+    /// nobody was found rather than a failure.
+    async fn short_profiles(
+        &self,
+        endpoint: &str,
+        ids: &[String],
+    ) -> Result<Vec<UserDetails>, Failure> {
         let creds = self.ensure_fresh_tokens().await?;
         let base = creds
             .middle_tier_url()
@@ -831,7 +859,7 @@ impl TeamsClient {
             .trim_end_matches('/')
             .to_owned();
         let url = format!(
-            "{base}/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true"
+            "{base}/beta/users/{endpoint}?isMailAddress=false&enableGuest=true&skypeTeamsInfo=true&canBeSmtpAddress=false&includeIBBarredUsers=true&includeDisabledAccounts=true"
         );
         let mris: Vec<String> = ids.iter().map(|id| user_mri(id)).collect();
         let mut found = Vec::new();
@@ -844,6 +872,9 @@ impl TeamsClient {
                 .send()
                 .await
                 .map_err(|e| Failure::Network(e.without_url().to_string()))?;
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                continue;
+            }
             if !resp.status().is_success() {
                 return Err(Failure::Http(resp.status().as_u16()));
             }
@@ -1550,6 +1581,8 @@ mod tests {
         assert_eq!(user_mri("a-1"), "8:orgid:a-1");
         assert_eq!(user_mri("8:live:x"), "8:live:x");
         assert_eq!(user_mri("live:.cid.x"), "8:live:.cid.x");
+        assert_eq!(user_mri("28:3914e2ec-62b6"), "28:3914e2ec-62b6");
+        assert_eq!(id_of_mri("28:3914e2ec-62b6"), "28:3914e2ec-62b6");
         assert_eq!(id_of_mri("8:live:.cid.x"), "live:.cid.x");
         assert_eq!(id_of_mri("8:orgid:a-1"), "a-1");
 
