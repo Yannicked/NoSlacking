@@ -29,6 +29,16 @@
 //! both ways and sends H.264 on its first video m-line, so whether Slack
 //! shows our video can be seen without anyone's camera. The log says
 //! what was sent, the keyframes asked for and the bandwidth estimate.
+//!
+//! With `--send-test-share` (a build with the `huddle-share` feature) it
+//! also shares a generated 1080p test screen (colour bars, a moving
+//! clock) once the audio is live, never anyone's screen: as Slack's own
+//! clients share, a second Chime attendee (`…#content`, with the join
+//! token's `#content`), its own connection, sending only that picture.
+//! So whether Slack shows our share can be seen without sharing a real
+//! screen. The log says how the share's session went (did Chime take
+//! the `#content` join, did it refuse a third share), what it sent, and
+//! whether it was encoded on the GPU.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -55,6 +65,8 @@ pub struct Options {
     pub send_tone: bool,
     /// Send a moving test picture as our camera (never a real one).
     pub send_test_video: bool,
+    /// Share a generated test screen (never a real one).
+    pub send_test_share: bool,
     /// What to look at of video (`--video`, `--video-h264-only`,
     /// `--video-dump`); Chime's video signaling is logged either way.
     pub video: super::video::Options,
@@ -148,6 +160,13 @@ pub fn run(options: &Options) -> i32 {
         );
         return 1;
     }
+    if options.send_test_share && !cfg!(feature = "huddle-share") {
+        log::error!(
+            "probe: FAILED: --send-test-share needs a build with the huddle-share feature \
+             (cargo run --release --features huddle-share,huddle-video -- --huddle-probe ...)"
+        );
+        return 1;
+    }
     if let Some(dir) = &options.video.dump
         && let Err(error) = std::fs::create_dir_all(dir)
     {
@@ -184,6 +203,19 @@ async fn probe(
     let settings = crate::settings::Settings::load(&options.settings);
     if let Err(error) = crate::slack::net::configure(&settings.proxy) {
         log::warn!("probe: the proxy setting does not work ({error:?}); going without");
+    }
+    // The app's "Use the graphics card for video" too.
+    #[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
+    {
+        super::hardware::set_enabled(settings.hardware_video);
+        log::info!(
+            "probe: video on the graphics card {}",
+            if settings.hardware_video {
+                "when it can (the setting)"
+            } else {
+                "off (the setting)"
+            }
+        );
     }
 
     log::info!("keyring: reading the sign-in for {}", options.team);
@@ -307,12 +339,24 @@ async fn probe(
     } else {
         (None, None)
     };
+    // The test share starts once the audio is live, as a share is started
+    // in a huddle one is in.
+    #[cfg(feature = "huddle-share")]
+    let (live, share) = if options.send_test_share {
+        let (live, up) = tokio::sync::oneshot::channel();
+        let share = tokio::spawn(test_share(joined.content(), up, stopped.clone()));
+        (Some(live), Some(share))
+    } else {
+        (None, None)
+    };
+    #[cfg(not(feature = "huddle-share"))]
+    let live = None;
     let (report, result) = media::listen(
         &joined,
         feed,
         uplink,
         stopped,
-        None,
+        live,
         None,
         media::Video {
             options: Some(options.video.clone()),
@@ -326,6 +370,17 @@ async fn probe(
     #[cfg(feature = "huddle-camera")]
     drop(test_video);
     timer.abort();
+    #[cfg(feature = "huddle-share")]
+    if let Some(share) = share {
+        match share.await {
+            Ok(lines) => {
+                for line in lines {
+                    log::info!("{line}");
+                }
+            }
+            Err(error) => log::warn!("summary: share: its task failed: {error}"),
+        }
+    }
 
     log::info!(
         "summary: ended: {}",
@@ -416,6 +471,95 @@ fn test_video() -> Result<(super::camera_send::CameraUplink, TestVideo), String>
             _refusals: refusals,
         },
     ))
+}
+
+/// The probe's test share: waits for the audio to be live (`up`), then
+/// captures the 1080p test screen, encodes it (on the GPU if the setting
+/// and the helper allow) and sends it as the `content` attendee until
+/// `stopped`. Returns the summary's lines.
+#[cfg(feature = "huddle-share")]
+async fn test_share(
+    content: super::join::ChimeJoin,
+    up: tokio::sync::oneshot::Receiver<()>,
+    stopped: tokio::sync::watch::Receiver<bool>,
+) -> Vec<String> {
+    use super::camera_send::{QUEUE, SendControl};
+    use super::share::{Choice, Frames, ShareControl, TestShare};
+    use super::share_send::{self, Encoding};
+    use super::video_encoder::Limits;
+    if up.await.is_err() {
+        return vec!["summary: share: not started, the audio never came up".into()];
+    }
+    log::info!(
+        "probe: sharing a 1080p test screen as {} (the JS SDK's content share: attendee and \
+         join token with #content); NoSlacking tells Slack nothing else about it",
+        content.attendee_id
+    );
+    let frames = Frames::default();
+    let mut capture = ShareControl::new(TestShare::new(frames.clone()));
+    if let Err(error) = capture.start(&Choice::System { again: false }) {
+        return vec![format!(
+            "summary: share: the test screen did not start: {error}"
+        )];
+    }
+    let (encoded, encoded_in) = tokio::sync::mpsc::channel(QUEUE);
+    let control = SendControl::new(Limits::SHARE);
+    let encoding = match Encoding::spawn(frames, encoded, control.clone()) {
+        Ok(encoding) => encoding,
+        Err(why) => return vec![format!("summary: share: no encoder: {why}")],
+    };
+    let (_on, on) = tokio::sync::watch::channel(true);
+    let (refused, mut refusals) = tokio::sync::mpsc::channel(1);
+    let uplink = share_send::uplink(encoded_in, on, control, refused);
+    let (report, result) = media::listen(
+        &content,
+        None,
+        None,
+        stopped,
+        None,
+        None,
+        media::Video {
+            options: None,
+            viewer: None,
+            camera: Some(uplink),
+        },
+    )
+    .await;
+    drop(encoding);
+    capture.stop();
+    let mut lines = vec![
+        format!(
+            "summary: share: ended {}; {}",
+            report.ending.as_deref().unwrap_or("-"),
+            match &result {
+                Ok(()) => "left cleanly".to_owned(),
+                Err(failure) =>
+                    format!("FAILED at {}: {}", Step::Chime(failure.stage), failure.why),
+            }
+        ),
+        format!(
+            "summary: share: ICE after {:?}, DTLS after {:?}; {} frames by type {:?}",
+            report.ice_connected,
+            report.dtls_up,
+            report.frames.values().sum::<u64>(),
+            report.frames
+        ),
+    ];
+    if refusals.try_recv().is_ok() || matches!(report.refused_status, Some(206 | 509)) {
+        lines.push(
+            "summary: share: Chime refused it (view only or at capacity): two people may \
+             already be sharing"
+                .into(),
+        );
+    }
+    if matches!(result, Err(ref f) if matches!(f.stage, Stage::Signaling | Stage::Join)) {
+        lines.push(
+            "summary: share: the #content join failed: Slack's join token may not take the \
+             #content suffix"
+                .into(),
+        );
+    }
+    lines
 }
 
 /// The summary's video lines: what INDEX showed, each stream received,

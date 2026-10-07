@@ -33,6 +33,9 @@ pub struct Cli {
     /// `--send-test-video`: the probe sends a moving test picture as its
     /// camera (with the `huddle-camera` feature).
     pub send_test_video: bool,
+    /// `--send-test-share`: the probe shares a generated test screen
+    /// (with the `huddle-share` feature).
+    pub send_test_share: bool,
     /// `--video N`: how many video streams a huddle receives (app or probe).
     pub video: usize,
     /// `--video-h264-only`: huddles offer no VP8.
@@ -171,6 +174,11 @@ pub const FLAGS: &[Flag] = &[
         name: "send-test-video",
         takes: Takes::Nothing(|cli| cli.send_test_video = true),
         help: "Have the huddle probe send a moving test picture with a clock as its camera the whole time (never a real camera), to see in Slack that our video gets through. Needs a build with the huddle-camera feature",
+    },
+    Flag {
+        name: "send-test-share",
+        takes: Takes::Nothing(|cli| cli.send_test_share = true),
+        help: "Have the huddle probe share a generated 1080p test screen with a moving clock once the audio is live (never a real screen), as a second #content attendee, to see in Slack that our screen share gets through. Needs a build with the huddle-share feature",
     },
     Flag {
         name: "video",
@@ -595,6 +603,7 @@ mod tests {
             "huddle-region",
             "send-tone",
             "send-test-video",
+            "send-test-share",
         ] {
             assert!(names.contains(&huddle), "{huddle}");
         }
@@ -681,6 +690,8 @@ mod tests {
             assert!(!run(&["--huddle-probe", "T1", "C1"]).send_test_video);
             assert!(run(&["--huddle-probe", "T1", "C1", "--send-test-video"]).send_test_video);
             assert!(help().contains("--send-test-video"));
+            assert!(run(&["--huddle-probe", "T1", "C1", "--send-test-share"]).send_test_share);
+            assert!(help().contains("--send-test-share"));
         }
 
         #[test]

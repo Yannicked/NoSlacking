@@ -606,7 +606,9 @@ mod tests {
         use super::super::hardware::pretend::{Act, Pretend, welcome};
         use noslacking_video_ipc::{Reply, Request};
         use std::sync::Mutex;
-        let opened: Arc<Mutex<Vec<(u32, u32, u32, u32)>>> = Arc::default();
+        // Width, height, frames a second, bitrate.
+        type Opened = Vec<(u32, u32, u32, u32)>;
+        let opened: Arc<Mutex<Opened>> = Arc::default();
         let seen = Arc::clone(&opened);
         let pretend = Pretend::new(move |request| match request {
             Request::Hello { .. } => Act::Reply(welcome()),

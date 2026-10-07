@@ -68,6 +68,7 @@ fn main() -> eframe::Result<()> {
                 settings: dirs.settings_file(),
                 send_tone: cli.send_tone,
                 send_test_video: cli.send_test_video,
+                send_test_share: cli.send_test_share,
                 video: noslacking::huddle_audio::video::Options {
                     streams: cli.video,
                     h264_only: cli.video_h264_only,

@@ -90,6 +90,9 @@ enum Step {
 
 type Starting = tokio::task::JoinHandle<(ShareControl<System>, Step)>;
 
+/// How a share's session ended, or its task failing.
+type Ended = Result<(media::Report, Result<(), media::Failure>), tokio::task::JoinError>;
+
 /// What a running share has to say.
 enum LiveEvent {
     /// Its connection came up (or its session went before it did).
@@ -99,7 +102,7 @@ enum LiveEvent {
     /// Chime takes no video from it.
     Refused,
     /// Its session ended by itself.
-    Over(Result<(media::Report, Result<(), media::Failure>), tokio::task::JoinError>),
+    Over(Box<Ended>),
 }
 
 /// The running share's next news, or never while none runs.
@@ -139,7 +142,7 @@ async fn live_event(live: &mut Option<Live>) -> LiveEvent {
                 std::future::pending::<()>().await;
             }
         } => LiveEvent::Refused,
-        over = session => LiveEvent::Over(over),
+        over = session => LiveEvent::Over(Box::new(over)),
     }
 }
 
@@ -372,7 +375,7 @@ pub async fn run(
                 LiveEvent::Over(over) => {
                     // The session's task is done: not waited for again.
                     let finished = live.take();
-                    let failure = match over {
+                    let failure = match *over {
                         Ok((report, result)) => {
                             log_ending(&report, &result);
                             session_failure(report.refused_status, &result)
