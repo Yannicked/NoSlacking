@@ -39,6 +39,12 @@ copied. Line refs are `file:line` at those commits.
   VideoToolbox and Media Foundation are planned behind the same trait.
   Our camera is encoded on the GPU too (§6.8): 1 ms and 0.4 ms of CPU a
   640×480 picture through the helper against 4.3 ms in software.
+- **Sharing your screen (Stage 4, 2026-10-07):** built behind
+  `huddle-share`: the ScreenCast portal (ashpd) and PipeWire on Wayland,
+  x11rb on X11, xcap on macOS/Windows; a second `#content` Chime session
+  that only sends; 1080p at 15 fps from the GPU (5 ms, 1.9 ms of CPU a
+  picture here), 720p in software (25 ms a 1080p picture is too much).
+  Untried against Slack.
 - **Plan**: probe (days) → receive screen shares (2–3 wk) → camera tiles
   (2–3 wk) → send camera (3–5 wk) → share screen (3–5 wk, Wayland the
   risk). Drawing, stickers and effects: not realistic (undocumented,
@@ -304,7 +310,7 @@ others' codecs today: log INDEX's `supported_receive_codec_intersection`.
 - macOS needs `NSCameraUsageDescription` in Info.plist, next to the
   microphone key we already have.
 
-### 3.5 Screen capture
+### 3.5 Screen capture (see Stage 4 in §5 for what was chosen)
 - **`xcap` 0.9.8** (2026-08, Apache-2.0, active) has a `VideoRecorder`.
   On Wayland it goes through the ScreenCast portal over zbus plus pipewire
   0.10, with a restore token; on X11 it uses xcb; on macOS objc2; on
@@ -812,6 +818,132 @@ against a real camera here).
     as well).
   - It works in the Flatpak on GNOME and KDE.
   - The two-share limit is reported cleanly.
+
+**Stage 4: built (2026-10-07), behind `huddle-share` (brings
+`huddle-camera`); not yet tried against Slack.**
+
+*Capture: the comparison.* The rule is pure Rust where it can be;
+bindings to the system's own capture APIs are allowed if what they pull
+in is said. Read from the crates' sources (registry copies), and built
+here where possible.
+
+| | Wayland (portal) | X11 | macOS | Windows | Frames | What it builds |
+|---|---|---|---|---|---|---|
+| **`xcap` 0.9.8** (Apache-2.0, active) | its `VideoRecorder`: ScreenCast portal over zbus, but monitors only (`types: 1`), no cursor mode, **no restore token**, and it connects to PipeWire's default socket (`connect_rc(None)`) instead of the portal's `OpenPipeWireRemote` fd, so not in the Flatpak; "video recording (WIP)" | xcb (links libxcb) | `objc2` CoreGraphics / AVFoundation; screenshots per call | `windows` crate (GDI, DXGI) | RGBA images (`capture_image`), or the recorder's frames | Linux: `pipewire` (bindgen + C shims, below), `xcb`, `libwayshot-xcap` (wayland-client, drm); macOS/Windows: bindings only, nothing compiled |
+| **`ashpd` 0.13.13** (MIT) + **`pipewire` 0.10.1** (MIT) | the whole portal: monitors and windows, cursor modes, persist mode and restore token, `OpenPipeWireRemote` (works in the Flatpak with no finish-args) | – | – | – | PipeWire buffers: SHM/MemFd mapped (`MAP_BUFFERS`), DMA-BUF if modifiers are offered; any raw format asked for; max frame rate negotiable | ashpd: pure Rust on the tree's zbus (async-io feature, as the tree's zbus). pipewire: `pipewire-sys`/`libspa-sys` run **bindgen (libclang)** against **libpipewire-0.3-dev's headers** (pkg-config), and libspa-sys **compiles five small C files** (wrappers for SPA's inline functions, plus libspa's test `pod.c`); the binary links `libpipewire-0.3.so.0` |
+| `pipewire-native` 0.2.0 (MIT, PipeWire's own pure-Rust client, WIP) | – | – | – | – | "Further work is required for sending and receiving audio/video": no streams yet | and it still compiles C (`cc`, SPA support shims) |
+| `scap` 0.1.0-beta.1 (MIT) | PipeWire + portal | – | ScreenCaptureKit | Windows Graphics Capture | | beta; pulls the same pipewire bindings |
+| `lamco-pipewire` 0.8 (MIT/Apache) | PipeWire with DMA-BUF | – | – | – | | pipewire bindings again |
+| **`x11rb` 0.13.2** (MIT/Apache, already in the tree) | – | GetImage on the root window per picture, RandR monitors by name; pure Rust connection (no libxcb) | – | – | 32-bit BGRX | nothing |
+| Native: ScreenCaptureKit (`objc2-screen-capture-kit`), Windows Graphics Capture (`windows`) | – | – | yes | yes | IOSurface / D3D textures | bindings, but calls are `unsafe`: not in our crate (only the helper may) |
+
+**Chosen:** Linux: **ashpd + pipewire** for the portal (Wayland, and X11
+desktops whose portal does ScreenCast), the only option with restore
+tokens, windows, cursor and the Flatpak's fd; **x11rb** when there is no
+portal and an X server (screens only: without a compositor an X window's
+own pixels are not kept). macOS and Windows: **xcap** (bindings, nothing
+compiled; its per-call screenshots at 15 a second), behind its target
+`cfg` so none of its Linux crates are built. No crate here compiles
+C/C++ except libspa-sys's wrapper shims, which are bindings glue for
+SPA's header-only API; a pure-Rust PipeWire stream client
+(`pipewire-native`) is not there yet. Build needs per platform:
+- Linux: libclang (already for nokhwa) and **libpipewire-0.3-dev**
+  (CI's Linux jobs install it), a C compiler (already for OpenSSL).
+  Run time: libpipewire-0.3.so.0 is linked; the portal
+  (xdg-desktop-portal with a GNOME/KDE/wlr backend) and PipeWire must
+  run for Wayland; the .deb recommends `xdg-desktop-portal, pipewire`.
+- macOS: `objc2` crates (in the tree through xcap's deps), nothing
+  compiled; Screen Recording permission asked with
+  `CGPreflightScreenCaptureAccess`/`CGRequestScreenCaptureAccess`
+  (objc2-core-graphics, safe functions) before the first capture; the
+  Info.plist has `NSScreenCaptureUsageDescription`.
+- Windows: the `windows` crate, nothing compiled.
+- macOS and Windows were **not built here** (no cross targets); the xcap
+  code was type-checked and linted against xcap 0.9.8's signatures
+  transcribed into a stub crate. CI's macOS/Windows jobs will build it.
+- Flatpak: the ScreenCast portal needs **no finish-args** (no
+  `--filesystem=xdg-run/pipewire-0`: the portal hands over a PipeWire fd
+  that sees only the chosen stream). The Flatpak does not build
+  `huddle-share` yet; the freedesktop SDK has PipeWire's headers.
+- A quick local test captured from Xvfb (`xvfb-run cargo test
+  --features huddle-share -- --ignored x11_capture`); the portal path was
+  not run here (it would show the desktop's dialog).
+
+*The content session.* As the JS SDK's `DefaultContentShareController`
+(`createContentShareMeetingSessionConfigure`, quoted on
+`ChimeJoin::content`): same meeting and URLs, `attendeeId + "#content"`,
+`joinToken + "#content"`, same external user id, and
+`NoVideoDownlinkBandwidthPolicy`. A second `media::listen` with no
+speaker, no microphone (Opus silence goes out, as the JS SDK
+synthesizes a silent track for a share without sound), no viewer, and
+the share as its "camera": the session code is shared as it was, the
+uplink now carrying its own SUBSCRIBE description
+(`CameraUplink::descriptor`: 1920×1080, 15 fps, 2,500 kbit/s) and the
+bandwidth target following it. Its SUBSCRIBE is RX for the audio, then
+DUPLEX with the video send stream, `receive_stream_ids = [0]` however
+much video INDEX lists. The main session never subscribes to our own
+`#content` (it never did: `Source::is_ours`), and the roster no longer
+counts anyone's `#content` attendee as a person. **Slack-side
+announcement:** none is sent. HuddleFM's sources make no Slack call
+about shares (they only use `rooms.join`, `rooms.info`,
+`screenhero.rooms.info` and `rooms.inviteResponse`), and Slack's own
+shares were seen only as Chime `#content` sources. The log says so when
+a share starts; the probe's summary says whether the `#content` join was
+taken. Unknown until tried: whether Slack's join token accepts the
+`#content` suffix, and whether Slack's UI shows a share that Slack
+itself was not told about.
+
+*Encoding.* Main's `Encoder` (GPU through the helper, software as the
+fallback), with `Limits`: a share may be 1920×1080 on the GPU, at most
+1280×720 in software. Measured on this machine (Ryzen AI 7 350, Radeon
+860M, release, one thread):
+
+| 1080p share, 15 fps, 2.5 Mbit/s | time a picture | CPU a picture |
+|---|---|---|
+| software (rusty_h264, Fast), mostly still screen | 24.9 ms (p95 30.9) | 24.9 ms |
+| software, everything moving | 24.5 ms (p95 26.5) | 24.5 ms |
+| software, the helper's bench (the 1080p fixture) | 24.5 ms | 24.5 ms |
+| GPU (VA-API) in process | 4.3 ms | 1.0 ms |
+| **GPU through the helper** (what the share uses here) | **5.0 ms** | **1.9 ms** |
+
+| 720p share in software | 9.1 ms mostly still, 9.9 ms everything moving (p95 ≤ 11.3) |
+|---|---|
+
+Software 1080p would take 37 % of a core at 15 fps here and more than a
+frame's time on older laptops, so software shares are 720p
+(`share_encode_cost`, ignored test; `examples/encode` in the helper).
+On this machine with "Use the graphics card for video" on, a share goes
+out at **1080p at 15 fps from the GPU**. The encoder thread also: skips
+pictures equal to the last (GNOME's PipeWire sends frames only on
+damage anyway), sends a still screen's picture again once a second and
+as an IDR every 4 s (and on PLI/FIR, at most every 500 ms; Chime asks
+content senders every 10 s), follows the bandwidth estimate in steps up
+to 2.5 Mbit/s (in place on the GPU), steps down to 720p if 1080p takes
+over 45 ms a picture on average, and to 720p at once when no encoder
+takes 1080p (no GPU, or the GPU failing).
+
+*Rules and UI.* `ShareControl` keeps the camera's rule (nothing captured
+until asked; stop, leaving, a failed or refused share session, the
+capture ending by itself all stop it), tested with a pretend capturer.
+Share sits beside Mute and Video in the call bar (icons alone there when
+the bar is narrow) and in the call window, Ctrl+Shift+E (Teams' chord;
+on the shortcut sheet); on, the bar says "You are sharing your screen"
+with Stop sharing; without a system dialog the bar lists screens and
+windows to pick; right click Share for "Share something else…" (asks
+the portal again). Toasts: cancelled, not allowed (macOS names where),
+no capture available, the source gone, capture failed, two shares
+already (Chime's 206/509, or two in INDEX with `huddle-video`), the
+share's connection refused or lost. Demo: `--demo-view sharing-self`,
+`share-pick`, `share-window`.
+
+*Probe.* `--send-test-share`: once the audio is live, shares a 1080p
+test screen (colour bars, a moving clock and frame count) as the
+`#content` attendee; the summary's "share" lines say how it went.
+
+*Not yet known:* everything Slack-side (above); GNOME vs KDE portal
+behaviour (frame rates, cursor, restore tokens), and DMA-BUF-only
+compositors (frames arriving that are not in memory are logged once);
+xcap's speed on real Macs and Windows machines.
 
 **Not recommended:** drawing on shares, effects, backgrounds, stickers.
 Reactions only if Stage 0 shows they are plain data messages.
