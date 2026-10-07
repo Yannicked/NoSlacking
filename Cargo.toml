@@ -17,7 +17,7 @@ categories = ["gui"]
 # (crates/; see crates/noslacking-video). `cargo build` at the root builds
 # the app alone; `--workspace` (or `-p noslacking-video`) builds the
 # helper too. Profiles and patches below apply to every member.
-members = [".", "crates/video-ipc"]
+members = [".", "crates/video-ipc", "crates/noslacking-video"]
 
 [lib]
 name = "noslacking"
