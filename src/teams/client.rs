@@ -9,7 +9,8 @@ use futures_util::future::BoxFuture;
 
 use crate::failure::Failure;
 use crate::teams::auth::{
-    Account, AudienceToken, RESOURCE_CSA, RESOURCE_GRAPH, TeamsCredentials, now_secs,
+    Account, AudienceToken, RESOURCE_CSA, RESOURCE_GRAPH, RESOURCE_MT_PERSONAL, TeamsCredentials,
+    now_secs,
 };
 use crate::teams::types::{
     Conversation, ConversationsResponse, Message, MessagesResponse, PostedMessage, Team,
@@ -74,12 +75,14 @@ impl ShortProfile {
     /// The person under the id messages name them by (the object id, as
     /// `8:orgid:` MRIs carry it), if the profile has one.
     fn into_details(self) -> Option<UserDetails> {
-        let id = self.object_id.filter(|id| !id.is_empty()).or_else(|| {
-            self.mri
-                .as_deref()
-                .and_then(|mri| mri.rsplit(':').next())
-                .map(str::to_owned)
-        })?;
+        // By the MRI, as messages name people: a personal account's object
+        // id is a GUID that messages never use.
+        let id = self
+            .mri
+            .as_deref()
+            .map(id_of_mri)
+            .filter(|id| !id.is_empty())
+            .or_else(|| self.object_id.filter(|id| !id.is_empty()))?;
         Some(UserDetails {
             id,
             display_name: self.display_name.filter(|n| !n.trim().is_empty()),
@@ -87,6 +90,16 @@ impl ShortProfile {
             user_principal_name: self.user_principal_name,
         })
     }
+}
+
+/// The id messages name a person by, from their MRI: the object id of
+/// `8:orgid:{id}`, and `live:…` of `8:live:…`.
+fn id_of_mri(mri: &str) -> String {
+    ["8:orgid:", "8:teamsvisitor:", "8:guest:", "8:"]
+        .iter()
+        .find_map(|prefix| mri.strip_prefix(prefix))
+        .unwrap_or(mri)
+        .to_owned()
 }
 
 /// The MRI of a person by the id messages name them by: a work object
@@ -569,11 +582,8 @@ impl TeamsClient {
     /// that fails. People neither knows, such as guests from elsewhere,
     /// are left out.
     pub async fn get_users(&self, ids: &[String]) -> Result<Vec<UserDetails>, Failure> {
-        // The personal middle tier refuses every token we hold (401, seen
-        // with `--teams-probe`), and Graph is not ours there: names come
-        // from messages instead.
         if self.credentials().account == Account::Personal {
-            return Ok(Vec::new());
+            return self.personal_profiles(ids).await;
         }
         match self.short_profiles(ids).await {
             Ok(found) => Ok(found),
@@ -619,6 +629,62 @@ impl TeamsClient {
                     .into_iter()
                     .filter_map(ShortProfile::into_details),
             );
+        }
+        Ok(found)
+    }
+
+    /// People as a personal account's middle tier knows them, the way the
+    /// Teams web client asks: personal accounts through `fetchShortProfile`,
+    /// work accounts met in personal chats through `fetchFederated`, each
+    /// with a token for the middle tier's own audience and the skype token.
+    async fn personal_profiles(&self, ids: &[String]) -> Result<Vec<UserDetails>, Failure> {
+        let creds = self.ensure_fresh_tokens().await?;
+        let base = creds
+            .middle_tier_url()
+            .ok_or_else(|| Failure::Unexpected("no middle tier in regionGtms".into()))?
+            .trim_end_matches('/')
+            .to_owned();
+        let skype = creds.skype_token.unwrap_or_default();
+        let (work, personal): (Vec<String>, Vec<String>) = ids
+            .iter()
+            .map(|id| user_mri(id))
+            .partition(|mri| mri.starts_with("8:orgid:"));
+        let mut found = Vec::new();
+        for (path, mris) in [
+            (
+                "fetchShortProfile?isMailAddress=false&canBeSmtpAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true&includeDisabledAccounts=true",
+                personal,
+            ),
+            (
+                "fetchFederated?edEnabled=false&includeDisabledAccounts=true",
+                work,
+            ),
+        ] {
+            let url = format!("{base}/beta/users/{path}");
+            for batch in mris.chunks(100) {
+                let resp = self
+                    .bearer(RESOURCE_MT_PERSONAL, |http, token| {
+                        crate::teams::auth::consumer_headers(
+                            http.post(&url)
+                                .bearer_auth(token)
+                                .header("x-skypetoken", &skype)
+                                .json(batch),
+                        )
+                    })
+                    .await?;
+                if !resp.status().is_success() {
+                    return Err(refused(resp, "look people up").await);
+                }
+                let page: ShortProfiles = resp
+                    .json()
+                    .await
+                    .map_err(|e| Failure::Unexpected(e.to_string()))?;
+                found.extend(
+                    page.value
+                        .into_iter()
+                        .filter_map(ShortProfile::into_details),
+                );
+            }
         }
         Ok(found)
     }
@@ -887,6 +953,20 @@ mod tests {
         assert_eq!(user_mri("a-1"), "8:orgid:a-1");
         assert_eq!(user_mri("8:live:x"), "8:live:x");
         assert_eq!(user_mri("live:.cid.x"), "8:live:.cid.x");
+        assert_eq!(id_of_mri("8:live:.cid.x"), "live:.cid.x");
+        assert_eq!(id_of_mri("8:orgid:a-1"), "a-1");
+
+        // A personal account's profile: named by its MRI, not its GUID.
+        let personal: ShortProfiles = serde_json::from_str(
+            r#"{"value":[{"objectId":"00000000-0000-0000-3448-d9d5387f3b43","mri":"8:live:.cid.3448","displayName":"Yan"}]}"#,
+        )
+        .expect("a page");
+        let details: Vec<UserDetails> = personal
+            .value
+            .into_iter()
+            .filter_map(ShortProfile::into_details)
+            .collect();
+        assert_eq!(details[0].id, "live:.cid.3448");
     }
 
     #[test]

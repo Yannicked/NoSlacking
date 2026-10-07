@@ -310,6 +310,16 @@ thread's members (`/v1/threads/{id}`) carry ids only, so names come from
 messages' `imdisplayname`: chats without a topic are named after their
 recent writers.
 
+A recording of teams.live.com showed why: the web client signs in with its
+own client id (`4b3e8f46-56d3-427f-b1e2-d239b2ea6bca`) and calls the
+middle tier with a token for
+`https://mtsvc.fl.teams.microsoft.com/teams.mt.readwrite` plus the skype
+token. It names personal people with `fetchShortProfile` and the work
+people in personal chats with `fetchFederated`, and yourself with
+`/beta/users/me`. Its chat token comes from `api/auth/v2.0/authz/consumer`.
+Whether the consumer device-code client may have the middle tier scope is
+what `--teams-probe` now tests.
+
 ### 6.2 Audio and video calls
 
 ost (MIT) implements 1:1 and channel calls. Its flow: an IC3 token

@@ -26,6 +26,11 @@ pub const RESOURCE_SPACES: &str = "https://api.spaces.skype.com";
 /// (CSA) takes only a bearer token minted for it, not the skype token.
 pub const RESOURCE_CSA: &str = "https://chatsvcagg.teams.microsoft.com";
 
+/// The middle tier's audience for personal accounts, where people are
+/// looked up; the Teams web client mints it from its refresh token (seen
+/// in a recording of teams.live.com, 2026-10-07).
+pub const RESOURCE_MT_PERSONAL: &str = "https://mtsvc.fl.teams.microsoft.com";
+
 /// Microsoft Graph's audience, for looking people up by id.
 pub const RESOURCE_GRAPH: &str = "https://graph.microsoft.com";
 
@@ -89,11 +94,16 @@ impl Account {
     }
 
     /// The scope that buys an access token for `resource`, if this kind of
-    /// account can have one: personal accounts reach the chat service only.
+    /// account can have one: personal accounts reach the chat service and
+    /// the middle tier only.
     pub fn scope_for(self, resource: &str) -> Option<String> {
         match self {
             Self::Work => Some(format!("{resource}/.default offline_access")),
-            Self::Personal => (resource == RESOURCE_SPACES).then(|| SCOPE_PERSONAL.to_owned()),
+            Self::Personal if resource == RESOURCE_SPACES => Some(SCOPE_PERSONAL.to_owned()),
+            Self::Personal if resource == RESOURCE_MT_PERSONAL => Some(format!(
+                "{RESOURCE_MT_PERSONAL}/teams.mt.readwrite openid profile offline_access"
+            )),
+            Self::Personal => None,
         }
     }
 

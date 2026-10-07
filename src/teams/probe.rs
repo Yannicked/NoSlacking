@@ -30,6 +30,13 @@ const SCOPE_SPACES: &str = "https://api.spaces.skype.com/.default offline_access
 /// The scope purple-teams asks for in its personal build.
 const SCOPE_MBI: &str = "service::api.fl.spaces.skype.com::MBI_SSL openid profile offline_access";
 
+/// The middle tier's scope, as the Teams web client asks for it.
+const SCOPE_MIDDLE_TIER: &str =
+    "https://mtsvc.fl.teams.microsoft.com/teams.mt.readwrite openid profile offline_access";
+
+/// The Teams web client's own client id for personal accounts.
+const WEB_CLIENT_ID: &str = "4b3e8f46-56d3-427f-b1e2-d239b2ea6bca";
+
 /// Tenant and scope pairs to ask a device code with, in order.
 const SIGN_INS: [(&str, &str); 4] = [
     ("consumers", SCOPE_SPACES),
@@ -245,9 +252,25 @@ async fn probe(settings: &std::path::Path) -> Reached {
         }
     }
 
-    // 4b. Names for a group chat without a topic.
+    // 4b. Names for a group chat: the middle tier's own token, which the
+    // Teams web client mints with its own client id; whether ours may have
+    // it too is what this finds out.
+    let middle_token = match &token.refresh {
+        Some(refresh) => match redeem(&http, tenant, refresh, SCOPE_MIDDLE_TIER).await {
+            Ok(minted) => {
+                describe_token("middle tier token", &minted);
+                Some(minted)
+            }
+            Err(why) => {
+                log::warn!("names: the middle tier scope was refused: {why}");
+                web_client_device_code(&http).await;
+                None
+            }
+        },
+        None => None,
+    };
     if let Some((host, group)) = &first_group {
-        names(&http, host, group, &skype, &access).await;
+        names(&http, host, group, &skype, middle_token.as_deref()).await;
     }
 
     // 5. Live updates.
@@ -302,6 +325,22 @@ async fn device_code(
             .and_then(Value::as_u64)
             .unwrap_or(900),
     })
+}
+
+/// Whether the web client's id would sign in with a device code at all,
+/// should only it be given the middle tier's scope. Asks for a code and
+/// leaves it unused.
+async fn web_client_device_code(http: &reqwest::Client) {
+    let answer = post_form(
+        http,
+        &super::auth::device_code_url("consumers"),
+        &[("client_id", WEB_CLIENT_ID), ("scope", SCOPE_MIDDLE_TIER)],
+    )
+    .await;
+    match answer {
+        Ok(_) => log::info!("names: the web client id does give device codes"),
+        Err(why) => log::warn!("names: the web client id gives no device code: {why}"),
+    }
 }
 
 /// Shows the code where whoever runs the probe sees it, not only in the
@@ -539,7 +578,7 @@ async fn names(
     host: &str,
     group: &Value,
     skype: &Skype,
-    access: &[(&str, String)],
+    middle_token: Option<&str>,
 ) {
     log::info!("names: a group chat's list entry: {}", shape(group));
     let id = group.get("id").and_then(Value::as_str).unwrap_or("");
@@ -579,40 +618,35 @@ async fn names(
         log::warn!("names: no middle tier in regionGtms");
         return;
     };
-    let url = format!(
-        "{}/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true",
-        middle.trim_end_matches('/')
-    );
-    let access = access.first().map(|(_, t)| t.as_str()).unwrap_or("");
-    for (how, bearer, skype_headers, consumer) in [
-        ("access token", Some(access), false, false),
-        ("access token, consumer headers", Some(access), false, true),
+    let Some(token) = middle_token else {
+        log::warn!("names: no middle tier token to look people up with");
+        return;
+    };
+    // As the Teams web client asks: personal people by fetchShortProfile,
+    // work people met in personal chats by fetchFederated.
+    let (work, personal): (Vec<&String>, Vec<&String>) =
+        members.iter().partition(|m| m.starts_with("8:orgid:"));
+    for (path, mris) in [
         (
-            "access and skype tokens, consumer headers",
-            Some(access),
-            true,
-            true,
+            "fetchShortProfile?isMailAddress=false&canBeSmtpAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true&includeDisabledAccounts=true",
+            personal,
         ),
-        ("skype token only, consumer headers", None, true, true),
         (
-            "skype token as bearer, consumer headers",
-            Some(skype.token.as_str()),
-            false,
-            true,
+            "fetchFederated?edEnabled=false&includeDisabledAccounts=true",
+            work,
         ),
     ] {
-        let mut request = http.post(&url).json(&members);
-        if let Some(bearer) = bearer {
-            request = request.bearer_auth(bearer);
+        if mris.is_empty() {
+            continue;
         }
-        if skype_headers {
-            request = request
-                .header("X-Skypetoken", &skype.token)
-                .header("Authentication", format!("skypetoken={}", skype.token));
-        }
-        if consumer {
-            request = super::auth::consumer_headers(request);
-        }
+        let endpoint = path.split('?').next().unwrap_or(path);
+        let url = format!("{}/beta/users/{path}", middle.trim_end_matches('/'));
+        let request = super::auth::consumer_headers(
+            http.post(&url)
+                .bearer_auth(token)
+                .header("x-skypetoken", &skype.token)
+                .json(&mris),
+        );
         match request.send().await {
             Ok(resp) => {
                 let status = resp.status();
@@ -632,21 +666,18 @@ async fn names(
                                 .count()
                         });
                     log::info!(
-                        "names: fetchShortProfile OK with {how}: {named} of {} named; {}",
-                        members.len(),
+                        "names: {endpoint} OK: {named} of {} named; {}",
+                        mris.len(),
                         shape(&body)
                     );
                 } else {
                     log::warn!(
-                        "names: fetchShortProfile refused with {how}: HTTP {status} {}",
+                        "names: {endpoint} refused: HTTP {status} {}",
                         super::auth::error_code(&text)
                     );
                 }
             }
-            Err(error) => log::warn!(
-                "names: fetchShortProfile with {how}: {}",
-                error.without_url()
-            ),
+            Err(error) => log::warn!("names: {endpoint}: {}", error.without_url()),
         }
     }
 }
