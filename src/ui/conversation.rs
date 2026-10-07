@@ -218,6 +218,16 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                             actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Members));
                         }
                     }
+                    #[cfg(feature = "huddle-audio")]
+                    super::people::huddle_button(
+                        ui,
+                        &palette,
+                        workspace,
+                        &conversation.id,
+                        huddles.listening.as_ref(),
+                        actions,
+                    );
+                    #[cfg(not(feature = "huddle-audio"))]
                     super::people::huddle_button(ui, &palette, workspace, &conversation.id, actions);
                     #[cfg(feature = "huddle-audio")]
                     super::people::start_huddle_menu(

@@ -250,6 +250,13 @@ pub enum Action {
 pub fn apply(app: &mut App, action: Action) {
     match action {
         Action::Join { team, room } => {
+            // With huddle audio a browser sign-in joins here; only the
+            // others hand the huddle to Slack.
+            #[cfg(feature = "huddle-audio")]
+            if is_session(app, &team) {
+                apply(app, Action::ListenInvite { team, room });
+                return;
+            }
             if let Some(invite) = app.huddles.invites.answered(&team, &room) {
                 app.open_url(&people::huddle_url(&team, &invite.channel));
             }

@@ -2579,13 +2579,6 @@ msgstr "Vorig resultaat"
 msgid "Next match"
 msgstr "Volgend resultaat"
 
-# Listening to a huddle in the app, with the microphone off.
-msgid "Listen"
-msgstr "Luisteren"
-
-msgid "Listen to the huddle here, with your microphone off"
-msgstr "Luister hier naar de huddle, met je microfoon uit"
-
 msgid "Joining…"
 msgstr "Deelnemen…"
 
@@ -2612,9 +2605,6 @@ msgstr "de geluidsverbinding kon niet worden gemaakt"
 
 msgid "the audio connection was lost"
 msgstr "de geluidsverbinding is verbroken"
-
-msgid "Listen here"
-msgstr "Hier luisteren"
 
 # The call bar, while a huddle plays here.
 msgid "Listening in #{channel}"
@@ -2652,9 +2642,6 @@ msgstr "{name} (jij, praat hier)"
 # A huddle participant whose Slack account is not known.
 msgid "Someone"
 msgstr "Iemand"
-
-msgid "Open in Slack, to talk"
-msgstr "Openen in Slack, om te praten"
 
 msgid "Leave the huddle ({shortcut})"
 msgstr "De huddle verlaten ({shortcut})"
@@ -2719,3 +2706,9 @@ msgstr "Hier een huddle starten"
 
 msgid "Start a huddle in Slack"
 msgstr "Een huddle starten in Slack"
+
+msgid "Join the huddle here, with your microphone off"
+msgstr "Hier meedoen aan de huddle, met je microfoon uit"
+
+msgid "Join the huddle here: {names}"
+msgstr "Hier meedoen aan de huddle: {names}"

@@ -313,12 +313,14 @@ fn save(dialog: &people::StatusDialog) -> Action {
 }
 
 /// The "huddle" button in a conversation's header, while one goes on: who
-/// is in it, and a click to join it in Slack.
+/// is in it, and a click to join it: here with huddle audio in a browser
+/// sign-in's workspace (with the microphone off), else in Slack.
 pub fn huddle_button(
     ui: &mut egui::Ui,
     palette: &Palette,
     workspace: &crate::app::WorkspaceState,
     channel: &str,
+    #[cfg(feature = "huddle-audio")] listening: Option<&crate::huddles::Listening>,
     actions: &mut Vec<Action>,
 ) {
     let Some(huddle) = workspace.people.huddles.get(channel) else {
@@ -342,25 +344,40 @@ pub fn huddle_button(
     )
     .stroke(Stroke::new(1.0, ACTIVE))
     .corner_radius(egui::CornerRadius::same(theme::RADIUS_SMALL + 2));
+    let team = &workspace.info.team_id;
+    let here = cfg!(feature = "huddle-audio")
+        && workspace.info.sign_in == crate::model::SignInKind::Session;
     let tip = crate::i18n::tf(
-        "Join the huddle in Slack: {names}",
+        if here {
+            "Join the huddle here: {names}"
+        } else {
+            "Join the huddle in Slack: {names}"
+        },
         &[("names", &names.join(", "))],
     );
     let response = ui
         .add(button)
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(&tip);
-    if response.clicked() {
-        actions.push(Action::OpenUrl(people::huddle_url(
-            &workspace.info.team_id,
-            channel,
-        )));
+    if !response.clicked() {
+        return;
     }
+    #[cfg(feature = "huddle-audio")]
+    if here {
+        // Already in it (or joining): nothing more to join.
+        if !listening.is_some_and(|l| l.is(team, channel)) {
+            actions.push(Action::Huddle(crate::huddles::Action::Listen {
+                team: team.clone(),
+                channel: channel.to_owned(),
+            }));
+        }
+        return;
+    }
+    actions.push(Action::OpenUrl(people::huddle_url(team, channel)));
 }
 
-/// "Listen" beside the huddle button, in a browser sign-in's workspace,
-/// or "Leave" while listening to this huddle (the `huddle-audio`
-/// feature): the huddle plays here with the microphone off.
+/// "Joining…", then "Leave", beside the huddle button while you are in
+/// this huddle (the `huddle-audio` feature).
 #[cfg(feature = "huddle-audio")]
 pub fn listen_button(
     ui: &mut egui::Ui,
@@ -371,23 +388,17 @@ pub fn listen_button(
     actions: &mut Vec<Action>,
 ) {
     let team = &workspace.info.team_id;
-    // The same state as the call bar: a failure there offers Listen again.
-    let here = listening.filter(|l| l.is(team, channel));
-    // A huddle we start shows Joining… and Leave here before Slack's news
-    // of it arrives.
-    if (here.is_none() && !workspace.people.huddles.contains_key(channel))
-        || workspace.info.sign_in != crate::model::SignInKind::Session
-    {
+    // Shown only while in this huddle (joining or live), also before
+    // Slack's news of a huddle we started arrives; joining is the huddle
+    // button's, and after a failure that joins again.
+    let Some(here) = listening.filter(|l| l.is(team, channel)) else {
         return;
-    }
-    let (label, tip) = match here.map(|l| &l.phase) {
-        Some(crate::huddles::Phase::Joining) => (t("Joining…"), t("Leave the huddle")),
-        Some(_) => (t("Leave"), t("Leave the huddle")),
-        None => (
-            t("Listen"),
-            t("Listen to the huddle here, with your microphone off"),
-        ),
     };
+    let label = match here.phase {
+        crate::huddles::Phase::Joining => t("Joining…"),
+        _ => t("Leave"),
+    };
+    let tip = t("Leave the huddle");
     let button = egui::Button::image_and_text(
         theme::Icon::Headphones.image(palette.secondary, 14.0),
         RichText::new(label)
@@ -400,20 +411,13 @@ pub fn listen_button(
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(tip);
     if response.clicked() {
-        actions.push(Action::Huddle(if here.is_some() {
-            crate::huddles::Action::Leave
-        } else {
-            crate::huddles::Action::Listen {
-                team: team.clone(),
-                channel: channel.to_owned(),
-            }
-        }));
+        actions.push(Action::Huddle(crate::huddles::Action::Leave));
     }
 }
 
 /// A headphones menu in a conversation's header while no huddle goes on
 /// there: start one here (with huddle audio, in a browser sign-in's
-/// workspace, joining muted) or in Slack. A menu rather than one click,
+/// workspace, joining muted), or else in Slack. A menu rather than one click,
 /// so a huddle that tells a whole channel is never started by accident.
 pub fn start_huddle_menu(
     ui: &mut egui::Ui,
@@ -453,10 +457,14 @@ pub fn start_huddle_menu(
                     }));
                     ui.close();
                 }
-                if ui
-                    .button(t("Start a huddle in Slack"))
-                    .on_hover_text(t("Open Slack's huddle for this conversation"))
-                    .clicked()
+                // Only where it can't start here: Slack's huddle in the browser.
+                let here = cfg!(feature = "huddle-audio")
+                    && workspace.info.sign_in == crate::model::SignInKind::Session;
+                if !here
+                    && ui
+                        .button(t("Start a huddle in Slack"))
+                        .on_hover_text(t("Open Slack's huddle for this conversation"))
+                        .clicked()
                 {
                     actions.push(Action::OpenUrl(people::huddle_url(team, channel)));
                     ui.close();
@@ -498,27 +506,9 @@ pub fn word(presence: Presence) -> std::borrow::Cow<'static, str> {
     }
 }
 
-/// The answer that listens to an invitation's huddle here; only reached
-/// in builds with huddle audio.
-#[cfg(feature = "huddle-audio")]
-fn listen_to(team: &str, room: &str) -> crate::huddles::Action {
-    crate::huddles::Action::ListenInvite {
-        team: team.to_owned(),
-        room: room.to_owned(),
-    }
-}
-
-#[cfg(not(feature = "huddle-audio"))]
-fn listen_to(team: &str, room: &str) -> crate::huddles::Action {
-    crate::huddles::Action::Join {
-        team: team.to_owned(),
-        room: room.to_owned(),
-    }
-}
-
 /// The huddle invitations ringing, each a card in the top right corner
-/// with Join (or, with huddle audio, Listen here and Open in Slack) and
-/// Decline (see [`crate::huddles`]).
+/// with Join (here with huddle audio in a browser sign-in, else in
+/// Slack) and Decline (see [`crate::huddles`]).
 pub fn invites(app: &mut App, ctx: &egui::Context) {
     if app.huddles.invites.list().is_empty() {
         return;
@@ -596,19 +586,15 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
                         });
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
-                            // With huddle audio, listening here comes first
-                            // and Slack takes the call with a microphone.
-                            let here = cfg!(feature = "huddle-audio") && session;
-                            let (label, hint) = if here {
-                                (
-                                    t("Listen here"),
-                                    t("Listen to the huddle here, with your microphone off"),
-                                )
+                            // With huddle audio a browser sign-in joins here
+                            // (see `huddles::Action::Join`); else Slack does.
+                            let hint = if cfg!(feature = "huddle-audio") && session {
+                                t("Join the huddle here, with your microphone off")
                             } else {
-                                (t("Join"), t("Join the huddle in Slack"))
+                                t("Join the huddle in Slack")
                             };
                             let join = egui::Button::new(
-                                RichText::new(label)
+                                RichText::new(t("Join"))
                                     .font(theme::medium(14.0))
                                     .color(Color32::WHITE),
                             )
@@ -620,20 +606,6 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                                 .on_hover_text(hint)
                                 .clicked()
-                            {
-                                answers.push(if here {
-                                    listen_to(&team, &room)
-                                } else {
-                                    crate::huddles::Action::Join {
-                                        team: team.clone(),
-                                        room: room.clone(),
-                                    }
-                                });
-                            }
-                            if here
-                                && theme::secondary_button(ui, &palette, &t("Open in Slack"))
-                                    .on_hover_text(t("Join the huddle in Slack"))
-                                    .clicked()
                             {
                                 answers.push(crate::huddles::Action::Join {
                                     team: team.clone(),

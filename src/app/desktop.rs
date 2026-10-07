@@ -253,6 +253,11 @@ impl App {
                         room: invite.room.clone(),
                     };
                     crate::huddles::apply(self, action);
+                    // Joined here: the call bar is in this window.
+                    #[cfg(feature = "huddle-audio")]
+                    {
+                        self.desktop.raise = true;
+                    }
                 } else {
                     self.open_url(link);
                 }

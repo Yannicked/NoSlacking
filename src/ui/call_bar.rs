@@ -6,9 +6,8 @@
 //! It names the huddle (a click opens its conversation), says whether it
 //! is joining, live and for how long, or why it failed, shows who is in
 //! it with the speaking ringed and the muted marked (you as your
-//! microphone really is), and offers Leave (also Ctrl+Shift+H), the
-//! microphone's mute button while live (see [`super::huddle_mic`]) and
-//! Open in Slack.
+//! microphone really is), and offers Leave (also Ctrl+Shift+H) and the
+//! microphone's mute button while live (see [`super::huddle_mic`]).
 
 use egui::{Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke, Vec2};
 
@@ -205,8 +204,7 @@ fn bar(
         });
 }
 
-/// The headphones, the huddle's name (opening its conversation) and
-/// Open in Slack.
+/// The headphones and the huddle's name, which opens its conversation.
 fn title_row(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -218,19 +216,6 @@ fn title_row(
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let open = theme::icon_button(
-                ui,
-                palette,
-                Icon::ExternalLink,
-                14.0,
-                &t("Open in Slack, to talk"),
-            );
-            if open.clicked() {
-                actions.push(Action::OpenUrl(crate::people::huddle_url(
-                    &bar.team,
-                    &bar.channel,
-                )));
-            }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add(Icon::Headphones.image(tint, 16.0));
                 let title = ui
