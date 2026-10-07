@@ -176,10 +176,7 @@ async fn boot(client: TeamsClient, workspace: Workspace, sink: Sink) {
         Ok(chats) => {
             let (list, users) = chat_list(&client, &chats, &me).await;
             if !users.is_empty() {
-                sink.send(Event::Users {
-                    team: team.clone(),
-                    users,
-                });
+                sink.send(people_event(&client, &team, users));
             }
             sink.send(Event::Conversations {
                 team: team.clone(),
@@ -212,10 +209,7 @@ async fn boot(client: TeamsClient, workspace: Workspace, sink: Sink) {
     }
 
     match client.get_me() {
-        Ok(me) => sink.send(Event::Users {
-            team,
-            users: vec![translate_user(&me)],
-        }),
+        Ok(me) => sink.send(people_event(&client, &team, vec![translate_user(&me)])),
         Err(err) => log::warn!("failed to read who is signed in to {team}: {err:?}"),
     }
 }
@@ -390,10 +384,7 @@ pub async fn history(
         Ok(page) => {
             let senders = senders(&page.messages);
             if !senders.is_empty() {
-                sink.send(Event::Users {
-                    team: team.clone(),
-                    users: senders,
-                });
+                sink.send(people_event(&client, &team, senders));
             }
             sink.send(Event::History {
                 team,
@@ -442,7 +433,7 @@ pub async fn fetch_users(client: TeamsClient, team: String, ids: Vec<String>, si
         Ok(found) => {
             let users: Vec<_> = found.iter().map(translate_user).collect();
             if !users.is_empty() {
-                sink.send(Event::Users { team, users });
+                sink.send(people_event(&client, &team, users));
             }
         }
         Err(error) => log::warn!(
@@ -459,7 +450,7 @@ pub async fn find_people(client: TeamsClient, team: String, query: String, sink:
         Ok(found) => {
             let users: Vec<_> = found.iter().map(translate_user).collect();
             if !users.is_empty() {
-                sink.send(Event::Users { team, users });
+                sink.send(people_event(&client, &team, users));
             }
         }
         Err(error) => sink.send(Event::Convos {
@@ -522,6 +513,31 @@ pub async fn open(client: TeamsClient, team: String, me: String, users: Vec<Stri
     });
 }
 
+/// People for the interface, each with their picture: Teams serves it
+/// from the middle tier by the person's MRI, fetched with the workspace's
+/// own sign-in (see [`crate::images`]).
+fn people_event(client: &TeamsClient, team: &str, mut users: Vec<crate::model::User>) -> Event {
+    if let Some(base) = client.credentials().middle_tier_url() {
+        for user in users.iter_mut().filter(|u| u.avatar.is_none()) {
+            user.avatar = Some(crate::images::authed(team, &avatar_url(base, &user.id)));
+        }
+    }
+    Event::Users {
+        team: team.to_owned(),
+        users,
+    }
+}
+
+/// Where the middle tier at `base` serves the picture of the person with
+/// id `id`, at the size the sidebar and messages draw it.
+fn avatar_url(base: &str, id: &str) -> String {
+    format!(
+        "{}/beta/users/{}/profilepicturev2?size=HR64x64",
+        base.trim_end_matches('/'),
+        crate::teams::client::user_mri(id)
+    )
+}
+
 /// A message to post to a Teams conversation.
 pub struct Post {
     pub team: String,
@@ -561,13 +577,11 @@ async fn name_yourself(client: &TeamsClient, mut workspace: Workspace, sink: &Si
                     sink.send(Event::WorkspaceReady(workspace.clone()));
                 }
             }
-            sink.send(Event::Users {
-                team: workspace.team_id,
-                users: vec![translate_user(&crate::teams::types::UserDetails {
-                    id: workspace.user_id,
-                    ..me
-                })],
+            let you = translate_user(&crate::teams::types::UserDetails {
+                id: workspace.user_id.clone(),
+                ..me
             });
+            sink.send(people_event(client, &workspace.team_id, vec![you]));
         }
         Err(error) => log::info!("could not read your own Teams profile: {error:?}"),
     }
@@ -865,7 +879,7 @@ async fn trouter_once(
                         let _ = write.send(WsMessage::Text(answer.into())).await;
                     }
                     if let Some(TrouterEvent::Message(message)) = parse_frame(&text) {
-                        live_message(team, &message, sink);
+                        live_message(team, client, &message, sink);
                     }
                 }
                 Some(Ok(WsMessage::Ping(payload))) => {
@@ -880,13 +894,15 @@ async fn trouter_once(
 }
 
 /// A message Trouter pushed: new, edited, or deleted.
-fn live_message(team: &str, message: &crate::teams::types::Message, sink: &Sink) {
+fn live_message(
+    team: &str,
+    client: &TeamsClient,
+    message: &crate::teams::types::Message,
+    sink: &Sink,
+) {
     let channel = message.conversation_id.clone().unwrap_or_default();
     if let [sender] = senders(std::slice::from_ref(message)).as_slice() {
-        sink.send(Event::Users {
-            team: team.to_owned(),
-            users: vec![sender.clone()],
-        });
+        sink.send(people_event(client, team, vec![sender.clone()]));
     }
     let Some(translated) = translate_message(message) else {
         return;
@@ -986,6 +1002,18 @@ mod tests {
             Some("Ann +1")
         );
         assert_eq!(group_name(&ids(&["x", "y"]), &names), None);
+    }
+
+    #[test]
+    fn avatars_are_asked_by_mri() {
+        assert_eq!(
+            avatar_url("https://teams.live.com/api/mt/", "live:.cid.4a5b"),
+            "https://teams.live.com/api/mt/beta/users/8:live:.cid.4a5b/profilepicturev2?size=HR64x64"
+        );
+        assert!(crate::teams::client::is_media_url(&avatar_url(
+            "https://teams.live.com/api/mt",
+            "a-1"
+        )));
     }
 
     #[test]

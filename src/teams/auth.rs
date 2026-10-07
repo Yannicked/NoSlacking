@@ -35,6 +35,10 @@ pub const RESOURCE_MT_PERSONAL: &str = "https://mtsvc.fl.teams.microsoft.com";
 /// started.
 pub const RESOURCE_GROUPS_PERSONAL: &str = "https://groupssvc.fl.teams.microsoft.com";
 
+/// The IC3 audience, which the work web client's chat and media services
+/// take as a bearer token (pictures on `asyncgw.teams.microsoft.com`).
+pub const RESOURCE_IC3: &str = "https://ic3.teams.office.com";
+
 /// Microsoft Graph's audience, for looking people up by id.
 pub const RESOURCE_GRAPH: &str = "https://graph.microsoft.com";
 

@@ -398,11 +398,23 @@ pub fn file_size(bytes: u64) -> String {
 /// The URI an image of `team` loads by: public URLs as they are, files
 /// through the authenticated loader.
 pub fn image_uri(team: &str, url: &str) -> String {
-    if crate::slack::client::is_slack_file_url(url) {
+    if crate::slack::client::is_slack_file_url(url) || is_teams_media(url) {
         crate::images::authed(team, url)
     } else {
         url.to_owned()
     }
+}
+
+/// Whether `url` is a Teams picture that needs the workspace's sign-in.
+#[cfg(feature = "teams")]
+fn is_teams_media(url: &str) -> bool {
+    crate::teams::client::is_media_url(url)
+}
+
+/// Without Teams in the build no picture is a Teams one.
+#[cfg(not(feature = "teams"))]
+fn is_teams_media(_url: &str) -> bool {
+    false
 }
 
 #[cfg(test)]

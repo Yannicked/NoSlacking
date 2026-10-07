@@ -679,6 +679,8 @@ impl Worker {
             self.credentials.clone(),
             sink.clone(),
         );
+        self.images
+            .set_teams_client(&workspace.team_id, client.clone());
         self.sink.send(Event::WorkspaceReady(workspace.clone()));
         self.start_teams(workspace, client, (sink, gate));
     }

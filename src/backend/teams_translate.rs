@@ -275,6 +275,59 @@ impl Activity {
     }
 }
 
+/// The pictures in a message's HTML (`<img itemtype="…/AMSImage">`, on
+/// Teams' media service), as files the interface shows as images. Their
+/// addresses need the workspace's sign-in, which the image loader adds.
+fn pictures(html: &str) -> Vec<crate::model::File> {
+    let mut found = Vec::new();
+    let mut rest = html;
+    while let Some(start) = rest.find("<img") {
+        let tail = &rest[start..];
+        let Some(end) = tail.find('>') else {
+            break;
+        };
+        let tag = &tail[..end];
+        rest = &tail[end..];
+        if !tag.contains("schema.skype.com/AMSImage") {
+            continue;
+        }
+        let attr = |name: &str| {
+            let key = format!(" {name}=\"");
+            let at = tag.find(&key)? + key.len();
+            let value = &tag[at..];
+            Some(crate::teams::html::unescape_html(
+                &value[..value.find('"')?],
+            ))
+        };
+        let Some(src) = attr("src").filter(|s| s.starts_with("https://")) else {
+            continue;
+        };
+        let size = match (
+            attr("width").and_then(|w| w.parse::<f32>().ok()),
+            attr("height").and_then(|h| h.parse::<f32>().ok()),
+        ) {
+            (Some(w), Some(h)) if w > 0.0 && h > 0.0 => Some([w, h]),
+            _ => None,
+        };
+        let id = attr("itemid").unwrap_or_else(|| src.clone());
+        found.push(crate::model::File {
+            name: "image".into(),
+            title: attr("alt")
+                .filter(|a| !a.is_empty())
+                .unwrap_or_else(|| "image".into()),
+            mimetype: "image/jpeg".into(),
+            filetype: "jpg".into(),
+            thumb: Some(src.clone()),
+            thumb_size: size,
+            original_size: size,
+            url_private: Some(src),
+            id,
+            ..Default::default()
+        });
+    }
+    found
+}
+
 /// A thread activity (`ThreadActivity/{kind}`) as a system line and its
 /// subtype, or `None` for one with nothing worth a line.
 fn thread_activity(kind: &str, content: &str) -> Option<(String, &'static str)> {
@@ -476,6 +529,7 @@ pub fn translate_message(msg: &types::Message) -> Option<Message> {
     }
 
     let edited = msg.properties.as_ref().is_some_and(|p| p.is_edited());
+    let files = pictures(&msg.content);
 
     Some(Message {
         ts,
@@ -490,7 +544,7 @@ pub fn translate_message(msg: &types::Message) -> Option<Message> {
         reply_users: Vec::new(),
         latest_reply: None,
         reactions,
-        files: Vec::new(),
+        files,
         attachments: Vec::new(),
         blocks: kit_blocks,
         edited,
@@ -796,6 +850,21 @@ mod tests {
         .expect("a line");
         assert_eq!(left.text, "<@b> left");
         assert_eq!(left.subtype.as_deref(), Some("channel_leave"));
+    }
+
+    #[test]
+    fn pictures_in_messages_become_files() {
+        let html = r#"<p>look</p><p><img itemscope="png" itemtype="http://schema.skype.com/AMSImage" src="https://eu-api.asm.skype.com/v1/objects/0-weu-d18-097b/views/imgo" width="346.02" height="250" alt="image" id="x_0-weu-d18-097b" itemid="0-weu-d18-097b"></p><p><img itemtype="http://schema.skype.com/Emoji" alt="🙁" src="https://statics.teams.cdn.office.net/x"></p>"#;
+        let files = pictures(html);
+        assert_eq!(files.len(), 1, "the emoji is text, not a file");
+        let file = &files[0];
+        assert_eq!(file.id, "0-weu-d18-097b");
+        assert_eq!(
+            file.thumb.as_deref(),
+            Some("https://eu-api.asm.skype.com/v1/objects/0-weu-d18-097b/views/imgo")
+        );
+        assert_eq!(file.thumb_size, Some([346.02, 250.0]));
+        assert!(file.is_image());
     }
 
     #[test]
