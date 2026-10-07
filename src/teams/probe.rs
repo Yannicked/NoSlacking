@@ -34,6 +34,10 @@ const SCOPE_MBI: &str = "service::api.fl.spaces.skype.com::MBI_SSL openid profil
 const SCOPE_MIDDLE_TIER: &str =
     "https://mtsvc.fl.teams.microsoft.com/teams.mt.readwrite openid profile offline_access";
 
+/// The groups service's scope, which creating a chat needs.
+const SCOPE_GROUPS: &str =
+    "https://groupssvc.fl.teams.microsoft.com/teams.readwrite openid profile offline_access";
+
 /// The Teams web client's own client id for personal accounts.
 const WEB_CLIENT_ID: &str = "4b3e8f46-56d3-427f-b1e2-d239b2ea6bca";
 
@@ -271,6 +275,14 @@ async fn probe(settings: &std::path::Path) -> Reached {
     };
     if let Some((host, group)) = &first_group {
         names(&http, host, group, &skype, middle_token.as_deref()).await;
+    }
+    // Creating a chat (`groups/v1/threads`) needs the groups service's
+    // own token: whether ours may have it.
+    if let Some(refresh) = &token.refresh {
+        match redeem(&http, tenant, refresh, SCOPE_GROUPS).await {
+            Ok(minted) => describe_token("groups service token", &minted),
+            Err(why) => log::warn!("groups: the groups service scope was refused: {why}"),
+        }
     }
 
     // 5. Live updates.

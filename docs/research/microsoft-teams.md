@@ -403,3 +403,17 @@ client's send adds `imdisplayname`, `fromUserId`, `composetime` and
 `properties` (`importance`, `subject`, `mentions`, `files`, `links`,
 `cards`, `formatVariant: "TEAMS"`). Not yet recorded: sending reactions
 and edits.
+
+**Starting a chat and sending a picture** (personal, recorded):
+`POST teams.live.com/api/groups/v1/threads` with
+`{"members":[{"id":"8:live:…","role":"User"},…],"properties":{"threadType":"chat","isStickyThread":"true"}}`
+answers `{"value":{"threadId":"19:uni01_…@thread.v2"}}`, with a groups
+service token (`groupssvc.fl.teams.microsoft.com/teams.readwrite`) and
+`x-skypetoken`; the first message is then an ordinary send. People are
+found by name or address with `POST mt/beta/users/searchUsers`
+(`{"searchKeyWord"}` or `{"emails":[…]}`). A picture is
+`POST {asm}/v1/objects/` with `{"type":"pish/image","permissions":{"{chat}":["read"]},"sharingMode":"Attached","filename"}`
+then `PUT {asm}/v1/objects/{id}/content/imgpsh` with the bytes, both with
+`Authorization: skype_token {skype token}`; other files go to the
+personal OneDrive through Graph. The web client marks read with
+`consumptionhorizon: "{message id};{now, ms};{client message id}"`.
