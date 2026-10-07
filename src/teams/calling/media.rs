@@ -565,6 +565,70 @@ fn public(ip: IpAddr) -> bool {
     }
 }
 
+/// The DTLS datagrams of the last flight we sent, kept to send again.
+///
+/// str0m's OpenSSL backend never retransmits a lost handshake flight
+/// (its timeout only notes the next deadline), and across two NATs the
+/// first ClientHello is often lost as the path opens: the call then
+/// never comes up. So while the handshake runs, a flight nothing has
+/// answered is sent again, as DTLS (RFC 6347 §4.2.4) would: after 1 s,
+/// then 2, then 4, a few times. A repeated handshake record is harmless
+/// to the far end.
+#[derive(Debug, Default)]
+struct Flight {
+    /// Each datagram with whether it went through the relay, and to where.
+    datagrams: Vec<(bool, SocketAddr, Vec<u8>)>,
+    /// Whether the far end has said anything since this flight began: the
+    /// next datagram we send starts a new flight.
+    answered: bool,
+    /// When to send it again.
+    resend_at: Option<Instant>,
+    /// The wait before that.
+    wait: Duration,
+    /// How often it was sent again.
+    tries: u32,
+}
+
+/// How many times a flight is sent again before the connection timeout
+/// is left to end the call.
+const FLIGHT_TRIES: u32 = 6;
+
+impl Flight {
+    /// We sent a DTLS datagram at `now`.
+    fn sent(&mut self, relayed: bool, to: SocketAddr, data: &[u8], now: Instant) {
+        if self.answered || self.datagrams.is_empty() {
+            self.datagrams.clear();
+            self.answered = false;
+            self.tries = 0;
+            self.wait = Duration::from_secs(1);
+            self.resend_at = Some(now + self.wait);
+        }
+        self.datagrams.push((relayed, to, data.to_vec()));
+    }
+
+    /// The far end sent a DTLS datagram: it heard us.
+    fn heard(&mut self) {
+        self.answered = true;
+        self.resend_at = None;
+    }
+
+    /// Whether to send the flight again at `now`; moves the next time on.
+    fn due(&mut self, now: Instant) -> bool {
+        if !self.resend_at.is_some_and(|at| at <= now) || self.datagrams.is_empty() {
+            return false;
+        }
+        self.tries += 1;
+        self.wait = (self.wait * 2).min(Duration::from_secs(4));
+        self.resend_at = (self.tries < FLIGHT_TRIES).then(|| now + self.wait);
+        true
+    }
+}
+
+/// Whether `data` is a DTLS record (RFC 7983's first byte 20 to 63).
+fn is_dtls(data: &[u8]) -> bool {
+    matches!(data.first(), Some(20..=63))
+}
+
 /// What went which way while connecting, by path and kind: which path
 /// ICE settled on, and whether the DTLS handshake crossed it, shows in
 /// the log when a call does not come up.
@@ -913,6 +977,8 @@ struct Session {
     connect_deadline: Option<Instant>,
     /// What went which way, by path and kind (see [`Paths`]).
     paths: Paths,
+    /// Our last DTLS flight, to send again if it goes unanswered.
+    flight: Flight,
     disconnected_at: Option<Instant>,
     next_audio: Option<Instant>,
     next_stats: Instant,
@@ -1023,6 +1089,7 @@ impl Session {
             flowing_told: false,
             connect_deadline: None,
             paths: Paths::default(),
+            flight: Flight::default(),
             disconnected_at: None,
             next_audio: None,
             next_stats: now + STATS_EVERY,
@@ -1253,6 +1320,9 @@ impl Session {
     fn feed_rtc(&mut self, source: SocketAddr, destination: SocketAddr, data: &[u8]) {
         let relayed = self.relay.as_ref().and_then(|l| l.relayed) == Some(destination);
         self.paths.count(false, relayed, data);
+        if is_dtls(data) {
+            self.flight.heard();
+        }
         bump(&self.counters.packets_in, 1);
         bump(&self.counters.bytes_in, data.len());
         expect_remote(&mut self.rtc, self.mid, self.opus_pt, &mut self.seen, data);
@@ -1293,13 +1363,35 @@ impl Session {
                     bump(&self.counters.packets_out, 1);
                     bump(&self.counters.bytes_out, transmit.contents.len());
                     match &mut self.relay {
+                        // A relay never carries traffic to a private address
+                        // (it refuses the permission, 403, every time ICE
+                        // tries): those checks are left unsent.
+                        Some(link)
+                            if Some(transmit.source) == link.relayed
+                                && !public(transmit.destination.ip()) => {}
                         Some(link) if Some(transmit.source) == link.relayed => {
                             self.paths.count(true, true, &transmit.contents);
+                            if !self.connected && is_dtls(&transmit.contents) {
+                                self.flight.sent(
+                                    true,
+                                    transmit.destination,
+                                    &transmit.contents,
+                                    now,
+                                );
+                            }
                             link.client
                                 .send_to(transmit.destination, &transmit.contents, now);
                         }
                         _ => {
                             self.paths.count(true, false, &transmit.contents);
+                            if !self.connected && is_dtls(&transmit.contents) {
+                                self.flight.sent(
+                                    false,
+                                    transmit.destination,
+                                    &transmit.contents,
+                                    now,
+                                );
+                            }
                             direct.push((transmit.destination, transmit.contents.to_vec()));
                         }
                     }
@@ -1532,6 +1624,7 @@ impl Session {
             self.relay.as_ref().and_then(|l| l.client.poll_timeout()),
             self.relay_deadline,
             self.connect_deadline,
+            self.flight.resend_at.filter(|_| !self.connected),
             self.disconnected_at.map(|at| at + RECONNECT_GRACE),
             self.next_audio,
         ]
@@ -1556,6 +1649,9 @@ impl Session {
                 log::warn!("relay: {}: no allocation in time", link.server);
             }
             self.next_relay().await;
+        }
+        if !self.connected && self.flight.due(now) {
+            self.resend_flight(now).await;
         }
         if self.connect_deadline.is_some_and(|at| at <= now) {
             log::warn!("connect: gave up; paths: {}", self.paths.line());
@@ -1585,6 +1681,28 @@ impl Session {
             }
             self.next_stats = now + STATS_EVERY;
         }
+    }
+
+    /// Sends our unanswered DTLS flight again, each datagram the way it
+    /// went first.
+    async fn resend_flight(&mut self, now: Instant) {
+        log::info!(
+            "connect: no DTLS answer; sending our {} handshake packets again (try {})",
+            self.flight.datagrams.len(),
+            self.flight.tries
+        );
+        let datagrams = self.flight.datagrams.clone();
+        for (relayed, to, data) in datagrams {
+            self.paths.count(true, relayed, &data);
+            if relayed {
+                if let Some(link) = &mut self.relay {
+                    link.client.send_to(to, &data, now);
+                }
+            } else if let Err(error) = self.socket.send_to(&data, to).await {
+                log::debug!("connect: could not send to {to}: {error}");
+            }
+        }
+        self.flush_relay().await;
     }
 
     /// Lets go of the peer and the relay, and says how it ended.
@@ -1793,6 +1911,46 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn an_unanswered_flight_is_sent_again_with_backoff() {
+        let start = Instant::now();
+        let to: SocketAddr = "198.51.100.7:5000".parse().expect("an address");
+        let mut flight = Flight::default();
+        flight.sent(false, to, &[22, 1], start);
+        flight.sent(false, to, &[22, 2], start);
+        assert!(!flight.due(start), "not before a second");
+        assert!(flight.due(start + Duration::from_secs(1)));
+        assert_eq!(flight.datagrams.len(), 2, "the whole flight");
+        assert!(
+            !flight.due(start + Duration::from_millis(2500)),
+            "then two seconds"
+        );
+        assert!(flight.due(start + Duration::from_secs(3)));
+        // An answer stops it; the next datagram starts a new flight.
+        flight.heard();
+        assert!(!flight.due(start + Duration::from_secs(60)));
+        flight.sent(false, to, &[22, 3], start + Duration::from_secs(60));
+        assert_eq!(flight.datagrams.len(), 1);
+        assert!(flight.due(start + Duration::from_secs(61)));
+    }
+
+    #[test]
+    fn a_flight_is_sent_again_a_few_times_only() {
+        let start = Instant::now();
+        let to: SocketAddr = "198.51.100.7:5000".parse().expect("an address");
+        let mut flight = Flight::default();
+        flight.sent(false, to, &[22], start);
+        let mut sent = 0;
+        let mut at = start;
+        for _ in 0..100 {
+            at += Duration::from_secs(5);
+            if flight.due(at) {
+                sent += 1;
+            }
+        }
+        assert_eq!(sent, FLIGHT_TRIES);
     }
 
     #[test]
