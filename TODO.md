@@ -901,6 +901,18 @@ engineering, as for the rest of the session sign-in.
         now), a level meter, reconnects, a microphone that fails while
         open (it logs and goes quiet; mute and unmute again).
 
+## Research notes
+
+- **Huddle video:** [docs/research/huddle-video.md](docs/research/huddle-video.md)
+  (2026-10-07). Watching is realistic on the audio path; sending is much
+  more. Next: Stage 0, a probe that logs Chime's video sources and which
+  codec arrives (shares as `#content`?, does an H.264-only offer move
+  senders to H.264?) before any decoding.
+- **Microsoft Teams:** [docs/research/microsoft-teams.md](docs/research/microsoft-teams.md)
+  (2026-10-06). Not being built: the official Graph route can't do live
+  updates or calls, and the route other clients take signs in as
+  Microsoft's own Teams app to get past an organisation's app controls.
+
 ## Media and file previews in the app (researched 2026-10-06)
 
 Slack already makes most previews; NoSlacking parses few of them.
