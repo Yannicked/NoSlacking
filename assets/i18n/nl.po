@@ -2739,3 +2739,31 @@ msgstr "Scherm van {name} tonen"
 
 msgid "Waiting for the picture…"
 msgstr "Wachten op het beeld…"
+
+msgid "{count} camera on"
+msgid_plural "{count} cameras on"
+msgstr[0] "{count} camera aan"
+msgstr[1] "{count} camera's aan"
+
+msgid "Video"
+msgstr "Video"
+
+msgid "Close video"
+msgstr "Video sluiten"
+
+msgid "Huddle video"
+msgstr "Video in de huddle"
+
+msgid "No one has their camera on"
+msgstr "Niemand heeft een camera aan"
+
+msgid "{name}, camera paused"
+msgstr "{name}, camera gepauzeerd"
+
+msgid "{name} · camera paused"
+msgstr "{name} · camera gepauzeerd"
+
+msgid "{count} more camera"
+msgid_plural "{count} more cameras"
+msgstr[0] "nog {count} camera"
+msgstr[1] "nog {count} camera's"
