@@ -188,7 +188,23 @@ struct Activity {
 
 impl Activity {
     fn parse(content: &str) -> Self {
-        Self::json(content).unwrap_or_else(|| Self::xml(content))
+        Self::json(content)
+            .unwrap_or_else(|| Self::xml(content))
+            .tidied()
+    }
+
+    /// Each person once, and the one who did it left out of whom it was
+    /// done to, unless they are all of it: a new chat's record names its
+    /// creator among the members it added.
+    fn tidied(mut self) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        self.targets.retain(|id| seen.insert(id.clone()));
+        if let Some(initiator) = &self.initiator
+            && self.targets.iter().any(|t| t != initiator)
+        {
+            self.targets.retain(|t| t != initiator);
+        }
+        self
     }
 
     fn json(content: &str) -> Option<Self> {
@@ -233,9 +249,10 @@ impl Activity {
                 .first()
                 .and_then(|id| clean_teams_user_id(id)),
             value: tag_texts(content, "value").into_iter().next(),
+            // Only `<target>`: `<detailedtargetinfo>` names each again in
+            // an `<id>`.
             targets: tag_texts(content, "target")
                 .iter()
-                .chain(tag_texts(content, "id").iter())
                 .filter_map(|id| clean_teams_user_id(id))
                 .collect(),
             names: tag_texts(content, "friendlyname"),
@@ -865,6 +882,17 @@ mod tests {
         );
         assert_eq!(file.thumb_size, Some([346.02, 250.0]));
         assert!(file.is_image());
+    }
+
+    #[test]
+    fn a_new_chat_says_who_was_added_once() {
+        // As Teams records starting a one-to-one chat.
+        let added = activity(
+            "ThreadActivity/AddMember",
+            "<addmember><eventtime>1</eventtime><initiator>8:live:.cid.me</initiator><target>8:live:.cid.me</target><target>8:live:other</target><detailedtargetinfo><id>8:live:.cid.me</id><id>8:live:other</id></detailedtargetinfo><rosterVersion>1</rosterVersion></addmember>",
+        )
+        .expect("a line");
+        assert_eq!(added.text, "<@live:.cid.me> added <@live:other>");
     }
 
     #[test]

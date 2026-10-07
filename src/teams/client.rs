@@ -140,6 +140,10 @@ fn cookies_of(headers: &reqwest::header::HeaderMap) -> String {
         .join("; ")
 }
 
+/// The site the personal web client runs at, which some of its services
+/// want named as the request's origin.
+const PERSONAL_ORIGIN: &str = "https://teams.live.com";
+
 /// Where a personal account's presence is read and said.
 const PERSONAL_PRESENCE_URL: &str = "https://teams.live.com/ups/global";
 
@@ -289,6 +293,9 @@ pub struct TeamsClient {
     /// messages where the token header is not taken), by the host that
     /// set them.
     media_cookies: Arc<RwLock<std::collections::HashMap<String, String>>>,
+    /// Held while a cookie is asked for, so the pictures of a whole
+    /// screen ask once rather than each.
+    cookie_asked: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl std::fmt::Debug for TeamsClient {
@@ -308,6 +315,7 @@ impl TeamsClient {
             reporting: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             own_name: Arc::new(RwLock::new(None)),
             media_cookies: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            cookie_asked: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -1041,13 +1049,18 @@ impl TeamsClient {
     /// until refused (`fresh`): the media service's from its
     /// `skypetokenauth`, the middle tier's from `imageauth/cookie`.
     async fn media_cookie(&self, host: &str, fresh: bool) -> Result<String, Failure> {
-        if !fresh
-            && let Some(cookie) = self
-                .media_cookies
+        let held = || {
+            self.media_cookies
                 .read()
                 .ok()
                 .and_then(|held| held.get(host).cloned())
-        {
+        };
+        if !fresh && let Some(cookie) = held() {
+            return Ok(cookie);
+        }
+        let _asking = self.cookie_asked.lock().await;
+        // Another picture may have asked while this one waited.
+        if !fresh && let Some(cookie) = held() {
             return Ok(cookie);
         }
         let creds = self.ensure_fresh_tokens().await?;
@@ -1067,11 +1080,15 @@ impl TeamsClient {
                 .trim_end_matches('/')
                 .to_owned();
             let url = format!("{base}/beta/imageauth/cookie");
+            // The middle tier sets its cookie only for a request that
+            // says which site it comes from, as a browser's always does.
             self.bearer(RESOURCE_MT_PERSONAL, |http, token| {
                 crate::teams::auth::consumer_headers(
                     http.post(&url)
                         .bearer_auth(token)
                         .header("x-skypetoken", &skype)
+                        .header(reqwest::header::ORIGIN, PERSONAL_ORIGIN)
+                        .header(reqwest::header::REFERER, format!("{PERSONAL_ORIGIN}/"))
                         .header(reqwest::header::CONTENT_LENGTH, "0"),
                 )
             })
