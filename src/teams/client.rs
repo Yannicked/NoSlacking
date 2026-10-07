@@ -337,6 +337,10 @@ pub struct TeamsClient {
     /// Where this account's call pushes go (see
     /// [`crate::teams::calling::router`]).
     calls: crate::teams::calling::router::Router,
+    /// Where people's photos are (their profiles' `imageUri`), by the id
+    /// the interface knows them by: every picture link asked for them
+    /// carries it, whichever list they arrive in.
+    photos: Arc<RwLock<std::collections::HashMap<String, String>>>,
     /// Held while a cookie is asked for, so the pictures of a whole
     /// screen ask once rather than each.
     cookie_asked: Arc<tokio::sync::Mutex<()>>,
@@ -362,6 +366,7 @@ impl TeamsClient {
             endpoint: Arc::new(RwLock::new(None)),
             media_cookies: Arc::new(RwLock::new(std::collections::HashMap::new())),
             calls: crate::teams::calling::router::Router::default(),
+            photos: Arc::default(),
             cookie_asked: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -405,6 +410,23 @@ impl TeamsClient {
     /// said we are here: calls name it as theirs.
     pub fn endpoint_id(&self) -> Option<String> {
         self.endpoint.read().ok().and_then(|e| e.clone())
+    }
+
+    /// Remembers where the photos of `profiles` are.
+    pub fn remember_photos(&self, profiles: &[UserDetails]) {
+        let Ok(mut photos) = self.photos.write() else {
+            return;
+        };
+        for profile in profiles {
+            if let Some(photo) = profile.image_uri.as_ref().filter(|u| !u.is_empty()) {
+                photos.insert(profile.id.clone(), photo.clone());
+            }
+        }
+    }
+
+    /// Where the photo of the person with id `id` is, if a profile said.
+    pub fn photo(&self, id: &str) -> Option<String> {
+        self.photos.read().ok()?.get(id).cloned()
     }
 
     /// Where this account's call pushes go, and the live connection's
@@ -1851,6 +1873,30 @@ mod tests {
         );
         assert_eq!(located.as_deref(), Some("19:abc@thread.v2"));
         assert_eq!(created_thread("{}", None), None);
+    }
+
+    #[test]
+    fn a_photo_address_is_remembered_for_later_lists() {
+        let client = TeamsClient::new(TeamsCredentials::default());
+        client.remember_photos(&[
+            UserDetails {
+                id: "live:ana".into(),
+                image_uri: Some(
+                    "https://substrate.office.com/profile/v1.0/users/cid:A/image".into(),
+                ),
+                ..UserDetails::default()
+            },
+            UserDetails {
+                id: "live:bob".into(),
+                ..UserDetails::default()
+            },
+        ]);
+        assert!(
+            client
+                .photo("live:ana")
+                .is_some_and(|p| p.ends_with("/image"))
+        );
+        assert_eq!(client.photo("live:bob"), None);
     }
 
     #[test]

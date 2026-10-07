@@ -585,13 +585,11 @@ fn people_event(
     // Someone whose profile had no name would be named by their id, over
     // a name their messages gave: leave them as they were.
     users.retain(|user| user.display_name != user.id);
+    client.remember_photos(profiles);
     if let Some(base) = client.credentials().middle_tier_url() {
         for user in users.iter_mut().filter(|u| u.avatar.is_none()) {
-            let photo = profiles
-                .iter()
-                .find(|p| p.id == user.id)
-                .and_then(|p| p.image_uri.as_deref());
-            let url = avatar_url(base, &user.id, Some(&user.real_name), photo);
+            let photo = client.photo(&user.id);
+            let url = avatar_url(base, &user.id, Some(&user.real_name), photo.as_deref());
             user.avatar = Some(crate::images::authed(team, &url));
         }
     }
@@ -704,6 +702,7 @@ async fn name_yourself(client: &TeamsClient, mut workspace: Workspace, sink: &Si
             // Messages name you by your MRI (`live:yourname`), the
             // sign-in by your `live:.cid.…`: you are both, and your
             // picture is asked by the MRI, as the web client asks it.
+            client.remember_photos(std::slice::from_ref(&me));
             let mut you = translate_user(&me);
             if let Some(base) = client.credentials().middle_tier_url() {
                 let url = avatar_url(
