@@ -11,6 +11,10 @@
 //! With `huddle-video`, a row for each screen shared in the huddle ("Ana
 //! is sharing their screen") with Watch, which opens the call window on
 //! it (see [`super::call_window`]).
+//!
+//! With `huddle-camera`, the camera's button beside the microphone's and,
+//! while it is on, your self-preview above the buttons (see
+//! [`super::huddle_camera`]).
 
 use egui::{Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke, Vec2};
 
@@ -204,6 +208,10 @@ fn bar(
                     share_row(ui, palette, share, actions);
                 }
             }
+            #[cfg(feature = "huddle-camera")]
+            if !failed {
+                super::huddle_camera::preview(ui, palette, listening.camera);
+            }
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -235,6 +243,13 @@ fn bar(
                                 super::huddle_mic::mute_button(ui, palette, listening.mic)
                         {
                             actions.push(Action::Huddle(huddles::Action::Microphone(action)));
+                        }
+                        #[cfg(feature = "huddle-camera")]
+                        if matches!(listening.phase, Phase::Live { .. })
+                            && let Some(action) =
+                                super::huddle_camera::camera_button(ui, palette, listening.camera)
+                        {
+                            actions.push(Action::Huddle(huddles::Action::Camera(action)));
                         }
                     }
                 });

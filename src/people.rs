@@ -248,6 +248,10 @@ pub enum Command {
     /// it, or none, receiving no share at all.
     #[cfg(feature = "huddle-video")]
     WatchShare { share: Option<String> },
+    /// Turns the camera on (opening it) or off (closing it) in the huddle
+    /// being listened to.
+    #[cfg(feature = "huddle-camera")]
+    CameraHuddle { on: bool },
 }
 
 /// How often, at most, Slack hears that you are active: Slack's desktop
@@ -350,6 +354,12 @@ pub enum Event {
     Microphone {
         channel: String,
         news: crate::huddle_mic::MicNews,
+    },
+    /// What the camera did in the huddle in `channel`.
+    #[cfg(feature = "huddle-camera")]
+    Camera {
+        channel: String,
+        news: crate::huddle_camera::CamNews,
     },
 }
 
@@ -791,6 +801,8 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
         | Event::Reconnected
         | Event::Listening { .. }
         | Event::Microphone { .. } => {}
+        #[cfg(feature = "huddle-camera")]
+        Event::Camera { .. } => {}
     }
     if let Some((text, error)) = toast {
         app.toast(text, error);

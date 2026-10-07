@@ -67,6 +67,7 @@ fn main() -> eframe::Result<()> {
                 region: cli.huddle_region.clone(),
                 settings: dirs.settings_file(),
                 send_tone: cli.send_tone,
+                send_test_video: cli.send_test_video,
                 video: noslacking::huddle_audio::video::Options {
                     streams: cli.video,
                     h264_only: cli.video_h264_only,
@@ -685,6 +686,14 @@ impl DemoSetup {
                     mic: noslacking::huddle_mic::Mic::Live,
                     ..noslacking::demo::listening()
                 });
+                app.actions.push(Action::OpenConversation("C03".into()));
+            }
+            // Your camera on (the test picture): the call bar's
+            // self-preview.
+            #[cfg(feature = "huddle-camera")]
+            Some("camera") => {
+                noslacking::demo::camera(true);
+                app.huddles.listening = Some(noslacking::demo::camera_on());
                 app.actions.push(Action::OpenConversation("C03".into()));
             }
             // Ana and Carla share their screens: the call bar's rows.

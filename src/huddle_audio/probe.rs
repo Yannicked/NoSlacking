@@ -22,6 +22,13 @@
 //! on each; `--video-h264-only` offers no VP8; `--video-dump DIR` keeps
 //! each stream's first 300 frames. The summary ends with each stream and
 //! whether audio kept flowing through every re-SUBSCRIBE.
+//!
+//! With `--send-test-video` (a build with the `huddle-camera` feature) it
+//! also sends a moving test picture with a clock as its camera, from the
+//! start, never a real camera: once the audio is live it re-SUBSCRIBEs
+//! both ways and sends H.264 on its first video m-line, so whether Slack
+//! shows our video can be seen without anyone's camera. The log says
+//! what was sent, the keyframes asked for and the bandwidth estimate.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -46,6 +53,8 @@ pub struct Options {
     pub settings: PathBuf,
     /// Join unmuted and send a quiet tone (never the microphone).
     pub send_tone: bool,
+    /// Send a moving test picture as our camera (never a real one).
+    pub send_test_video: bool,
     /// What to look at of video (`--video`, `--video-h264-only`,
     /// `--video-dump`); Chime's video signaling is logged either way.
     pub video: super::video::Options,
@@ -132,6 +141,13 @@ pub fn run(options: &Options) -> i32 {
                 dir.display()
             ))
     );
+    if options.send_test_video && !cfg!(feature = "huddle-camera") {
+        log::error!(
+            "probe: FAILED: --send-test-video needs a build with the huddle-camera feature \
+             (cargo run --release --features huddle-camera -- --huddle-probe ...)"
+        );
+        return 1;
+    }
     if let Some(dir) = &options.video.dump
         && let Err(error) = std::fs::create_dir_all(dir)
     {
@@ -279,6 +295,18 @@ async fn probe(
     } else {
         (None, None)
     };
+    #[cfg(feature = "huddle-camera")]
+    let (camera, test_video) = if options.send_test_video {
+        match test_video() {
+            Ok((uplink, running)) => (Some(uplink), Some(running)),
+            Err(why) => {
+                log::warn!("probe: no test video ({why}); sending none");
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
     let (report, result) = media::listen(
         &joined,
         feed,
@@ -289,10 +317,14 @@ async fn probe(
         media::Video {
             options: Some(options.video.clone()),
             viewer: None,
+            #[cfg(feature = "huddle-camera")]
+            camera,
         },
     )
     .await;
     drop(tone);
+    #[cfg(feature = "huddle-camera")]
+    drop(test_video);
     timer.abort();
 
     log::info!(
@@ -336,6 +368,53 @@ async fn probe(
         result.map_err(|failure| (Step::Chime(failure.stage), failure.why)),
         frames,
     )
+}
+
+/// The test video's threads and the ends of its channels the session
+/// does not hold; dropped, the threads stop.
+#[cfg(feature = "huddle-camera")]
+struct TestVideo {
+    _pattern: super::camera::Capturing,
+    _encoding: super::camera_send::Encoding,
+    _on: tokio::sync::watch::Sender<bool>,
+    _refusals: tokio::sync::mpsc::Receiver<()>,
+}
+
+/// The test picture as an always-on camera, encoded on its own thread:
+/// the session's side of it, and the threads.
+#[cfg(feature = "huddle-camera")]
+fn test_video() -> Result<(super::camera_send::CameraUplink, TestVideo), String> {
+    use super::camera::Latest;
+    use super::camera_send::{self, CameraUplink, Encoding, SendControl};
+    let latest = Latest::default();
+    let (frames, frames_in) = tokio::sync::mpsc::channel(camera_send::QUEUE);
+    let control = SendControl::default();
+    let encoding = Encoding::spawn(latest.clone(), frames, control.clone(), None)?;
+    let pattern = camera_send::test_pattern(latest)?;
+    // On from the start; the sender lives as long as the session, or the
+    // session would take its end for "off".
+    let (on, on_rx) = tokio::sync::watch::channel(true);
+    let (refused, refusals) = tokio::sync::mpsc::channel(1);
+    log::info!(
+        "probe: sending a test picture as our camera, {}x{} at {} fps",
+        super::camera::MAX_WIDTH,
+        super::camera::MAX_HEIGHT,
+        super::camera::FPS
+    );
+    Ok((
+        CameraUplink {
+            frames: frames_in,
+            on: on_rx,
+            control,
+            refused,
+        },
+        TestVideo {
+            _pattern: pattern,
+            _encoding: encoding,
+            _on: on,
+            _refusals: refusals,
+        },
+    ))
 }
 
 /// The summary's video lines: what INDEX showed, each stream received,

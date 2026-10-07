@@ -30,6 +30,9 @@ pub struct Cli {
     pub huddle_region: Option<String>,
     /// `--send-tone`: the probe joins unmuted and sends a quiet tone.
     pub send_tone: bool,
+    /// `--send-test-video`: the probe sends a moving test picture as its
+    /// camera (with the `huddle-camera` feature).
+    pub send_test_video: bool,
     /// `--video N`: how many video streams a huddle receives (app or probe).
     pub video: usize,
     /// `--video-h264-only`: huddles offer no VP8.
@@ -165,6 +168,11 @@ pub const FLAGS: &[Flag] = &[
         help: "Have the huddle probe join unmuted and send a quiet 440 Hz tone the whole time (never the microphone), to hear in Slack that our audio gets through",
     },
     Flag {
+        name: "send-test-video",
+        takes: Takes::Nothing(|cli| cli.send_test_video = true),
+        help: "Have the huddle probe send a moving test picture with a clock as its camera the whole time (never a real camera), to see in Slack that our video gets through. Needs a build with the huddle-camera feature",
+    },
+    Flag {
         name: "video",
         takes: Takes::One("N", |cli, v| number(v).map(|v| cli.video = v)),
         help: "When joining a huddle (in the app or the probe), receive up to N video streams once the audio is live (screen shares first), logging the codec, frames, keyframes and gaps of each; nothing is decoded or shown [default: 0, only Chime's video signaling is logged]",
@@ -207,7 +215,7 @@ pub const FLAGS: &[Flag] = &[
     Flag {
         name: "demo-view",
         takes: Takes::One("VIEW", |cli, v| text(v).map(|v| cli.demo_view = Some(v))),
-        help: "Open a view before the screenshot: thread, settings, sign-in, switcher, palette, picker, profile, share, upload, drafts, lightbox, media, previews, viewer-sheet, viewer-csv, viewer-zip, viewer-text, compact, held-media, shortcuts, delete-file, add-emoji, listening, talking or (with huddle-video) sharing or call-window",
+        help: "Open a view before the screenshot: thread, settings, sign-in, switcher, palette, picker, profile, share, upload, drafts, lightbox, media, previews, viewer-sheet, viewer-csv, viewer-zip, viewer-text, compact, held-media, shortcuts, delete-file, add-emoji, listening, talking, (with huddle-video) sharing or call-window, or (with huddle-camera) camera",
     },
     #[cfg(feature = "demo")]
     Flag {
@@ -581,7 +589,13 @@ mod tests {
     #[test]
     fn the_huddle_flags_always_exist_and_the_demo_flags_with_their_feature() {
         let names: Vec<&str> = FLAGS.iter().map(|f| f.name).collect();
-        for huddle in ["huddle-probe", "seconds", "huddle-region", "send-tone"] {
+        for huddle in [
+            "huddle-probe",
+            "seconds",
+            "huddle-region",
+            "send-tone",
+            "send-test-video",
+        ] {
             assert!(names.contains(&huddle), "{huddle}");
         }
         assert_eq!(names.contains(&"demo"), cfg!(feature = "demo"));
@@ -660,6 +674,13 @@ mod tests {
         fn send_tone_is_off_unless_asked() {
             assert!(!run(&["--huddle-probe", "T1", "C1"]).send_tone);
             assert!(run(&["--huddle-probe", "T1", "C1", "--send-tone"]).send_tone);
+        }
+
+        #[test]
+        fn test_video_is_off_unless_asked() {
+            assert!(!run(&["--huddle-probe", "T1", "C1"]).send_test_video);
+            assert!(run(&["--huddle-probe", "T1", "C1", "--send-test-video"]).send_test_video);
+            assert!(help().contains("--send-test-video"));
         }
 
         #[test]

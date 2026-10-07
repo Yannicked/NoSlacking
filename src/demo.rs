@@ -1220,6 +1220,83 @@ pub fn watch_share(on: bool) {
     }
 }
 
+/// The demo's camera: the test picture, never a real one, feeding the
+/// self-preview while it is on.
+#[cfg(feature = "huddle-camera")]
+struct DemoCamera {
+    preview: crate::huddle_camera::Preview,
+    latest: crate::huddle_audio::camera::Latest,
+    running: std::sync::Mutex<
+        Option<(
+            crate::huddle_audio::camera::Capturing,
+            crate::huddle_audio::microphone::Running,
+        )>,
+    >,
+}
+
+#[cfg(feature = "huddle-camera")]
+static CAMERA: std::sync::OnceLock<DemoCamera> = std::sync::OnceLock::new();
+
+/// Sets up the demo's camera, its preview waking the window through
+/// `sink`'s waker. Only the first call counts.
+#[cfg(feature = "huddle-camera")]
+fn start_camera(sink: &Sink) {
+    let waker = sink.waker();
+    let _ = CAMERA.set(DemoCamera {
+        preview: crate::huddle_camera::Preview::new(move || waker.wake()),
+        latest: crate::huddle_audio::camera::Latest::default(),
+        running: std::sync::Mutex::new(None),
+    });
+}
+
+/// The demo camera's self-preview, once the demo has started.
+#[cfg(feature = "huddle-camera")]
+pub fn camera_preview() -> Option<crate::huddle_camera::Preview> {
+    CAMERA.get().map(|c| c.preview.clone())
+}
+
+/// Turns the demo's camera (the test picture) on or off.
+#[cfg(feature = "huddle-camera")]
+pub fn camera(on: bool) {
+    use crate::huddle_audio::camera::{Camera as _, TestPattern};
+    let Some(camera) = CAMERA.get() else {
+        return;
+    };
+    let mut running = camera
+        .running
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !on {
+        *running = None;
+        return;
+    }
+    if running.is_some() {
+        return;
+    }
+    let pattern = TestPattern::new(camera.latest.clone()).open();
+    let feed = crate::huddle_audio::camera_send::preview_feed(
+        camera.latest.clone(),
+        camera.preview.clone(),
+    );
+    match (pattern, feed) {
+        (Ok(pattern), Ok(feed)) => *running = Some((pattern, feed)),
+        (Err(error), _) => log::warn!("demo: no camera: {error}"),
+        (_, Err(error)) => log::warn!("demo: no camera: {error}"),
+    }
+}
+
+/// Listening to #design's huddle, talking, with your camera on: the call
+/// bar's self-preview (`--demo-view camera`).
+#[cfg(feature = "huddle-camera")]
+pub fn camera_on() -> crate::huddles::Listening {
+    crate::huddles::Listening {
+        mic: crate::huddle_mic::Mic::Live,
+        camera: crate::huddle_camera::Cam::On,
+        preview: camera_preview(),
+        ..listening()
+    }
+}
+
 /// Who shares in #design's huddle: Ana, and Carla too, so the call
 /// window has two tabs.
 #[cfg(feature = "huddle-video")]
@@ -1403,6 +1480,8 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
     sink.send(crate::backend::people::demo_huddle(TEAM));
     #[cfg(feature = "huddle-video")]
     start_share(&sink);
+    #[cfg(feature = "huddle-camera")]
+    start_camera(&sink);
     // Ana keeps typing in her direct message, as Slack repeats it.
     let typing = sink.clone();
     tokio::spawn(async move {

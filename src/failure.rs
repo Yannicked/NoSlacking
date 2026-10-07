@@ -304,6 +304,24 @@ impl Failure {
                     "no microphone could be opened; check that Windows' privacy settings let apps use it",
                 ),
                 HuddleTrouble::Microphone => t("no microphone could be opened"),
+                HuddleTrouble::NoCamera => t("no camera was found"),
+                // Each system keeps apps from the camera its own way;
+                // say where to let NoSlacking use it.
+                HuddleTrouble::CameraDenied if cfg!(target_os = "macos") => t(
+                    "the camera is not allowed; allow NoSlacking in System Settings, Privacy & Security, Camera",
+                ),
+                HuddleTrouble::CameraDenied if cfg!(windows) => t(
+                    "the camera is not allowed; check that Windows' privacy settings let apps use it",
+                ),
+                HuddleTrouble::CameraDenied => {
+                    t("the camera is not allowed; check that you may use the video device")
+                }
+                HuddleTrouble::Camera => {
+                    t("the camera could not be opened; another app may be using it")
+                }
+                HuddleTrouble::ViewOnly => {
+                    t("This huddle takes no more video, so your camera stays off")
+                }
             },
             Self::Slack(code) => return code.replace('_', " "),
             Self::Other(text) => return text.clone(),
@@ -333,6 +351,14 @@ pub enum HuddleTrouble {
     SoundStopped,
     /// No microphone would open on unmuting.
     Microphone,
+    /// There is no camera to turn on.
+    NoCamera,
+    /// The system did not let the app use the camera.
+    CameraDenied,
+    /// The camera would not open (in use, or no usable format).
+    Camera,
+    /// The huddle takes no video from us (Chime's "view only").
+    ViewOnly,
 }
 
 /// Why the system keyring did not do what was asked. The worker hands this
@@ -581,6 +607,10 @@ mod tests {
             Failure::Huddle(HuddleTrouble::Lost),
             Failure::Huddle(HuddleTrouble::SoundStopped),
             Failure::Huddle(HuddleTrouble::Microphone),
+            Failure::Huddle(HuddleTrouble::NoCamera),
+            Failure::Huddle(HuddleTrouble::CameraDenied),
+            Failure::Huddle(HuddleTrouble::Camera),
+            Failure::Huddle(HuddleTrouble::ViewOnly),
             Failure::Slack("some_new_code".into()),
             Failure::Other("disk full".into()),
         ]
