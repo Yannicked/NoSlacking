@@ -254,6 +254,12 @@ pub enum Command {
     /// being listened to.
     #[cfg(feature = "huddle-camera")]
     CameraHuddle { on: bool },
+    /// Starts, picks or stops sharing your screen in the huddle being
+    /// listened to.
+    #[cfg(feature = "huddle-share")]
+    ShareHuddle {
+        request: crate::huddle_share::ShareRequest,
+    },
 }
 
 /// How often, at most, Slack hears that you are active: Slack's desktop
@@ -362,6 +368,12 @@ pub enum Event {
     Camera {
         channel: String,
         news: crate::huddle_camera::CamNews,
+    },
+    /// What your screen share did in the huddle in `channel`.
+    #[cfg(feature = "huddle-share")]
+    Share {
+        channel: String,
+        news: crate::huddle_share::ShareNews,
     },
 }
 
@@ -805,6 +817,8 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
         | Event::Microphone { .. } => {}
         #[cfg(feature = "huddle-camera")]
         Event::Camera { .. } => {}
+        #[cfg(feature = "huddle-share")]
+        Event::Share { .. } => {}
     }
     if let Some((text, error)) = toast {
         app.toast(text, error);

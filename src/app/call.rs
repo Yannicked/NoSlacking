@@ -258,5 +258,7 @@ fn controls(
         mic: listening.mic,
         #[cfg(feature = "huddle-camera")]
         camera: listening.camera,
+        #[cfg(feature = "huddle-share")]
+        sharing: listening.sharing,
     }
 }

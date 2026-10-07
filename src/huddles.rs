@@ -309,6 +309,10 @@ pub enum Action {
     /// Turns the camera on or off in the huddle being listened to.
     #[cfg(feature = "huddle-camera")]
     Camera(crate::huddle_camera::CamAction),
+    /// Starts, picks or stops sharing your screen in the huddle being
+    /// listened to.
+    #[cfg(feature = "huddle-share")]
+    Share(crate::huddle_share::ShareAction),
 }
 
 /// Applies a view's request.
@@ -361,6 +365,8 @@ pub fn apply(app: &mut App, action: Action) {
         Action::OpenCall => listen::open_call(app),
         #[cfg(feature = "huddle-camera")]
         Action::Camera(action) => crate::huddle_camera::apply(app, action),
+        #[cfg(feature = "huddle-share")]
+        Action::Share(action) => crate::huddle_share::apply(app, action),
     }
 }
 
@@ -509,6 +515,11 @@ pub fn handle(app: &mut App, team: &str, event: people::Event) -> Option<people:
         #[cfg(feature = "huddle-camera")]
         people::Event::Camera { channel, news } => {
             crate::huddle_camera::news(app, team, &channel, news);
+            None
+        }
+        #[cfg(feature = "huddle-share")]
+        people::Event::Share { channel, news } => {
+            crate::huddle_share::news(app, team, &channel, news);
             None
         }
         people::Event::InviteDeclined { result } => {

@@ -16,6 +16,11 @@
 //! With `huddle-camera`, the camera's button beside the microphone's and,
 //! while it is on, your self-preview above the buttons (see
 //! [`super::huddle_camera`]).
+//!
+//! With `huddle-share`, Share beside the camera's button, a row saying
+//! "You are sharing your screen" with Stop sharing while you do, and the
+//! screens and windows to pick from where the system has no dialog of
+//! its own (see [`super::huddle_share`]).
 
 use egui::{Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke, Vec2};
 
@@ -29,6 +34,9 @@ use crate::theme::{self, Icon, Palette};
 /// A face's side, and the room between faces.
 const FACE: f32 = 26.0;
 const FACE_GAP: f32 = 5.0;
+/// The room left beside Leave, in points, under which Mute, Video and
+/// Share drop their words.
+const COMPACT_BELOW: f32 = 290.0;
 /// Leave's red: deep enough for white text on both themes (the dark
 /// palette's own red is too light for it).
 pub const LEAVE: Color32 = Color32::from_rgb(0xcc, 0x2e, 0x45);
@@ -227,6 +235,18 @@ fn bar(
             if !failed {
                 super::huddle_camera::preview(ui, palette, listening.camera);
             }
+            // Your share: what is going on, or what to choose from.
+            #[cfg(feature = "huddle-share")]
+            if !failed {
+                let asked = if listening.sharing == crate::huddle_share::Sharing::Choosing {
+                    super::huddle_share::picker(ui, palette, &listening.share_sources)
+                } else {
+                    super::huddle_share::sharing_row(ui, palette, listening.sharing)
+                };
+                if let Some(action) = asked {
+                    actions.push(Action::Huddle(huddles::Action::Share(action)));
+                }
+            }
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -242,10 +262,30 @@ fn bar(
                             }));
                         }
                     } else {
-                        // Right to left, so they read Mute, Video, Leave, as
-                        // in the call window.
+                        // Right to left, so they read Mute, Video, Share,
+                        // Leave, as in the call window.
                         if leave_button(ui, palette, Look::BAR) {
                             actions.push(Action::Huddle(huddles::Action::Leave));
+                        }
+                        // Four worded controls do not fit a narrow sidebar:
+                        // the microphone, the camera and Share then show
+                        // their icons alone (their words in the tooltip and
+                        // for a screen reader); Leave keeps its word.
+                        let compact = Look {
+                            labelled: !cfg!(feature = "huddle-share")
+                                || ui.available_width() >= COMPACT_BELOW,
+                            ..Look::BAR
+                        };
+                        #[cfg(feature = "huddle-share")]
+                        if matches!(listening.phase, Phase::Live { .. })
+                            && let Some(action) = super::huddle_share::share_button(
+                                ui,
+                                palette,
+                                listening.sharing,
+                                compact,
+                            )
+                        {
+                            actions.push(Action::Huddle(huddles::Action::Share(action)));
                         }
                         #[cfg(feature = "huddle-camera")]
                         if matches!(listening.phase, Phase::Live { .. })
@@ -253,18 +293,14 @@ fn bar(
                                 ui,
                                 palette,
                                 listening.camera,
-                                Look::BAR,
+                                compact,
                             )
                         {
                             actions.push(Action::Huddle(huddles::Action::Camera(action)));
                         }
                         if matches!(listening.phase, Phase::Live { .. })
-                            && let Some(action) = super::huddle_mic::mute_button(
-                                ui,
-                                palette,
-                                listening.mic,
-                                Look::BAR,
-                            )
+                            && let Some(action) =
+                                super::huddle_mic::mute_button(ui, palette, listening.mic, compact)
                         {
                             actions.push(Action::Huddle(huddles::Action::Microphone(action)));
                         }

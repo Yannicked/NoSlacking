@@ -757,6 +757,41 @@ impl DemoSetup {
                 app.actions
                     .push(Action::Huddle(noslacking::huddles::Action::OpenCall));
             }
+            // Sharing your screen: the call bar's "You are sharing your
+            // screen" with Stop sharing, and Share on.
+            #[cfg(feature = "huddle-share")]
+            Some("sharing-self") => {
+                app.huddles.listening = Some(noslacking::demo::sharing_self());
+                app.actions.push(Action::OpenConversation("C03".into()));
+            }
+            // Where the system has no dialog of its own: the call bar's
+            // screens and windows to choose from.
+            #[cfg(feature = "huddle-share")]
+            Some("share-pick") => {
+                app.huddles.listening = Some(noslacking::huddles::Listening {
+                    sharing: noslacking::huddle_share::Sharing::Choosing,
+                    share_sources: noslacking::demo::share_sources(),
+                    ..noslacking::demo::listening()
+                });
+                app.actions.push(Action::OpenConversation("C03".into()));
+            }
+            // Sharing your screen while watching Ana's: the call window's
+            // controls with Share on, drawn inside the main window.
+            #[cfg(all(feature = "huddle-video", feature = "huddle-share"))]
+            Some("share-window") => {
+                let listening = noslacking::huddles::Listening {
+                    mic: noslacking::huddle_mic::Mic::Live,
+                    sharing: noslacking::huddle_share::Sharing::On,
+                    ..noslacking::demo::sharing()
+                };
+                let first = listening.shares.first().map(|s| s.key.clone());
+                app.huddles.listening = Some(listening);
+                app.huddles.picture.embed = true;
+                app.huddles.picture.size = self.call_size;
+                app.actions.push(Action::OpenConversation("C02".into()));
+                app.actions
+                    .push(Action::Huddle(noslacking::huddles::Action::Watch(first)));
+            }
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             // The deploy bot's Approve button pressed: its question.
             Some("approve") => {
