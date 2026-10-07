@@ -134,4 +134,15 @@ pub struct LocalMedia {
     /// Whether we send audio (unmuted or not, the line stays `sendrecv`;
     /// this is for holding a call, later).
     pub audio_direction: Direction,
+    /// The SSRC of the data m-line (`m=x-data`), or `None` to leave the
+    /// data line out of an offer and reject it in an answer. Nothing
+    /// speaks SCTP over it yet; offering it is only to look like the web
+    /// client, in case Microsoft's side expects the line.
+    pub data_ssrc: Option<u32>,
+    /// The origin line's session id (`o=- {id} …`): made up once per call,
+    /// kept for every offer and answer of it, as a browser does.
+    pub session_id: u64,
+    /// The origin line's version, raised by the caller for each new SDP
+    /// of the call.
+    pub session_version: u32,
 }
