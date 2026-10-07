@@ -1,4 +1,5 @@
-//! What a huddle's video looks like to us, for the probe: the sources
+//! What a huddle's video looks like to us, for the probe (and the app,
+//! with `--video`): the sources
 //! Chime's INDEX lists, which of them to receive, how the receiving
 //! m-lines line up with SUBSCRIBE's `receive_stream_ids`, whose stream an
 //! SSRC is, and what arrives on each, counted, never decoded.
@@ -22,7 +23,24 @@ use super::bitstream::{self, Sps, Vp8Header};
 use super::chime::proto;
 use super::roster::slack_user;
 
-/// What the probe asks of video.
+/// The video options the app's own huddles use, from `--video` and its
+/// companions at start-up; unset (no video at all) unless asked, so a
+/// normal run is untouched.
+static FOR_APP: std::sync::OnceLock<Options> = std::sync::OnceLock::new();
+
+/// Makes the app's huddles watch video as `options` say, as the probe
+/// does. Only the first call counts.
+pub fn set_for_app(options: Options) {
+    let _ = FOR_APP.set(options);
+}
+
+/// The video options for the app's huddles, if `--video` and its
+/// companions asked for any.
+pub fn for_app() -> Option<Options> {
+    FOR_APP.get().cloned()
+}
+
+/// What the probe, or the app when asked, wants of video.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Options {
     /// How many video streams to receive; 0 only logs what Chime says.

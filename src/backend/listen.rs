@@ -251,7 +251,7 @@ async fn run(
         stopped,
         Some(live),
         Some(roster),
-        None,
+        crate::huddle_audio::video::for_app(),
     );
     tokio::pin!(listening);
     let mut connected = Some(connected);
@@ -302,6 +302,11 @@ async fn run(
         report.audio_bytes,
         report.ending.as_deref().unwrap_or("-")
     );
+    if let Some(video) = &report.video {
+        for line in crate::huddle_audio::probe::video_summary(video) {
+            log::info!("huddle {line}");
+        }
+    }
     tell(Listen::Ended(ending(report.meeting_ended, result)));
 }
 

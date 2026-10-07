@@ -34,13 +34,13 @@ pub struct Cli {
     /// `--send-tone`: the probe joins unmuted and sends a quiet tone.
     #[cfg(feature = "huddle-audio")]
     pub send_tone: bool,
-    /// `--video N`: how many video streams the probe receives.
+    /// `--video N`: how many video streams a huddle receives (app or probe).
     #[cfg(feature = "huddle-audio")]
     pub video: usize,
-    /// `--video-h264-only`: the probe offers no VP8.
+    /// `--video-h264-only`: huddles offer no VP8.
     #[cfg(feature = "huddle-audio")]
     pub video_h264_only: bool,
-    /// `--video-dump DIR`: where the probe writes the first video frames.
+    /// `--video-dump DIR`: where huddles write the first video frames.
     #[cfg(feature = "huddle-audio")]
     pub video_dump: Option<PathBuf>,
     /// `--demo`: run against a pretend Slack.
@@ -188,19 +188,19 @@ pub const FLAGS: &[Flag] = &[
     Flag {
         name: "video",
         takes: Takes::One("N", |cli, v| number(v).map(|v| cli.video = v)),
-        help: "Have the huddle probe receive up to N video streams once the audio is live (screen shares first), logging the codec, frames, keyframes and gaps of each; nothing is decoded or shown [default: 0, only Chime's video signaling is logged]",
+        help: "When joining a huddle (in the app or the probe), receive up to N video streams once the audio is live (screen shares first), logging the codec, frames, keyframes and gaps of each; nothing is decoded or shown [default: 0, only Chime's video signaling is logged]",
     },
     #[cfg(feature = "huddle-audio")]
     Flag {
         name: "video-h264-only",
         takes: Takes::Nothing(|cli| cli.video_h264_only = true),
-        help: "Have the huddle probe offer H.264 only for video (no VP8), to see whether the others' apps then send H.264",
+        help: "When joining a huddle (in the app or the probe), offer H.264 only for video (no VP8), to see whether the others' apps then send H.264",
     },
     #[cfg(feature = "huddle-audio")]
     Flag {
         name: "video-dump",
         takes: Takes::One("DIR", |cli, v| path(v).map(|v| cli.video_dump = Some(v))),
-        help: "Have the huddle probe write the first 300 frames of each video stream it receives into DIR (H.264 as .h264, VP8 as .ivf). These files hold the people's camera pictures and screens: keep them private and delete them when done",
+        help: "When joining a huddle (in the app or the probe), write the first 300 frames of each video stream it receives into DIR (H.264 as .h264, VP8 as .ivf). These files hold the people's camera pictures and screens: keep them private and delete them when done",
     },
     #[cfg(feature = "demo")]
     Flag {

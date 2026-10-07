@@ -76,6 +76,15 @@ fn main() -> eframe::Result<()> {
             });
         std::process::exit(code);
     }
+    // The same video logging in the app's own huddles, when asked.
+    #[cfg(feature = "huddle-audio")]
+    if cli.video > 0 || cli.video_h264_only || cli.video_dump.is_some() {
+        noslacking::huddle_audio::video::set_for_app(noslacking::huddle_audio::video::Options {
+            streams: cli.video,
+            h264_only: cli.video_h264_only,
+            dump: cli.video_dump.clone(),
+        });
+    }
 
     let waker = Waker::default();
     let (requests, incoming) = mpsc::channel::<Request>();
