@@ -322,6 +322,9 @@ pub struct TeamsClient {
     reporting: Arc<std::sync::atomic::AtomicBool>,
     /// Your name, as messages sent from here carry it, once known.
     own_name: Arc<RwLock<Option<String>>>,
+    /// This app's endpoint id with Teams (its Trouter connection's), which
+    /// the presence service wants with every request.
+    endpoint: Arc<RwLock<Option<String>>>,
     /// The people already looked up (see [`Self::not_yet_asked`]).
     asked: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// The cookies that let pictures be fetched (avatars; pictures in
@@ -350,6 +353,7 @@ impl TeamsClient {
             reporting: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             own_name: Arc::new(RwLock::new(None)),
             asked: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            endpoint: Arc::new(RwLock::new(None)),
             media_cookies: Arc::new(RwLock::new(std::collections::HashMap::new())),
             cookie_asked: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -1217,8 +1221,12 @@ impl TeamsClient {
     }
 
     /// Says you are here, from the endpoint `endpoint` (this app's
-    /// Trouter connection): without it Teams shows you offline.
+    /// Trouter connection): without it Teams shows you offline. Keeps the
+    /// endpoint for later presence requests.
     pub async fn publish_presence(&self, endpoint: &str) -> Result<(), Failure> {
+        if let Ok(mut held) = self.endpoint.write() {
+            *held = Some(endpoint.to_owned());
+        }
         let body = serde_json::json!({
             "id": endpoint,
             "availability": "Available",
@@ -1227,9 +1235,7 @@ impl TeamsClient {
             "deviceType": "Desktop",
         });
         let resp = self
-            .presence_request("me/endpoints/", |request| {
-                request.header("x-ms-endpoint-id", endpoint).json(&body)
-            })
+            .presence_request("me/endpoints/", |request| request.json(&body))
             .await?;
         if resp.status().is_success() {
             Ok(())
@@ -1250,6 +1256,22 @@ impl TeamsClient {
         let creds = self.ensure_fresh_tokens().await?;
         let skype = creds.skype_token.clone().unwrap_or_default();
         let put = path.starts_with("me/");
+        // As the web client sends it with each request; none before
+        // Trouter first connects.
+        let endpoint = self
+            .endpoint
+            .read()
+            .ok()
+            .and_then(|e| e.clone())
+            .unwrap_or_default();
+        let build = |request: reqwest::RequestBuilder| {
+            let request = if endpoint.is_empty() {
+                request
+            } else {
+                request.header("x-ms-endpoint-id", &endpoint)
+            };
+            build(request)
+        };
         match creds.account {
             Account::Personal => {
                 let url = format!("{PERSONAL_PRESENCE_URL}/v1/{path}");

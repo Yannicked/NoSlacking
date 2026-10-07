@@ -596,6 +596,11 @@ fn avatar_url(base: &str, id: &str) -> String {
 pub async fn presence(client: TeamsClient, team: String, users: Vec<String>, sink: Sink) {
     match client.get_presence(&users).await {
         Ok(found) => {
+            log::info!(
+                "Teams presence in {team}: {} asked, {} answered",
+                users.len(),
+                found.len()
+            );
             let users: Vec<(String, crate::people::Presence)> = found
                 .into_iter()
                 .map(|(id, availability)| (id, presence_of(&availability)))
@@ -607,7 +612,7 @@ pub async fn presence(client: TeamsClient, team: String, users: Vec<String>, sin
                 });
             }
         }
-        Err(error) => log::debug!("could not read presence in {team}: {error:?}"),
+        Err(error) => log::warn!("could not read presence in {team}: {error:?}"),
     }
 }
 
