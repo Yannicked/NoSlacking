@@ -2,17 +2,18 @@
 //! video (INDEX, PAUSE, RESUME, BITRATES, DATA_MESSAGE,
 //! REMOTE_VIDEO_UPDATE), receives the streams wanted on `recvonly`
 //! m-lines added by renegotiation, counts what arrives on each and asks
-//! for keyframes. What is wanted: the share the call window shows (with
-//! `huddle-video`, whose frames go on to the decoder thread,
-//! `screen`), and for the probe or `--video N` up to N streams,
-//! which can also be dumped. The choices are [`super::video`]'s; this is
-//! the part that touches `str0m`.
+//! for keyframes. What is wanted: while the call window is open, the
+//! share it shows and the cameras its tiles show (with `huddle-video`,
+//! whose frames go on to the decoder threads, `screen` and `gallery`),
+//! and for the probe or `--video N` up to N streams, which can also be
+//! dumped. The choices are [`super::video`]'s and [`super::cameras`]'s;
+//! this is the part that touches `str0m`.
 //!
 //! A probe run or `--video` logs everything at info level; an app session
 //! that only watches shares logs what changes and keeps the rest at debug
 //! level.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
@@ -23,7 +24,10 @@ use str0m::change::SdpPendingOffer;
 use str0m::media::{Direction, KeyframeRequestKind, MediaData, MediaKind, Mid};
 
 use super::bitstream::{Dump, DumpKind};
+use super::cameras::{self, Camera, Debounce, Pauses, Wish};
 use super::chime::{self, FrameType};
+#[cfg(feature = "huddle-video")]
+use super::gallery::{CameraDecoding, Gallery};
 #[cfg(feature = "huddle-video")]
 use super::screen::{Decoding, Screen};
 use super::sdp::{self, Mids};
@@ -82,15 +86,22 @@ struct Slot {
     last_pli: Option<Instant>,
 }
 
-/// What the app hands a session to watch screen shares with.
+/// What the app hands a session to watch shares and cameras with.
 pub struct Viewer {
     /// Told who shares their screen, whenever that changes.
     pub shares: tokio::sync::watch::Sender<Vec<Share>>,
-    /// Which share the call window shows (its key), if any.
-    pub watched: tokio::sync::watch::Receiver<Option<String>>,
+    /// Told who has a camera on, and which have a tile, whenever that
+    /// changes.
+    pub cameras: tokio::sync::watch::Sender<Vec<Camera>>,
+    /// What the call window wants: whether it is open, the share it
+    /// shows, room for how many tiles of what size.
+    pub wish: tokio::sync::watch::Receiver<Wish>,
     /// Where the watched share's pictures go.
     #[cfg(feature = "huddle-video")]
     pub screen: Screen,
+    /// Where the camera tiles' pictures go.
+    #[cfg(feature = "huddle-video")]
+    pub gallery: Gallery,
 }
 
 impl std::fmt::Debug for Viewer {
@@ -102,13 +113,21 @@ impl std::fmt::Debug for Viewer {
 /// The session's side of the [`Viewer`].
 struct Viewing {
     shares: tokio::sync::watch::Sender<Vec<Share>>,
+    cameras: tokio::sync::watch::Sender<Vec<Camera>>,
     #[cfg(feature = "huddle-video")]
     screen: Screen,
+    #[cfg(feature = "huddle-video")]
+    gallery: Gallery,
     /// The decoder thread, from the first share watched.
     #[cfg(feature = "huddle-video")]
     decoding: Option<Decoding>,
-    /// The stream whose frames are being decoded.
+    /// The cameras' decoder thread, from the first tile.
+    #[cfg(feature = "huddle-video")]
+    camera_decoding: Option<CameraDecoding>,
+    /// The share stream whose frames are being decoded.
     decoding_stream: Option<u32>,
+    /// The cameras whose frames are being decoded, and their streams.
+    decoding_cameras: BTreeMap<String, u32>,
 }
 
 /// What a session follows of video.
@@ -117,8 +136,18 @@ pub struct Watch {
     /// Whether this is the probe or `--video`, which log everything.
     diagnostic: bool,
     me: String,
-    /// The share the call window shows, by key.
-    watched: Option<String>,
+    /// What the call window wants.
+    wish: Wish,
+    /// When each attendee was last heard speaking, for the tiles.
+    spoke: HashMap<String, Instant>,
+    /// The streams paused at their source.
+    pauses: Pauses,
+    /// The cameras with a tile, in tile order, as last asked for.
+    shown: Vec<String>,
+    /// And the stream asked for each.
+    shown_streams: BTreeMap<String, u32>,
+    /// Holds a new choice back until it stands still.
+    debounce: Debounce,
     viewing: Option<Viewing>,
     /// Our first video m-line: the send line, slot 0, always inactive.
     send_line: Option<Mid>,
@@ -155,21 +184,32 @@ impl std::fmt::Debug for Watch {
 impl Watch {
     /// Follows video for attendee `me` as `options` ask (the probe's, or
     /// `--video`'s, which log everything), and for a `viewer` if there is
-    /// one. Only the viewer's half of `watched` stays with the session.
+    /// one. Only the viewer's half of `wish` stays with the session.
     pub fn new(options: Option<Options>, viewer: Option<Viewer>, me: &str) -> Self {
         let viewing = viewer.map(|viewer| Viewing {
             shares: viewer.shares,
+            cameras: viewer.cameras,
             #[cfg(feature = "huddle-video")]
             screen: viewer.screen,
             #[cfg(feature = "huddle-video")]
+            gallery: viewer.gallery,
+            #[cfg(feature = "huddle-video")]
             decoding: None,
+            #[cfg(feature = "huddle-video")]
+            camera_decoding: None,
             decoding_stream: None,
+            decoding_cameras: BTreeMap::new(),
         });
         Self {
             diagnostic: options.is_some(),
             options: options.unwrap_or_default(),
             me: me.to_owned(),
-            watched: None,
+            wish: Wish::closed(),
+            spoke: HashMap::new(),
+            pauses: Pauses::default(),
+            shown: Vec::new(),
+            shown_streams: BTreeMap::new(),
+            debounce: Debounce::default(),
             viewing,
             send_line: None,
             index: Index::default(),
@@ -205,69 +245,217 @@ impl Watch {
         }
     }
 
-    /// The streams to receive now.
-    fn wanted(&self) -> Vec<u32> {
-        video::wanted(
+    /// The share the call window shows, while it is open.
+    fn watched(&self) -> Option<&str> {
+        self.wish
+            .share
+            .as_deref()
+            .filter(|_| self.wish.open && self.viewing.is_some())
+    }
+
+    /// The cameras on now.
+    fn feeds(&self) -> Vec<cameras::Feed> {
+        cameras::feeds(&self.index, &self.me, &self.pauses)
+    }
+
+    /// The camera tiles to have at `now`, in order, and the stream to
+    /// receive for each; none while the window is closed.
+    fn tiles(&self, now: Instant) -> Vec<(String, u32)> {
+        if !self.wish.open || self.viewing.is_none() {
+            return Vec::new();
+        }
+        let feeds = self.feeds();
+        cameras::pick(&feeds, &self.shown, &self.spoke, self.wish.tiles, now)
+            .into_iter()
+            .filter_map(|key| {
+                let feed = feeds.iter().find(|f| f.key == key)?;
+                let stream = cameras::layer(feed, self.wish.tile)?;
+                Some((key, stream))
+            })
+            .collect()
+    }
+
+    /// The tiles and every stream to receive at `now`.
+    fn wanted(&self, now: Instant) -> (Vec<(String, u32)>, Vec<u32>) {
+        let tiles = self.tiles(now);
+        let streams: Vec<u32> = tiles.iter().map(|&(_, stream)| stream).collect();
+        let wanted = video::wanted(
             &self.index,
             &self.me,
             self.options.streams,
-            self.watched.as_deref(),
-        )
+            self.watched(),
+            &streams,
+        );
+        (tiles, wanted)
     }
 
-    /// The call window shows the share `key` now, or none. Its stream is
-    /// received from the next re-SUBSCRIBE; with none, decoding stops at
-    /// once.
-    pub fn set_watched(&mut self, key: Option<String>) {
-        if self.watched == key {
+    /// Takes the call window's new wish. Closed, decoding stops at once
+    /// and the tiles are forgotten; the streams go at the next
+    /// re-SUBSCRIBE.
+    pub fn set_wish(&mut self, wish: Wish) {
+        if self.wish == wish {
             return;
         }
-        log::info!(
-            "video: {}",
-            key.as_deref().map_or_else(
-                || "the call window closed".to_owned(),
-                |key| format!("watching the share of {}", video::short(key))
-            )
-        );
-        self.watched = key;
-        self.follow_watched();
+        if (self.wish.open, &self.wish.share) != (wish.open, &wish.share) {
+            log::info!(
+                "video: {}",
+                match (wish.open, wish.share.as_deref()) {
+                    (false, _) => "the call window closed".to_owned(),
+                    (true, None) =>
+                        format!("the call window is open, room for {} tiles", wish.tiles),
+                    (true, Some(key)) => format!(
+                        "watching the share of {}, room for {} tiles",
+                        video::short(key),
+                        wish.tiles
+                    ),
+                }
+            );
+        }
+        if !wish.open {
+            self.shown.clear();
+            self.shown_streams.clear();
+        }
+        self.wish = wish;
+        self.follow();
+        self.tell_cameras();
     }
 
-    /// Starts or stops decoding as the watched share's stream is received
-    /// or not.
-    fn follow_watched(&mut self) {
+    /// Someone (by attendee id) is heard speaking at `now`.
+    pub fn spoke(&mut self, attendee: &str, now: Instant) {
+        if let Some(at) = self.spoke.get_mut(attendee) {
+            *at = now;
+        } else {
+            self.spoke.insert(attendee.to_owned(), now);
+        }
+    }
+
+    /// The tiles asked for are these now.
+    fn commit_tiles(&mut self, tiles: Vec<(String, u32)>) {
+        let keys: Vec<String> = tiles.iter().map(|(key, _)| key.clone()).collect();
+        let streams: BTreeMap<String, u32> = tiles.into_iter().collect();
+        if keys == self.shown && streams == self.shown_streams {
+            return;
+        }
+        if keys != self.shown {
+            log::info!(
+                "video: camera tiles for {}",
+                if keys.is_empty() {
+                    "nobody".to_owned()
+                } else {
+                    keys.iter()
+                        .map(|k| video::short(k))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            );
+        }
+        self.shown = keys;
+        self.shown_streams = streams;
+        self.follow();
+        self.tell_cameras();
+    }
+
+    /// Asks for a keyframe on the slots receiving `streams`.
+    fn want_pli(&mut self, streams: &[u32]) {
+        for (slot, stream) in self.slots.streams().iter().enumerate() {
+            if streams.contains(stream)
+                && let Some(line) = self.lines.get_mut(slot)
+            {
+                line.want_pli = true;
+            }
+        }
+    }
+
+    /// Starts or stops decoding as the watched share's stream and the
+    /// tiles' are received or not.
+    fn follow(&mut self) {
+        let receiving = self.slots.receiving();
         let target = self
-            .watched
-            .as_deref()
+            .watched()
             .and_then(|key| video::share_stream(&self.index, &self.me, key))
-            .filter(|stream| self.slots.receiving().contains(stream));
+            .filter(|stream| receiving.contains(stream));
+        let tiles: BTreeMap<String, u32> = if self.wish.open {
+            self.shown_streams
+                .iter()
+                .filter(|(_, stream)| receiving.contains(stream))
+                .map(|(key, &stream)| (key.clone(), stream))
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
         let Some(viewing) = &mut self.viewing else {
             return;
         };
-        if viewing.decoding_stream == target {
+        if viewing.decoding_stream != target {
+            viewing.decoding_stream = target;
+            #[cfg(feature = "huddle-video")]
+            {
+                if target.is_some() && viewing.decoding.is_none() {
+                    match Decoding::spawn(viewing.screen.clone()) {
+                        Ok(decoding) => viewing.decoding = Some(decoding),
+                        Err(error) => log::warn!("video: no decoder thread: {error}"),
+                    }
+                }
+                if let Some(decoding) = &mut viewing.decoding {
+                    if target.is_some() {
+                        decoding.start();
+                    } else {
+                        decoding.stop();
+                    }
+                }
+            }
+            match target {
+                Some(stream) => log::info!("video: decoding stream {stream}"),
+                None => log::info!("video: decoding stopped"),
+            }
+        }
+        if viewing.decoding_cameras == tiles {
             return;
         }
-        viewing.decoding_stream = target;
         #[cfg(feature = "huddle-video")]
         {
-            if target.is_some() && viewing.decoding.is_none() {
-                match Decoding::spawn(viewing.screen.clone()) {
-                    Ok(decoding) => viewing.decoding = Some(decoding),
-                    Err(error) => log::warn!("video: no decoder thread: {error}"),
+            if !tiles.is_empty() && viewing.camera_decoding.is_none() {
+                match CameraDecoding::spawn(viewing.gallery.clone()) {
+                    Ok(decoding) => viewing.camera_decoding = Some(decoding),
+                    Err(error) => log::warn!("video: no camera decoder thread: {error}"),
                 }
             }
-            if let Some(decoding) = &mut viewing.decoding {
-                if target.is_some() {
-                    decoding.start();
-                } else {
-                    decoding.stop();
+            if let Some(decoding) = &mut viewing.camera_decoding {
+                for (key, stream) in &viewing.decoding_cameras {
+                    if tiles.get(key) != Some(stream) {
+                        decoding.stop(key);
+                    }
+                }
+                for (key, stream) in &tiles {
+                    if viewing.decoding_cameras.get(key) != Some(stream) {
+                        decoding.start(key);
+                    }
                 }
             }
         }
-        match target {
-            Some(stream) => log::info!("video: decoding stream {stream}"),
-            None => log::info!("video: decoding stopped"),
-        }
+        log::info!(
+            "video: decoding {} cameras (streams {:?})",
+            tiles.len(),
+            tiles.values().collect::<Vec<_>>()
+        );
+        viewing.decoding_cameras = tiles;
+    }
+
+    /// Tells the viewer who has a camera on and who has a tile, if that
+    /// changed.
+    fn tell_cameras(&self) {
+        let Some(viewing) = &self.viewing else {
+            return;
+        };
+        let tiles: &[String] = if self.wish.open { &self.shown } else { &[] };
+        let now = cameras::cameras(&self.feeds(), tiles);
+        viewing.cameras.send_if_modified(|cameras| {
+            let changed = *cameras != now;
+            if changed {
+                *cameras = now;
+            }
+            changed
+        });
     }
 
     /// Tells the viewer who shares, if that changed.
@@ -301,13 +489,28 @@ impl Watch {
             self.summary.codecs.clone_from(&self.index.codecs);
             self.log_index(now);
             self.tell_shares();
+            let resumed = self.pauses.index(&self.index);
+            self.want_pli(&resumed);
+            self.tell_cameras();
         }
         if let Some(pause) = &frame.pause {
-            let name = match kind {
-                Some(FrameType::Resume) => "RESUME",
-                _ => "PAUSE",
-            };
-            log::log!(self.level(), "video: {}", video::pause_line(name, pause));
+            let resume = kind == Some(FrameType::Resume);
+            log::log!(
+                self.level(),
+                "video: {}",
+                video::pause_line(if resume { "RESUME" } else { "PAUSE" }, pause)
+            );
+            if resume {
+                // A keyframe at once, so the picture comes back quickly.
+                let resumed = self
+                    .pauses
+                    .resume(&pause.stream_ids, &pause.group_ids, &self.index);
+                self.want_pli(&resumed);
+            } else {
+                self.pauses
+                    .pause(&pause.stream_ids, &pause.group_ids, &self.index);
+            }
+            self.tell_cameras();
         }
         if let Some(bitrates) = &frame.bitrates
             && self.bitrates_at.is_none_or(|at| now >= at + BITRATES_EVERY)
@@ -394,17 +597,24 @@ impl Watch {
         dtls_up: Instant,
         audio_frames: u64,
     ) -> Option<Reoffer> {
-        if self.in_flight.is_some()
+        if self.in_flight.is_some() {
+            return None;
+        }
+        let (tiles, wanted) = self.wanted(now);
+        let plan = self.slots.plan(&wanted);
+        if !plan.changes() {
+            self.commit_tiles(tiles);
+            return None;
+        }
+        // Noted even while its turn has not come, so a choice that stood
+        // still meanwhile goes as soon as it has.
+        let settled = self.debounce.settled(&wanted, now);
+        if !settled
             || now < dtls_up + SETTLE
             || self
                 .last_resubscribe
                 .is_some_and(|at| now < at + RESUBSCRIBE_EVERY)
         {
-            return None;
-        }
-        let wanted = self.wanted();
-        let plan = self.slots.plan(&wanted);
-        if !plan.changes() {
             return None;
         }
         let mut api = rtc.sdp_api();
@@ -440,6 +650,7 @@ impl Watch {
             plan.add
         );
         self.last_resubscribe = Some(now);
+        self.commit_tiles(tiles);
         self.in_flight = Some(InFlight {
             plan,
             added,
@@ -548,7 +759,7 @@ impl Watch {
             }
         }
         self.slots = after;
-        self.follow_watched();
+        self.follow();
         let answered_ms = u64::try_from(now.duration_since(flight.sent).as_millis()).unwrap_or(0);
         flight.audit.answered_ms = Some(answered_ms);
         flight.answered = Some(now);
@@ -627,13 +838,22 @@ impl Watch {
         }
         let stream = stats.stream_id;
         #[cfg(feature = "huddle-video")]
-        if let Some(viewing) = &mut self.viewing
-            && viewing.decoding_stream == Some(stream)
-            && let Some(decoding) = &mut viewing.decoding
-        {
-            decoding.push(data.data.to_vec(), data.contiguous);
-            if viewing.screen.take_keyframe_wish() {
-                line.want_pli = true;
+        if let Some(viewing) = &mut self.viewing {
+            if viewing.decoding_stream == Some(stream)
+                && let Some(decoding) = &mut viewing.decoding
+            {
+                decoding.push(data.data.to_vec(), data.contiguous);
+                if viewing.screen.take_keyframe_wish() {
+                    line.want_pli = true;
+                }
+            } else if let Some((key, _)) =
+                viewing.decoding_cameras.iter().find(|&(_, &s)| s == stream)
+                && let Some(decoding) = &mut viewing.camera_decoding
+            {
+                decoding.push(key, data.data.to_vec(), data.contiguous);
+                if viewing.gallery.take_keyframe_wish(key) {
+                    line.want_pli = true;
+                }
             }
         }
         let attendee = stats.attendee.clone();
@@ -721,13 +941,18 @@ impl Watch {
                 .iter()
                 .filter_map(|f| f.answered.map(|at| at + AUDIO_WINDOW)),
         );
-        if self.in_flight.is_none() && self.slots.plan(&self.wanted()).changes() {
-            // A change of streams waits for its turn.
-            due.push(
-                self.last_resubscribe
-                    .map_or(now + SETTLE, |at| at + RESUBSCRIBE_EVERY)
-                    .max(now + Duration::from_millis(100)),
-            );
+        if self.in_flight.is_none() {
+            let (_, wanted) = self.wanted(now);
+            if self.slots.plan(&wanted).changes() {
+                // A change of streams waits for its turn, and until it
+                // stands still.
+                due.push(
+                    self.last_resubscribe
+                        .map_or(now + SETTLE, |at| at + RESUBSCRIBE_EVERY)
+                        .max(self.debounce.ready_at(&wanted, now))
+                        .max(now + Duration::from_millis(100)),
+                );
+            }
         }
         if let Some(at) = self.logged_at
             && self.logged.as_ref() != Some(&shape(&self.index))
