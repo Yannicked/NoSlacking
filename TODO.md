@@ -1078,6 +1078,26 @@ engineering, as for the rest of the session sign-in.
         V4L2, which would need `--device=all`.
   - [ ] Choosing the camera (Settings) when there is more than one;
         today the first is taken.
+  - [ ] **All video in the helper (decided 2026-10-07).** The helper
+        (`noslacking-video`) does everything that touches pixels; the app
+        keeps the call (signaling, DTLS/SRTP, RTP, the UI) and all audio
+        (small, latency-sensitive, and echo cancellation needs the
+        speaker next to the microphone). Why: release builds abort on any
+        panic, and decoders read other people's network data, so a decoder
+        bug must kill the helper (which restarts), not the app; capture's
+        native dependencies (nokhwa's ObjC shim, libclang, PipeWire, portal
+        fds) leave the app's build; capture → GPU encode → small NAL units
+        over the pipe instead of 3 MB raw frames; one place for codec,
+        capture and hardware choices. No helper, or one that keeps
+        crashing, means no video for that session (no in-process
+        fallback). Check macOS permissions (camera, Screen Recording) carry
+        from the app bundle to its helper on a real Mac. Order, after
+        `feat/huddle-share` and `feat/hw-encode` merge:
+        1. Software decoding (rusty_h264 + the shrink) moves into the
+           helper: every decode goes through it, hardware or not.
+        2. Screen capture + encoding in the helper (PipeWire dmabuf →
+           VA-API encode, software fallback), from the share branch.
+        3. The camera in the helper (capture + encode).
   - [ ] **Hardware video decoding (and maybe encoding), in a separate
         process.** Pure Rust in software costs little today (about 0.4 ms
         per 480×480 camera frame, 3–5 ms per 1080p share frame, 4 ms to
@@ -1114,8 +1134,9 @@ engineering, as for the rest of the session sign-in.
           executable or from PATH on the first stream start, kills it
           after a 1 s timeout, restarts it at most 3 times, and decodes
           in software for anything it cannot do, asking for a keyframe
-          when it switches. Settings → Huddles → "Decode video on the
-          graphics card", on by default since 2026-10-07. Linux back end: VA-API, libva
+          when it switches. Settings → Huddles → "Use the graphics
+          card for video" (first "Decode video on the graphics card";
+          the `hardware_video` key kept), on by default since 2026-10-07. Linux back end: VA-API, libva
           opened at run time (no build dependency), our own H.264
           stateless state over cros-codecs' parser; bit-exact on both
           fixtures. Ships in the tar.gz, .deb (recommends libva2 and a
@@ -1142,12 +1163,25 @@ engineering, as for the rest of the session sign-in.
         - [ ] A faster whole-step shrink in the app: halving a 1080p
               picture costs 2.7 ms, more than decoding it (a 2× special
               case, or the `yuv` crate's SIMD scaler).
-        - [ ] **VA-API encoding** (640×480@30, CBR ~1.8 Mbit/s, IDR on
-              request): `VAEntrypointEncSlice(LP)`, packed SPS/PPS/slice
-              headers (cros-codecs' `nalu_writer`/`synthesizer` without
-              features), `OpenEncoder`/`Encode`/`SetBitrate` are in the
-              protocol; compare quality with rusty_h264-encoder at call
-              bitrates before using it.
+        - [x] **VA-API encoding** (2026-10-07, `feat/hw-encode`,
+              research doc §6.8): constrained baseline on
+              `VAEntrypointEncSlice(LP)`, CBR, our own packed SPS/PPS
+              and slice headers (Mesa needs them), IDR on request and
+              every 4 s, a new bitrate without a keyframe. Camera
+              640×480@30: 1.0 ms and 0.4 ms of CPU a picture through
+              the helper against software's 4.3 ms, 2.7 dB better at
+              the same rate; 1080p@15: 5.3 ms against 31. The camera
+              uses it when the setting is on and the helper encodes
+              the size (`video_encoder::Encoder`); any failure hands
+              over to software with a keyframe for the session.
+        - [ ] Try the GPU encoder against Slack, and on an Intel GPU
+              (iHD lists packed headers and EncSliceLP; untested).
+        - [ ] Screen sharing on the GPU encoder (`feat/huddle-share`
+              plugs into `video_encoder::Encoder`; 1080p needs level 4.0
+              and software cannot send past 720p).
+        - [ ] Skip the second 3 MB copy of a 1080p picture into the
+              helper (shared memory, or the app's I420 moved instead of
+              cloned): the pipe costs 2.6 ms of the 5.3.
         - [ ] **Vulkan Video** with `gpu-video` (MIT, safe API, H.264
               decode and encode, Linux and Windows, NV12 bytes without
               its wgpu feature): the Windows back end and Linux's second

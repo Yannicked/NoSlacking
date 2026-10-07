@@ -27,7 +27,7 @@ use crate::huddle_audio::media::{self, Stage};
 use crate::huddle_audio::share::{Choice, ShareControl, ShareError, Source, System, may_share};
 use crate::huddle_audio::share_send::{self, Encoding};
 use crate::huddle_audio::video::Share;
-use crate::huddle_audio::video_encoder::{Backend, Limits};
+use crate::huddle_audio::video_encoder::Limits;
 use crate::huddle_share::{ShareNews, ShareRequest};
 
 /// How long the share's session gets to leave (LEAVE, then LEAVE_ACK)
@@ -162,7 +162,7 @@ fn go_live(
 ) -> Result<Live, String> {
     let (encoded, encoded_in) = mpsc::channel(crate::huddle_audio::camera_send::QUEUE);
     let control = SendControl::new(Limits::SHARE);
-    let encoding = Encoding::spawn(frames, encoded, control.clone(), Backend::Software)?;
+    let encoding = Encoding::spawn(frames, encoded, control.clone())?;
     let (on, on_rx) = watch::channel(true);
     let (refused, refusals) = mpsc::channel(1);
     let uplink = share_send::uplink(encoded_in, on_rx, control, refused);

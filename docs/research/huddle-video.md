@@ -37,6 +37,8 @@ copied. Line refs are `file:line` at those commits.
   than software; at full size software still wins. Off by default for
   now. Vulkan Video, V4L2,
   VideoToolbox and Media Foundation are planned behind the same trait.
+  Our camera is encoded on the GPU too (§6.8): 1 ms and 0.4 ms of CPU a
+  640×480 picture through the helper against 4.3 ms in software.
 - **Plan**: probe (days) → receive screen shares (2–3 wk) → camera tiles
   (2–3 wk) → send camera (3–5 wk) → share screen (3–5 wk, Wayland the
   risk). Drawing, stickers and effects: not realistic (undocumented,
@@ -897,8 +899,10 @@ and nowhere in the app.
   off until the app restarts. `Unsupported` (B slices, fields,
   interlace, a profile the driver lacks) and a GPU failure on a keyframe
   keep that stream in software without counting against the helper.
-- **Setting.** Settings → Huddles → "Decode video on the graphics card"
-  (`hardware_video`), for streams that start afterwards; on by default
+- **Setting.** Settings → Huddles → "Use the graphics card for video"
+  (first "Decode video on the graphics card"; `hardware_video`, which
+  since §6.8 also covers encoding our camera), for streams that start
+  afterwards; on by default
   since 2026-10-07, on the §6.3 numbers (off before GPU scaling, when
   it did not yet beat software).
 
@@ -1053,7 +1057,7 @@ down: it belongs in the helper too.
 | platforms | Linux (Intel, AMD, some NVIDIA via nvidia-vaapi-driver) | Linux and Windows: NVIDIA, AMD (RADV, Mesa ≥ 24), Intel (ANV, Mesa ≥ 24) |
 | this machine | H.264 decode (Fedora's `mesa-va-drivers-freeworld`) | **no H.264**: Fedora builds RADV without the patented codecs; `vulkaninfo` lists AV1 and VP9 decode only |
 | our fixtures | bit-exact, 1.8 ms a 1080p decode | could not be tried |
-| encode, IDR control | VA encode exists; not built yet | yes, with IDR on request |
+| encode, IDR control | built (§6.8): CB, CBR, IDR on request | yes, with IDR on request |
 | licence, upkeep | libva MIT; our code | MIT; active |
 | what we own | ~650 lines of H.264 state, ~900 of libva wrapper (36 `unsafe` blocks) | none of the codec logic |
 
@@ -1097,13 +1101,121 @@ Two kinds, both behind the same `Backend` trait:
 
 | platform | back end | crate | state |
 | --- | --- | --- | --- |
-| desktop Linux, Intel/AMD | VA-API | libloading + own FFI + own H.264 state | **decoding works**; encoding to do |
+| desktop Linux, Intel/AMD | VA-API | libloading + own FFI + own H.264 state | **decoding and encoding work** (§6.8) |
 | desktop Linux without VA H.264, NVIDIA | Vulkan Video | `gpu-video` | planned |
 | ARM Linux (Snapdragon, Raspberry Pi) | V4L2 stateful | `v4l2r` | planned |
 | ARM Linux (Rockchip, MediaTek, Allwinner) | V4L2 stateless | `v4l2r` + `src/h264.rs` | planned |
 | Windows (x86 and Snapdragon) | Vulkan Video, else Media Foundation / D3D11 video | `gpu-video`; `windows` | planned; the helper builds and reports no hardware |
 | macOS | VideoToolbox | `objc2-video-toolbox`, `objc2-core-media` | planned; the helper builds and reports no hardware |
 | everywhere | software | rusty_h264 (decode), rusty_h264-encoder | the default and the fallback |
+
+### 6.8 Encoding on the GPU (VA-API, `feat/hw-encode`, 2026-10-07)
+
+Our camera (and later a share) encoded by the GPU through the same
+helper, with rusty_h264-encoder as the fallback.
+
+**What the driver offers here** (radeonsi, Mesa 26.2.3, Radeon 860M):
+constrained baseline, Main and High at `VAEntrypointEncSlice` only (no
+`EncSliceLP`, Intel's low-power entry point, which is preferred where
+it exists); rate control CBR, VBR, CQP and QVBR (`0x416`); packed
+headers sequence, picture, slice, misc and raw (`0x1f`); two list-0
+references; up to 4096×4096.
+
+**Design** (`crates/noslacking-video/src/vaapi/encoder.rs`, bindings in
+`vaapi/va/enc.rs`):
+
+- Constrained baseline (`VAProfileH264ConstrainedBaseline`): CAVLC, one
+  reference (each P from the picture before), no B-frames, one slice a
+  picture (packetization-mode 1 splits it), picture order type 2 (no
+  order count in slice headers), every picture a reference. Level 3.1
+  up to 720p@30 (the software encoder's), then 3.2, 4.0 (1080p@15–30),
+  4.2 (1080p@60, 2048×1088); past 4.2 refused. Sizes not whole
+  macroblocks are cropped in the SPS, the surface padded by repeating
+  the last row and column.
+- **Headers are ours, packed**: the SPS and PPS together as
+  `VAEncPackedHeaderSequence` at each IDR, and each picture's slice
+  header as `VAEncPackedHeaderSlice` (`src/nal.rs`, ~120 lines and
+  tests; parsed back by cros-codecs' parser in a test). Mesa needs them:
+  without packed headers it wrote no SPS or PPS and a slice NAL header
+  of `0x00` (type 0); with only SPS and PPS packed, the same. With both
+  (what ffmpeg does there; seen with `LIBVA_TRACE`) Mesa writes our
+  SPS/PPS as they are and rewrites the slice header with its QP. A
+  driver that takes no packed headers writes its own, and ours go in
+  front of an IDR that came without them. The SPS says `42e0xx`
+  (constraint_set0–2, as WebRTC) and, in its VUI, timing and
+  `max_dec_frame_buffering` 1, so decoders show each picture at once.
+- **Rate control**: CBR where the driver has it, else VBR (target
+  100 %), window 1 s, HRD buffer half a second, frame skipping and bit
+  stuffing off (a still screen costs nothing). `SetBitrate` sends a new
+  `VAEncMiscParameterRateControl` (with `reset`) with the next picture:
+  no keyframe, no new context. Followed: 900 → 450 kbit/s mid-sequence
+  came out 832 then 462.
+- **IDRs** when asked and at least every 4 s (`fps × 4` pictures).
+- **Pictures in**: the app's I420 is written into an NV12 surface
+  through `vaDeriveImage` (else `vaCreateImage` + `vaPutImage`), checked
+  against the image's pitches and size before a byte is written.
+  **Out**: one coded buffer (raw size, at least 256 KiB) read with
+  `vaMapBuffer`, its segments walked (at most 64, each checked to fit)
+  and joined. Every picture's NAL units are checked (a slice; an IDR
+  when one was asked, SPS and PPS before it) before they go out, in the
+  helper and again in the app.
+- **Bindings**: `VAEncSequenceParameterBufferH264` (1132 bytes),
+  `…Picture…` (648), `…Slice…` (3140), the rate control (60), frame
+  rate and HRD (24) misc payloads, the packed header parameter (28) and
+  `VACodedBufferSegment` (48): sizes and offsets from clang over libva
+  2.23's headers asserted in tests, padding written out, bit fields
+  checked against what clang made of the same assignments. 11 more
+  `unsafe` blocks (map/unmap, coded segments, `vaPutImage`, the coded
+  buffer), each with its SAFETY note.
+- **Protocol**: unchanged (version 2; `OpenEncoder`, `Encode`,
+  `SetBitrate` were defined): the welcome now lists `Encode` for H.264
+  (meaning constrained baseline) up to 2048×1088. A picture to encode
+  is streamed from its planes into the pipe and read straight into its
+  own (`write_request`/`read_request`), as decoded pictures come back.
+
+**The app** (`src/huddle_audio/video_encoder.rs`): `Encoder` wraps
+either rusty_h264 (`VideoEncoder`) or the helper's (`HwEncoder` in
+`hardware.rs`). It takes the GPU when the setting is on ("Use the
+graphics card for video", the `hardware_video` key kept) and the
+helper's welcome covers the size; `retune(bitrate)` changes the GPU's
+rate in place (the camera thread follows the bitrate steps within a
+second; software still makes a new encoder at most every 8 s). Any
+GPU failure (a crash, a hang past 1 s, a failure reply, a stream that is
+not what was asked) encodes that same picture in software as a
+keyframe, and the camera stays in software for the session. The
+helper's crash counts against its restarts as for decoding.
+`huddle-camera` now builds `hardware.rs` (and the protocol crate) too.
+
+**Measurements** (release, `examples/encode.rs`, five rounds each:
+the 480×480 camera fixture stretched to 640×480 at 30 fps and
+900 kbit/s, the 1080p share fixture at 15 fps and 2.5 Mbit/s; CPU is
+the bench's and the helper's; PSNR is luma against the source,
+decoded by rusty_h264):
+
+| 640×480@30, 900 kbit/s | per picture | CPU | out | PSNR |
+| --- | --- | --- | --- | --- |
+| software (rusty_h264, Fast) | 4.33 ms | 4.30 ms | 902 kbit/s | 35.3 dB |
+| GPU, in process | 0.87 ms | 0.24 ms | 916 kbit/s | 38.0 dB |
+| GPU, through the helper | 1.02 ms | 0.42 ms | 916 kbit/s | 38.0 dB |
+
+| 1920×1080@15, 2.5 Mbit/s | per picture | CPU | out | PSNR |
+| --- | --- | --- | --- | --- |
+| software (level 4.0) | 31.0 ms | 30.7 ms | 2375 kbit/s | 56.8 dB |
+| GPU, in process | 2.68 ms | 1.00 ms | 1447 kbit/s | 52.7 dB |
+| GPU, through the helper | 5.2 ms | 2.2 ms | 1447 kbit/s | 52.7 dB |
+
+At camera rates the GPU is better and 4× faster at a tenth of the
+CPU. A share is mostly still: CBR without stuffing leaves the GPU well
+under its rate and a little behind software's quality, which spends
+the whole budget at 31 ms a picture (two thirds of a 15 fps frame's
+time on one core). Through the pipe a 1080p picture costs 2.6 ms more
+(3 MB in); a 1 MiB input pipe made it worse (11.8 ms, writer and reader
+no longer overlap), so the helper's input stays at 64 KiB. Checked
+with ffmpeg: both streams decode without an error as Constrained
+Baseline (level 3.1 and 4.0), and against the sources give PSNR
+36.4 dB (camera, whole stream) and 49.8 dB (share), as rusty_h264's
+decoding of them does. Forced IDRs and the 4 s ones come where asked
+(ignored GPU test `vaapi_encodes_what_the_software_decoder_reads_back`).
 
 ## Sources
 - amazon-chime-sdk-js @ dea69d268c623ab2006169d3899981fea766fa8a (Apache-2.0), files as cited.

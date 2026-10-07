@@ -29,10 +29,10 @@ pub fn serve(
         encoders: HashMap::new(),
         next_id: 1,
     };
-    let Some(first) = ipc::read_frame(input)? else {
+    let Some((first, hello)) = ipc::read_request(input)? else {
         return Ok(());
     };
-    match Request::decode(&first.body) {
+    match hello {
         Ok(Request::Hello { .. }) => {
             // The app compares versions; ours goes back either way.
             let welcome = Reply::Welcome {
@@ -40,20 +40,21 @@ pub fn serve(
                 backend: server.backend.name(),
                 capabilities: server.backend.capabilities(),
             };
-            ipc::write_frame(output, first.seq, &welcome.encode())?;
+            ipc::write_frame(output, first, &welcome.encode())?;
         }
         _ => {
             let reply = failed(FailKind::Protocol, "the first message must be the hello");
-            ipc::write_frame(output, first.seq, &reply.encode())?;
+            ipc::write_frame(output, first, &reply.encode())?;
             return Err(ipc::Error::BadValue("first message"));
         }
     }
-    while let Some(frame) = ipc::read_frame(input)? {
-        let reply = match Request::decode(&frame.body) {
+    // Pictures to encode are read straight into their planes.
+    while let Some((seq, request)) = ipc::read_request(input)? {
+        let reply = match request {
             Ok(request) => server.handle(request),
             Err(error) => failed(FailKind::Protocol, &error.to_string()),
         };
-        ipc::write_reply(output, frame.seq, &reply)?;
+        ipc::write_reply(output, seq, &reply)?;
     }
     Ok(())
 }

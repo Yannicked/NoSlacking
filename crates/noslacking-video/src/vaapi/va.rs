@@ -18,6 +18,8 @@ use std::rc::Rc;
 
 use libloading::Library;
 
+pub mod enc;
+
 /// `VAStatus`: 0 is success.
 type Status = c_int;
 /// `VADisplay`.
@@ -79,6 +81,18 @@ pub enum BufferType {
     SliceParameter = 4,
     /// `VASliceDataBufferType`.
     SliceData = 5,
+    /// `VAEncSequenceParameterBufferType`.
+    EncSequenceParameter = 22,
+    /// `VAEncPictureParameterBufferType`.
+    EncPictureParameter = 23,
+    /// `VAEncSliceParameterBufferType`.
+    EncSliceParameter = 24,
+    /// `VAEncPackedHeaderParameterBufferType`.
+    EncPackedHeaderParameter = 25,
+    /// `VAEncPackedHeaderDataBufferType`.
+    EncPackedHeaderData = 26,
+    /// `VAEncMiscParameterBufferType`.
+    EncMiscParameter = 27,
     /// `VAProcPipelineParameterBufferType`.
     ProcPipelineParameter = 41,
 }
@@ -632,6 +646,19 @@ struct Functions {
     create_image:
         unsafe extern "C" fn(RawDisplay, *mut ImageFormat, c_int, c_int, *mut Image) -> Status,
     get_image: unsafe extern "C" fn(RawDisplay, u32, c_int, c_int, c_uint, c_uint, u32) -> Status,
+    put_image: unsafe extern "C" fn(
+        RawDisplay,
+        u32,
+        u32,
+        c_int,
+        c_int,
+        c_uint,
+        c_uint,
+        c_int,
+        c_int,
+        c_uint,
+        c_uint,
+    ) -> Status,
     destroy_image: unsafe extern "C" fn(RawDisplay, u32) -> Status,
     map_buffer: unsafe extern "C" fn(RawDisplay, u32, *mut *mut c_void) -> Status,
     unmap_buffer: unsafe extern "C" fn(RawDisplay, u32) -> Status,
@@ -689,6 +716,7 @@ impl Libva {
             derive_image: symbol!(libva, "vaDeriveImage"),
             create_image: symbol!(libva, "vaCreateImage"),
             get_image: symbol!(libva, "vaGetImage"),
+            put_image: symbol!(libva, "vaPutImage"),
             destroy_image: symbol!(libva, "vaDestroyImage"),
             map_buffer: symbol!(libva, "vaMapBuffer"),
             unmap_buffer: symbol!(libva, "vaUnmapBuffer"),
@@ -900,19 +928,37 @@ impl Config {
         profile: i32,
         entrypoint: i32,
     ) -> Result<Self, String> {
-        let mut attribute = ConfigAttrib {
+        Self::with_attributes(display, profile, entrypoint, &[])
+    }
+
+    /// A configuration for `profile` at `entrypoint`, on 4:2:0 surfaces,
+    /// with `attributes` (kind, value) besides.
+    pub fn with_attributes(
+        display: &Rc<Display>,
+        profile: i32,
+        entrypoint: i32,
+        attributes: &[(i32, u32)],
+    ) -> Result<Self, String> {
+        let mut list = vec![ConfigAttrib {
             kind: ATTRIB_RT_FORMAT,
             value: RT_FORMAT_YUV420,
-        };
+        }];
+        list.extend(
+            attributes
+                .iter()
+                .map(|&(kind, value)| ConfigAttrib { kind, value }),
+        );
+        let count = c_int::try_from(list.len()).map_err(|e| e.to_string())?;
         let mut id = INVALID_ID;
-        // SAFETY: one attribute, and an out pointer to a live local.
+        // SAFETY: `count` attributes in `list`, and an out pointer to a
+        // live local.
         let status = unsafe {
             (display.libva.functions.create_config)(
                 display.raw,
                 profile,
                 entrypoint,
-                &mut attribute,
-                1,
+                list.as_mut_ptr(),
+                count,
                 &mut id,
             )
         };

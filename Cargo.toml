@@ -152,7 +152,7 @@ sonora-simd = "0.2.0"
 # unsafe in our crate. See docs/research/huddle-video.md.
 rusty_h264-decoder = { version = "0.16", default-features = false, features = ["std", "asm"], optional = true }
 yuv = { version = "0.8.19", optional = true }
-# Decoding on the GPU, in the noslacking-video helper process
+# Decoding and encoding on the GPU, in the noslacking-video helper process
 # (crates/noslacking-video, which ships beside the app): the messages
 # the two exchange. Plain std; the helper itself is not a dependency.
 noslacking-video-ipc = { path = "crates/video-ipc", optional = true }
@@ -312,14 +312,16 @@ demo = []
 huddle-video = ["dep:rusty_h264-decoder", "dep:yuv", "dep:bytemuck", "dep:noslacking-video-ipc"]
 # Sending your camera in huddles: the camera, opened only while it is
 # on, encoded to H.264 on a thread of its own, with a self-preview in the
-# call bar. Independent of `huddle-video` (sending needs no decoder). Off
-# until it has been tried against Slack.
-huddle-camera = ["dep:rusty_h264-encoder", "dep:rusty_h264-common", "dep:nokhwa", "dep:yuv", "dep:bytemuck"]
+# call bar; on the GPU through the helper when it can. Independent of
+# `huddle-video` (sending needs no decoder). Off until it has been tried
+# against Slack.
+huddle-camera = ["dep:rusty_h264-encoder", "dep:rusty_h264-common", "dep:nokhwa", "dep:yuv", "dep:bytemuck", "dep:noslacking-video-ipc"]
 # Sharing your screen in huddles: a second Chime attendee (`#content`)
 # that sends only the screen, captured only while sharing, through the
 # ScreenCast portal and PipeWire (Linux, Wayland and Flatpak), the X
 # server (X11 without a portal) or xcap (macOS, Windows), encoded by the
-# camera's encoder. Off until it has been tried against Slack.
+# camera's encoder (the GPU's through the helper when it can). Off until
+# it has been tried against Slack.
 huddle-share = ["huddle-camera", "dep:ashpd", "dep:pipewire", "dep:x11rb", "dep:xcap", "dep:objc2-core-graphics"]
 # Colours code blocks that name their language (```` ```rust ````). Our own
 # small lexer, a few kilobytes; turn it off for plain code blocks.

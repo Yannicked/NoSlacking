@@ -24,11 +24,14 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use super::camera::I420;
-use super::camera_send::{SendControl, Sender, VideoFrame, hand_over, rtp_time};
+use super::camera_send::{
+    EncodeCounts, RETUNE_EVERY, RETUNE_GPU_EVERY, SendControl, VideoFrame, rtp_time, step_within,
+};
 use super::chime::VideoSend;
+use super::hardware::{self, Helper};
 use super::microphone::Running;
 use super::share::{FPS, Frames, MAX_SIZE, REDUCED_SIZE, ShareFrame, unchanged};
-use super::video_encoder::{Backend, Limits};
+use super::video_encoder::{EncodeTrouble, Encoded, Encoder, Limits, Settings};
 
 /// How SUBSCRIBE describes a share: what it sends at most.
 pub const DESCRIPTOR: VideoSend = VideoSend {
@@ -122,22 +125,178 @@ pub struct Encoding {
 impl Encoding {
     /// Starts encoding what arrives in `latest` into `frames`, as
     /// `control` (a share's: [`SendControl::new`] with
-    /// [`Limits::SHARE`]) says, with `backend`'s encoder.
+    /// [`Limits::SHARE`]) says: on the GPU through the video helper when
+    /// the setting is on and the helper encodes the size, else in
+    /// software.
     pub fn spawn(
         latest: Frames,
         frames: mpsc::Sender<VideoFrame>,
         control: SendControl,
-        backend: Backend,
+    ) -> Result<Self, String> {
+        Self::spawn_with(latest, frames, control, || {
+            hardware::enabled().then(hardware::shared).flatten()
+        })
+    }
+
+    /// The same, on the GPU through the helper `gpu` gives, if any.
+    pub fn spawn_with(
+        latest: Frames,
+        frames: mpsc::Sender<VideoFrame>,
+        control: SendControl,
+        gpu: impl FnOnce() -> Option<Helper> + Send + 'static,
     ) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let thread = std::thread::Builder::new()
             .name("noslacking-share-encoder".into())
-            .spawn(move || encode(&latest, &frames, &control, backend, &thread_stop))
+            .spawn(move || {
+                // Asked for here: starting the helper may take a moment.
+                let sender = Sender::new(gpu());
+                encode(&latest, &frames, &control, sender, &thread_stop);
+            })
             .map_err(|e| format!("no share encoder thread: {e}"))?;
         Ok(Self {
             _running: Running::new(stop, thread),
         })
+    }
+}
+
+/// The share's encoder as its thread keeps it: made for the picture's
+/// size (on the GPU while the helper serves, in software once it has
+/// failed), following the bandwidth estimate in steps (in place on the
+/// GPU; a new software encoder at most every [`RETUNE_EVERY`]), with
+/// keyframes when asked and after anything was lost.
+struct Sender {
+    encoder: Option<Encoder>,
+    gpu: Option<Helper>,
+    retuned: Option<Instant>,
+    last_keyframe: Option<Instant>,
+    force_keyframe: bool,
+    counts: EncodeCounts,
+    busy: Duration,
+}
+
+impl Sender {
+    fn new(gpu: Option<Helper>) -> Self {
+        Self {
+            encoder: None,
+            gpu,
+            retuned: None,
+            last_keyframe: None,
+            force_keyframe: false,
+            counts: EncodeCounts::default(),
+            busy: Duration::ZERO,
+        }
+    }
+
+    /// Mean encoding time a picture so far, in milliseconds.
+    fn mean_ms(&self) -> f64 {
+        self.busy.as_secs_f64() * 1000.0 / self.counts.encoded.max(1) as f64
+    }
+
+    /// Encodes `picture` as `control` says at `now`. `Err(Size)` when no
+    /// encoder takes its size (1080p without a GPU that encodes it): the
+    /// caller shrinks it. Any other failure is `Ok(None)`, and the next
+    /// picture starts afresh.
+    fn encode(
+        &mut self,
+        picture: &I420,
+        control: &SendControl,
+        now: Instant,
+    ) -> Result<Option<Encoded>, EncodeTrouble> {
+        let limits = control.limits();
+        let wanted = step_within(control.bitrate(), limits.max_bitrate);
+        let rebuild = match &mut self.encoder {
+            None => true,
+            Some(e) => {
+                let s = e.settings();
+                if (s.width, s.height) != (picture.width, picture.height) {
+                    true
+                } else if s.bitrate == wanted {
+                    false
+                } else if e.on_gpu() {
+                    if self.retuned.is_none_or(|at| now >= at + RETUNE_GPU_EVERY) {
+                        if !e.retune(wanted) {
+                            // The helper is gone: software from here on.
+                            self.gpu = None;
+                            self.counts.gpu_failures += 1;
+                        }
+                        self.retuned = Some(now);
+                    }
+                    false
+                } else {
+                    self.retuned.is_none_or(|at| now >= at + RETUNE_EVERY)
+                }
+            }
+        };
+        if rebuild {
+            let settings = Settings {
+                width: picture.width,
+                height: picture.height,
+                fps: FPS,
+                bitrate: wanted,
+                limits,
+            };
+            match Encoder::new(settings, self.gpu.as_ref()) {
+                Ok(fresh) => {
+                    log::info!(
+                        "huddle share: encoding {}x{} at {} kbit/s, {FPS} a second, {}",
+                        settings.width,
+                        settings.height,
+                        fresh.settings().bitrate / 1000,
+                        if fresh.on_gpu() {
+                            "on the GPU"
+                        } else {
+                            "in software"
+                        }
+                    );
+                    self.encoder = Some(fresh);
+                    self.retuned = Some(now);
+                }
+                Err(EncodeTrouble::Size(w, h)) => return Err(EncodeTrouble::Size(w, h)),
+                Err(error) => {
+                    self.counts.failed += 1;
+                    log::warn!("huddle share: {error}");
+                    return Ok(None);
+                }
+            }
+        }
+        let Some(active) = self.encoder.as_mut() else {
+            return Ok(None);
+        };
+        if std::mem::take(&mut self.force_keyframe) {
+            active.request_keyframe();
+        }
+        let started = Instant::now();
+        let was_on_gpu = active.on_gpu();
+        let encoded = match active.encode(picture) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                self.counts.failed += 1;
+                log::debug!("huddle share: {error}");
+                if was_on_gpu {
+                    // The GPU failed and software could not take over at
+                    // this size: software, shrunk, from here on.
+                    self.gpu = None;
+                    self.counts.gpu_failures += 1;
+                }
+                // The reference chain may be broken: start over.
+                self.encoder = None;
+                return Ok(None);
+            }
+        };
+        if was_on_gpu && !active.on_gpu() {
+            self.gpu = None;
+            self.counts.gpu_failures += 1;
+        }
+        self.busy += started.elapsed();
+        self.counts.encoded += 1;
+        self.counts.bytes += encoded.data.len() as u64;
+        if encoded.keyframe {
+            self.counts.keyframes += 1;
+            self.last_keyframe = Some(now);
+        }
+        Ok(Some(encoded))
     }
 }
 
@@ -156,10 +315,9 @@ fn encode(
     latest: &Frames,
     frames: &mpsc::Sender<VideoFrame>,
     control: &SendControl,
-    backend: Backend,
+    mut sender: Sender,
     stop: &AtomicBool,
 ) {
-    let mut sender = Sender::new(backend, "share");
     let mut gate = Gate::default();
     let mut held: Option<Held> = None;
     let mut size = MAX_SIZE;
@@ -197,14 +355,14 @@ fn encode(
         // A receiver's request a moment after a keyframe waits its turn.
         let asked = control.keyframe_wanted()
             && sender
-                .last_keyframe()
+                .last_keyframe
                 .is_none_or(|at| now >= at + KEYFRAME_GAP);
-        let Some(send) = gate.decide(now, current.pending, asked, sender.last_keyframe()) else {
+        let Some(next) = gate.decide(now, current.pending, asked, sender.last_keyframe) else {
             continue;
         };
-        if send == Next::Keyframe {
+        if next == Next::Keyframe {
             control.take_keyframe();
-            sender.restart();
+            sender.force_keyframe = true;
         }
         // A fresh picture carries its capture time; one sent again, now.
         let at = if current.pending {
@@ -215,8 +373,29 @@ fn encode(
         };
         current.pending = false;
         let started = Instant::now();
-        let Some(encoded) = sender.encode(&current.picture, FPS, control, now) else {
-            continue;
+        let encoded = match sender.encode(&current.picture, control, now) {
+            Ok(Some(encoded)) => encoded,
+            Ok(None) => continue,
+            Err(_) if size == MAX_SIZE => {
+                // No encoder here takes 1080p: 720p, which software does.
+                log::info!(
+                    "huddle share: no encoder for {}x{} here (no GPU that encodes it); \
+                     sending {}x{}",
+                    current.picture.width,
+                    current.picture.height,
+                    REDUCED_SIZE.0,
+                    REDUCED_SIZE.1
+                );
+                size = REDUCED_SIZE;
+                held = None;
+                continue;
+            }
+            Err(error) => {
+                counts.unusable += 1;
+                log::debug!("huddle share: {error}");
+                held = None;
+                continue;
+            }
         };
         window += 1;
         window_busy += started.elapsed();
@@ -228,8 +407,14 @@ fn encode(
             time,
             at,
         };
-        if !hand_over(frames, &mut sender, frame) {
-            break;
+        match frames.try_send(frame) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // What follows would refer to it: a keyframe next.
+                sender.counts.dropped += 1;
+                sender.force_keyframe = true;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => break,
         }
         if window >= SLOW_OVER {
             let mean = window_busy / window;
@@ -252,7 +437,7 @@ fn encode(
             log::info!(
                 "huddle share: {:?}, {counts:?}; {:.1} ms a picture; {} pictures replaced \
                  before encoding",
-                sender.counts(),
+                sender.counts,
                 sender.mean_ms(),
                 latest.replaced()
             );
@@ -260,7 +445,7 @@ fn encode(
     }
     log::info!(
         "huddle share: encoder stopped; {:?}, {counts:?}",
-        sender.counts()
+        sender.counts
     );
 }
 
@@ -355,7 +540,7 @@ mod tests {
         let latest = Frames::default();
         let (frames, mut out) = mpsc::channel(8);
         let control = SendControl::new(Limits::SHARE);
-        let encoding = Encoding::spawn(latest.clone(), frames, control.clone(), Backend::Software)
+        let encoding = Encoding::spawn_with(latest.clone(), frames, control.clone(), || None)
             .expect("a thread");
         let mut share = ShareControl::new(TestShare::new(latest.clone()));
         share
@@ -378,7 +563,8 @@ mod tests {
             .decode(&got[0].data)
             .expect("decodes")
             .expect("a picture");
-        assert_eq!((picture.width, picture.height), MAX_SIZE);
+        // Without a GPU, 1080p is shrunk to what software encodes.
+        assert_eq!((picture.width, picture.height), REDUCED_SIZE);
         while out.try_recv().is_ok() {}
         std::thread::sleep(Duration::from_millis(100));
         assert!(out.try_recv().is_err(), "nothing after it stopped");
@@ -392,7 +578,7 @@ mod tests {
         let (frames, mut out) = mpsc::channel(64);
         let control = SendControl::new(Limits::SHARE);
         let encoding =
-            Encoding::spawn(latest.clone(), frames, control, Backend::Software).expect("a thread");
+            Encoding::spawn_with(latest.clone(), frames, control, || None).expect("a thread");
         let still = super::super::camera::pattern(320, 240, 0, Duration::ZERO);
         let started = Instant::now();
         // Half a second of the same picture, 30 a second.
@@ -410,6 +596,84 @@ mod tests {
             sent += 1;
         }
         assert_eq!(sent, 1, "one picture for half a second of a still screen");
+    }
+
+    /// With a GPU that encodes 1080p (a pretend helper here), the test
+    /// screen goes out at 1080p from it, at the share's bitrate, not
+    /// shrunk to what software takes.
+    #[test]
+    fn a_gpu_shares_at_1080p() {
+        use super::super::hardware::pretend::{Act, Pretend, welcome};
+        use noslacking_video_ipc::{Reply, Request};
+        use std::sync::Mutex;
+        let opened: Arc<Mutex<Vec<(u32, u32, u32, u32)>>> = Arc::default();
+        let seen = Arc::clone(&opened);
+        let pretend = Pretend::new(move |request| match request {
+            Request::Hello { .. } => Act::Reply(welcome()),
+            Request::OpenEncoder {
+                width,
+                height,
+                fps,
+                bitrate,
+                ..
+            } => {
+                seen.lock()
+                    .expect("not poisoned")
+                    .push((*width, *height, *fps, *bitrate));
+                Act::Reply(Reply::Opened { id: 1 })
+            }
+            Request::Encode { force_keyframe, .. } => {
+                // A stand-in access unit: SPS, PPS and an IDR when asked,
+                // else a P slice.
+                let data = if *force_keyframe {
+                    vec![
+                        0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 1, 0, 0, 0, 1, 0x65, 1,
+                    ]
+                } else {
+                    vec![0, 0, 0, 1, 0x41, 1]
+                };
+                Act::Reply(Reply::Encoded {
+                    keyframe: *force_keyframe,
+                    data,
+                })
+            }
+            _ => Act::Reply(Reply::Done),
+        });
+        let helper = Helper::with_timeouts(
+            Arc::new(pretend),
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+        );
+        let latest = Frames::default();
+        let (frames, mut out) = mpsc::channel(8);
+        let encoding = Encoding::spawn_with(
+            latest.clone(),
+            frames,
+            SendControl::new(Limits::SHARE),
+            move || Some(helper),
+        )
+        .expect("a thread");
+        let mut share = ShareControl::new(TestShare::new(latest));
+        share
+            .start(&Choice::System { again: false })
+            .expect("started");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut got = Vec::new();
+        while got.len() < 2 && Instant::now() < deadline {
+            match out.try_recv() {
+                Ok(frame) => got.push(frame),
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        share.stop();
+        drop(encoding);
+        assert!(got.len() >= 2, "only {} frames", got.len());
+        assert!(got[0].keyframe);
+        let opened = opened.lock().expect("not poisoned").clone();
+        assert_eq!(
+            opened.first().map(|o| (o.0, o.1, o.2)),
+            Some((1920, 1080, 15))
+        );
     }
 
     #[test]

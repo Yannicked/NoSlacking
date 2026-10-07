@@ -2811,8 +2811,8 @@ msgstr "{name} (jij)"
 msgid "Huddles"
 msgstr "Huddles"
 
-msgid "Decode video on the graphics card"
-msgstr "Video op de videokaart decoderen"
+msgid "Use the graphics card for video"
+msgstr "De videokaart voor video gebruiken"
 
-msgid "When it can. Off: shared screens and cameras are always decoded by the processor."
-msgstr "Waar dat kan. Uit: gedeelde schermen en camera's worden altijd door de processor gedecodeerd."
+msgid "When it can: shared screens and cameras in, your camera out. Off: all on the processor."
+msgstr "Waar dat kan: gedeelde schermen en camera's binnen, je camera naar buiten. Uit: alles op de processor."

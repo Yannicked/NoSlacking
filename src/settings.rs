@@ -129,11 +129,13 @@ pub struct Settings {
     /// Direct messages closed in the sidebar, by workspace: each one's
     /// newest message when it was closed. Anything newer brings it back.
     pub closed: BTreeMap<String, BTreeMap<String, String>>,
-    /// Whether huddle video is decoded on the GPU when it can be (through
-    /// the `noslacking-video` helper); on by default, as it takes 3–6×
-    /// less CPU whenever pictures are shown smaller than they come
-    /// (docs/research/huddle-video.md §6), and software decodes whenever
-    /// the GPU cannot.
+    /// Whether huddle video is decoded, and our camera encoded, on the GPU
+    /// when it can be (through the `noslacking-video` helper); on by
+    /// default, as decoding takes 3–6× less CPU whenever pictures are
+    /// shown smaller than they come and encoding 10× less
+    /// (docs/research/huddle-video.md §6), and software takes over
+    /// whenever the GPU cannot. The key keeps its first name, from when it
+    /// was decoding only.
     pub hardware_video: bool,
     /// Whether your Slack app is known to be made from an older manifest,
     /// which Slack would not authorize with the newer scopes: sign-ins

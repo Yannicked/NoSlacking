@@ -3796,7 +3796,9 @@ dependencies = [
  "libc",
  "libloading",
  "noslacking-video-ipc",
+ "rusty_h264-common",
  "rusty_h264-decoder",
+ "rusty_h264-encoder",
  "sha2",
 ]
 
