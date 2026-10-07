@@ -24,7 +24,7 @@ use super::camera::{FPS, I420, Latest, MAX_HEIGHT, MAX_WIDTH};
 use super::chime::VideoSend;
 use super::hardware::{self, Helper};
 use super::microphone::Running;
-use super::video_encoder::{self, Encoder, Settings};
+use super::video_encoder::{self, Encoder, Limits, Settings};
 
 /// How SUBSCRIBE describes our camera: what it sends at most.
 pub const DESCRIPTOR: VideoSend = VideoSend {
@@ -38,10 +38,10 @@ pub const DESCRIPTOR: VideoSend = VideoSend {
 pub const QUEUE: usize = 8;
 /// The bitrate changes the software encoder follows at most this often:
 /// each change starts a new encoder, and so costs a keyframe.
-const RETUNE_EVERY: Duration = Duration::from_secs(8);
+pub(crate) const RETUNE_EVERY: Duration = Duration::from_secs(8);
 /// The GPU's encoder takes a new bitrate without a keyframe, so it
 /// follows the estimate's steps sooner.
-const RETUNE_GPU_EVERY: Duration = Duration::from_secs(1);
+pub(crate) const RETUNE_GPU_EVERY: Duration = Duration::from_secs(1);
 /// A keyframe asked for by a receiver at most this often: Chime may pass
 /// on several receivers' PLIs at once.
 const KEYFRAME_EVERY: Duration = Duration::from_millis(500);
@@ -71,6 +71,7 @@ pub struct VideoFrame {
 #[derive(Clone, Debug)]
 pub struct SendControl {
     shared: Arc<ControlShared>,
+    limits: Limits,
 }
 
 #[derive(Debug)]
@@ -79,34 +80,50 @@ struct ControlShared {
     bitrate: AtomicU32,
 }
 
+/// A camera's.
 impl Default for SendControl {
     fn default() -> Self {
-        Self {
-            shared: Arc::new(ControlShared {
-                keyframe: AtomicBool::new(false),
-                bitrate: AtomicU32::new(video_encoder::START_BITRATE),
-            }),
-        }
+        Self::new(Limits::CAMERA)
     }
 }
 
 impl SendControl {
+    /// The controls of an encoder kept within `limits`.
+    pub fn new(limits: Limits) -> Self {
+        Self {
+            shared: Arc::new(ControlShared {
+                keyframe: AtomicBool::new(false),
+                bitrate: AtomicU32::new(limits.bitrate(video_encoder::START_BITRATE)),
+            }),
+            limits,
+        }
+    }
+
+    /// What the encoder is kept within.
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
+    /// Whether a keyframe has been asked for and not yet made.
+    pub fn keyframe_wanted(&self) -> bool {
+        self.shared.keyframe.load(Ordering::Relaxed)
+    }
+
     /// The next picture should be a keyframe.
     pub fn want_keyframe(&self) {
         self.shared.keyframe.store(true, Ordering::Relaxed);
     }
 
     /// Whether a keyframe was asked for since the last call.
-    fn take_keyframe(&self) -> bool {
+    pub(crate) fn take_keyframe(&self) -> bool {
         self.shared.keyframe.swap(false, Ordering::Relaxed)
     }
 
     /// The bitrate to aim at, in bit/s, kept within what is sent.
     pub fn set_bitrate(&self, bitrate: u32) {
-        self.shared.bitrate.store(
-            bitrate.clamp(video_encoder::MIN_BITRATE, video_encoder::MAX_BITRATE),
-            Ordering::Relaxed,
-        );
+        self.shared
+            .bitrate
+            .store(self.limits.bitrate(bitrate), Ordering::Relaxed);
     }
 
     /// The bitrate aimed at now.
@@ -115,17 +132,22 @@ impl SendControl {
     }
 }
 
-/// The bitrate an encoder made for `wanted` uses: a few steps, so small
-/// swings of the estimate do not each cost a keyframe.
+/// The bitrate a camera's encoder made for `wanted` uses: a few steps, so
+/// small swings of the estimate do not each cost a keyframe.
 pub fn step(wanted: u32) -> u32 {
-    const STEPS: [u32; 7] = [
-        150_000, 250_000, 400_000, 600_000, 900_000, 1_300_000, 1_800_000,
+    step_within(wanted, video_encoder::MAX_BITRATE)
+}
+
+/// [`step`], up to `max` instead of the camera's most.
+pub fn step_within(wanted: u32, max: u32) -> u32 {
+    const STEPS: [u32; 8] = [
+        150_000, 250_000, 400_000, 600_000, 900_000, 1_300_000, 1_800_000, 2_500_000,
     ];
     STEPS
         .iter()
         .rev()
         .copied()
-        .find(|&s| s <= wanted)
+        .find(|&s| s <= wanted.min(max))
         .unwrap_or(STEPS[0])
 }
 
@@ -400,6 +422,7 @@ fn encode(sending: &Sending<'_>, mut gpu: Option<Helper>) {
                 height: picture.height,
                 fps: FPS,
                 bitrate: wanted,
+                limits: control.limits(),
             };
             match Encoder::new(settings, gpu.as_ref()) {
                 Ok(fresh) => {
@@ -529,6 +552,9 @@ pub struct CameraUplink {
     pub control: SendControl,
     /// Told when Chime takes no video from us (view only, its 206).
     pub refused: mpsc::Sender<()>,
+    /// How SUBSCRIBE describes what is sent: [`DESCRIPTOR`] for a camera,
+    /// the share's own for a screen share.
+    pub descriptor: VideoSend,
 }
 
 /// The test picture as a camera that is always on: for the probe's
@@ -721,6 +747,7 @@ mod tests {
                     height: *height as usize,
                     fps: *fps,
                     bitrate: *bitrate,
+                    limits: Limits::CAMERA,
                 };
                 *gpu_encoder.lock().expect("not poisoned") =
                     Some(video_encoder::VideoEncoder::new(settings).expect("an encoder"));

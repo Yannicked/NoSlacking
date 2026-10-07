@@ -145,6 +145,11 @@ pub struct Report {
     pub silent_frames: u64,
     /// What the probe saw of video, when it looked.
     pub video: Option<video::Summary>,
+    /// The error status Chime refused the join or a SUBSCRIBE with, if it
+    /// ended the session (403, 409, 509, …), or 206 when it took no video
+    /// from us: a screen share learns from it that the meeting has all
+    /// the shares it takes.
+    pub refused_status: Option<u32>,
 }
 
 /// What a session sends besides silence: frames from the microphone, and
@@ -503,6 +508,9 @@ impl Session<'_> {
     fn end(&mut self, ending: Ending) {
         log::info!("signaling: over: {ending}");
         self.report.ending = Some(ending.to_string());
+        if let Ending::Refused { status, .. } = &ending {
+            self.report.refused_status = Some(*status);
+        }
         if self.over.is_some() {
             return;
         }
@@ -1492,6 +1500,8 @@ struct CameraSide {
     keyframe_requests: u64,
     /// The bandwidth estimate last heard, in bit/s.
     estimate: Option<u64>,
+    /// How SUBSCRIBE describes it.
+    descriptor: super::chime::VideoSend,
 }
 
 #[cfg(feature = "huddle-camera")]
@@ -1511,6 +1521,7 @@ impl CameraSide {
             held: 0,
             keyframe_requests: 0,
             estimate: None,
+            descriptor: uplink.descriptor,
         }
     }
 }
@@ -1586,7 +1597,7 @@ impl Session<'_> {
         if let (Some(camera), Some(watch)) = (&self.camera, &mut self.video)
             && camera.on
         {
-            watch.set_sending(Some(super::camera_send::DESCRIPTOR));
+            watch.set_sending(Some(camera.descriptor));
         }
     }
 
@@ -1615,10 +1626,10 @@ impl Session<'_> {
         camera.need_keyframe = true;
         log::info!("media: camera {}", if on { "on" } else { "off" });
         if let Some(watch) = &mut self.video {
-            watch.set_sending(on.then_some(super::camera_send::DESCRIPTOR));
+            watch.set_sending(on.then_some(camera.descriptor));
         }
         if on && let Some(rtc) = &mut self.rtc {
-            let desired = u64::from(super::video_encoder::MAX_BITRATE) + AUDIO_SHARE_BPS;
+            let desired = u64::from(camera.descriptor.max_kbps) * 1000 + AUDIO_SHARE_BPS;
             rtc.bwe()
                 .set_desired_bitrate(str0m::bwe::Bitrate::bps(desired));
         }
@@ -1738,6 +1749,7 @@ impl Session<'_> {
     /// Chime takes no video from us: the camera goes off, and the one who
     /// turned it on hears why.
     fn refused(&mut self) {
+        self.report.refused_status = Some(206);
         if let Some(watch) = &mut self.video {
             watch.refuse_sending();
         }
@@ -1995,6 +2007,98 @@ mod tests {
         let (video, _, directions) = exchange(&mut watch, &mut ours, &mut chime_peer, made, now);
         assert_eq!(video, None, "the next SUBSCRIBE sends no camera");
         assert_eq!(directions[0], "inactive");
+    }
+
+    /// A screen share's own session is send-only: the `#content`
+    /// attendee's SUBSCRIBE goes DUPLEX with the share's 1080p, 15 fps,
+    /// 2.5 Mbit/s description on the send line, and asks to receive
+    /// nothing, however much video INDEX lists (as the JS SDK's
+    /// `NoVideoDownlinkBandwidthPolicy`), our own camera included.
+    #[cfg(feature = "huddle-share")]
+    #[test]
+    fn a_share_session_sends_and_receives_no_video() {
+        let relayed: SocketAddr = "203.0.113.5:50000".parse().expect("an address");
+        let local: SocketAddr = "192.168.1.2:40000".parse().expect("an address");
+        let mut ours = new_peer_with(relayed, local, false, true).expect("a peer");
+        let offer = make_offer(&mut ours).expect("an offer");
+        let mut chime_peer = RtcConfig::new()
+            .set_crypto_provider(Arc::new(dtls::provider()))
+            .build(Instant::now());
+        let server: SocketAddr = "192.0.2.10:3478".parse().expect("an address");
+        chime_peer.add_local_candidate(Candidate::host(server, "udp").expect("a candidate"));
+        let answer = chime_peer
+            .sdp_api()
+            .accept_offer(SdpOffer::from_sdp_string(&offer.sdp).expect("parses"))
+            .expect("accepted")
+            .to_sdp_string();
+        ours.sdp_api()
+            .accept_answer(
+                offer.pending,
+                SdpAnswer::from_sdp_string(&offer.mids.answer_from_chime(&answer)).expect("parses"),
+            )
+            .expect("taken");
+        // As the session makes it for a share: no probe options, no
+        // viewer, only something to send.
+        let mut watch = Watch::new(None, None, "A1#content");
+        watch.offered(offer.video);
+        let mut index = chime::frame(FrameType::Index, 1);
+        let video = |stream, attendee: &str| chime::proto::SdkStreamDescriptor {
+            stream_id: Some(stream),
+            group_id: Some(stream),
+            attendee_id: Some(attendee.into()),
+            media_type: Some(chime::proto::SdkStreamMediaType::Video as i32),
+            max_bitrate_kbps: Some(800),
+            ..Default::default()
+        };
+        index.index = Some(chime::proto::SdkIndexFrame {
+            sources: vec![video(7, "B2"), video(8, "C3#content"), video(9, "A1")],
+            ..Default::default()
+        });
+        let now = Instant::now();
+        let dtls_up = now - Duration::from_secs(10);
+        watch.frame(&index, now);
+        watch.set_sending(Some(super::super::share_send::DESCRIPTOR));
+        let made = watch
+            .reoffer(&mut ours, now, dtls_up, 0)
+            .or_else(|| watch.reoffer(&mut ours, now + Duration::from_secs(1), dtls_up, 0))
+            .expect("an offer to send");
+        let directions: Vec<String> = sdp::media_lines(&made.offer)
+            .iter()
+            .filter(|l| l.kind == "video")
+            .map(|l| l.direction.clone())
+            .collect();
+        assert_eq!(directions, ["sendrecv"], "one video line, ours, sending");
+        assert_eq!(made.receive_stream_ids, [0], "nothing to receive");
+        let frame = chime::subscribe(
+            &chime::Subscribe {
+                sdp_offer: String::new(),
+                audio_host: String::new(),
+                attendee_id: "A1#content".into(),
+                muted: true,
+                receive_stream_ids: made.receive_stream_ids,
+                video: made.video,
+            },
+            1,
+        );
+        let sub = frame.sub.expect("a subscribe");
+        assert_eq!(
+            sub.duplex,
+            Some(chime::proto::SdkStreamServiceType::Duplex as i32)
+        );
+        assert_eq!(sub.receive_stream_ids, [0]);
+        let [_, share] = &sub.send_streams[..] else {
+            panic!("{:?}", sub.send_streams);
+        };
+        assert_eq!(
+            (
+                share.width,
+                share.height,
+                share.framerate,
+                share.max_bitrate_kbps
+            ),
+            (Some(1920), Some(1080), Some(15), Some(2500))
+        );
+        assert_eq!(share.attendee_id.as_deref(), Some("A1#content"));
     }
 
     /// What one side of the pretend call does with `str0m`'s output:
@@ -2677,6 +2781,7 @@ mod tests {
                     on: on_rx,
                     control,
                     refused,
+                    descriptor: super::super::camera_send::DESCRIPTOR,
                 }),
                 (encoding, pattern, on, refusals),
             )
@@ -2864,6 +2969,342 @@ mod tests {
                 .any(|(_, level, payload)| payload[..] == SILENT_OPUS[..] && *level == Some(-127)),
             "silence after the mute"
         );
+    }
+
+    /// A screen share's own session against a pretend Chime on loopback
+    /// sockets: the signaling server is opened with the join token's
+    /// `#content`, sees JOIN and a SUBSCRIBE that asks to receive no
+    /// video, then a DUPLEX re-SUBSCRIBE describing the share at 1080p;
+    /// the media server receives the test screen as H.264 (720p: there is
+    /// no GPU here, and software shares at most that), asks once for a
+    /// keyframe, gets one, and decodes every frame. Ignored by default:
+    /// `cargo test --all-features -- --ignored loopback`.
+    #[cfg(feature = "huddle-share")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "opens loopback sockets and takes a few seconds"]
+    async fn loopback_share_session_sends_the_screen() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use std::sync::Mutex;
+        use str0m::media::KeyframeRequestKind;
+        use tokio_tungstenite::tungstenite::Message as Ws;
+        use turn::{Class, Message, Method, attr, read_xor_address, xor_address};
+
+        // Each SUBSCRIBE: whether DUPLEX, the receive ids, the video send
+        // stream's (width, height, max kbps).
+        type Subscribed = Vec<(bool, Vec<u32>, Option<(u32, u32, u32)>)>;
+        let subscribed: Arc<Mutex<Subscribed>> = Arc::default();
+        let signaling_subscribed = subscribed.clone();
+        // The share's frames the media server received, keyframe or not.
+        type Heard = Vec<(bool, Vec<u8>)>;
+        let heard: Arc<Mutex<Heard>> = Arc::default();
+        let media_heard = heard.clone();
+
+        let media_server: SocketAddr = "127.0.0.2:3478".parse().expect("an address");
+        let relayed: SocketAddr = "127.0.0.3:50000".parse().expect("an address");
+        let turn_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bound");
+        let turn_port = turn_socket.local_addr().expect("an address").port();
+        let (offers, mut offer_inbox) =
+            tokio::sync::mpsc::channel::<(String, tokio::sync::oneshot::Sender<String>)>(1);
+        tokio::spawn(async move {
+            let mut chime: Option<Rtc> = None;
+            let mut client: Option<SocketAddr> = None;
+            let mut buf = vec![0u8; 2048];
+            loop {
+                let now = Instant::now();
+                let mut wake = now + Duration::from_millis(20);
+                if let Some(rtc) = &mut chime {
+                    let _ = rtc.handle_input(Input::Timeout(now));
+                    loop {
+                        match rtc.poll_output() {
+                            Ok(Output::Timeout(at)) => {
+                                wake = wake.min(at);
+                                break;
+                            }
+                            Ok(Output::Transmit(t)) => {
+                                if let Some(client) = client {
+                                    let data =
+                                        Message::new(Method::Data, Class::Indication, [5; 12])
+                                            .with(
+                                                attr::XOR_PEER_ADDRESS,
+                                                xor_address(media_server, &[5; 12]),
+                                            )
+                                            .with(attr::DATA, t.contents.to_vec())
+                                            .encode(None);
+                                    let _ = turn_socket.send_to(&data, client).await;
+                                }
+                            }
+                            // The share: kept, and after five frames a
+                            // keyframe asked for, as a late receiver does.
+                            Ok(Output::Event(RtcEvent::MediaData(data)))
+                                if data.params.spec().codec == Codec::H264 =>
+                            {
+                                let count = media_heard.lock().map_or(0, |mut heard| {
+                                    heard.push((data.is_keyframe(), data.data.to_vec()));
+                                    heard.len()
+                                });
+                                if count == 5
+                                    && let Some(mut writer) = rtc.writer(data.mid)
+                                {
+                                    let _ = writer.request_keyframe(None, KeyframeRequestKind::Pli);
+                                }
+                            }
+                            Ok(Output::Event(_)) => {}
+                            Err(_) => break,
+                        }
+                    }
+                }
+                tokio::select! {
+                    offer = offer_inbox.recv() => {
+                        let Some((offer, reply)) = offer else { return };
+                        let offer = str0m::change::SdpOffer::from_sdp_string(&offer).expect("parses");
+                        let rtc = chime.get_or_insert_with(|| {
+                            let mut rtc = RtcConfig::new()
+                                .set_crypto_provider(Arc::new(dtls::provider()))
+                                .build(Instant::now());
+                            rtc.add_local_candidate(Candidate::host(media_server, "udp").expect("a candidate"));
+                            rtc
+                        });
+                        let answer = rtc.sdp_api().accept_offer(offer).expect("accepted");
+                        let _ = reply.send(answer.to_sdp_string());
+                    }
+                    got = turn_socket.recv_from(&mut buf) => {
+                        let Ok((n, from)) = got else { return };
+                        client = Some(from);
+                        let message = Message::decode(&buf[..n]).expect("STUN");
+                        match (message.method(), message.class) {
+                            (Some(Method::Send), Class::Indication) => {
+                                let peer = message.get(attr::XOR_PEER_ADDRESS)
+                                    .and_then(|v| read_xor_address(v, &message.transaction));
+                                if let (Some(rtc), Some(data), Some(peer)) = (&mut chime, message.get(attr::DATA), peer)
+                                    && peer == media_server
+                                    && let Ok(receive) = Receive::new(Protocol::Udp, relayed, media_server, data)
+                                {
+                                    let _ = rtc.handle_input(Input::Receive(Instant::now(), receive));
+                                }
+                            }
+                            (_, Class::Request) => {
+                                let extra = if message.method() == Some(Method::Allocate) {
+                                    vec![(attr::XOR_RELAYED_ADDRESS, xor_address(relayed, &message.transaction))]
+                                } else {
+                                    vec![]
+                                };
+                                let answer = Message {
+                                    method: message.method,
+                                    class: Class::Success,
+                                    transaction: message.transaction,
+                                    attributes: extra,
+                                }
+                                .encode(None);
+                                let _ = turn_socket.send_to(&answer, from).await;
+                            }
+                            _ => {}
+                        }
+                    }
+                    () = tokio::time::sleep_until(wake.into()) => {}
+                }
+            }
+        });
+
+        // The signaling server: the content attendee's socket.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bound");
+        let signaling_port = listener.local_addr().expect("an address").port();
+        tokio::spawn(async move {
+            let Ok((tcp, _)) = listener.accept().await else {
+                return;
+            };
+            #[allow(clippy::result_large_err, reason = "tungstenite's callback type")]
+            let check = |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                         mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                let protocols = request
+                    .headers()
+                    .get("Sec-WebSocket-Protocol")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                assert_eq!(protocols, "_aws_wt_session, the-token#content");
+                response.headers_mut().insert(
+                    "Sec-WebSocket-Protocol",
+                    tokio_tungstenite::tungstenite::http::HeaderValue::from_static("_aws_wt_session"),
+                );
+                Ok(response)
+            };
+            let mut ws = tokio_tungstenite::accept_hdr_async(tcp, check)
+                .await
+                .expect("a socket");
+            let reply = |frame: chime::Frame| Ws::Binary(chime::encode(&frame).into());
+            while let Some(Ok(message)) = ws.next().await {
+                let Ws::Binary(bytes) = message else { continue };
+                let frame = chime::decode(&bytes).expect("a frame");
+                match FrameType::try_from(frame.r#type) {
+                    Ok(FrameType::Join) => {
+                        let mut ack = chime::frame(FrameType::JoinAck, 1);
+                        ack.joinack = Some(chime::proto::SdkJoinAckFrame {
+                            turn_credentials: Some(chime::proto::SdkTurnCredentials {
+                                username: Some("u".into()),
+                                password: Some("p".into()),
+                                ttl: Some(300),
+                                uris: vec![format!("turn:127.0.0.1:{turn_port}?transport=udp")],
+                            }),
+                            ..Default::default()
+                        });
+                        let _ = ws.send(reply(ack)).await;
+                        // Others' camera and share, and our own camera:
+                        // none of it is for the share's session.
+                        let source =
+                            |stream: u32, attendee: &str| chime::proto::SdkStreamDescriptor {
+                                stream_id: Some(stream),
+                                group_id: Some(stream),
+                                attendee_id: Some(attendee.into()),
+                                media_type: Some(chime::proto::SdkStreamMediaType::Video as i32),
+                                max_bitrate_kbps: Some(300),
+                                ..Default::default()
+                            };
+                        let mut index = chime::frame(FrameType::Index, 2);
+                        index.index = Some(chime::proto::SdkIndexFrame {
+                            sources: vec![
+                                source(7, "B2"),
+                                source(8, "C3#content"),
+                                source(9, "A1"),
+                            ],
+                            num_participants: Some(3),
+                            ..Default::default()
+                        });
+                        let _ = ws.send(reply(index)).await;
+                    }
+                    Ok(FrameType::Subscribe) => {
+                        let sub = frame.sub.expect("a subscribe");
+                        let video = sub
+                            .send_streams
+                            .iter()
+                            .find(|s| {
+                                s.media_type == Some(chime::proto::SdkStreamMediaType::Video as i32)
+                            })
+                            .map(|s| {
+                                (
+                                    s.width.unwrap_or_default(),
+                                    s.height.unwrap_or_default(),
+                                    s.max_bitrate_kbps.unwrap_or_default(),
+                                )
+                            });
+                        if let Ok(mut subscribed) = signaling_subscribed.lock() {
+                            subscribed.push((
+                                sub.duplex
+                                    == Some(chime::proto::SdkStreamServiceType::Duplex as i32),
+                                sub.receive_stream_ids.clone(),
+                                video,
+                            ));
+                        }
+                        let offer = sub.sdp_offer.expect("an offer");
+                        let (answer_to, answer) = tokio::sync::oneshot::channel();
+                        let _ = offers.send((offer, answer_to)).await;
+                        let answer = answer.await.expect("an answer");
+                        let mut ack = chime::frame(FrameType::SubscribeAck, 3);
+                        ack.suback = Some(chime::proto::SdkSubscribeAckFrame {
+                            sdp_answer: Some(answer),
+                            ..Default::default()
+                        });
+                        let _ = ws.send(reply(ack)).await;
+                    }
+                    Ok(FrameType::Leave) => {
+                        let _ = ws.send(reply(chime::frame(FrameType::LeaveAck, 4))).await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let join = ChimeJoin {
+            call_id: Some("R1".into()),
+            meeting_id: Some("M1".into()),
+            media_region: Some("us-east-1".into()),
+            signaling_url: format!("ws://127.0.0.1:{signaling_port}/control/M1"),
+            turn_control_url: None,
+            audio_host_url: "127.0.0.1:1".into(),
+            attendee_id: "A1".into(),
+            external_user_id: Some("U1".into()),
+            join_token: super::super::join::JoinToken::new("the-token"),
+        }
+        .content();
+        // The test screen, encoded as a share is (no GPU in a test).
+        use super::super::camera_send::{QUEUE, SendControl};
+        use super::super::share::{Choice, Frames, ShareControl, TestShare};
+        use super::super::share_send::{self, Encoding};
+        let frames = Frames::default();
+        let mut capture = ShareControl::new(TestShare::new(frames.clone()));
+        capture
+            .start(&Choice::System { again: false })
+            .expect("the test screen");
+        let (encoded, encoded_in) = tokio::sync::mpsc::channel(QUEUE);
+        let control = SendControl::new(super::super::video_encoder::Limits::SHARE);
+        let encoding =
+            Encoding::spawn_with(frames, encoded, control.clone(), || None).expect("an encoder");
+        let (_on, on) = tokio::sync::watch::channel(true);
+        let (refused, _refusals) = tokio::sync::mpsc::channel(1);
+        let uplink = share_send::uplink(encoded_in, on, control, refused);
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(7)).await;
+            let _ = stop.send(true);
+        });
+        let (report, result) = listen(
+            &join,
+            None,
+            None,
+            stopped,
+            None,
+            None,
+            Video {
+                options: None,
+                viewer: None,
+                camera: Some(uplink),
+            },
+        )
+        .await;
+        drop(encoding);
+        capture.stop();
+
+        assert_eq!(result, Ok(()), "{report:?}");
+        assert_eq!(report.ending.as_deref(), Some("left"));
+        assert!(report.dtls_up.is_some(), "{report:?}");
+        assert!(
+            report.silent_frames > 20,
+            "silence on the audio line: {report:?}"
+        );
+        let subscribed = subscribed.lock().expect("subscribed").clone();
+        assert!(subscribed.len() >= 2, "{subscribed:?}");
+        assert!(
+            subscribed
+                .iter()
+                .all(|(_, ids, _)| ids.iter().all(|&id| id == 0)),
+            "the share receives no video: {subscribed:?}"
+        );
+        assert_eq!(subscribed[0], (false, vec![0], None), "audio first");
+        assert!(
+            subscribed[1..]
+                .iter()
+                .all(|s| s.0 && s.2 == Some((1920, 1080, 2500))),
+            "then both ways, described as 1080p: {subscribed:?}"
+        );
+        let heard = heard.lock().expect("heard").clone();
+        assert!(heard.len() >= 20, "{} frames of the share", heard.len());
+        assert!(heard[0].0, "the first is a keyframe");
+        assert!(
+            heard[5..].iter().any(|(keyframe, _)| *keyframe),
+            "a keyframe after the PLI"
+        );
+        let mut decoder = rusty_h264_decoder::Decoder::new();
+        for (_, unit) in &heard {
+            let picture = decoder.decode(unit).expect("decodes").expect("a picture");
+            assert_eq!(
+                (picture.width, picture.height),
+                super::super::share::REDUCED_SIZE,
+                "720p from software"
+            );
+        }
     }
 
     #[test]

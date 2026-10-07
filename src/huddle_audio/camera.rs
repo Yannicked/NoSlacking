@@ -303,25 +303,44 @@ pub struct Frame {
     pub at: Instant,
 }
 
-/// The newest frame from the camera, waiting for the encoder: put by the
-/// capture thread, taken by the encoder's. A frame not taken in time is
-/// replaced by the next, never queued, so a slow encoder sends fewer
-/// frames rather than late ones.
-#[derive(Clone, Default)]
-pub struct Latest {
-    shared: Arc<LatestShared>,
+/// The newest frame from the camera (or a shared screen), waiting for
+/// the encoder: put by the capture thread, taken by the encoder's. A
+/// frame not taken in time is replaced by the next, never queued, so a
+/// slow encoder sends fewer frames rather than late ones.
+pub struct Latest<T = Frame> {
+    shared: Arc<LatestShared<T>>,
 }
 
-#[derive(Default)]
-struct LatestShared {
-    slot: Mutex<Option<Frame>>,
+struct LatestShared<T> {
+    slot: Mutex<Option<T>>,
     ready: Condvar,
     /// Frames put, and frames replaced before they were taken.
     put: AtomicU64,
     replaced: AtomicU64,
 }
 
-impl std::fmt::Debug for Latest {
+impl<T> Clone for Latest<T> {
+    fn clone(&self) -> Self {
+        Self {
+            shared: self.shared.clone(),
+        }
+    }
+}
+
+impl<T> Default for Latest<T> {
+    fn default() -> Self {
+        Self {
+            shared: Arc::new(LatestShared {
+                slot: Mutex::new(None),
+                ready: Condvar::new(),
+                put: AtomicU64::new(0),
+                replaced: AtomicU64::new(0),
+            }),
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for Latest<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Latest")
             .field("put", &self.put_count())
@@ -330,8 +349,8 @@ impl std::fmt::Debug for Latest {
     }
 }
 
-impl Latest {
-    fn slot(&self) -> std::sync::MutexGuard<'_, Option<Frame>> {
+impl<T> Latest<T> {
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<T>> {
         self.shared
             .slot
             .lock()
@@ -339,7 +358,7 @@ impl Latest {
     }
 
     /// Puts `frame` in place of one not taken yet.
-    pub fn put(&self, frame: Frame) {
+    pub fn put(&self, frame: T) {
         if self.slot().replace(frame).is_some() {
             self.shared.replaced.fetch_add(1, Ordering::Relaxed);
         }
@@ -348,7 +367,7 @@ impl Latest {
     }
 
     /// The newest frame, waiting up to `wait` for one.
-    pub fn take(&self, wait: Duration) -> Option<Frame> {
+    pub fn take(&self, wait: Duration) -> Option<T> {
         let slot = self.slot();
         let (mut slot, _) = self
             .shared

@@ -33,6 +33,9 @@ pub struct Cli {
     /// `--send-test-video`: the probe sends a moving test picture as its
     /// camera (with the `huddle-camera` feature).
     pub send_test_video: bool,
+    /// `--send-test-share`: the probe shares a generated test screen
+    /// (with the `huddle-share` feature).
+    pub send_test_share: bool,
     /// `--video N`: how many video streams a huddle receives (app or probe).
     pub video: usize,
     /// `--video-h264-only`: huddles offer no VP8.
@@ -173,6 +176,11 @@ pub const FLAGS: &[Flag] = &[
         help: "Have the huddle probe send a moving test picture with a clock as its camera the whole time (never a real camera), to see in Slack that our video gets through. Needs a build with the huddle-camera feature",
     },
     Flag {
+        name: "send-test-share",
+        takes: Takes::Nothing(|cli| cli.send_test_share = true),
+        help: "Have the huddle probe share a generated 1080p test screen with a moving clock once the audio is live (never a real screen), as a second #content attendee, to see in Slack that our screen share gets through. Needs a build with the huddle-share feature",
+    },
+    Flag {
         name: "video",
         takes: Takes::One("N", |cli, v| number(v).map(|v| cli.video = v)),
         help: "When joining a huddle (in the app or the probe), receive up to N video streams once the audio is live (screen shares first), logging the codec, frames, keyframes and gaps of each; nothing is decoded or shown [default: 0, only Chime's video signaling is logged]",
@@ -215,7 +223,7 @@ pub const FLAGS: &[Flag] = &[
     Flag {
         name: "demo-view",
         takes: Takes::One("VIEW", |cli, v| text(v).map(|v| cli.demo_view = Some(v))),
-        help: "Open a view before the screenshot: thread, settings, sign-in, switcher, palette, picker, profile, share, upload, drafts, lightbox, media, previews, viewer-sheet, viewer-csv, viewer-zip, viewer-text, compact, held-media, shortcuts, delete-file, add-emoji, listening, talking or (with huddle-video) sharing, call-window or cameras, or (with huddle-camera) camera, and with both camera-window; --demo-size also sizes the call window",
+        help: "Open a view before the screenshot: thread, settings, sign-in, switcher, palette, picker, profile, share, upload, drafts, lightbox, media, previews, viewer-sheet, viewer-csv, viewer-zip, viewer-text, compact, held-media, shortcuts, delete-file, add-emoji, listening, talking or (with huddle-video) sharing, call-window or cameras, or (with huddle-camera) camera, and with both camera-window, or (with huddle-share) sharing-self or share-pick, and with huddle-video share-window; --demo-size also sizes the call window",
     },
     #[cfg(feature = "demo")]
     Flag {
@@ -595,6 +603,7 @@ mod tests {
             "huddle-region",
             "send-tone",
             "send-test-video",
+            "send-test-share",
         ] {
             assert!(names.contains(&huddle), "{huddle}");
         }
@@ -681,6 +690,8 @@ mod tests {
             assert!(!run(&["--huddle-probe", "T1", "C1"]).send_test_video);
             assert!(run(&["--huddle-probe", "T1", "C1", "--send-test-video"]).send_test_video);
             assert!(help().contains("--send-test-video"));
+            assert!(run(&["--huddle-probe", "T1", "C1", "--send-test-share"]).send_test_share);
+            assert!(help().contains("--send-test-share"));
         }
 
         #[test]

@@ -1078,6 +1078,35 @@ engineering, as for the rest of the session sign-in.
         V4L2, which would need `--device=all`.
   - [ ] Choosing the camera (Settings) when there is more than one;
         today the first is taken.
+  - [x] Stage 4 built, behind `huddle-share` (off by default; brings
+        `huddle-camera`), not yet tried against Slack: Share beside Mute
+        and Video (Ctrl+Shift+E), "You are sharing your screen" with Stop
+        sharing in the bar; the ScreenCast portal + PipeWire on Wayland
+        and in the Flatpak (the portal's own dialog, remembered for the
+        run; right click Share for something else), the X server on X11
+        without a portal and xcap on macOS/Windows (a picker in the bar);
+        captured only while sharing; a second Chime session as
+        `attendee#content` / `joinToken#content` that sends silence and
+        the screen and receives no video; 1080p on the GPU through the
+        helper, 720p in software; unchanged pictures skipped, a still
+        screen resent once a second, keyframes every 4 s and on PLI; the
+        two-share limit (206/509, or two shares already in INDEX) is a
+        toast. Details in the research note's Stage 4.
+  - [ ] Try Stage 4 against Slack: first the probe's test screen
+        (`cargo run --release --features huddle-share,huddle-video --
+        --huddle-probe TEAM CHANNEL --send-test-share`; does Slack accept
+        the `#content` join, show the share as ours on desktop, web and
+        mobile, with the clock moving? the log's "summary: share" lines
+        say how the share's session went), then the app on GNOME and KDE
+        (Wayland and X11), in the Flatpak, and with two others already
+        sharing. Does Slack need its own announcement of a share (none is
+        sent; HuddleFM shows none)?
+  - [ ] Shares: the portal's restore token kept across runs (persist mode
+        2, stored in the state folder) once it is clear users want that;
+        thumbnails in the picker; DMA-BUF frames from PipeWire straight
+        into the helper's VA-API encoder (no copy, see "All video in the
+        helper"); try xcap on a real Mac and Windows machine (built here
+        only against its signatures).
   - [ ] **All video in the helper (decided 2026-10-07).** The helper
         (`noslacking-video`) does everything that touches pixels; the app
         keeps the call (signaling, DTLS/SRTP, RTP, the UI) and all audio

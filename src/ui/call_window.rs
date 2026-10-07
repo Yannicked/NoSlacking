@@ -121,15 +121,19 @@ pub struct Controls {
     /// Your camera.
     #[cfg(feature = "huddle-camera")]
     pub camera: crate::huddle_camera::Cam,
+    /// Your screen share.
+    #[cfg(feature = "huddle-share")]
+    pub sharing: crate::huddle_share::Sharing,
 }
 
 impl Controls {
-    /// How many buttons the bar has: Mute and the camera only while
-    /// live, Leave always.
+    /// How many buttons the bar has: Mute, the camera and Share only
+    /// while live, Leave always.
     pub fn buttons(&self) -> usize {
         let camera = cfg!(feature = "huddle-camera");
+        let share = cfg!(feature = "huddle-share");
         1 + if self.live {
-            1 + usize::from(camera)
+            1 + usize::from(camera) + usize::from(share)
         } else {
             0
         }
@@ -438,6 +442,12 @@ fn control_bar(
             super::huddle_camera::camera_button(&mut row, palette, controls.camera, look)
         {
             actions.push(Action::Huddle(huddles::Action::Camera(action)));
+        }
+        #[cfg(feature = "huddle-share")]
+        if let Some(action) =
+            super::huddle_share::share_button(&mut row, palette, controls.sharing, look)
+        {
+            actions.push(Action::Huddle(huddles::Action::Share(action)));
         }
     }
     let leave = call_bar::leave_button(&mut row, palette, look);
@@ -864,6 +874,8 @@ mod tests {
                 mic,
                 #[cfg(feature = "huddle-camera")]
                 camera: crate::huddle_camera::Cam::Off,
+                #[cfg(feature = "huddle-share")]
+                sharing: crate::huddle_share::Sharing::Off,
             },
         }
     }
@@ -940,6 +952,24 @@ mod tests {
             pressed(&view(true, Mic::Muted), egui::Key::O),
             vec![huddles::Action::Camera(CamAction::On)]
         );
+    }
+
+    #[cfg(feature = "huddle-share")]
+    #[test]
+    fn the_share_shortcut_works_in_the_call_window() {
+        use crate::huddle_share::{ShareAction, Sharing};
+        assert_eq!(
+            pressed(&view(true, Mic::Muted), egui::Key::E),
+            vec![huddles::Action::Share(ShareAction::Start)]
+        );
+        let mut sharing = view(true, Mic::Muted);
+        sharing.controls.sharing = Sharing::On;
+        assert_eq!(
+            pressed(&sharing, egui::Key::E),
+            vec![huddles::Action::Share(ShareAction::Stop)]
+        );
+        // Joining: no Share yet.
+        assert_eq!(pressed(&view(false, Mic::Muted), egui::Key::E), vec![]);
     }
 
     #[test]

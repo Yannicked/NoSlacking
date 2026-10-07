@@ -15,6 +15,12 @@
 //! panicking; [`VideoEncoder::new`] also refuses sizes larger than this
 //! feature sends, so nothing past level 3.1 goes out.
 //!
+//! What may be asked of it depends on what is sent ([`Limits`]): a
+//! camera up to 1280×720, a screen share up to 1920×1080 on the GPU but
+//! only 1280×720 in software, which takes about 25–31 ms a 1080p picture
+//! on a fast laptop (docs/research/huddle-video.md, Stage 4), too much
+//! for 15 a second beside everything else.
+//!
 //! [`Encoder`] is what a sender holds: the GPU's encoder through the
 //! video helper ([`super::hardware`]) when the setting is on and the
 //! helper encodes the size, else this one. A GPU that fails, a helper
@@ -41,6 +47,57 @@ pub const MAX_BITRATE: u32 = 1_800_000;
 /// What sending starts at, before bandwidth estimation says more.
 pub const START_BITRATE: u32 = 600_000;
 
+/// What an encoder may be asked for: the largest picture (on the GPU;
+/// software stays within [`sendable`]) and the bitrates it is kept
+/// between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// The most pixels a picture may have.
+    pub max_pixels: usize,
+    /// The longest side, in pixels.
+    pub max_side: usize,
+    /// The least bitrate, in bit/s.
+    pub min_bitrate: u32,
+    /// The most, in bit/s.
+    pub max_bitrate: u32,
+}
+
+impl Limits {
+    /// A camera: up to 1280×720 (level 3.1), up to 1.8 Mbit/s.
+    pub const CAMERA: Self = Self {
+        max_pixels: MAX_PIXELS,
+        max_side: 2048,
+        min_bitrate: MIN_BITRATE,
+        max_bitrate: MAX_BITRATE,
+    };
+    /// A screen share: up to 1920×1080 (Slack's own shares arrive at that
+    /// size; the helper picks the level), up to 2.5 Mbit/s, the JS SDK's
+    /// ceiling for content (`setVideoMaxBandwidthKbps(2500)`).
+    pub const SHARE: Self = Self {
+        max_pixels: 1920 * 1088,
+        max_side: 1920,
+        min_bitrate: MIN_BITRATE,
+        max_bitrate: 2_500_000,
+    };
+
+    /// Whether `width`×`height` can be encoded and sent within these
+    /// limits (on the GPU; software also needs [`sendable`]).
+    pub fn fits(&self, width: usize, height: usize) -> bool {
+        width >= 16
+            && height >= 16
+            && width.is_multiple_of(2)
+            && height.is_multiple_of(2)
+            && width <= self.max_side
+            && height <= self.max_side
+            && width * height <= self.max_pixels
+    }
+
+    /// `bitrate` kept within these limits.
+    pub fn bitrate(&self, bitrate: u32) -> u32 {
+        bitrate.clamp(self.min_bitrate, self.max_bitrate)
+    }
+}
+
 /// What the encoder is set up for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -52,6 +109,8 @@ pub struct Settings {
     pub fps: u32,
     /// The average bitrate aimed at, in bit/s.
     pub bitrate: u32,
+    /// What it may be asked for.
+    pub limits: Limits,
 }
 
 /// Why a picture was not encoded.
@@ -117,7 +176,7 @@ impl VideoEncoder {
         // A keyframe may be forced any time.
         config.min_keyint = 1;
         config.framerate = fps as f32;
-        config.bitrate = settings.bitrate.clamp(MIN_BITRATE, MAX_BITRATE);
+        config.bitrate = settings.limits.bitrate(settings.bitrate);
         // The rate control's starting quality: a little coarser than its
         // default, so the first IDR is not a burst of a second's bits.
         config.qp = 30;
@@ -127,7 +186,7 @@ impl VideoEncoder {
             encoder,
             settings: Settings {
                 fps,
-                bitrate: config_bitrate(settings.bitrate),
+                bitrate: settings.limits.bitrate(settings.bitrate),
                 ..settings
             },
         })
@@ -173,8 +232,42 @@ impl VideoEncoder {
     }
 }
 
-fn config_bitrate(bitrate: u32) -> u32 {
-    bitrate.clamp(MIN_BITRATE, MAX_BITRATE)
+/// Packed BGRA (or BGRx: the fourth byte is ignored) with rows `stride`
+/// bytes apart as I420, BT.601 studio range, as WebRTC senders send it;
+/// an odd size loses its last row or column. `None` when the buffer is
+/// shorter than the size and stride say.
+pub fn from_bgra(data: &[u8], width: usize, height: usize, stride: usize) -> Option<I420> {
+    let (w, h) = (width & !1, height & !1);
+    if w == 0 || h == 0 || stride < width.checked_mul(4)? {
+        return None;
+    }
+    // Only the even rows are read, each `stride` apart.
+    let needed = stride.checked_mul(h)?;
+    if data.len() < needed {
+        return None;
+    }
+    let mut out = I420::black(w, h);
+    let size = |n: usize| u32::try_from(n).ok();
+    let mut planar = yuv::YuvPlanarImageMut {
+        y_plane: yuv::BufferStoreMut::Borrowed(&mut out.y),
+        y_stride: size(w)?,
+        u_plane: yuv::BufferStoreMut::Borrowed(&mut out.u),
+        u_stride: size(w / 2)?,
+        v_plane: yuv::BufferStoreMut::Borrowed(&mut out.v),
+        v_stride: size(w / 2)?,
+        width: size(w)?,
+        height: size(h)?,
+    };
+    yuv::bgra_to_yuv420(
+        &mut planar,
+        &data[..needed],
+        size(stride)?,
+        yuv::YuvRange::Limited,
+        yuv::YuvStandardMatrix::Bt601,
+        yuv::YuvConversionMode::Balanced,
+    )
+    .ok()?;
+    Some(out)
 }
 
 /// What does the encoding.
@@ -207,13 +300,18 @@ impl Encoder {
     /// An encoder for `settings`: through `gpu`'s helper if it encodes
     /// this size, else (or if opening fails) in software. Its first
     /// picture is an IDR.
+    ///
+    /// Within its [`Limits`] on the GPU; software takes no more than
+    /// [`sendable`], so a share larger than 1280×720 without a GPU that
+    /// encodes it is refused ([`EncodeTrouble::Size`]) and the sender
+    /// shrinks it.
     pub fn new(settings: Settings, gpu: Option<&Helper>) -> Result<Self, EncodeTrouble> {
-        if !sendable(settings.width, settings.height) {
+        if !settings.limits.fits(settings.width, settings.height) {
             return Err(EncodeTrouble::Size(settings.width, settings.height));
         }
         let settings = Settings {
             fps: settings.fps.clamp(1, 60),
-            bitrate: config_bitrate(settings.bitrate),
+            bitrate: settings.limits.bitrate(settings.bitrate),
             ..settings
         };
         if let Some(helper) = gpu
@@ -268,7 +366,7 @@ impl Encoder {
     /// the encoder can (the GPU's); false when it cannot, and a new
     /// encoder must be made for it (software's).
     pub fn retune(&mut self, bitrate: u32) -> bool {
-        let bitrate = config_bitrate(bitrate);
+        let bitrate = self.settings.limits.bitrate(bitrate);
         let Engine::Hardware(encoder) = &mut self.engine else {
             return false;
         };
@@ -395,6 +493,7 @@ mod tests {
             height,
             fps: 15,
             bitrate: 800_000,
+            limits: Limits::CAMERA,
         }
     }
 
@@ -539,6 +638,126 @@ mod tests {
                 .bitrate,
             MAX_BITRATE
         );
+        let mut share = settings(1280, 720);
+        share.limits = Limits::SHARE;
+        share.bitrate = u32::MAX;
+        assert_eq!(
+            Encoder::new(share, None)
+                .expect("an encoder")
+                .settings()
+                .bitrate,
+            2_500_000
+        );
+    }
+
+    /// A share may be 1080p on the GPU, which a camera may not be; in
+    /// software it is refused above 720p, so the sender shrinks it.
+    #[test]
+    fn a_share_is_up_to_1080p_on_the_gpu_and_720p_in_software() {
+        assert!(Limits::SHARE.fits(1920, 1080));
+        assert!(Limits::SHARE.fits(1080, 1920), "a portrait screen");
+        assert!(!Limits::SHARE.fits(1920, 1200), "more pixels than 1080p");
+        assert!(!Limits::SHARE.fits(2048, 512), "no side past 1920");
+        assert!(!Limits::CAMERA.fits(1920, 1080));
+        let mut share = settings(1920, 1080);
+        share.limits = Limits::SHARE;
+        assert_eq!(
+            Encoder::new(share, None).map(|_| ()),
+            Err(EncodeTrouble::Size(1920, 1080)),
+            "no GPU: not in software"
+        );
+        share.width = 1280;
+        share.height = 720;
+        let mut encoder = Encoder::new(share, None).expect("an encoder");
+        assert!(!encoder.on_gpu());
+        let picture = pattern(1280, 720, 0, Duration::ZERO);
+        assert!(encoder.encode(&picture).expect("encoded").keyframe);
+    }
+
+    #[test]
+    fn bgra_converts_to_studio_range_i420() {
+        let (width, height) = (64, 48);
+        // A grey ramp with a pad of 16 bytes on every row.
+        let stride = width * 4 + 16;
+        let mut data = vec![0u8; stride * height];
+        for row in 0..height {
+            for x in 0..width {
+                let level = u8::try_from(x * 255 / width).expect("a byte");
+                data[row * stride + x * 4..][..4].copy_from_slice(&[level, level, level, 255]);
+            }
+        }
+        let picture = from_bgra(&data, width, height, stride).expect("converted");
+        assert!(picture.whole());
+        assert!(
+            picture.y[width * 20 + 1] < 25,
+            "{}",
+            picture.y[width * 20 + 1]
+        );
+        assert!(picture.y[width * 20 + 62] > 220);
+        assert!(from_bgra(&data[..stride * 10], width, height, stride).is_none());
+        assert!(
+            from_bgra(&data, width, height, width).is_none(),
+            "stride too small"
+        );
+    }
+
+    /// What a share costs to encode in software, one thread: run with
+    /// `cargo test --release --features huddle-camera -- --ignored
+    /// share_encode_cost --nocapture`. A desktop that types a little
+    /// (most of the picture still, a band changing each frame), and one
+    /// where everything moves, the worst a share can be.
+    #[test]
+    #[ignore = "a measurement; run in release"]
+    #[allow(clippy::print_stdout, reason = "the measurement is for the reader")]
+    fn share_encode_cost() {
+        for (width, height, bitrate, whole) in [
+            (1920, 1080, 2_500_000, false),
+            (1920, 1080, 2_500_000, true),
+            (1280, 720, 1_500_000, false),
+            (1280, 720, 1_500_000, true),
+        ] {
+            let mut config = EncoderConfig::baseline(width, height);
+            config.preset = Preset::Fast;
+            config.gop_size = 60;
+            config.min_keyint = 1;
+            config.framerate = 15.0;
+            config.bitrate = bitrate;
+            config.qp = 30;
+            config.level_idc = 40;
+            let mut encoder = Rusty::new(config).expect("an encoder");
+            let still = pattern(width, height, 0, Duration::ZERO);
+            let mut times = Vec::new();
+            let mut bytes = 0usize;
+            for n in 0..60u64 {
+                let moving = pattern(width, height, n, Duration::from_millis(n * 66));
+                let picture = if whole {
+                    moving
+                } else {
+                    let mut picture = still.clone();
+                    let band = height / 2 * width;
+                    picture.y[band..].copy_from_slice(&moving.y[band..]);
+                    picture
+                };
+                let planes = YuvPlanes::tight(width, height, &picture.y, &picture.u, &picture.v)
+                    .expect("planes");
+                let started = std::time::Instant::now();
+                let data = encoder.encode_planes(&planes).expect("encoded");
+                times.push(started.elapsed());
+                bytes += data.len();
+            }
+            times.sort();
+            let mean = times.iter().sum::<Duration>() / u32::try_from(times.len()).unwrap_or(1);
+            let p95 = times[times.len() * 95 / 100];
+            let max = times[times.len() - 1];
+            let kbps = bytes * 8 * 15 / 60 / 1000;
+            let scene = if whole { "all moving" } else { "mostly still" };
+            println!(
+                "{width}x{height} {scene}: {:.1} ms mean, {:.1} p95, {:.1} max; {kbps} kbit/s",
+                mean.as_secs_f64() * 1e3,
+                p95.as_secs_f64() * 1e3,
+                max.as_secs_f64() * 1e3
+            );
+        }
     }
 }
 
@@ -561,6 +780,7 @@ mod gpu_tests {
             height: 240,
             fps: 15,
             bitrate: 600_000,
+            limits: Limits::CAMERA,
         }
     }
 

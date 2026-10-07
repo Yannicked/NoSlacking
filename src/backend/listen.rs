@@ -56,6 +56,9 @@ use crate::huddles::{Left, Listen};
 use crate::people;
 use crate::slack::Client;
 
+#[cfg(feature = "huddle-share")]
+mod share;
+
 /// The shortest time between two rosters sent to the interface. Chime
 /// sends volumes several times a second; the window need not wake for
 /// each, and a speaking mark held a moment longer reads as well.
@@ -79,6 +82,9 @@ struct Running {
     /// Whether the interface wants the camera on.
     #[cfg(feature = "huddle-camera")]
     camera: watch::Sender<bool>,
+    /// What the interface asks of the screen share.
+    #[cfg(feature = "huddle-share")]
+    share: mpsc::Sender<crate::huddle_share::ShareRequest>,
 }
 
 /// The one listening session there may be.
@@ -99,6 +105,9 @@ impl Listener {
         // Joined with the camera off.
         #[cfg(feature = "huddle-camera")]
         let (camera, camera_wanted) = watch::channel(false);
+        // Joined not sharing.
+        #[cfg(feature = "huddle-share")]
+        let (share, share_requests) = mpsc::channel(8);
         let controls = Controls {
             stopped,
             wanted,
@@ -106,6 +115,8 @@ impl Listener {
             wishes,
             #[cfg(feature = "huddle-camera")]
             camera_wanted,
+            #[cfg(feature = "huddle-share")]
+            share_requests,
         };
         tokio::spawn(run(client, team.clone(), channel, controls, sink));
         self.running = Some(Running {
@@ -116,7 +127,20 @@ impl Listener {
             wish,
             #[cfg(feature = "huddle-camera")]
             camera,
+            #[cfg(feature = "huddle-share")]
+            share,
         });
+    }
+
+    /// Starts, picks or stops sharing your screen in the huddle, if there
+    /// is one.
+    #[cfg(feature = "huddle-share")]
+    pub fn share(&mut self, request: crate::huddle_share::ShareRequest) {
+        if let Some(running) = &self.running
+            && let Err(error) = running.share.try_send(request)
+        {
+            log::warn!("huddle share: a request was dropped: {error}");
+        }
     }
 
     /// Turns the camera on or off in the huddle, if there is one.
@@ -407,6 +431,9 @@ struct Controls {
     /// Whether the camera should be on.
     #[cfg(feature = "huddle-camera")]
     camera_wanted: watch::Receiver<bool>,
+    /// What is asked of the screen share.
+    #[cfg(feature = "huddle-share")]
+    share_requests: mpsc::Receiver<crate::huddle_share::ShareRequest>,
 }
 
 /// The next list of who shares, or never while there is none.
@@ -444,6 +471,8 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
         wishes,
         #[cfg(feature = "huddle-camera")]
         camera_wanted,
+        #[cfg(feature = "huddle-share")]
+        share_requests,
     } = controls;
     let tell = |state: Listen| {
         sink.send(Event::People {
@@ -583,8 +612,34 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
             on: on_rx,
             control,
             refused,
+            descriptor: crate::huddle_audio::camera_send::DESCRIPTOR,
         };
         (Some(uplink), task, close_camera)
+    };
+    // The screen share: nothing captured until asked; its own session
+    // (the `#content` attendee) from then until it stops or this one
+    // ends.
+    #[cfg(feature = "huddle-share")]
+    let (share_task, close_share) = {
+        let (close_share, share_done) = oneshot::channel();
+        let share_sink = sink.clone();
+        let (share_team, share_channel) = (team.clone(), channel.clone());
+        let task = tokio::spawn(share::run(
+            joined.content(),
+            share_requests,
+            shares.clone(),
+            share_done,
+            move |news| {
+                share_sink.send(Event::People {
+                    team: share_team.clone(),
+                    event: people::Event::Share {
+                        channel: share_channel.clone(),
+                        news,
+                    },
+                });
+            },
+        ));
+        (task, close_share)
     };
     let listening = media::listen(
         &joined,
@@ -692,13 +747,18 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
             },
         }
     };
-    // Left: the microphone and the camera close before anything else.
+    // Left: the microphone, the camera and the share close before
+    // anything else.
     let _ = close_mic.send(());
     #[cfg(feature = "huddle-camera")]
     let _ = close_camera.send(());
+    #[cfg(feature = "huddle-share")]
+    let _ = close_share.send(());
     let _ = mic.await;
     #[cfg(feature = "huddle-camera")]
     let _ = camera_task.await;
+    #[cfg(feature = "huddle-share")]
+    let _ = share_task.await;
     // Stopping the device waits for its thread; not on this one.
     let _ = tokio::task::spawn_blocking(move || drop(speaker)).await;
     log::info!(

@@ -21,6 +21,8 @@ pub enum When {
     EnterNewLine,
     /// In builds that send your camera (the `huddle-camera` feature).
     Camera,
+    /// In builds that share your screen (the `huddle-share` feature).
+    Share,
 }
 
 /// One line of the sheet.
@@ -154,6 +156,10 @@ pub const GROUPS: &[Group] = &[
                 ..line("Turn the camera on / off", &["Cmd+Shift+O"])
             },
             Shortcut {
+                when: When::Share,
+                ..line("Share your screen / stop sharing", &["Cmd+Shift+E"])
+            },
+            Shortcut {
                 also: &["Cmd+Shift+Equals", "Cmd+Plus"],
                 ..line("Zoom in / out", &["Cmd+Equals", "Cmd+Minus"])
             },
@@ -183,6 +189,7 @@ pub fn shown(group: &Group, enter_sends: bool) -> impl Iterator<Item = &Shortcut
     group.shortcuts.iter().filter(move |s| match s.when {
         When::Always => true,
         When::Camera => cfg!(feature = "huddle-camera"),
+        When::Share => cfg!(feature = "huddle-share"),
         When::EnterSends => enter_sends,
         When::EnterNewLine => !enter_sends,
     })

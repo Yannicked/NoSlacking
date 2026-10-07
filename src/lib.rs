@@ -27,6 +27,8 @@ pub mod huddle_audio;
 #[cfg(feature = "huddle-camera")]
 pub mod huddle_camera;
 pub mod huddle_mic;
+#[cfg(feature = "huddle-share")]
+pub mod huddle_share;
 pub mod huddles;
 pub mod i18n;
 pub mod images;
