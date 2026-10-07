@@ -214,6 +214,17 @@ pub fn leave(now_ms: u64) -> Frame {
     frame
 }
 
+/// AUDIO_CONTROL: this attendee muted or unmuted their microphone, which
+/// is how the others see it. The JS SDK sends it from
+/// `DefaultSignalingClient.mute`, called on every mute and unmute
+/// (`ListenForVolumeIndicatorsTask.realtimeMuteAndUnmuteHandler`), while
+/// the track itself keeps sending, silence while muted.
+pub fn audio_control(muted: bool, now_ms: u64) -> Frame {
+    let mut frame = frame(FrameType::AudioControl, now_ms);
+    frame.audio_control = Some(proto::SdkAudioControlFrame { muted: Some(muted) });
+    frame
+}
+
 /// A ping (to keep the socket's path alive) or the pong that answers one.
 pub fn ping_pong(kind: proto::SdkPingPongType, ping_id: u32, now_ms: u64) -> Frame {
     let mut frame = frame(FrameType::PingPong, now_ms);
@@ -301,6 +312,9 @@ pub fn describe(frame: &Frame) -> String {
             sub.audio_host.as_deref().unwrap_or_default(),
             sub.audio_muted.unwrap_or_default()
         ));
+    }
+    if let Some(control) = &frame.audio_control {
+        add(format!("muted={}", control.muted.unwrap_or_default()));
     }
     if let Some(status) = &frame.audio_status {
         add(format!(
@@ -414,6 +428,14 @@ mod tests {
         assert_eq!(body.send_streams[0].attendee_id.as_deref(), Some("A1"));
         assert_eq!(body.audio_muted, Some(true));
         assert_eq!(round_trip(&leave(7)), leave(7));
+        let mute = audio_control(true, 6);
+        assert_eq!(round_trip(&mute), mute);
+        assert_eq!(mute.r#type, FrameType::AudioControl as i32);
+        assert_eq!(describe(&mute), "AUDIO_CONTROL muted=true");
+        assert_eq!(
+            describe(&audio_control(false, 6)),
+            "AUDIO_CONTROL muted=false"
+        );
         let pong = ping_pong(proto::SdkPingPongType::Pong, 9, 8);
         assert_eq!(round_trip(&pong), pong);
     }

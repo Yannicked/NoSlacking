@@ -2623,6 +2623,13 @@ msgstr "Luisteren in #{channel}"
 msgid "Listening with {name}"
 msgstr "Luisteren met {name}"
 
+# The same while your microphone is on.
+msgid "Talking in #{channel}"
+msgstr "Praten in #{channel}"
+
+msgid "Talking with {name}"
+msgstr "Praten met {name}"
+
 # How long you have been listening, as a clock (2:14).
 msgid "Live · {time}"
 msgstr "Live · {time}"
@@ -2638,6 +2645,9 @@ msgstr "Iedereen anders heeft de huddle verlaten"
 
 msgid "{name} (you, listening here)"
 msgstr "{name} (jij, luistert hier)"
+
+msgid "{name} (you, talking here)"
+msgstr "{name} (jij, praat hier)"
 
 # A huddle participant whose Slack account is not known.
 msgid "Someone"
@@ -2659,3 +2669,35 @@ msgid "{count} more person"
 msgid_plural "{count} more people"
 msgstr[0] "nog {count} persoon"
 msgstr[1] "nog {count} personen"
+
+# Talking in a huddle: the microphone opens only when you unmute.
+msgid "Unmute"
+msgstr "Dempen opheffen"
+
+msgid "Mute"
+msgstr "Dempen"
+
+msgid "Turning on…"
+msgstr "Aanzetten…"
+
+msgid "Your microphone is off. Unmute to talk ({shortcut})"
+msgstr "Je microfoon staat uit. Hef het dempen op om te praten ({shortcut})"
+
+msgid "Opening your microphone. Mute ({shortcut})"
+msgstr "Je microfoon wordt geopend. Dempen ({shortcut})"
+
+msgid "Your microphone is on: everyone hears you. Mute ({shortcut})"
+msgstr "Je microfoon staat aan: iedereen hoort je. Dempen ({shortcut})"
+
+msgid "Could not unmute: {error}"
+msgstr "Kon het dempen niet opheffen: {error}"
+
+msgid "no microphone could be opened"
+msgstr "er kon geen microfoon worden geopend"
+
+msgid "no microphone could be opened; check that Windows' privacy settings let apps use it"
+msgstr "er kon geen microfoon worden geopend; kijk of de privacyinstellingen van Windows apps de microfoon laten gebruiken"
+
+# The shortcut sheet's line for it.
+msgid "Mute / unmute the microphone"
+msgstr "Microfoon dempen / dempen opheffen"

@@ -299,6 +299,12 @@ impl Failure {
                 HuddleTrouble::Offer => t("the huddle's server did not take the audio setup"),
                 HuddleTrouble::Connect => t("the audio connection could not be made"),
                 HuddleTrouble::Lost => t("the audio connection was lost"),
+                // Windows keeps apps from the microphone until its privacy
+                // settings allow them; that is the likeliest cause there.
+                HuddleTrouble::Microphone if cfg!(windows) => t(
+                    "no microphone could be opened; check that Windows' privacy settings let apps use it",
+                ),
+                HuddleTrouble::Microphone => t("no microphone could be opened"),
             },
             Self::Slack(code) => return code.replace('_', " "),
             Self::Other(text) => return text.clone(),
@@ -325,6 +331,8 @@ pub enum HuddleTrouble {
     Connect,
     /// The session broke while listening.
     Lost,
+    /// No microphone would open on unmuting.
+    Microphone,
 }
 
 /// Why the system keyring did not do what was asked. The worker hands this
@@ -578,6 +586,8 @@ mod tests {
             Failure::Huddle(HuddleTrouble::Connect),
             #[cfg(feature = "huddle-audio")]
             Failure::Huddle(HuddleTrouble::Lost),
+            #[cfg(feature = "huddle-audio")]
+            Failure::Huddle(HuddleTrouble::Microphone),
             Failure::Slack("some_new_code".into()),
             Failure::Other("disk full".into()),
         ]

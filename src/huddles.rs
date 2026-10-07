@@ -241,6 +241,9 @@ pub enum Action {
     /// Leaves the huddle being listened to.
     #[cfg(feature = "huddle-audio")]
     Leave,
+    /// Mutes or unmutes the microphone in the huddle being listened to.
+    #[cfg(feature = "huddle-audio")]
+    Microphone(crate::huddle_mic::MicAction),
 }
 
 /// Applies a view's request.
@@ -281,6 +284,8 @@ pub fn apply(app: &mut App, action: Action) {
         }
         #[cfg(feature = "huddle-audio")]
         Action::Listen { team, channel } => listen::listen(app, team, channel),
+        #[cfg(feature = "huddle-audio")]
+        Action::Microphone(action) => crate::huddle_mic::apply(app, action),
         #[cfg(feature = "huddle-audio")]
         Action::Leave => listen::leave(app),
     }
@@ -424,6 +429,11 @@ pub fn handle(app: &mut App, team: &str, event: people::Event) -> Option<people:
         #[cfg(feature = "huddle-audio")]
         people::Event::Listening { channel, state } => {
             listen::heard(app, team, &channel, state);
+            None
+        }
+        #[cfg(feature = "huddle-audio")]
+        people::Event::Microphone { channel, news } => {
+            crate::huddle_mic::news(app, team, &channel, news);
             None
         }
         people::Event::InviteDeclined { result } => {

@@ -10,11 +10,16 @@
 //! find on Linux, macOS or Windows. It passes the RFC 8251 test vectors
 //! by its own account; it is young, and libopus (the `opus` crate) is the
 //! fallback if it ever decodes wrong.
+//!
+//! What is decoded is also handed to a [`RenderTap`] just before the
+//! device takes it: the far end the echo canceller needs while the
+//! microphone is open ([`super::processing`]).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::jitter::{CLOCK, Counts, FRAME, Jitter, Pull};
+use super::processing::RenderTap;
 
 /// Channels played: Chime's Opus is stereo-capable; mono comes out on
 /// both.
@@ -74,10 +79,12 @@ pub struct Decoded {
     /// Interleaved samples decoded and not yet played.
     samples: Vec<f32>,
     at: usize,
+    /// Where what is played goes for echo cancellation.
+    tap: Option<RenderTap>,
 }
 
 impl Decoded {
-    fn new(shared: Arc<Shared>) -> Result<Self, String> {
+    fn new(shared: Arc<Shared>, tap: Option<RenderTap>) -> Result<Self, String> {
         let decoder = opus_decoder::OpusDecoder::new(CLOCK, usize::from(CHANNELS))
             .map_err(|e| format!("no Opus decoder: {e}"))?;
         Ok(Self {
@@ -85,11 +92,21 @@ impl Decoded {
             decoder,
             samples: Vec::new(),
             at: 0,
+            tap,
         })
     }
 
-    /// Decodes what comes next into `self.samples`.
+    /// Decodes what comes next into `self.samples`, and shows it to the
+    /// tap.
     fn refill(&mut self) {
+        self.decode();
+        if let Some(tap) = &self.tap {
+            tap.push(&self.samples, usize::from(CHANNELS));
+        }
+    }
+
+    /// Decodes what comes next into `self.samples`.
+    fn decode(&mut self) {
         let pull = lock(&self.shared.jitter).pull();
         let room = self.decoder.max_frame_size_per_channel() * usize::from(CHANNELS);
         self.samples.resize(room, 0.0);
@@ -170,11 +187,12 @@ impl std::fmt::Debug for Speaker {
 
 impl Speaker {
     /// Opens the default output device on a thread of its own and starts
-    /// playing (silence, until frames come). Returns the speaker and its
-    /// feed, or why no device would open.
-    pub fn open() -> Result<(Self, Feed), String> {
+    /// playing (silence, until frames come), showing what it plays to
+    /// `tap`. Returns the speaker and its feed, or why no device would
+    /// open.
+    pub fn open(tap: Option<RenderTap>) -> Result<(Self, Feed), String> {
         let shared = Arc::new(Shared::default());
-        let source = Decoded::new(shared.clone())?;
+        let source = Decoded::new(shared.clone(), tap)?;
         let (opened, result) = std::sync::mpsc::channel();
         let thread_shared = shared.clone();
         let thread = std::thread::Builder::new()
@@ -238,7 +256,7 @@ mod tests {
         let feed = Feed {
             shared: shared.clone(),
         };
-        let mut decoded = Decoded::new(shared).expect("a decoder");
+        let mut decoded = Decoded::new(shared, None).expect("a decoder");
         for n in 0..4 {
             feed.push(n * FRAME, &SILENT_FRAME);
         }
@@ -254,7 +272,7 @@ mod tests {
     #[test]
     fn nothing_to_play_is_silence_not_the_end() {
         let shared = Arc::new(Shared::default());
-        let mut decoded = Decoded::new(shared.clone()).expect("a decoder");
+        let mut decoded = Decoded::new(shared.clone(), None).expect("a decoder");
         assert_eq!(decoded.by_ref().take(SILENCE * 3).count(), SILENCE * 3);
         shared.stop.store(true, Ordering::Relaxed);
         // What was decoded plays out, then it ends.
@@ -267,7 +285,7 @@ mod tests {
         let feed = Feed {
             shared: shared.clone(),
         };
-        let mut decoded = Decoded::new(shared).expect("a decoder");
+        let mut decoded = Decoded::new(shared, None).expect("a decoder");
         // A 20 ms TOC whose padding runs past the end: the buffer takes
         // it, the decoder not.
         for n in 0..3 {
@@ -276,5 +294,24 @@ mod tests {
         let samples: Vec<f32> = decoded.by_ref().take(3 * 960 * 2).collect();
         assert_eq!(samples.len(), 3 * 960 * 2);
         assert!(feed.played().broken > 0);
+    }
+
+    #[test]
+    fn what_plays_is_tapped_for_the_echo_canceller() {
+        let shared = Arc::new(Shared::default());
+        let feed = Feed {
+            shared: shared.clone(),
+        };
+        let tap = RenderTap::default();
+        tap.set_on(true);
+        let mut decoded = Decoded::new(shared, Some(tap.clone())).expect("a decoder");
+        for n in 0..4 {
+            feed.push(n * FRAME, &SILENT_FRAME);
+        }
+        // 80 ms of frames, then 60 ms of silence as the buffer runs dry:
+        // fourteen 10 ms frames of mono, silence included.
+        let played = decoded.by_ref().take(SILENCE * 6 + 4 * 960 * 2).count();
+        assert_eq!(played, SILENCE * 6 + 4 * 960 * 2);
+        assert_eq!(tap.take().len(), 14);
     }
 }

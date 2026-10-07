@@ -5,8 +5,10 @@
 //!
 //! It names the huddle (a click opens its conversation), says whether it
 //! is joining, live and for how long, or why it failed, shows who is in
-//! it with the speaking ringed and the muted marked, and offers Leave
-//! (also Ctrl+Shift+H) and Open in Slack, where you can talk.
+//! it with the speaking ringed and the muted marked (you as your
+//! microphone really is), and offers Leave (also Ctrl+Shift+H), the
+//! microphone's mute button while live (see [`super::huddle_mic`]) and
+//! Open in Slack.
 
 use egui::{Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke, Vec2};
 
@@ -31,6 +33,8 @@ struct Face {
     seed: String,
     muted: bool,
     speaking: bool,
+    /// You, listening here: always shown, last.
+    me: bool,
 }
 
 /// What the bar shows, gathered before drawing.
@@ -64,6 +68,10 @@ fn gather(
         .map(|person| {
             let user = person.user.as_deref().and_then(|id| workspace.user(id));
             let name = match (&person.user, person.me) {
+                (_, true) if listening.mic == crate::huddle_mic::Mic::Live => tf(
+                    "{name} (you, talking here)",
+                    &[("name", &workspace.user_label(&workspace.info.user_id))],
+                ),
                 (_, true) => tf(
                     "{name} (you, listening here)",
                     &[("name", &workspace.user_label(&workspace.info.user_id))],
@@ -75,15 +83,22 @@ fn gather(
                 name,
                 avatar: user.and_then(|u| u.avatar.clone()),
                 seed: person.user.clone().unwrap_or_default(),
-                muted: person.muted,
+                // Yours as it is here, not as Chime last said: the
+                // microphone is the truth, and Chime hears of it late.
+                muted: if person.me {
+                    listening.mic != crate::huddle_mic::Mic::Live
+                } else {
+                    person.muted
+                },
                 speaking: person.speaking,
+                me: person.me,
             }
         })
         .collect();
     Some(Bar {
         team: listening.team.clone(),
         channel: listening.channel.clone(),
-        title: huddles::title_text(place),
+        title: huddles::title_text(place, listening.mic == crate::huddle_mic::Mic::Live),
         status: huddles::status_text(&listening.phase, now),
         workspace: (workspaces.len() > 1).then(|| workspace.info.name.clone()),
         faces,
@@ -147,6 +162,11 @@ fn bar(
             ui.spacing_mut().item_spacing.y = 4.0;
             title_row(ui, palette, &bar, tint, settings, actions);
             status_row(ui, palette, &bar, &listening.phase, tint);
+            // The faces have a row of their own, so the buttons leave them
+            // room.
+            if !bar.faces.is_empty() {
+                ui.horizontal(|ui| faces(ui, palette, &bar.faces));
+            }
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -173,10 +193,13 @@ fn bar(
                         {
                             actions.push(Action::Huddle(huddles::Action::Leave));
                         }
+                        if matches!(listening.phase, Phase::Live { .. })
+                            && let Some(action) =
+                                super::huddle_mic::mute_button(ui, palette, listening.mic)
+                        {
+                            actions.push(Action::Huddle(huddles::Action::Microphone(action)));
+                        }
                     }
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        faces(ui, palette, &bar.faces);
-                    });
                 });
             });
         });
@@ -286,46 +309,30 @@ fn small_button(
     .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// The faces, as many as fit, then "+N"; the speaking ringed, the muted
-/// marked.
+/// Of `others` and, if `me`, your face, in room for `fit` faces: how many
+/// of the others show, and how many "+N" counts. Yours always shows, so
+/// the count is of the others alone.
+fn fitting(others: usize, me: bool, fit: usize) -> (usize, usize) {
+    let room = fit.max(1 + usize::from(me)) - usize::from(me);
+    if others <= room {
+        (others, 0)
+    } else {
+        // "+N" takes a face's room.
+        let shown = room.saturating_sub(1);
+        (shown, others - shown)
+    }
+}
+
+/// The faces, as many as fit, then "+N" and yours; the speaking ringed,
+/// the muted marked.
 fn faces(ui: &mut egui::Ui, palette: &Palette, faces: &[Face]) {
     ui.spacing_mut().item_spacing.x = FACE_GAP;
     let room = ui.available_width();
     let fit = ((room + FACE_GAP) / (FACE + FACE_GAP)).floor().max(1.0) as usize;
-    let (shown, more) = if faces.len() > fit {
-        (fit.saturating_sub(1), faces.len() - fit.saturating_sub(1))
-    } else {
-        (faces.len(), 0)
-    };
-    for face in &faces[..shown] {
-        let (rect, response) = ui.allocate_exact_size(Vec2::splat(FACE), Sense::hover());
-        let inner = rect.shrink(2.5);
-        super::paint_avatar(ui, inner, face.avatar.as_deref(), &face.name, &face.seed);
-        if face.speaking {
-            ui.painter().rect_stroke(
-                rect.shrink(0.75),
-                CornerRadius::same(8),
-                Stroke::new(2.0, ACTIVE),
-                egui::StrokeKind::Inside,
-            );
-        }
-        if face.muted {
-            let badge =
-                Rect::from_center_size(rect.right_bottom() - Vec2::splat(4.0), Vec2::splat(13.0));
-            ui.painter()
-                .circle_filled(badge.center(), 6.5, palette.surface);
-            Icon::MicOff
-                .image(palette.secondary, 9.0)
-                .paint_at(ui, Rect::from_center_size(badge.center(), Vec2::splat(9.0)));
-        }
-        let mut said = face.name.clone();
-        if face.speaking {
-            said = tf("{name}, speaking", &[("name", &said)]);
-        } else if face.muted {
-            said = tf("{name}, muted", &[("name", &said)]);
-        }
-        theme::describe(&response, egui::WidgetType::Image, &said);
-        response.on_hover_text(said);
+    let (others, mine): (Vec<&Face>, Vec<&Face>) = faces.iter().partition(|f| !f.me);
+    let (shown, more) = fitting(others.len(), !mine.is_empty(), fit);
+    for face in &others[..shown] {
+        one_face(ui, palette, face);
     }
     if more > 0 {
         let label = format!("+{more}");
@@ -347,5 +354,58 @@ fn faces(ui: &mut egui::Ui, palette: &Palette, faces: &[Face]) {
             "{count} more people",
             more as u32,
         ));
+    }
+    for face in mine {
+        one_face(ui, palette, face);
+    }
+}
+
+/// One face, ringed if speaking, marked if muted.
+fn one_face(ui: &mut egui::Ui, palette: &Palette, face: &Face) {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(FACE), Sense::hover());
+    let inner = rect.shrink(2.5);
+    super::paint_avatar(ui, inner, face.avatar.as_deref(), &face.name, &face.seed);
+    if face.speaking {
+        ui.painter().rect_stroke(
+            rect.shrink(0.75),
+            CornerRadius::same(8),
+            Stroke::new(2.0, ACTIVE),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if face.muted {
+        let badge =
+            Rect::from_center_size(rect.right_bottom() - Vec2::splat(4.0), Vec2::splat(13.0));
+        ui.painter()
+            .circle_filled(badge.center(), 6.5, palette.surface);
+        Icon::MicOff
+            .image(palette.secondary, 9.0)
+            .paint_at(ui, Rect::from_center_size(badge.center(), Vec2::splat(9.0)));
+    }
+    let mut said = face.name.clone();
+    if face.speaking {
+        said = tf("{name}, speaking", &[("name", &said)]);
+    } else if face.muted {
+        said = tf("{name}, muted", &[("name", &said)]);
+    }
+    theme::describe(&response, egui::WidgetType::Image, &said);
+    response.on_hover_text(said);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn your_face_always_shows_and_more_counts_the_others() {
+        // Room for everyone: all show, no "+N".
+        assert_eq!(fitting(3, true, 5), (3, 0));
+        assert_eq!(fitting(4, true, 5), (4, 0));
+        // Too many: one place goes to "+N", one to you.
+        assert_eq!(fitting(9, true, 5), (3, 6));
+        assert_eq!(fitting(9, false, 5), (4, 5));
+        // Hardly any room: still you, and the others as a count.
+        assert_eq!(fitting(4, true, 1), (0, 4));
+        assert_eq!(fitting(0, true, 1), (0, 0));
     }
 }

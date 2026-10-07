@@ -67,6 +67,7 @@ fn main() -> eframe::Result<()> {
                 seconds: cli.seconds,
                 region: cli.huddle_region.clone(),
                 settings: dirs.settings_file(),
+                send_tone: cli.send_tone,
             });
         std::process::exit(code);
     }
@@ -665,6 +666,15 @@ impl DemoSetup {
             #[cfg(feature = "huddle-audio")]
             Some("listening") => {
                 app.huddles.listening = Some(noslacking::demo::listening());
+                app.actions.push(Action::OpenConversation("C03".into()));
+            }
+            // The same with your microphone live.
+            #[cfg(feature = "huddle-audio")]
+            Some("talking") => {
+                app.huddles.listening = Some(noslacking::huddles::Listening {
+                    mic: noslacking::huddle_mic::Mic::Live,
+                    ..noslacking::demo::listening()
+                });
                 app.actions.push(Action::OpenConversation("C03".into()));
             }
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),

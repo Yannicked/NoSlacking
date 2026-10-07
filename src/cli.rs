@@ -31,6 +31,9 @@ pub struct Cli {
     /// `--huddle-region REGION`: the media region the probe asks for.
     #[cfg(feature = "huddle-audio")]
     pub huddle_region: Option<String>,
+    /// `--send-tone`: the probe joins unmuted and sends a quiet tone.
+    #[cfg(feature = "huddle-audio")]
+    pub send_tone: bool,
     /// `--demo`: run against a pretend Slack.
     #[cfg(feature = "demo")]
     pub demo: bool,
@@ -166,6 +169,12 @@ pub const FLAGS: &[Flag] = &[
         }),
         help: "The media region the huddle probe asks Slack for. Without it, the nearest is asked of AWS, falling back to us-east-1",
     },
+    #[cfg(feature = "huddle-audio")]
+    Flag {
+        name: "send-tone",
+        takes: Takes::Nothing(|cli| cli.send_tone = true),
+        help: "Have the huddle probe join unmuted and send a quiet 440 Hz tone the whole time (never the microphone), to hear in Slack that our audio gets through",
+    },
     #[cfg(feature = "demo")]
     Flag {
         name: "demo",
@@ -194,7 +203,7 @@ pub const FLAGS: &[Flag] = &[
     Flag {
         name: "demo-view",
         takes: Takes::One("VIEW", |cli, v| text(v).map(|v| cli.demo_view = Some(v))),
-        help: "Open a view before the screenshot: thread, settings, sign-in, switcher, palette, picker, profile, share, upload, drafts, lightbox, media, previews, viewer-sheet, viewer-csv, viewer-zip, viewer-text, compact, held-media, shortcuts, delete-file, add-emoji or (with huddle-audio) listening",
+        help: "Open a view before the screenshot: thread, settings, sign-in, switcher, palette, picker, profile, share, upload, drafts, lightbox, media, previews, viewer-sheet, viewer-csv, viewer-zip, viewer-text, compact, held-media, shortcuts, delete-file, add-emoji or (with huddle-audio) listening or talking",
     },
     #[cfg(feature = "demo")]
     Flag {
@@ -585,6 +594,7 @@ mod tests {
             names.contains(&"huddle-region"),
             cfg!(feature = "huddle-audio")
         );
+        assert_eq!(names.contains(&"send-tone"), cfg!(feature = "huddle-audio"));
         assert_eq!(names.contains(&"demo"), cfg!(feature = "demo"));
         assert_eq!(names.contains(&"demo-shot"), cfg!(feature = "demo"));
         assert_eq!(
@@ -669,6 +679,12 @@ mod tests {
                 assert_eq!(cli.seconds, 5);
                 assert_eq!(cli.huddle_region.as_deref(), Some("eu-west-1"));
             }
+        }
+
+        #[test]
+        fn send_tone_is_off_unless_asked() {
+            assert!(!run(&["--huddle-probe", "T1", "C1"]).send_tone);
+            assert!(run(&["--huddle-probe", "T1", "C1", "--send-tone"]).send_tone);
         }
 
         #[test]

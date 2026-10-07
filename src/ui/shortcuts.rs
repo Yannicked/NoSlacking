@@ -152,6 +152,10 @@ pub const GROUPS: &[Group] = &[
                 ..line("Leave the huddle", &["Cmd+Shift+H"])
             },
             Shortcut {
+                when: When::HuddleAudio,
+                ..line("Mute / unmute the microphone", &["Cmd+Shift+Space"])
+            },
+            Shortcut {
                 also: &["Cmd+Shift+Equals", "Cmd+Plus"],
                 ..line("Zoom in / out", &["Cmd+Equals", "Cmd+Minus"])
             },

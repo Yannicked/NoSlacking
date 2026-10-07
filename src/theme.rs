@@ -376,6 +376,7 @@ fastframe_icons::icons! {
         MessageCircle => "message-circle",
         MicOff => "mic-off",
         Messages => "messages-square",
+        Mic => lucide "mic",
         Paperclip => "paperclip",
         Pencil => lucide "pencil",
         Pin => lucide "pin",

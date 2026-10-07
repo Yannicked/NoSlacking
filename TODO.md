@@ -839,6 +839,67 @@ engineering, as for the rest of the session sign-in.
       unmuted, Chime's AUDIO_CONTROL for mute), echo cancellation and
       noise suppression, devices, reconnects. Who is talking is done (the
       call bar). Video and screen viewing after that (+4–8 weeks).
+      - Built, unproven against Slack (steps 1 and 2; also `huddle-audio`):
+        microphone → 48 kHz mono → WebRTC's audio processing → Opus → the
+        audio track we already send silence on. `src/huddle_audio/`:
+        `microphone` (cpal's default input, opened on a thread of its own
+        only while unmuted, closed on mute and on leaving; `MicControl`
+        is that rule, tested against a pretend device), `processing`
+        (**`sonora`** 0.2, WebRTC M145 in pure Rust: high-pass, AEC3,
+        noise suppression at High, AGC2's adaptive digital gain; the far
+        end tapped in `speaker` as it is decoded; stream delay guessed
+        from cpal's input latency + 40 ms, AEC3 measures the rest; the
+        sinc resampler for 44.1 kHz microphones; AGC2's RNN VAD for DTX),
+        `encoder` (**`opus-rs`** 0.1.34, libopus 1.6 in pure Rust, VOIP,
+        32 kbit/s VBR, behind an `Encoder` trait), `uplink` (10 → 20 ms
+        framing, DTX outside the encoder: 200 ms hangover, then one frame
+        in 20; RTP time +960 a frame counting the frames left out, the
+        marker bit after a gap; RFC 6464 levels, which `str0m` writes
+        when the answer takes `ssrc-audio-level`, as its offer asks).
+        Muting is signalled as the JS SDK does (`DefaultSignalingClient
+        .mute`: an AUDIO_CONTROL frame with `muted`, on every mute and
+        unmute; SUBSCRIBE carries the state at the time), while silence
+        keeps flowing. In the app: a mute button in the call bar beside
+        Leave (red while live; Cmd+Shift+Space), joined muted; your own
+        face there shows the microphone as it really is.
+        `--huddle-probe … --send-tone` joins unmuted and sends a quiet
+        440 Hz tone instead of the microphone, logging what was sent and
+        Chime's RTCP receiver reports every 5 s. The loopback test has the
+        pretend Chime decode our Opus and hear the mute.
+      - In-band FEC is off, an upstream `opus-rs` bug to report: with
+        0.1.34, `OpusEncoder::new(48000, 1, Application::Voip)`,
+        `use_inband_fec = true` and `packet_loss_perc = 10`, one second of
+        a 0.3 sine at 440 Hz decodes to 3.9 times the energy put in (5.2
+        times for a 120 Hz harmonic "vowel"; 2.7 to 3.3 with CBR; 1.8 to
+        4.6 across 16–40 kbit/s), frame levels swinging from -1 to -50
+        dBFS where -14 went in. `opus-decoder` and `opus-rs`'s own
+        decoder agree sample for sample, so the encoder's LBRR is at
+        fault. With FEC off: 0.95 to 0.98, as it should be; white noise
+        is fine either way. Turn it on when fixed;
+        `encoded_speech_decodes_back_with_both_decoders` shows it.
+        Playing stays on `opus-decoder`: `opus-rs`'s decoder conceals a
+        loss but cannot decode FEC.
+      - Cost: `opus-rs` (no dependencies; its unsafe is SIMD and
+        unchecked indexing), `sonora` and its six crates (unsafe only in
+        SIMD behind runtime CPU detection), `derive_more`; all
+        BSD-3-Clause or MIT/Apache, `cargo deny` passes. The default build
+        gains no crate. With `huddle-audio`, talking added 4.6 MB to the
+        release binary (49.3 to 54.0 MB, Linux x86-64, measured before
+        the move to OpenSSL).
+      - Packaging: macOS's Info.plist has `NSMicrophoneUsageDescription`
+        (ad-hoc signed without the hardened runtime, so no entitlement);
+        the Flatpak's `--socket=pulseaudio` carries recording too; on
+        Windows, a refused microphone says to check the privacy settings.
+      - Try it: first `cargo run --release --features huddle-audio --
+        --huddle-probe TEAM CHANNEL --seconds 60 --send-tone` (the others
+        should hear a quiet 440 Hz tone; the log shows what was sent and
+        Chime's receiver reports), then `cargo run --release --features
+        huddle-audio`, Listen and Unmute: with headphones (is the voice
+        clear, the level right?), then without (does the far end hear
+        itself back?).
+      - Not done: choosing the input device (the system's default for
+        now), a level meter, reconnects, a microphone that fails while
+        open (it logs and goes quiet; mute and unmute again).
 
 ## Media and file previews in the app (researched 2026-10-06)
 

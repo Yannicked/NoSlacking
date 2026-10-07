@@ -120,7 +120,7 @@ impl Hub {
                 log::debug!("{command:?} needs the workspace's client");
             }
             #[cfg(feature = "huddle-audio")]
-            Command::ListenHuddle { .. } | Command::LeaveHuddle => {
+            Command::ListenHuddle { .. } | Command::LeaveHuddle | Command::MuteHuddle { .. } => {
                 log::debug!("{command:?} is the worker's");
             }
             Command::Active => {
@@ -516,6 +516,19 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
             event: people::Event::Listening {
                 channel: "C03".into(),
                 state: crate::huddles::Listen::Ended(Ok(crate::huddles::Left::Asked)),
+            },
+        }],
+        // The demo has no microphone; it opens and closes as asked.
+        #[cfg(feature = "huddle-audio")]
+        Command::MuteHuddle { muted } => vec![Event::People {
+            team: team.to_owned(),
+            event: people::Event::Microphone {
+                channel: "C03".into(),
+                news: if muted {
+                    crate::huddle_mic::MicNews::Muted
+                } else {
+                    crate::huddle_mic::MicNews::Live
+                },
             },
         }],
         Command::DeclineHuddle { .. } => vec![Event::People {
