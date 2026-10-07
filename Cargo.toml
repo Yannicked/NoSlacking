@@ -84,12 +84,12 @@ chacha20poly1305 = { version = "0.11", default-features = false, features = ["al
 # Spell checking in the composer with the system's Hunspell dictionaries:
 # pure Rust (Helix's), MPL-2.0, two small dependencies.
 spellbook = "0.4.2"
-# Voice clips and sound files play in the app (the `audio` feature).
-# rodio drives the sound device through cpal (ALSA on Linux, so the
-# packages need libasound2) and decodes with symphonia (MPL-2.0, pure
-# Rust): AAC in MP4/M4A, MP3, Ogg Vorbis, FLAC and WAV. Symphonia has no
+# Voice clips, sound files and huddles play in the app. rodio drives the
+# sound device through cpal (ALSA on Linux, so the packages need
+# libasound2) and decodes with symphonia (MPL-2.0, pure Rust): AAC in
+# MP4/M4A, MP3, Ogg Vorbis, FLAC and WAV. Symphonia has no
 # Opus decoder; those open in the system's player.
-rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp4", "mp3", "vorbis", "flac", "wav"], optional = true }
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp4", "mp3", "vorbis", "flac", "wav"] }
 
 # Listening and talking in huddles (the `huddle-audio` feature, a spike;
 # see TODO.md).
@@ -237,10 +237,7 @@ assets = [
 ]
 
 [features]
-default = ["highlight", "bundled-emoji", "audio", "huddle-audio"]
-# Plays voice clips and sound files in the app. Without it they open in
-# the system's player, and the build needs no sound libraries.
-audio = ["dep:rodio"]
+default = ["highlight", "bundled-emoji", "huddle-audio"]
 # Compiles all of Noto Color Emoji (about 10 MB) into Linux and other Unix
 # builds, for desktops whose emoji font is one fastframe-emoji cannot draw
 # (COLRv1 only, as on Fedora). Without it the app reads
@@ -253,7 +250,7 @@ demo = []
 # Adds `noslacking --huddle-probe`. Needs OpenSSL's headers on Linux
 # (libssl-dev, openssl-devel); macOS and Windows build OpenSSL from
 # source, which needs Perl.
-huddle-audio = ["audio", "dep:prost", "dep:str0m", "dep:openssl", "dep:opus-decoder", "dep:hmac", "dep:md-5", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:tracing", "tokio/signal", "dep:opus-rs", "dep:sonora", "dep:sonora-agc2", "dep:sonora-common-audio", "dep:sonora-simd"]
+huddle-audio = ["dep:prost", "dep:str0m", "dep:openssl", "dep:opus-decoder", "dep:hmac", "dep:md-5", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:tracing", "tokio/signal", "dep:opus-rs", "dep:sonora", "dep:sonora-agc2", "dep:sonora-common-audio", "dep:sonora-simd"]
 # Watching screen shares in huddles: a call window with the share,
 # decoded on a thread of its own. Off until it has been tried against
 # Slack; needs `huddle-audio`.
