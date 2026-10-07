@@ -512,9 +512,10 @@ mod tests {
     }
 
     #[test]
-    fn a_hybrid_frame_that_panics_opus_decoder_is_lost_not_fatal() {
+    fn a_hybrid_frame_claiming_too_much_redundancy_plays() {
         // Two 76-byte hybrid frames claiming more redundancy than they
-        // hold: opus-decoder 0.1.1 slices out of range on it (TODO.md).
+        // hold: opus-decoder 0.1.1 sliced out of range on it; the patched
+        // copy (vendor/opus-decoder) drops the redundancy as libopus does.
         const BAD_HYBRID: [u8; 153] = [
             0x69, 0xaf, 0x0e, 0xe6, 0x85, 0x96, 0x57, 0x1b, 0xb5, 0x8c, 0xc1, 0xa2, 0x21, 0x35,
             0xa5, 0x94, 0x3d, 0x0d, 0x19, 0xd1, 0xc8, 0xe7, 0x7c, 0xd0, 0x63, 0x03, 0xbd, 0xc4,
@@ -532,14 +533,13 @@ mod tests {
         feed.push(0, &BAD_HYBRID);
         feed.push(2 * FRAME, &SILENT_FRAME);
         feed.push(3 * FRAME, &SILENT_FRAME);
-        // The bad packet's 40 ms in silence, then the two frames.
+        // The odd packet's 40 ms, then the two frames.
         let samples = decoded.by_ref().take(4 * 960 * 2).count();
         assert_eq!(samples, 4 * 960 * 2);
         let played = feed.played();
         assert_eq!(played.jitter.played, 3);
-        assert_eq!(played.broken, 1);
-        // Once opus-decoder refuses it instead, nothing restarts.
-        assert!(played.restarts <= 1);
+        assert_eq!(played.broken, 0);
+        assert_eq!(played.restarts, 0);
         assert!(!device.health.thread_gone());
     }
 

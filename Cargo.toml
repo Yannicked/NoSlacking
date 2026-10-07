@@ -293,18 +293,12 @@ debug = "line-tables-only"
 opt-level = 2
 debug = false
 
-# opus-decoder 0.1.1 keeps a CELT collapse mask in a u8 and shifts it by
-# up to 15 (src/celt/vq.rs:118); libopus keeps it in an unsigned int. With
-# overflow checks on, a transient frame with 16 short blocks panics on the
-# sound device's thread and the huddle goes quiet. Without them the shift
-# wraps to bit i mod 8, which the folding that follows (bands.rs,
-# post_tf_collapse_mask) maps to the same final mask as libopus's, so
-# release builds have always decoded these frames right. Debug builds now
-# decode them the same way. Drop this once opus-decoder is fixed (TODO.md).
-[profile.dev.package.opus-decoder]
-overflow-checks = false
-
 [patch.crates-io]
+# opus-decoder 0.1.1 with two fixes (vendor/opus-decoder/VENDORED.md): a
+# hybrid packet naming more redundancy bytes than it holds panicked (in
+# release too, which aborts the app), and frames with 16 short blocks
+# overflowed a shift in debug builds. Drop once upstream has both.
+opus-decoder = { path = "vendor/opus-decoder" }
 # crmne/egui apps-0.36, shared with ZapFast and Spotifast: egui 0.36.1 with
 # bidi shaping, egui's busy-loop fix and Wayland frame pacing. Every egui
 # crate comes from the same revision so they share one emath and epaint.

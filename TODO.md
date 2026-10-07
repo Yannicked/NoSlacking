@@ -902,9 +902,10 @@ engineering, as for the rest of the session sign-in.
         open (it logs and goes quiet; mute and unmute again).
 - [ ] **File upstream: opus-decoder's collapse mask overflows.** A real
       huddle stopped playing in a debug build: opus-decoder panicked on
-      the sound device's thread. We turn its overflow checks off in
-      `Cargo.toml` (`[profile.dev.package.opus-decoder]`); drop that once
-      a fixed release is out. To file at
+      the sound device's thread. Fixed in our patched copy
+      (`vendor/opus-decoder`, see its VENDORED.md; still unfixed on
+      Rusopus main `ecb22cf` as of 2026-10-07); drop the copy once a
+      fixed release is out. To file at
       <https://github.com/TadeuszWolfGang/Rusopus/issues>:
 
       > **`extract_collapse_mask` overflows its `u8` with 16 short blocks
@@ -959,15 +960,16 @@ engineering, as for the rest of the session sign-in.
       > final mask, so the output matched a `u32` build bit for bit over
       > 20,000 random packets. The panic is the only harm, but it takes
       > down the audio thread of whatever is decoding.
-- [ ] **File upstream, and weigh a patched copy: a malformed hybrid
-      packet panics opus-decoder in release builds too.** Found by
+- [ ] **File upstream: a malformed hybrid packet panics opus-decoder in
+      release builds too.** Fixed in our patched copy
+      (`vendor/opus-decoder`, libopus's `len*8 < ec_tell` check; still
+      unfixed on Rusopus main `ecb22cf`). Found by
       fuzzing while fixing the above: about 1 in 80,000 random packets.
       Our release builds abort on a panic, so any huddle participant (or
       Chime) sending such a packet closes NoSlacking for everyone
       listening; SRTP rules out corruption on the way, not a hostile
       sender. Debug builds catch it now (`audio::guard`). Until upstream
-      fixes it, the choices are a `[patch.crates-io]` copy with the
-      two-line check below, or living with it. To file:
+      fixes it we carry the copy. To file:
 
       > **Hybrid redundancy longer than the frame: `range start index
       > out of range` (lib.rs:676 and :724)**

@@ -1,0 +1,12 @@
+[package]
+name = "opus-decoder"
+version = "0.1.1"
+edition = "2024"
+rust-version = "1.85"
+description = "Pure-Rust Opus decoder — RFC 8251 conformant, no unsafe, no FFI"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/TadeuszWolfGang/Rusopus"
+publish = false
+
+[dependencies]
+thiserror = "2.0.18"
