@@ -2892,3 +2892,9 @@ msgstr "de verbinding van het gedeelde scherm is verbroken"
 
 msgid "the system did not allow screen sharing"
 msgstr "het systeem stond scherm delen niet toe"
+
+msgid "screen sharing needs NoSlacking's video helper (noslacking-video), which is missing or keeps failing"
+msgstr "voor scherm delen is de videohulp van NoSlacking (noslacking-video) nodig, en die ontbreekt of loopt steeds vast"
+
+msgid "NoSlacking's video helper stopped"
+msgstr "de videohulp van NoSlacking is gestopt"

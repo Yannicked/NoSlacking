@@ -1,8 +1,13 @@
 //! The worker's side of sharing your screen (the `huddle-share` feature):
-//! the capture, its encoder and the share's own session, started when the
-//! interface asks and stopped when it asks, when the huddle is left, when
-//! the share's session fails or Chime refuses it, or when the capture
-//! ends by itself.
+//! the share in the video helper, its sending thread and the share's own
+//! session, started when the interface asks and stopped when it asks,
+//! when the huddle is left, when the share's session fails or Chime
+//! refuses it, or when the capture ends by itself.
+//!
+//! The helper (`noslacking-video`, its screen lane) does everything that
+//! touches the screen: it says what can be shared (nothing to list where
+//! the system has its own dialog), shows that dialog, captures and
+//! encodes. No helper, no sharing: the interface says so.
 //!
 //! A share is a second Chime attendee, as in the JS SDK's
 //! `DefaultContentShareController`: the same meeting, `attendeeId#content`
@@ -15,34 +20,45 @@
 //! shares were only ever seen as Chime's `#content` sources, and no
 //! Slack call announcing one is known (HuddleFM shows none). The log
 //! says so when a share starts, so a real run can tell.
+//!
+//! A helper that crashes while sharing ends the share with "the video
+//! helper stopped" rather than starting it again on its own: a new
+//! capture may need the system's dialog again, and a crash there could
+//! repeat; pressing Share again starts a fresh helper (it is started
+//! again a few times, as for decoding).
 
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::failure::{Failure, HuddleTrouble};
 use crate::huddle_audio::camera_send::SendControl;
+use crate::huddle_audio::helper::{self, Lane, RemoteShare, ShareTrouble};
 use crate::huddle_audio::join::ChimeJoin;
 use crate::huddle_audio::media::{self, Stage};
-use crate::huddle_audio::share::{Choice, ShareControl, ShareError, Source, System, may_share};
-use crate::huddle_audio::share_send::{self, Encoding};
+use crate::huddle_audio::share::{Source, may_share, problem_failure};
+use crate::huddle_audio::share_send::{self, Encoding, Ending};
 use crate::huddle_audio::video::Share;
 use crate::huddle_audio::video_encoder::Limits;
 use crate::huddle_share::{ShareNews, ShareRequest};
+use noslacking_video_ipc::ShareChoice;
 
 /// How long the share's session gets to leave (LEAVE, then LEAVE_ACK)
 /// once told to stop.
 const LEAVE_WAIT: Duration = Duration::from_secs(4);
 
-/// What a capture that did not start tells the interface.
-pub fn capture_failure(error: &ShareError) -> Failure {
-    Failure::Huddle(match error {
-        ShareError::Cancelled => HuddleTrouble::ShareCancelled,
-        ShareError::Denied => HuddleTrouble::ShareDenied,
-        ShareError::Unavailable => HuddleTrouble::NoScreenCapture,
-        ShareError::Gone => HuddleTrouble::ShareGone,
-        ShareError::Failed(_) => HuddleTrouble::ShareCapture,
-    })
+/// The portal's restore token from the last share, for this run of the
+/// app: sharing again shares the same without its dialog. Kept here
+/// rather than in the helper so a restarted helper still has it.
+static RESTORE: Mutex<String> = Mutex::new(String::new());
+
+/// What a share the helper could not start or keep tells the interface.
+pub fn start_failure(trouble: &ShareTrouble) -> Failure {
+    match trouble {
+        ShareTrouble::Problem(problem, _) => problem_failure(*problem),
+        ShareTrouble::Lost(_) => Failure::Huddle(HuddleTrouble::ShareHelperLost),
+    }
 }
 
 /// What the share's session ending by itself tells the interface: `None`
@@ -65,13 +81,13 @@ pub fn session_failure(
     }))
 }
 
-/// A share running: its session, its encoder, what ends it.
+/// A share running: its session, its sending thread, what ends it.
 struct Live {
     halt: watch::Sender<bool>,
     session: tokio::task::JoinHandle<(media::Report, Result<(), media::Failure>)>,
     encoding: Option<Encoding>,
-    /// Told when the capture ends by itself.
-    ended: watch::Receiver<bool>,
+    /// Told when the share ends by itself (capture ended, helper failed).
+    ended: watch::Receiver<Option<Ending>>,
     /// Told when Chime takes no video from the share.
     refusals: mpsc::Receiver<()>,
     /// Told once the share's connection is up.
@@ -80,30 +96,40 @@ struct Live {
     _on: watch::Sender<bool>,
 }
 
+/// What the interface asked, for the blocking thread that asks the
+/// helper.
+enum Begin {
+    /// Share: the system's dialog, or the list for the call bar.
+    Start {
+        /// Choose afresh.
+        again: bool,
+    },
+    /// Share this one of the listed sources.
+    Pick(String),
+}
+
 /// What a start on the blocking thread came to.
 enum Step {
     /// No dialog of the system's: these can be picked.
     Choose(Vec<Source>),
-    /// The capture started, or why not.
-    Started(Result<(), ShareError>),
+    /// The share started in the helper, or why not.
+    Started(Result<RemoteShare, Failure>),
 }
-
-type Starting = tokio::task::JoinHandle<(ShareControl<System>, Step)>;
-
-/// How a share's session ended, or its task failing.
-type Ended = Result<(media::Report, Result<(), media::Failure>), tokio::task::JoinError>;
 
 /// What a running share has to say.
 enum LiveEvent {
     /// Its connection came up (or its session went before it did).
     Up(bool),
-    /// The capture ended by itself.
-    CaptureEnded,
+    /// It ended by itself.
+    Ended(Ending),
     /// Chime takes no video from it.
     Refused,
     /// Its session ended by itself.
     Over(Box<Ended>),
 }
+
+/// How a share's session ended, or its task failing.
+type Ended = Result<(media::Report, Result<(), media::Failure>), tokio::task::JoinError>;
 
 /// The running share's next news, or never while none runs.
 async fn live_event(live: &mut Option<Live>) -> LiveEvent {
@@ -127,16 +153,16 @@ async fn live_event(live: &mut Option<Live>) -> LiveEvent {
             *up = None;
             LiveEvent::Up(ok)
         }
-        () = async {
+        ending = async {
             loop {
-                if *ended.borrow_and_update() {
-                    return;
+                if let Some(ending) = ended.borrow_and_update().clone() {
+                    return ending;
                 }
                 if ended.changed().await.is_err() {
                     return std::future::pending().await;
                 }
             }
-        } => LiveEvent::CaptureEnded,
+        } => LiveEvent::Ended(ending),
         () = async {
             if refusals.recv().await.is_none() {
                 std::future::pending::<()>().await;
@@ -147,7 +173,7 @@ async fn live_event(live: &mut Option<Live>) -> LiveEvent {
 }
 
 /// A start under way finishing, or never.
-async fn started(starting: &mut Option<Starting>) -> Option<(ShareControl<System>, Step)> {
+async fn started(starting: &mut Option<tokio::task::JoinHandle<Step>>) -> Option<Step> {
     match starting {
         Some(job) => {
             let done = job.await.ok();
@@ -158,14 +184,53 @@ async fn started(starting: &mut Option<Starting>) -> Option<(ShareControl<System
     }
 }
 
-/// Starts the share's session and encoder for a capture that started.
-fn go_live(
-    content: &ChimeJoin,
-    frames: crate::huddle_audio::share::Frames,
-) -> Result<Live, String> {
+/// Asks the helper for what `begin` says, on a blocking thread: the
+/// sources, the system's dialog, the capture all wait on another process
+/// and on the user.
+fn begin(begin: Begin) -> Step {
+    let Some(helper) = helper::shared(Lane::Screen).filter(|h| !h.given_up()) else {
+        log::warn!("huddle share: no video helper: no sharing");
+        return Step::Started(Err(Failure::Huddle(HuddleTrouble::NoVideoHelper)));
+    };
+    let lost = |helper: &helper::Helper, trouble: ShareTrouble| {
+        log::warn!("huddle share: {trouble:?}");
+        if helper.given_up() && matches!(trouble, ShareTrouble::Lost(_)) {
+            Step::Started(Err(Failure::Huddle(HuddleTrouble::NoVideoHelper)))
+        } else {
+            Step::Started(Err(start_failure(&trouble)))
+        }
+    };
+    let choice = match begin {
+        Begin::Pick(id) => ShareChoice::Source(id),
+        Begin::Start { again } => match helper.sources() {
+            Ok((false, sources)) if !sources.is_empty() => return Step::Choose(sources),
+            Ok(_) => ShareChoice::System { again },
+            Err(trouble) => return lost(&helper, trouble),
+        },
+    };
+    let restore = RESTORE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    let bitrate = Limits::SHARE.bitrate(crate::huddle_audio::video_encoder::START_BITRATE);
+    match helper.start_share(choice, helper::gpu(), bitrate, &restore) {
+        Ok((share, token)) => {
+            if !token.is_empty() {
+                *RESTORE.lock().unwrap_or_else(PoisonError::into_inner) = token;
+            }
+            Step::Started(Ok(share))
+        }
+        Err(trouble) => lost(&helper, trouble),
+    }
+}
+
+/// Starts the share's session and sending thread for a share the helper
+/// started.
+fn go_live(content: &ChimeJoin, share: RemoteShare) -> Result<Live, String> {
     let (encoded, encoded_in) = mpsc::channel(crate::huddle_audio::camera_send::QUEUE);
     let control = SendControl::new(Limits::SHARE);
-    let encoding = Encoding::spawn(frames, encoded, control.clone())?;
+    let (ending, ended) = watch::channel(None);
+    let encoding = Encoding::spawn(share, encoded, control.clone(), ending)?;
     let (on, on_rx) = watch::channel(true);
     let (refused, refusals) = mpsc::channel(1);
     let uplink = share_send::uplink(encoded_in, on_rx, control, refused);
@@ -198,47 +263,35 @@ fn go_live(
         halt,
         session,
         encoding: Some(encoding),
-        ended: watch::channel(false).1,
+        ended,
         refusals,
         up: Some(up_rx),
         _on: on,
     })
 }
 
-/// Stops a running share: its session leaves (waited for a moment), its
-/// encoder stops, then its capture.
-async fn stop_live(live: Option<Live>, control: &mut Option<ShareControl<System>>) {
-    if let Some(mut live) = live {
-        let _ = live.halt.send(true);
-        match tokio::time::timeout(LEAVE_WAIT, &mut live.session).await {
-            Ok(Ok((report, result))) => log_ending(&report, &result),
-            Ok(Err(error)) => log::warn!("huddle share: the session's task failed: {error}"),
-            Err(_) => {
-                log::warn!("huddle share: the session did not leave in time");
-                live.session.abort();
-            }
-        }
-        let encoding = live.encoding.take();
-        // Joining the encoder's thread waits on it: not on this one.
-        let _ = tokio::task::spawn_blocking(move || drop(encoding)).await;
-    }
-    stop_capture(control).await;
+/// Stops the sending thread, and with it the share in the helper, off
+/// the async threads (it waits on the helper).
+async fn stop_sending(encoding: Option<Encoding>) {
+    let _ = tokio::task::spawn_blocking(move || drop(encoding)).await;
 }
 
-/// Stops the capture (joining its threads, closing the portal's
-/// session) off the async threads.
-async fn stop_capture(control: &mut Option<ShareControl<System>>) {
-    let Some(mut held) = control.take().filter(ShareControl::is_capturing) else {
+/// Stops a running share: its session leaves (waited for a moment), then
+/// its sending thread and the capture.
+async fn stop_live(live: Option<Live>) {
+    let Some(mut live) = live else {
         return;
     };
-    let stopped = tokio::task::spawn_blocking(move || {
-        held.stop();
-        held
-    })
-    .await;
-    // A thread that failed took the control with it; the next share makes
-    // a fresh one.
-    *control = stopped.ok();
+    let _ = live.halt.send(true);
+    match tokio::time::timeout(LEAVE_WAIT, &mut live.session).await {
+        Ok(Ok((report, result))) => log_ending(&report, &result),
+        Ok(Err(error)) => log::warn!("huddle share: the session's task failed: {error}"),
+        Err(_) => {
+            log::warn!("huddle share: the session did not leave in time");
+            live.session.abort();
+        }
+    }
+    stop_sending(live.encoding.take()).await;
 }
 
 fn log_ending(report: &media::Report, result: &Result<(), media::Failure>) {
@@ -263,17 +316,7 @@ pub async fn run(
     mut done: oneshot::Receiver<()>,
     tell: impl Fn(ShareNews),
 ) {
-    let frames = crate::huddle_audio::share::Frames::default();
-    let fresh = || {
-        let system = System::new(frames.clone());
-        log::debug!(
-            "huddle share: screens are captured through {}",
-            system.name()
-        );
-        ShareControl::new(system)
-    };
-    let mut control = None;
-    let mut starting: Option<Starting> = None;
+    let mut starting: Option<tokio::task::JoinHandle<Step>> = None;
     // Asked to stop while a start was under way.
     let mut stop_after_start = false;
     let mut live: Option<Live> = None;
@@ -282,10 +325,10 @@ pub async fn run(
             _ = &mut done => break,
             request = requests.recv() => {
                 let Some(request) = request else { break };
-                let choice = match request {
+                let what = match request {
                     ShareRequest::Stop => {
                         stop_after_start = starting.is_some();
-                        stop_live(live.take(), &mut control).await;
+                        stop_live(live.take()).await;
                         tell(ShareNews::Off);
                         continue;
                     }
@@ -298,59 +341,38 @@ pub async fn run(
                             tell(ShareNews::Failed(Failure::Huddle(HuddleTrouble::ShareLimit)));
                             continue;
                         }
-                        Err(again)
+                        Begin::Start { again }
                     }
                     ShareRequest::Pick(id) => {
                         if starting.is_some() {
                             continue;
                         }
-                        Ok(Choice::Source(id))
+                        Begin::Pick(id)
                     }
                 };
-                stop_live(live.take(), &mut control).await;
-                let mut held = control.take().unwrap_or_else(fresh);
+                stop_live(live.take()).await;
                 stop_after_start = false;
-                // Asking the system (its dialog) and starting the capture
-                // wait on other threads and on the user: not on this one.
-                starting = Some(tokio::task::spawn_blocking(move || {
-                    let step = match choice {
-                        Ok(choice) => Step::Started(held.start(&choice)),
-                        Err(again) => match held.sources() {
-                            Ok(sources) if !sources.is_empty() => Step::Choose(sources),
-                            Ok(_) => Step::Started(held.start(&Choice::System { again })),
-                            Err(error) => Step::Started(Err(error)),
-                        },
-                    };
-                    (held, step)
-                }));
+                starting = Some(tokio::task::spawn_blocking(move || begin(what)));
             }
             finished = started(&mut starting) => {
-                let Some((held, step)) = finished else {
-                    log::warn!("huddle share: the capture's thread failed");
+                let Some(step) = finished else {
+                    log::warn!("huddle share: the start's thread failed");
                     tell(ShareNews::Failed(Failure::Huddle(HuddleTrouble::ShareCapture)));
                     continue;
                 };
-                control = Some(held);
                 if std::mem::take(&mut stop_after_start) {
-                    stop_capture(&mut control).await;
+                    if let Step::Started(Ok(share)) = step {
+                        let _ = tokio::task::spawn_blocking(move || drop(share)).await;
+                    }
                     continue;
                 }
                 match step {
                     Step::Choose(sources) => tell(ShareNews::Choose(sources)),
-                    Step::Started(Err(error)) => {
-                        log::warn!("huddle share: {error}");
-                        tell(ShareNews::Failed(capture_failure(&error)));
-                    }
-                    Step::Started(Ok(())) => match go_live(&content, frames.clone()) {
-                        Ok(mut running) => {
-                            if let Some(ended) = control.as_ref().and_then(ShareControl::ended) {
-                                running.ended = ended;
-                            }
-                            live = Some(running);
-                        }
+                    Step::Started(Err(failure)) => tell(ShareNews::Failed(failure)),
+                    Step::Started(Ok(share)) => match go_live(&content, share) {
+                        Ok(running) => live = Some(running),
                         Err(why) => {
                             log::warn!("huddle share: {why}");
-                            stop_capture(&mut control).await;
                             tell(ShareNews::Failed(Failure::Huddle(HuddleTrouble::ShareCapture)));
                         }
                     },
@@ -362,14 +384,17 @@ pub async fn run(
                     tell(ShareNews::On);
                 }
                 LiveEvent::Up(false) => {}
-                LiveEvent::CaptureEnded => {
-                    log::info!("huddle share: the capture ended; stopping the share");
-                    stop_live(live.take(), &mut control).await;
-                    tell(ShareNews::Ended);
+                LiveEvent::Ended(ending) => {
+                    log::info!("huddle share: the share ended by itself ({ending:?}); stopping");
+                    stop_live(live.take()).await;
+                    tell(match ending {
+                        Ending::Ended => ShareNews::Ended,
+                        Ending::Failed(failure) => ShareNews::Failed(failure),
+                    });
                 }
                 LiveEvent::Refused => {
                     log::warn!("huddle share: Chime takes no video from the share (view only)");
-                    stop_live(live.take(), &mut control).await;
+                    stop_live(live.take()).await;
                     tell(ShareNews::Failed(Failure::Huddle(HuddleTrouble::ShareLimit)));
                 }
                 LiveEvent::Over(over) => {
@@ -386,37 +411,55 @@ pub async fn run(
                         }
                     };
                     if let Some(mut finished) = finished {
-                        let encoding = finished.encoding.take();
-                        let _ = tokio::task::spawn_blocking(move || drop(encoding)).await;
+                        stop_sending(finished.encoding.take()).await;
                     }
-                    stop_capture(&mut control).await;
                     tell(failure.map_or(ShareNews::Off, ShareNews::Failed));
                 }
             },
         }
     }
     // The huddle was left: everything stops. A start still waiting on the
-    // system's dialog stops its capture itself when it returns, as its
-    // control is dropped with it.
+    // system's dialog closes its share itself when it returns, as its
+    // share is dropped with the task's result.
     drop(starting.take());
-    stop_live(live.take(), &mut control).await;
+    stop_live(live.take()).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noslacking_video_ipc::ShareProblem;
 
     #[test]
-    fn capture_failures_have_their_words() {
-        for (error, trouble) in [
-            (ShareError::Cancelled, HuddleTrouble::ShareCancelled),
-            (ShareError::Denied, HuddleTrouble::ShareDenied),
-            (ShareError::Unavailable, HuddleTrouble::NoScreenCapture),
-            (ShareError::Gone, HuddleTrouble::ShareGone),
-            (ShareError::Failed("x".into()), HuddleTrouble::ShareCapture),
-        ] {
-            assert_eq!(capture_failure(&error), Failure::Huddle(trouble));
-        }
+    fn the_helpers_troubles_have_their_words() {
+        assert_eq!(
+            start_failure(&ShareTrouble::Problem(ShareProblem::Cancelled, "x".into())),
+            Failure::Huddle(HuddleTrouble::ShareCancelled)
+        );
+        assert_eq!(
+            start_failure(&ShareTrouble::Lost("crashed".into())),
+            Failure::Huddle(HuddleTrouble::ShareHelperLost)
+        );
+    }
+
+    /// Without the setting, a list from the helper (here its own code on
+    /// a thread, with pretend sources) goes to the call bar; a pick
+    /// starts the share in the helper.
+    #[test]
+    fn the_helper_lists_what_can_be_shared_and_shares_the_pick() {
+        let Step::Choose(sources) = begin(Begin::Start { again: false }) else {
+            panic!("a list for the call bar");
+        };
+        assert_eq!(sources, helper::pretend::sources());
+        let Step::Started(Ok(share)) = begin(Begin::Pick(sources[1].id.clone())) else {
+            panic!("a share");
+        };
+        drop(share);
+        // A source that is not there (any more).
+        let Step::Started(Err(failure)) = begin(Begin::Pick("gone".into())) else {
+            panic!("no share");
+        };
+        assert_eq!(failure, Failure::Huddle(HuddleTrouble::ShareGone));
     }
 
     /// Chime refusing the share (206 view only, 509 at capacity) is the

@@ -2,16 +2,18 @@
 //! `huddle-share` feature): off on joining, captured only once you choose
 //! to share, stopped when you stop or leave.
 //!
-//! Share screen asks the worker to start. Where the system has its own
-//! dialog (the ScreenCast portal on Wayland and in the Flatpak) that is
-//! where the user picks; elsewhere the worker answers with the screens
-//! and windows there are, and the call bar shows them to pick from. The
-//! share is "starting" until its own connection to the huddle is up,
-//! then "on" ("You are sharing your screen", Stop sharing). A choice
-//! cancelled, a capture the system refused, a huddle that already has two
-//! shares, or a share that failed says so and is off. The worker keeps
-//! the rule itself (see [`crate::huddle_audio::share`]); this is only its
-//! picture.
+//! Share screen asks the worker to start, which asks the video helper
+//! (`noslacking-video`, which captures and encodes the screen). Where the
+//! system has its own dialog (the ScreenCast portal on Wayland and in
+//! the Flatpak) that is where the user picks; elsewhere the helper lists
+//! the screens and windows there are, and the call bar shows them to
+//! pick from. The share is "starting" until its own connection to the
+//! huddle is up, then "on" ("You are sharing your screen", Stop
+//! sharing). A choice cancelled, a capture the system refused, a huddle
+//! that already has two shares, no helper installed, or a share (or its
+//! helper) that failed says so and is off. The worker and the helper
+//! keep the rule itself (see [`crate::huddle_audio::share`]); this is
+//! only its picture.
 
 use crate::app::App;
 use crate::backend;
@@ -278,6 +280,8 @@ mod tests {
             HuddleTrouble::ShareLimit,
             HuddleTrouble::ShareRefused,
             HuddleTrouble::ShareLost,
+            HuddleTrouble::NoVideoHelper,
+            HuddleTrouble::ShareHelperLost,
         ] {
             let failed = ShareNews::Failed(Failure::Huddle(trouble));
             assert_eq!(told(Sharing::Starting, &failed), Sharing::Off);

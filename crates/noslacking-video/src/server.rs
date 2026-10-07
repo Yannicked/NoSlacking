@@ -76,8 +76,9 @@ fn failed(kind: FailKind, detail: &str) -> Reply {
     }
 }
 
-/// The most screen shares open at once: one is all the app makes.
-const MAX_SHARES: usize = 2;
+/// The most screen shares open at once: the app makes one; its tests,
+/// sharing one helper, a few.
+const MAX_SHARES: usize = 4;
 
 fn share_problem(trouble: Trouble) -> Reply {
     Reply::ShareProblem {
