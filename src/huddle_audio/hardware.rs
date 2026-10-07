@@ -1,5 +1,6 @@
-//! Video decoded on the GPU (the `huddle-video` feature), through
-//! `noslacking-video`, a helper process (crates/noslacking-video).
+//! Video decoded and encoded on the GPU (the `huddle-video` and
+//! `huddle-camera` features), through `noslacking-video`, a helper
+//! process (crates/noslacking-video).
 //!
 //! The platform video APIs are C libraries and GPU drivers, which take
 //! `unsafe` code this crate forbids, and a driver handed a stranger's
@@ -7,16 +8,17 @@
 //! this module starts the first time a stream could use it and talks to
 //! over its standard input and output (`noslacking-video-ipc`'s
 //! messages). The helper is found next to this program, else on `PATH`;
-//! without it there is no hardware decoding, and nothing else changes.
+//! without it there is no hardware video, and nothing else changes.
 //!
-//! Software (rusty_h264, [`super::decode`]) is always the fallback:
-//! hardware is used only for what the helper says it can do. A reply
-//! that does not come within a timeout counts as a crash; after a crash
-//! the helper is killed and started again on the next stream, at most
-//! [`MAX_RESTARTS`] times, and then never again until the app restarts.
-//! The stream that lost it asks for a keyframe and goes on in software.
-//! Nothing from the helper is trusted: replies are checked field by
-//! field, a picture's planes against its size, before use.
+//! Software (rusty_h264: `decode` for streams in, `video_encoder` for our
+//! camera out) is always the fallback: hardware is used only for what the
+//! helper says it can do. A reply that does not come within a timeout
+//! counts as a crash; after a crash the helper is killed and started
+//! again on the next stream, at most [`MAX_RESTARTS`] times, and then
+//! never again until the app restarts. A stream that lost it asks for a
+//! keyframe and goes on in software; our camera goes on in software with
+//! a keyframe. Nothing from the helper is trusted: replies are checked
+//! field by field, a picture's planes against its size, before use.
 
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
@@ -28,6 +30,7 @@ use std::time::Duration;
 
 use noslacking_video_ipc::{self as ipc, Capability, Codec, Direction, FailKind, Reply, Request};
 
+#[cfg(feature = "huddle-video")]
 use super::decode::Yuv;
 
 /// How many times a crashed or stuck helper is started again before
@@ -36,23 +39,25 @@ pub const MAX_RESTARTS: u32 = 3;
 /// How long the helper may take to start and say what it can do: the
 /// first open of a GPU driver can take a few hundred milliseconds.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long one frame may take. A 1080p frame takes a few milliseconds;
-/// a second means the driver hangs.
+/// How long one frame may take. A 1080p frame takes a few milliseconds
+/// to decode or encode; a second means the driver hangs.
 const CALL_TIMEOUT: Duration = Duration::from_secs(1);
 /// The helper's name, beside this program or on `PATH`.
 const HELPER: &str = "noslacking-video";
 
-/// Settings → Huddles → Hardware video decoding, set from the settings at
-/// start-up (on by default there). Off until then, so tests that want it
-/// turn it on for themselves.
+/// Settings → Huddles → Use the graphics card for video, set from the
+/// settings at start-up (on by default there). Off until then, so tests
+/// that want it turn it on for themselves.
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Turns hardware decoding on or off for streams that start from now on.
+/// Turns hardware video on or off for streams (and our camera) that
+/// start from now on.
 pub fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, Ordering::Relaxed);
 }
 
-/// Whether streams starting now may use hardware decoding.
+/// Whether streams starting now may decode, and our camera encode, on
+/// the GPU.
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
@@ -173,7 +178,7 @@ pub fn shared() -> Option<Helper> {
 /// its replies, so a helper that stops reading or answering cannot hold
 /// the caller past the timeout.
 struct Live {
-    requests: SyncSender<(u32, Vec<u8>)>,
+    requests: SyncSender<(u32, Request)>,
     replies: Receiver<Result<(u32, Reply), String>>,
     stop: Box<dyn FnMut() + Send>,
     seq: u32,
@@ -247,6 +252,16 @@ impl Helper {
     /// Whether the helper decodes `codec` at `width`×`height`, starting
     /// it if it is not running.
     pub fn decodes(&self, codec: Codec, width: u32, height: u32) -> bool {
+        self.can(codec, Direction::Decode, width, height)
+    }
+
+    /// Whether the helper encodes `codec` (for H.264, constrained
+    /// baseline) at `width`×`height`, starting it if it is not running.
+    pub fn encodes(&self, codec: Codec, width: u32, height: u32) -> bool {
+        self.can(codec, Direction::Encode, width, height)
+    }
+
+    fn can(&self, codec: Codec, direction: Direction, width: u32, height: u32) -> bool {
         let mut state = self.state();
         if self.ensure_started(&mut state).is_err() {
             return false;
@@ -254,7 +269,7 @@ impl Helper {
         state
             .capabilities
             .iter()
-            .any(|c| c.covers(codec, Direction::Decode, width, height))
+            .any(|c| c.covers(codec, direction, width, height))
     }
 
     /// Starts the helper if it is not running and says hello.
@@ -278,7 +293,7 @@ impl Helper {
         let hello = Request::Hello {
             version: ipc::VERSION,
         };
-        match self.exchange(state, &hello, self.hello_timeout) {
+        match self.exchange(state, hello, self.hello_timeout) {
             Ok(Reply::Welcome {
                 version,
                 backend,
@@ -310,7 +325,7 @@ impl Helper {
     fn exchange(
         &self,
         state: &mut State,
-        request: &Request,
+        request: Request,
         timeout: Duration,
     ) -> Result<Reply, Lost> {
         let Some(live) = state.live.as_mut() else {
@@ -318,7 +333,7 @@ impl Helper {
         };
         live.seq = live.seq.wrapping_add(1);
         let seq = live.seq;
-        if live.requests.send((seq, request.encode())).is_err() {
+        if live.requests.send((seq, request)).is_err() {
             return Err(self.fail(state, "its input closed"));
         }
         match live.replies.recv_timeout(timeout) {
@@ -351,7 +366,7 @@ impl Helper {
     }
 
     /// One request to a running helper, as part of decoder `generation`.
-    fn call(&self, generation: u64, request: &Request) -> Result<Reply, Lost> {
+    fn call(&self, generation: u64, request: Request) -> Result<Reply, Lost> {
         let mut state = self.state();
         if state.generation != generation || state.live.is_none() {
             return Err(Lost("the helper restarted".into()));
@@ -369,7 +384,7 @@ impl Helper {
             height,
         };
         let generation = state.generation;
-        match self.exchange(&mut state, &request, self.call_timeout)? {
+        match self.exchange(&mut state, request, self.call_timeout)? {
             Reply::Opened { id } => Ok(HwDecoder {
                 helper: self.clone(),
                 id,
@@ -386,6 +401,38 @@ impl Helper {
             other => Err(self.fail(&mut state, &format!("an answer to open: {other:?}"))),
         }
     }
+
+    /// Opens an encoder of `codec` (constrained baseline H.264) for
+    /// `width`×`height` pictures at `fps` and `bitrate` bit/s.
+    pub fn open_encoder(
+        &self,
+        codec: Codec,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate: u32,
+    ) -> Result<HwEncoder, Lost> {
+        let mut state = self.state();
+        self.ensure_started(&mut state)?;
+        let request = Request::OpenEncoder {
+            codec,
+            width,
+            height,
+            fps,
+            bitrate,
+        };
+        let generation = state.generation;
+        match self.exchange(&mut state, request, self.call_timeout)? {
+            Reply::Opened { id } => Ok(HwEncoder {
+                helper: self.clone(),
+                id,
+                generation,
+                size: (width, height),
+            }),
+            Reply::Failed { kind, detail } => Err(Lost(format!("{kind:?}: {detail}"))),
+            other => Err(self.fail(&mut state, &format!("an answer to open: {other:?}"))),
+        }
+    }
 }
 
 /// Starts the threads that write to and read from a launched helper.
@@ -396,14 +443,15 @@ fn start(link: Link) -> Live {
         stop,
     } = link;
     // Requests wait for their reply, so at most one is ever queued.
-    let (requests, queued) = mpsc::sync_channel::<(u32, Vec<u8>)>(1);
+    let (requests, queued) = mpsc::sync_channel::<(u32, Request)>(1);
     let (answer, replies) = mpsc::sync_channel(1);
     let _ = std::thread::Builder::new()
         .name("video-helper-in".into())
         .spawn(move || {
             let mut input = BufWriter::new(input);
-            for (seq, body) in queued {
-                if ipc::write_frame(&mut input, seq, &body).is_err() {
+            // A picture to encode goes from its planes into the pipe.
+            for (seq, request) in queued {
+                if ipc::write_request(&mut input, seq, &request).is_err() {
                     break;
                 }
             }
@@ -454,18 +502,20 @@ pub struct HwDecoder {
     id: u32,
     generation: u64,
     /// The largest picture the helper said it decodes.
+    #[cfg_attr(not(feature = "huddle-video"), allow(dead_code))]
     max: (u32, u32),
 }
 
 impl HwDecoder {
     /// Decodes one frame (an access unit, Annex B).
+    #[cfg(feature = "huddle-video")]
     pub fn decode(&mut self, unit: &[u8], keyframe: bool) -> Result<Option<Yuv>, HwTrouble> {
         let request = Request::Decode {
             id: self.id,
             keyframe,
             data: unit.to_vec(),
         };
-        match self.helper.call(self.generation, &request) {
+        match self.helper.call(self.generation, request) {
             Ok(Reply::Picture(planes)) => {
                 // Checked against their size as they were read; and no
                 // larger than the helper said it decodes.
@@ -505,7 +555,7 @@ impl HwDecoder {
             width,
             height,
         };
-        match self.helper.call(self.generation, &request) {
+        match self.helper.call(self.generation, request) {
             Ok(Reply::Done) => Ok(()),
             Ok(other) => Err(HwTrouble::Lost(format!(
                 "an answer to the output size: {other:?}"
@@ -520,12 +570,95 @@ impl Drop for HwDecoder {
         // Best effort: a helper that restarted has forgotten it anyway.
         let _ = self
             .helper
-            .call(self.generation, &Request::Close { id: self.id });
+            .call(self.generation, Request::Close { id: self.id });
+    }
+}
+
+/// One encoder in the helper: constrained baseline H.264, one access unit
+/// out for each picture in. Closed when dropped.
+#[derive(Debug)]
+pub struct HwEncoder {
+    helper: Helper,
+    id: u32,
+    generation: u64,
+    /// The pictures' size, which the helper's reply must not change.
+    size: (u32, u32),
+}
+
+/// What a GPU-encoded picture came back as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HwEncoded {
+    /// The access unit, Annex B.
+    pub data: Vec<u8>,
+    /// Whether the helper says it is an IDR (the caller checks).
+    pub keyframe: bool,
+}
+
+impl HwEncoder {
+    /// The size it encodes.
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    /// Encodes one picture, an IDR if `force_keyframe`. Any failure means
+    /// the stream goes on in software.
+    pub fn encode(
+        &mut self,
+        picture: ipc::Planes,
+        force_keyframe: bool,
+    ) -> Result<HwEncoded, HwTrouble> {
+        if (picture.width, picture.height) != self.size {
+            return Err(HwTrouble::Unsupported("another size".into()));
+        }
+        let request = Request::Encode {
+            id: self.id,
+            force_keyframe,
+            picture,
+        };
+        match self.helper.call(self.generation, request) {
+            Ok(Reply::Encoded { keyframe, data }) if !data.is_empty() => {
+                Ok(HwEncoded { data, keyframe })
+            }
+            Ok(Reply::Failed { kind, detail }) => Err(match kind {
+                FailKind::Device | FailKind::Protocol | FailKind::UnknownId => {
+                    HwTrouble::Lost(format!("{kind:?}: {detail}"))
+                }
+                _ => HwTrouble::Unsupported(format!("{kind:?}: {detail}")),
+            }),
+            Ok(other) => Err(HwTrouble::Lost(format!("an answer to encode: {other:?}"))),
+            Err(Lost(why)) => Err(HwTrouble::Lost(why)),
+        }
+    }
+
+    /// Aims at `bitrate` bit/s from the next picture on, with no
+    /// keyframe.
+    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<(), HwTrouble> {
+        let request = Request::SetBitrate {
+            id: self.id,
+            bitrate,
+        };
+        match self.helper.call(self.generation, request) {
+            Ok(Reply::Done) => Ok(()),
+            Ok(other) => Err(HwTrouble::Lost(format!(
+                "an answer to the bit rate: {other:?}"
+            ))),
+            Err(Lost(why)) => Err(HwTrouble::Lost(why)),
+        }
+    }
+}
+
+impl Drop for HwEncoder {
+    fn drop(&mut self) {
+        // Best effort, as for a decoder.
+        let _ = self
+            .helper
+            .call(self.generation, Request::Close { id: self.id });
     }
 }
 
 /// The helper as a test sees it: what it does with each request.
 #[cfg(test)]
+#[cfg_attr(not(feature = "huddle-video"), allow(dead_code))]
 pub(crate) mod pretend {
     use super::*;
 
@@ -558,17 +691,20 @@ pub(crate) mod pretend {
         }
     }
 
-    /// A welcome listing H.264 decoding up to 1920×1088.
+    /// A welcome listing H.264 decoding and encoding up to 1920×1088.
     pub fn welcome() -> Reply {
         Reply::Welcome {
             version: ipc::VERSION,
             backend: "pretend".into(),
-            capabilities: vec![Capability {
-                codec: Codec::H264,
-                direction: Direction::Decode,
-                max_width: 1920,
-                max_height: 1088,
-            }],
+            capabilities: [Direction::Decode, Direction::Encode]
+                .into_iter()
+                .map(|direction| Capability {
+                    codec: Codec::H264,
+                    direction,
+                    max_width: 1920,
+                    max_height: 1088,
+                })
+                .collect(),
         }
     }
 
@@ -626,7 +762,7 @@ pub(crate) mod pretend {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "huddle-video"))]
 mod tests {
     use super::pretend::{Act, Pretend, picture, welcome};
     use super::*;
