@@ -418,3 +418,51 @@ then `PUT {asm}/v1/objects/{id}/content/imgpsh` with the bytes, both with
 `Authorization: skype_token {skype token}`; other files go to the
 personal OneDrive through Graph. The web client marks read with
 `consumptionhorizon: "{message id};{now, ms};{client message id}"`.
+
+### 6.5 Calls, as the personal web client makes them (recorded)
+
+A "Meet now" call joined alone, recorded in Firefox (2026-10-07). It
+overturns §6.2's main worry: **the web client speaks the browser's media
+dialect**, so str0m and the huddle media stack fit; ost's Skype/Lync
+dialect (SDES, PCMU, X-H264UC) is the desktop client's.
+
+**Signalling**, all through `https://api.flightproxy.skype.com/api/v2/…`
+with callbacks to our Trouter URLs (`{surl}callAgent/{endpoint}/…`):
+
+1. `POST cpconv` with `conversationRequest` (`applicationType: "TFL"`,
+   a Delta `roster` callback, `properties`, `links`: conversationEnd,
+   conversationUpdate, localParticipantUpdate, addParticipantSuccess…)
+   answers `conversationController` and `links` (leave, …).
+2. `POST cp/{conv host}/conv/{id}` joins, with `callInvitation`:
+   `callModalities`, `links`, and `mediaContent {contentType:
+   "application/sdp-ngc-1.0", blob: <SDP offer>}`; answers the roster and
+   `activeModalities.call.links.participants` (a `cc…cc.skype.com` call
+   hub) and `groupChat.threadId` (`19:meeting_…@thread.v2`).
+3. `POST …/conv/{id}/updateEndpointState`, `PUT …/updateEndpointMetadata`
+   with `from {id, displayName, endpointId, participantId, languageId}`.
+4. Media control on the call hub: `POST …/cc/v1/active/…/updateMediaDescriptions`
+   (`mid`s with `sendrecv`/`recvonly`, `label: "main-video"`,
+   `negotiationTag`) and `…/mcProxy/…/applyChannelParameters`
+   (`maxVideoSendCapabilities`).
+5. `POST …/sendMessage` for in-call reactions; `POST …/leave` with
+   `conversationTransactionEnd` and `callTransactionEnd`.
+6. Events: a broker long-poll, `GET …/broker…/api/v1/subscribe/{id}/0`
+   (`nextSubscribeUrl`, 30 s), besides Trouter.
+
+**Media (the SDP offer):** `a=group:BUNDLE` over 13 m-lines, `rtcp-mux`,
+`a=setup:actpass` with a SHA-256 `a=fingerprint` (DTLS-SRTP), trickle
+ICE with one `typ relay` UDP candidate. Audio: `opus/48000/2` first, then
+G722, PCMU, PCMA, CN, telephone-event; `ssrc-audio-level`, `mid`,
+transport-wide CC. Video (12 m-lines, one `sendrecv` main video and
+receivers): H264 (several profiles), AV1, rtx; abs-send-time, toffset,
+video-orientation, AV1 dependency descriptor. Data: `m=x-data` over SCTP.
+Microsoft's own lines: `a=x-ssrc-range`, `a=x-signaling-fb:* x-message
+app …`, `b=CT:4000`.
+
+**Relays:** `GET https://edge.skype.com/trap/tokens` with `X-Skypetoken`
+answers `{tokens: [{realm: "rtcmedia", username, password}], expires}`
+(TURN credentials).
+
+**Not in a Firefox recording:** the SDP answer and incoming call
+invitations arrive over Trouter, and Firefox leaves WebSocket messages
+out of its HAR; Chrome and Edge include them (`_webSocketMessages`).
