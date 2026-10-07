@@ -74,6 +74,9 @@ pub enum Phase {
     Subscribing,
     /// Media is negotiated.
     Live,
+    /// Live, and a new SUBSCRIBE (a changed offer, other video streams)
+    /// waits for its SUBSCRIBE_ACK; media keeps flowing meanwhile.
+    Resubscribing,
     /// LEAVE sent.
     Leaving,
     /// Done, one way or another.
@@ -238,6 +241,32 @@ impl Handshake {
         vec![Step::Send(Box::new(chime::subscribe(sub, now_ms)))]
     }
 
+    /// Sends a new SUBSCRIBE once live: the same connection, a changed
+    /// offer (the video m-lines) and the streams wanted on them. Its
+    /// SUBSCRIBE_ACK comes back as [`Step::Answer`].
+    pub fn resubscribe(&mut self, sub: &chime::Subscribe, now_ms: u64) -> Vec<Step> {
+        if self.phase != Phase::Live {
+            return vec![Step::Note(format!(
+                "a new offer while {:?}; not subscribing",
+                self.phase
+            ))];
+        }
+        self.phase = Phase::Resubscribing;
+        vec![Step::Send(Box::new(chime::subscribe(sub, now_ms)))]
+    }
+
+    /// No SUBSCRIBE_ACK came for a re-SUBSCRIBE: back to live, on the
+    /// media as it was.
+    pub fn resubscribe_timed_out(&mut self) -> Vec<Step> {
+        if self.phase != Phase::Resubscribing {
+            return Vec::new();
+        }
+        self.phase = Phase::Live;
+        vec![Step::Note(
+            "no SUBSCRIBE_ACK for the new SUBSCRIBE in time".into(),
+        )]
+    }
+
     /// Sends LEAVE, unless the session is already over.
     pub fn leave(&mut self, now_ms: u64) -> Vec<Step> {
         match self.phase {
@@ -360,6 +389,22 @@ impl Handshake {
                         self.phase = Phase::Over;
                         steps.push(Step::Over(Ending::NoAnswer));
                     }
+                }
+            }
+            // A re-SUBSCRIBE's answer; without one the media stays as
+            // it was, which ends nothing.
+            Some(FrameType::SubscribeAck) if self.phase == Phase::Resubscribing => {
+                self.phase = Phase::Live;
+                match frame
+                    .suback
+                    .as_ref()
+                    .and_then(|ack| ack.sdp_answer.clone())
+                    .filter(|sdp| !sdp.is_empty())
+                {
+                    Some(answer) => steps.push(Step::Answer(answer)),
+                    None => steps.push(Step::Note(
+                        "the new SUBSCRIBE_ACK carried no SDP answer".into(),
+                    )),
                 }
             }
             Some(FrameType::LeaveAck) if self.phase == Phase::Leaving => {
@@ -584,6 +629,7 @@ mod tests {
             audio_host: "h:3478".into(),
             attendee_id: "A1".into(),
             muted: true,
+            receive_stream_ids: vec![0],
         }
     }
 
@@ -631,6 +677,69 @@ mod tests {
         );
         assert_eq!(session.phase(), Phase::Over);
         assert!(session.leave(8).is_empty());
+    }
+
+    #[test]
+    fn a_live_session_resubscribes_and_stays_live() {
+        let mut session = Handshake::new(7);
+        session.start(1);
+        // Not before it is live.
+        assert!(matches!(
+            &session.resubscribe(&sub(), 1)[..],
+            [Step::Note(_)]
+        ));
+        session.on_frame(&ack_with_turn(&["turn:t:3478"]), 2);
+        session.on_frame(&chime::frame(FrameType::Index, 3), 3);
+        session.subscribe(&sub(), 4);
+        let mut ack = chime::frame(FrameType::SubscribeAck, 5);
+        ack.suback = Some(proto::SdkSubscribeAckFrame {
+            sdp_answer: Some("first".into()),
+            ..Default::default()
+        });
+        session.on_frame(&ack, 5);
+        assert_eq!(session.phase(), Phase::Live);
+
+        let mut video = sub();
+        video.receive_stream_ids = vec![0, 6, 2];
+        let steps = session.resubscribe(&video, 6);
+        let [Step::Send(frame)] = &steps[..] else {
+            panic!("{steps:?}");
+        };
+        assert_eq!(
+            frame.sub.as_ref().map(|s| s.receive_stream_ids.clone()),
+            Some(vec![0, 6, 2])
+        );
+        assert_eq!(session.phase(), Phase::Resubscribing);
+        // An error riding on its answer ends nothing.
+        ack.error = Some(proto::SdkErrorFrame {
+            status: Some(206),
+            description: None,
+        });
+        ack.suback = Some(proto::SdkSubscribeAckFrame {
+            sdp_answer: Some("second".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            session.on_frame(&ack, 7),
+            vec![Step::Answer("second".into())]
+        );
+        assert_eq!(session.phase(), Phase::Live);
+
+        // One with no answer: still live.
+        session.resubscribe(&video, 8);
+        ack.error = None;
+        ack.suback = Some(proto::SdkSubscribeAckFrame::default());
+        assert!(matches!(&session.on_frame(&ack, 9)[..], [Step::Note(_)]));
+        assert_eq!(session.phase(), Phase::Live);
+
+        // One with no SUBSCRIBE_ACK at all: given up, still live.
+        session.resubscribe(&video, 10);
+        assert!(matches!(
+            &session.resubscribe_timed_out()[..],
+            [Step::Note(_)]
+        ));
+        assert_eq!(session.phase(), Phase::Live);
+        assert!(session.resubscribe_timed_out().is_empty());
     }
 
     #[test]

@@ -68,6 +68,11 @@ fn main() -> eframe::Result<()> {
                 region: cli.huddle_region.clone(),
                 settings: dirs.settings_file(),
                 send_tone: cli.send_tone,
+                video: noslacking::huddle_audio::video::Options {
+                    streams: cli.video,
+                    h264_only: cli.video_h264_only,
+                    dump: cli.video_dump.clone(),
+                },
             });
         std::process::exit(code);
     }

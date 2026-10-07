@@ -14,6 +14,14 @@
 //! microphone itself, so whether Chime takes our audio can be heard in
 //! Slack without anyone talking. Every five seconds the log says what was
 //! sent and what Chime's RTCP receiver reports say of it.
+//!
+//! Video (see [`super::watch`]): every INDEX that changes is logged with
+//! its sources, as are PAUSE, RESUME, BITRATES (every 20 s), the topics
+//! and sizes of DATA_MESSAGEs and any REMOTE_VIDEO_UPDATE. `--video N`
+//! receives up to N streams once the audio is live and logs what comes
+//! on each; `--video-h264-only` offers no VP8; `--video-dump DIR` keeps
+//! each stream's first 300 frames. The summary ends with each stream and
+//! whether audio kept flowing through every re-SUBSCRIBE.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -38,6 +46,9 @@ pub struct Options {
     pub settings: PathBuf,
     /// Join unmuted and send a quiet tone (never the microphone).
     pub send_tone: bool,
+    /// What to look at of video (`--video`, `--video-h264-only`,
+    /// `--video-dump`); Chime's video signaling is logged either way.
+    pub video: super::video::Options,
 }
 
 /// The steps, by the name the last line gives a failure.
@@ -101,6 +112,32 @@ pub fn run(options: &Options) -> i32 {
             "muted"
         }
     );
+    log::info!(
+        "probe: video: {}{}{}",
+        match options.video.streams {
+            0 => "logging Chime's video signaling only".to_owned(),
+            n => format!("receiving up to {n} streams"),
+        },
+        if options.video.h264_only {
+            ", offering H.264 only"
+        } else {
+            ", offering VP8 and H.264"
+        },
+        options
+            .video
+            .dump
+            .as_ref()
+            .map_or_else(String::new, |dir| format!(
+                ", dumping the first frames to {}",
+                dir.display()
+            ))
+    );
+    if let Some(dir) = &options.video.dump
+        && let Err(error) = std::fs::create_dir_all(dir)
+    {
+        log::error!("probe: FAILED to make {}: {error}", dir.display());
+        return 1;
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -242,7 +279,16 @@ async fn probe(
     } else {
         (None, None)
     };
-    let (report, result) = media::listen(&joined, feed, uplink, stopped, None, None).await;
+    let (report, result) = media::listen(
+        &joined,
+        feed,
+        uplink,
+        stopped,
+        None,
+        None,
+        Some(options.video.clone()),
+    )
+    .await;
     drop(tone);
     timer.abort();
 
@@ -277,6 +323,11 @@ async fn probe(
         log::info!("summary: played {:?}", feed.played());
         drop(speaker);
     }
+    if let Some(video) = &report.video {
+        for line in video_summary(video) {
+            log::info!("{line}");
+        }
+    }
     let frames = report.audio_frames;
     (
         result.map_err(|failure| (Step::Chime(failure.stage), failure.why)),
@@ -284,9 +335,94 @@ async fn probe(
     )
 }
 
+/// The summary's video lines: what INDEX showed, each stream received,
+/// and whether audio flowed through every re-SUBSCRIBE.
+pub fn video_summary(video: &super::video::Summary) -> Vec<String> {
+    let mut lines = vec![format!(
+        "summary: video: {} INDEX changes logged; a #content source (screen share) {}; last codec \
+         intersection [{}]",
+        video.indexes,
+        if video.saw_share {
+            "was listed"
+        } else {
+            "never listed"
+        },
+        video.codecs.join(", ")
+    )];
+    if video.streams.is_empty() {
+        lines.push("summary: video: no stream received".into());
+    }
+    for stream in &video.streams {
+        lines.push(format!("summary: video: {}", stream.line()));
+    }
+    for resubscribe in &video.resubscribes {
+        lines.push(format!("summary: video: {}", resubscribe.line()));
+    }
+    if !video.resubscribes.is_empty() {
+        let kept = video
+            .resubscribes
+            .iter()
+            .all(|r| r.audio_frames.is_some_and(|n| n > 0));
+        lines.push(format!(
+            "summary: video: audio {} through all {} re-SUBSCRIBEs",
+            if kept {
+                "stayed live"
+            } else {
+                "did NOT stay live"
+            },
+            video.resubscribes.len()
+        ));
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_video_summary_says_what_came_and_whether_audio_flowed() {
+        let summary = super::super::video::Summary {
+            streams: vec![super::super::video::StreamStats {
+                stream_id: 6,
+                attendee: "abcdef12-content".into(),
+                share: true,
+                mid: "2".into(),
+                codec: Some(("H264".into(), 108)),
+                frames: 90,
+                keyframes: 2,
+                ..Default::default()
+            }],
+            resubscribes: vec![super::super::video::Resubscribe {
+                n: 1,
+                stream_ids: vec![0, 6],
+                answered_ms: Some(80),
+                audio_frames: Some(104),
+                window_ms: 2080,
+            }],
+            indexes: 3,
+            codecs: vec!["H264_CONSTRAINED_BASELINE_PROFILE".into()],
+            saw_share: true,
+        };
+        let lines = video_summary(&summary);
+        assert!(
+            lines[0].contains("screen share) was listed"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("stream 6 (abcdef12-content, a share"),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[2].contains("104 audio frames"), "{}", lines[2]);
+        assert_eq!(
+            lines[3],
+            "summary: video: audio stayed live through all 1 re-SUBSCRIBEs"
+        );
+        let empty = video_summary(&super::super::video::Summary::default());
+        assert_eq!(empty[1], "summary: video: no stream received");
+    }
 
     #[test]
     fn the_last_line_names_the_failed_step() {
