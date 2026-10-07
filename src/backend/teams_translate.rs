@@ -547,6 +547,10 @@ pub fn translate_message(msg: &types::Message) -> Option<Message> {
                 .iter()
                 .filter_map(|u| clean_teams_user_id(&u.mri))
                 .collect();
+            // Teams keeps a reaction everyone took back, with nobody in it.
+            if users.is_empty() {
+                continue;
+            }
             let count = users.len() as u32;
             reactions.push(Reaction { name, count, users });
         }
@@ -733,6 +737,35 @@ mod tests {
         }
         assert_eq!(reaction_key("+1"), "like");
         assert_eq!(reaction_key("eyes"), "1f440_eyes");
+    }
+
+    #[test]
+    fn a_reaction_everyone_took_back_is_gone() {
+        let message = types::Message {
+            id: "1".into(),
+            from: Some("8:orgid:a".into()),
+            content: "<p>hi</p>".into(),
+            properties: Some(types::MessageProperties {
+                emotions: Some(vec![
+                    types::Emotion {
+                        key: "like".into(),
+                        users: Vec::new(),
+                    },
+                    types::Emotion {
+                        key: "heart".into(),
+                        users: vec![types::EmotionUser {
+                            mri: "8:orgid:b".into(),
+                            time: None,
+                        }],
+                    },
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let reactions = translate_message(&message).expect("a message").reactions;
+        let names: Vec<&str> = reactions.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["heart"]);
     }
 
     #[test]

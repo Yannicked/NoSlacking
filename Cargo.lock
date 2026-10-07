@@ -3499,6 +3499,7 @@ dependencies = [
  "fastframe-text",
  "fastframe-theme",
  "fastframe-tray",
+ "flate2",
  "futures-util",
  "hmac",
  "hyper-util",

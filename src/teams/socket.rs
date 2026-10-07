@@ -12,8 +12,11 @@ use serde::{Deserialize, Serialize};
 pub enum TrouterEvent {
     /// Server ping requiring pong response.
     Ping,
-    /// Message or conversation update.
-    Message(Box<crate::teams::types::Message>),
+    /// A message posted, or one changed (edited, reacted to, deleted).
+    Message {
+        message: Box<crate::teams::types::Message>,
+        changed: bool,
+    },
     /// Other unparsed raw payload.
     Raw(String),
 }
@@ -164,47 +167,89 @@ pub fn handle_frame_control(frame: &str) -> Option<String> {
 }
 
 /// Parses an incoming WebSocket text frame into a high-level [`TrouterEvent`].
+///
+/// A chat event comes as an HTTP request over the socket (`3:::{json}`)
+/// whose `body` is the event as a string, plain JSON or gzip-compressed and
+/// base64-encoded: `{"resourceType": "NewMessage", "resource": {…}}`.
 pub fn parse_frame(frame: &str) -> Option<TrouterEvent> {
     if frame == "2" || frame == "2::" {
         return Some(TrouterEvent::Ping);
     }
-
     if let Some(body) = frame.strip_prefix("3:::")
-        && let Ok(val) = serde_json::from_str::<serde_json::Value>(body)
+        && let Ok(request) = serde_json::from_str::<serde_json::Value>(body)
     {
-        // Trouter payload often wraps in body.body, body.params, or body.resource
-        let inner = val
-            .get("body")
-            .or_else(|| val.get("resource"))
-            .unwrap_or(&val);
-        if let Ok(msg) = serde_json::from_value::<crate::teams::types::Message>(inner.clone())
-            && !msg.id.is_empty()
-        {
-            return Some(TrouterEvent::Message(Box::new(msg)));
-        }
-        return Some(TrouterEvent::Raw(body.to_string()));
+        return Some(
+            request
+                .get("body")
+                .and_then(unpack)
+                .and_then(|event| message_event(&event))
+                .unwrap_or_else(|| TrouterEvent::Raw(body.to_owned())),
+        );
     }
-
     if frame.starts_with("5:") {
-        if let Some(pos) = frame.find("::{") {
-            let json_str = &frame[pos + 2..];
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
-                let inner = val
-                    .get("body")
-                    .or_else(|| val.get("resource"))
-                    .unwrap_or(&val);
-                if let Ok(msg) =
-                    serde_json::from_value::<crate::teams::types::Message>(inner.clone())
-                    && !msg.id.is_empty()
-                {
-                    return Some(TrouterEvent::Message(Box::new(msg)));
-                }
-            }
-        }
-        return Some(TrouterEvent::Raw(frame.to_string()));
+        return Some(TrouterEvent::Raw(frame.to_owned()));
     }
-
     None
+}
+
+/// A request body as JSON: a string of JSON, or of gzip-compressed JSON in
+/// base64, or JSON already.
+pub fn unpack(body: &serde_json::Value) -> Option<serde_json::Value> {
+    use base64::Engine as _;
+    use std::io::Read as _;
+    let text = match body {
+        serde_json::Value::String(text) => text,
+        serde_json::Value::Object(_) => return Some(body.clone()),
+        _ => return None,
+    };
+    if let Ok(value) = serde_json::from_str(text) {
+        return Some(value);
+    }
+    let compressed = base64::engine::general_purpose::STANDARD
+        .decode(text.trim())
+        .ok()?;
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(compressed.as_slice())
+        .read_to_string(&mut json)
+        .ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+/// The message in a chat event, if it is one: a new message, or a changed
+/// one (`MessageUpdate`: edits, reactions, deletions). Its conversation
+/// is named only in its `conversationLink`.
+fn message_event(event: &serde_json::Value) -> Option<TrouterEvent> {
+    let kind = event.get("resourceType").and_then(|k| k.as_str());
+    let changed = match kind {
+        Some("NewMessage") => false,
+        Some("MessageUpdate") => true,
+        // A bare message, as some events carry it.
+        None if event.get("id").is_some() => false,
+        _ => return None,
+    };
+    let resource = event.get("resource").unwrap_or(event);
+    let mut message: crate::teams::types::Message =
+        serde_json::from_value(resource.clone()).ok()?;
+    if message.id.is_empty() {
+        return None;
+    }
+    if message.conversation_id.is_none() {
+        message.conversation_id = resource
+            .get("conversationLink")
+            .and_then(|link| link.as_str())
+            .and_then(conversation_of_link);
+    }
+    Some(TrouterEvent::Message {
+        message: Box::new(message),
+        changed,
+    })
+}
+
+/// The conversation id at the end of a `…/conversations/{id}` link.
+fn conversation_of_link(link: &str) -> Option<String> {
+    let id = link.rsplit_once("/conversations/")?.1;
+    let id = id.split([';', '?', '/']).next()?;
+    (!id.is_empty()).then(|| id.to_owned())
 }
 
 /// Negotiates a Trouter session via `https://go.trouter.teams.microsoft.com/v4/a`.
@@ -354,16 +399,55 @@ mod tests {
     }
 
     #[test]
-    fn parses_nested_message_in_trouter_frame() {
-        let frame = r#"3:::{"id":5,"body":{"id":"1728287364000","content":"<p>hi</p>","imdisplayname":"Bob"}}"#;
-        let event = parse_frame(frame).expect("parses");
-        match event {
-            TrouterEvent::Message(msg) => {
-                assert_eq!(msg.id, "1728287364000");
-                assert_eq!(msg.im_display_name.as_deref(), Some("Bob"));
+    fn a_live_message_is_read_from_its_event() {
+        // As Trouter delivers one: the event as a string in the body.
+        let event = r#"{"time":"2026-10-07T13:41:03Z","type":"EventMessage","resourceType":"NewMessage","resource":{"id":"1791380463186","content":"hi","messagetype":"Text","imdisplayname":"Bob","from":"https://notifications.skype.net/v1/users/ME/contacts/8:live:bob","conversationLink":"https://notifications.skype.net/v1/users/ME/conversations/19:uni01_abc@thread.v2","properties":{"importance":"","subject":""}}}"#;
+        let frame = format!(
+            "3:::{}",
+            serde_json::json!({ "id": 5, "method": "POST", "url": "/v4/f/x/messaging", "body": event })
+        );
+        match parse_frame(&frame).expect("parses") {
+            TrouterEvent::Message { message, changed } => {
+                assert_eq!(message.id, "1791380463186");
+                assert_eq!(
+                    message.conversation_id.as_deref(),
+                    Some("19:uni01_abc@thread.v2")
+                );
+                assert!(!changed);
             }
-            _ => panic!("expected Message event"),
+            other => panic!("expected a message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_compressed_update_is_unpacked_and_marked_changed() {
+        use base64::Engine as _;
+        use std::io::Write as _;
+        // Reactions arrive as properties in text, as live events carry them.
+        let event = r#"{"resourceType":"MessageUpdate","resource":{"id":"1","content":"hi","conversationLink":"https://x/v1/users/ME/conversations/19:a@thread.v2","properties":{"emotions":"[{\"key\":\"heart\",\"users\":[{\"mri\":\"8:live:bob\",\"time\":1}]}]"}}}"#;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(event.as_bytes()).expect("compresses");
+        let body =
+            base64::engine::general_purpose::STANDARD.encode(gz.finish().expect("compresses"));
+        let frame = format!("3:::{}", serde_json::json!({ "id": 6, "body": body }));
+        match parse_frame(&frame).expect("parses") {
+            TrouterEvent::Message { message, changed } => {
+                assert!(changed);
+                let emotions = message
+                    .properties
+                    .and_then(|p| p.emotions)
+                    .expect("reactions read from text");
+                assert_eq!(emotions[0].key, "heart");
+            }
+            other => panic!("expected a message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_events_are_left_raw() {
+        let event = r#"{"resourceType":"ConversationUpdate","resource":{"id":"19:a@thread.v2"}}"#;
+        let frame = format!("3:::{}", serde_json::json!({ "id": 7, "body": event }));
+        assert!(matches!(parse_frame(&frame), Some(TrouterEvent::Raw(_))));
     }
 
     #[test]

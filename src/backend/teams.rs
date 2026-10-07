@@ -964,8 +964,8 @@ async fn trouter_once(
                     if let Some(answer) = handle_frame_control(&text) {
                         let _ = write.send(WsMessage::Text(answer.into())).await;
                     }
-                    if let Some(TrouterEvent::Message(message)) = parse_frame(&text) {
-                        live_message(team, client, &message, sink);
+                    if let Some(TrouterEvent::Message { message, changed }) = parse_frame(&text) {
+                        live_message(team, client, &message, changed, sink);
                     }
                 }
                 Some(Ok(WsMessage::Ping(payload))) => {
@@ -984,6 +984,7 @@ fn live_message(
     team: &str,
     client: &TeamsClient,
     message: &crate::teams::types::Message,
+    changed: bool,
     sink: &Sink,
 ) {
     let channel = message.conversation_id.clone().unwrap_or_default();
@@ -1010,7 +1011,7 @@ fn live_message(
         sink.send(Event::Message {
             team: team.to_owned(),
             channel,
-            changed: message.properties.as_ref().is_some_and(|p| p.is_edited()),
+            changed: changed || message.properties.as_ref().is_some_and(|p| p.is_edited()),
             message: translated,
         });
     }

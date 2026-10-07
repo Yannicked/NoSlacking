@@ -5,6 +5,21 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+/// A list that may come as itself or as JSON text of itself; anything
+/// unreadable is taken as none rather than failing the whole message.
+fn list_or_text<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::String(text)) => serde_json::from_str(&text).ok(),
+        Some(value @ serde_json::Value::Array(_)) => serde_json::from_value(value).ok(),
+        _ => None,
+    })
+}
+
 /// Strips surrounding quotes from string values if present.
 fn de_trimmed_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
@@ -214,7 +229,9 @@ pub struct Message {
 /// Message properties carrying reactions, edits, and deletions.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageProperties {
-    #[serde(default)]
+    /// Reactions: a list in history, the same list as JSON text in live
+    /// events.
+    #[serde(default, deserialize_with = "list_or_text")]
     pub emotions: Option<Vec<Emotion>>,
     #[serde(default, rename = "deletetime")]
     pub delete_time: Option<serde_json::Value>,
