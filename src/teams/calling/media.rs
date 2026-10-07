@@ -546,12 +546,61 @@ fn permissions(remote: &RemoteMedia, ipv4: bool) -> Vec<IpAddr> {
     let mut ips: Vec<IpAddr> = remote
         .candidates
         .iter()
-        .filter(|c| usable(c.addr) && c.addr.is_ipv4() == ipv4)
+        // A relay refuses private and loopback addresses (403), and
+        // would only be asked again and again.
+        .filter(|c| usable(c.addr) && c.addr.is_ipv4() == ipv4 && public(c.addr.ip()))
         .map(|c| c.addr.ip())
         .collect();
     ips.sort();
     ips.dedup();
     ips
+}
+
+/// Whether `ip` can be reached across the internet: not a private,
+/// loopback or unique-local address.
+fn public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => !(ip.is_private() || ip.is_loopback() || ip.is_link_local()),
+        IpAddr::V6(ip) => !(ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00),
+    }
+}
+
+/// What went which way while connecting, by path and kind: which path
+/// ICE settled on, and whether the DTLS handshake crossed it, shows in
+/// the log when a call does not come up.
+#[derive(Clone, Copy, Debug, Default)]
+struct Paths {
+    /// `[in, out][direct, relayed][stun, dtls, rtp]`.
+    counts: [[[u64; 3]; 2]; 2],
+}
+
+impl Paths {
+    /// Counts a datagram going `out` (or in) on the relay (or directly).
+    fn count(&mut self, out: bool, relayed: bool, data: &[u8]) {
+        // RFC 7983's demultiplexing by the first byte.
+        let kind = match data.first() {
+            Some(0..=3) => 0,
+            Some(20..=63) => 1,
+            Some(128..=191) => 2,
+            _ => return,
+        };
+        self.counts[usize::from(out)][usize::from(relayed)][kind] += 1;
+    }
+
+    /// One line for the log.
+    fn line(&self) -> String {
+        let side = |dir: usize, path: usize| {
+            let [stun, dtls, rtp] = self.counts[dir][path];
+            format!("stun {stun} dtls {dtls} rtp {rtp}")
+        };
+        format!(
+            "direct in [{}] out [{}]; relayed in [{}] out [{}]",
+            side(0, 0),
+            side(1, 0),
+            side(0, 1),
+            side(1, 1)
+        )
+    }
 }
 
 /// Checks the far end's media description and turns it into what str0m
@@ -862,6 +911,8 @@ struct Session {
     connected: bool,
     flowing_told: bool,
     connect_deadline: Option<Instant>,
+    /// What went which way, by path and kind (see [`Paths`]).
+    paths: Paths,
     disconnected_at: Option<Instant>,
     next_audio: Option<Instant>,
     next_stats: Instant,
@@ -971,6 +1022,7 @@ impl Session {
             connected: false,
             flowing_told: false,
             connect_deadline: None,
+            paths: Paths::default(),
             disconnected_at: None,
             next_audio: None,
             next_stats: now + STATS_EVERY,
@@ -1199,6 +1251,8 @@ impl Session {
 
     /// Feeds str0m what `source` sent to our `destination`.
     fn feed_rtc(&mut self, source: SocketAddr, destination: SocketAddr, data: &[u8]) {
+        let relayed = self.relay.as_ref().and_then(|l| l.relayed) == Some(destination);
+        self.paths.count(false, relayed, data);
         bump(&self.counters.packets_in, 1);
         bump(&self.counters.bytes_in, data.len());
         expect_remote(&mut self.rtc, self.mid, self.opus_pt, &mut self.seen, data);
@@ -1240,10 +1294,14 @@ impl Session {
                     bump(&self.counters.bytes_out, transmit.contents.len());
                     match &mut self.relay {
                         Some(link) if Some(transmit.source) == link.relayed => {
+                            self.paths.count(true, true, &transmit.contents);
                             link.client
                                 .send_to(transmit.destination, &transmit.contents, now);
                         }
-                        _ => direct.push((transmit.destination, transmit.contents.to_vec())),
+                        _ => {
+                            self.paths.count(true, false, &transmit.contents);
+                            direct.push((transmit.destination, transmit.contents.to_vec()));
+                        }
                     }
                 }
                 Ok(Output::Event(event)) => events.push(event),
@@ -1463,6 +1521,7 @@ impl Session {
             counts.silent_out,
             if self.muted() { "muted" } else { "unmuted" }
         );
+        log::info!("media: paths: {}", self.paths.line());
     }
 
     /// The next moment something is due.
@@ -1499,6 +1558,7 @@ impl Session {
             self.next_relay().await;
         }
         if self.connect_deadline.is_some_and(|at| at <= now) {
+            log::warn!("connect: gave up; paths: {}", self.paths.line());
             self.over.get_or_insert(Err(failure(
                 Stage::Connect,
                 format!("no media connection within {} s", CONNECT_TIMEOUT.as_secs()),
@@ -1736,6 +1796,28 @@ mod tests {
     }
 
     #[test]
+    fn paths_count_by_kind() {
+        let mut paths = Paths::default();
+        paths.count(true, true, &[0x00, 0x01]);
+        paths.count(false, false, &[22, 254]);
+        paths.count(false, false, &[0x80, 111]);
+        paths.count(true, false, &[]);
+        assert_eq!(
+            paths.line(),
+            "direct in [stun 0 dtls 1 rtp 1] out [stun 0 dtls 0 rtp 0]; \
+             relayed in [stun 0 dtls 0 rtp 0] out [stun 1 dtls 0 rtp 0]"
+        );
+    }
+
+    #[test]
+    fn a_relay_is_asked_only_for_public_addresses() {
+        assert!(public("178.230.119.236".parse().expect("an address")));
+        assert!(!public("10.9.243.230".parse().expect("an address")));
+        assert!(!public("192.168.0.73".parse().expect("an address")));
+        assert!(!public("127.0.0.1".parse().expect("an address")));
+    }
+
+    #[test]
     fn the_dtls_role_follows_the_far_ends_setup() {
         assert!(dtls_active(Setup::Passive), "they are the server");
         assert!(!dtls_active(Setup::Active), "they are the client");
@@ -1791,10 +1873,9 @@ mod tests {
             permissions(&remote, true),
             vec![
                 "20.202.0.1".parse::<IpAddr>().expect("an IP"),
-                "192.168.1.20".parse().expect("an IP"),
                 "198.51.100.7".parse().expect("an IP"),
             ],
-            "IPv4 only, the wildcard left out, the srflx address once"
+            "IPv4 only, public only (no wildcard, no private host), the srflx address once"
         );
         assert_eq!(
             permissions(&remote, false),
@@ -1809,7 +1890,7 @@ mod tests {
         assert_eq!(plan.creds.ufrag, "abcd");
         assert_eq!(plan.fingerprint.len(), 32);
         assert_eq!(plan.candidates.len(), 5, "the wildcard dropped");
-        assert_eq!(plan.permits.len(), 3);
+        assert_eq!(plan.permits.len(), 2, "the private host address left out");
         assert!(plan.send && plan.receive);
         let shown = format!("{plan:?}");
         assert!(!shown.contains("password"), "{shown}");
