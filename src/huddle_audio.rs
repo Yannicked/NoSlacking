@@ -28,6 +28,7 @@
 
 #![warn(missing_docs)]
 
+pub mod bitstream;
 pub mod chime;
 pub mod dtls;
 pub mod encoder;
