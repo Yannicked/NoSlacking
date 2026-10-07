@@ -56,14 +56,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake desktop-file-utils appstream dpkg-dev
+      # The app and its hardware video helper (crates/noslacking-video).
       - name: Build
-        run: cargo build --locked --release
+        run: cargo build --locked --release -p noslacking -p noslacking-video
       - name: Package
         run: |
           name="noslacking-$VERSION-linux-x86_64"
           root="dist/$name"
           mkdir -p "$root/bin" "$root/share/applications" "$root/share/metainfo" "$root/share/icons"
-          cp target/release/noslacking "$root/bin/"
+          cp target/release/noslacking target/release/noslacking-video "$root/bin/"
           cp packaging/applications/cloud.yannick.NoSlacking.desktop "$root/share/applications/"
           cp packaging/metainfo/cloud.yannick.NoSlacking.metainfo.xml "$root/share/metainfo/"
           cp -R packaging/icons/hicolor "$root/share/icons/"
@@ -152,18 +153,20 @@ jobs:
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Build
         run: |
-          cargo build --locked --release --target aarch64-apple-darwin
-          cargo build --locked --release --target x86_64-apple-darwin
+          cargo build --locked --release --target aarch64-apple-darwin -p noslacking -p noslacking-video
+          cargo build --locked --release --target x86_64-apple-darwin -p noslacking -p noslacking-video
           mkdir -p dist
-          lipo -create -output dist/noslacking \
-            target/aarch64-apple-darwin/release/noslacking \
-            target/x86_64-apple-darwin/release/noslacking
-          lipo -info dist/noslacking
+          for bin in noslacking noslacking-video; do
+            lipo -create -output "dist/$bin" \
+              "target/aarch64-apple-darwin/release/$bin" \
+              "target/x86_64-apple-darwin/release/$bin"
+            lipo -info "dist/$bin"
+          done
       - name: Package
         run: |
           name="noslacking-$VERSION-macos-universal"
           mkdir -p "dist/$name"
-          packaging/macos/bundle.sh dist/noslacking "$VERSION" "dist/$name"
+          packaging/macos/bundle.sh dist/noslacking "$VERSION" "dist/$name" dist/noslacking-video
           cp LICENSE README.md "dist/$name/"
           # ditto keeps the bundle's symlinks, permissions and signature.
           ditto -c -k --keepParent "dist/$name" "dist/$name.zip"
@@ -185,13 +188,13 @@ jobs:
       - name: Toolchain
         run: rustup toolchain install
       - name: Build
-        run: cargo build --locked --release
+        run: cargo build --locked --release -p noslacking -p noslacking-video
       - name: Package
         shell: pwsh
         run: |
           $name = "noslacking-$($env:VERSION)-windows-x86_64"
           New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
-          Copy-Item target/release/noslacking.exe, LICENSE, README.md "dist/$name/"
+          Copy-Item target/release/noslacking.exe, target/release/noslacking-video.exe, LICENSE, README.md "dist/$name/"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

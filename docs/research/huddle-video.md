@@ -29,6 +29,14 @@ copied. Line refs are `file:line` at those commits.
   PipeWire portals. *(Stage 1 update: the spike found rusty_h264, pure
   Rust, bit-exact and fast enough for 1080p shares; it is what Stage 1
   uses. Real Slack sends H.264 CB, so VP8 is not needed.)*
+- **Hardware decoding (§6, 2026-10-07):** a helper process,
+  `noslacking-video`, decodes H.264 with VA-API on Linux, bit-exact,
+  with software as the fallback for anything it cannot do or any crash.
+  Pictures are scaled on the GPU to the size shown before they are
+  copied back: for a share shown at half size that is 6 times less CPU
+  than software; at full size software still wins. Off by default for
+  now. Vulkan Video, V4L2,
+  VideoToolbox and Media Foundation are planned behind the same trait.
 - **Plan**: probe (days) → receive screen shares (2–3 wk) → camera tiles
   (2–3 wk) → send camera (3–5 wk) → share screen (3–5 wk, Wayland the
   risk). Drawing, stickers and effects: not realistic (undocumented,
@@ -832,6 +840,271 @@ Reactions only if Stage 0 shows they are plain data messages.
 1.5–2.5 months for sending (Stages 3–4), plus hardening. This is in line
 with the TODO's "+4–8 weeks" for video and screen viewing.
 
+## 6. Hardware decoding in a helper process (2026-10-07)
+
+Built on `feat/hw-video`: the architecture and the first back end,
+VA-API decoding on Linux. The decision behind it (TODO.md): the
+platform APIs directly, in a separate process, `unsafe` allowed there
+and nowhere in the app.
+
+### 6.1 Design
+
+- **Two crates in a workspace.** `crates/video-ipc`
+  (`noslacking-video-ipc`, `forbid(unsafe_code)`, std only) holds the
+  messages; `crates/noslacking-video` is the helper, a `[[bin]]` with a
+  library for its tests and benchmark. The helper's crate denies
+  `unsafe` too, except two modules that say so: `vaapi::va` (the libva
+  calls) and `pipe` (one `fcntl`). The root `Cargo.toml` gained a
+  `[workspace]`; `cargo build` at the root still builds only the app,
+  so `--locked`, features and the existing commands keep working, and
+  CI and the release builds name `-p noslacking -p noslacking-video` or
+  `--workspace`.
+- **Process.** The app (`src/huddle_audio/hardware.rs`) starts the
+  helper the first time a stream starts (a keyframe after waiting), from
+  beside its own executable (`current_exe`), else `PATH`; not found means
+  software, said once in the log. One helper serves every stream; a
+  writer thread and a reader thread talk to its stdin and stdout, so a
+  helper that stops reading or answering cannot block the caller past
+  the timeout (5 s for the hello, which opens the GPU; 1 s per frame).
+  Its stderr goes to the app's debug log. It exits when its stdin
+  closes, which happens when the app drops it or exits.
+- **Protocol (version 2; §6.2 for what 2 added).** Each frame is `u32` length, `u32` sequence
+  number (the reply repeats it), a tag and fields, little-endian; byte
+  strings carry a `u32` length; frames over 32 MiB and pictures over
+  4096 a side are refused before anything is allocated. `Hello{magic,
+  version}` → `Welcome{version, backend, capabilities[codec, decode |
+  encode, max size]}`; `OpenDecoder{codec, size hint}` → `Opened{id}`;
+  `Decode{id, keyframe, Annex B frame}` → `Picture{I420 planes}` |
+  `NoPicture` | `Failed{kind, detail}`; `SetOutputSize{id, box}`; `Close{id}`; and for later
+  `OpenEncoder{size, fps, bitrate}`, `Encode{id, force keyframe, I420}`
+  → `Encoded{keyframe, NALs}`, `SetBitrate`. Failure kinds say what the
+  app does next: `NeedKeyframe`, `Broken` (wait for a keyframe),
+  `Unsupported` (software for this stream), `Device` / `Protocol` /
+  `UnknownId` (the helper is in trouble: software). A version mismatch
+  means software for the session.
+- **Trust.** Every field is checked on reading (lengths against the
+  bytes there are, enums against known values, a picture's three planes
+  against its size), and the app also refuses a picture larger than the
+  helper's welcome promised. Malformed messages, cut frames and lying
+  plane lengths are tested.
+- **Fallback is always software.** Hardware is tried only when the
+  setting is on, the helper is there and its welcome covers H.264 at the
+  stream's SPS size. A stream whose helper crashes, hangs (timeout →
+  killed) or garbles a reply goes on in software at once if the frame in
+  hand is a keyframe, else asks for one (the decoder thread's
+  `want_keyframe` → PLI). The helper is started again for the next
+  stream start, at most 3 times; after the fourth failure hardware is
+  off until the app restarts. `Unsupported` (B slices, fields,
+  interlace, a profile the driver lacks) and a GPU failure on a keyframe
+  keep that stream in software without counting against the helper.
+- **Setting.** Settings → Huddles → "Decode video on the graphics card"
+  (`hardware_video`), for streams that start afterwards; on by default
+  since 2026-10-07, on the §6.3 numbers (off before GPU scaling, when
+  it did not yet beat software).
+
+### 6.2 Moving pictures: the pipe, carrying only what is shown
+
+A 1080p I420 picture is 3.1 MB. Measured on this machine (Ryzen AI 7
+350, Radeon 860M, Fedora 44, release build): a framed 1080p picture
+through two pipes and `cat` takes 0.65 ms. The first version of the
+helper path cost 6.6 ms a 1080p frame against 3.0 ms in process; two
+changes brought it to 3.9 ms:
+
+| change | 1080p through the helper |
+| --- | --- |
+| first version (64 KiB pipe, picture copied into one message) | 6.6 ms |
+| helper's stdout pipe raised to 1 MiB (`F_SETPIPE_SZ`) | 5.3 ms |
+| planes written and read straight from and into their vectors | 3.9 ms |
+
+So the pipe now costs about 0.9 ms of latency a 1080p frame (nothing
+measurable at 480×480), well inside a frame's 83 ms at 12 fps, but CPU
+in the kernel too. Decided (2026-10-07): keep the pipe, no shared
+memory, and send less: the helper shrinks each picture **on the GPU**
+to the size the app shows it at, before reading it back, so both the
+copy back and the pipe carry only that (§6.3).
+
+- **Protocol 2** adds `SetOutputSize{id, width, height}`: the box the
+  pictures should cover (0×0: their own size). The app sends it when
+  the shown size changes (the call window's share; a camera tile's
+  size, already in 32 px steps), not with every frame. The size is
+  `noslacking_video_ipc::output_size`: scaled by the larger of the two
+  ratios so it still covers the box both ways, the aspect ratio kept,
+  never larger than the source, even each way. Version 1 and 2 do not
+  mix; app and helper ship together, and a mismatch means software.
+- **Scaling on the GPU:** VA-API video processing
+  (`VAProfileNone`/`VAEntrypointVideoProc`, one context per stream,
+  made on first need), a `VAProcPipelineParameterBuffer` scaling the
+  decoded surface's visible region into an NV12 output surface (a pool
+  of four, by size), BT.601 studio range in and out, the default
+  scaling filter. radeonsi offers it (`vaQueryVideoProcPipelineCaps`:
+  no special pipeline or filter flags, outputs from 16 to 10240 wide).
+  The small surface is read back as before (`vaDeriveImage`, else
+  `vaGetImage`). The structure's size and offsets (224 bytes, five
+  padding holes written out) are clang-checked in tests like the rest.
+  The scaled pictures are within a mean difference of 0.07 (share at
+  960×540) and 0.23 (camera at 240×240) of the software decoder's,
+  ffmpeg-exact, pictures shrunk on the CPU (ignored GPU test).
+- **Without video processing** (a driver that lacks it, or a failure),
+  the helper shrinks on its CPU by a whole step (`shrink.rs`, the app's
+  box filter), so the pipe still carries the small picture.
+- **The app** shrinks nothing more: a picture that already covers the
+  shown size gives `decode::reduction` 1. The software path shrinks as
+  before.
+
+### 6.3 Measurements (this machine, release)
+
+Ryzen AI 7 350, Radeon 860M, Fedora 44, Mesa 26.2.3. `examples/bench.rs`:
+each fixture ten times, one frame at a time. "CPU" is user + system time
+of the bench and the helper together, from /proc, per frame; software is
+the app's path (rusty_h264, then its whole-step shrink).
+
+| 1080p share (36 frames) | wall | CPU |
+| --- | --- | --- |
+| full size: software | 1.8 ms | 1.8 ms |
+| full size: helper, GPU | 3.7 ms | 2.5 ms |
+| shown 960 wide: software (decode + shrink) | 4.5 ms | 4.4 ms |
+| shown 960 wide: helper, scaled on the GPU | **1.8 ms** | **0.7 ms** |
+| shown 960 wide: helper, shrunk on its CPU | 6.2 ms | 4.6 ms |
+| shown 640 wide: software | 4.0 ms | 4.0 ms |
+| shown 640 wide: helper, scaled on the GPU | **1.4 ms** | **0.5 ms** |
+| shown 640 wide: helper, shrunk on its CPU | 4.4 ms | 2.8 ms |
+
+| 480×480 camera (66 frames) | wall | CPU |
+| --- | --- | --- |
+| full size: software | 0.43 ms | 0.42 ms |
+| full size: helper, GPU | 0.76 ms | 0.33 ms |
+| 240 tile: software | 0.85 ms | 0.85 ms |
+| 240 tile: helper, scaled on the GPU | **0.64 ms** | **0.17 ms** |
+| 240 tile: helper, shrunk on its CPU | 1.15 ms | 0.55 ms |
+
+On the GPU in the bench's own process (no pipe) the 960-wide share is
+1.4 ms and 0.36 ms of CPU, so the pipe now adds little. Before the
+shrink (first version of this section) the helper cost 3.9 ms a 1080p
+frame against software's 2.1 ms. Two surprises: the app's whole-step
+shrink costs more than decoding (2.7 ms to halve a 1080p picture, a
+plain per-pixel box filter); a faster one (a 2× special case, SIMD)
+would narrow the gap for software too. And at full size, where nothing
+is shrunk, software still wins on this machine.
+
+The demo (`NOSLACKING_DEMO_HARDWARE_VIDEO=1 noslacking --demo
+--demo-view call-window`, under Xvfb at 1600×1000: the 1080p share
+shown at about 1624×914 and four cameras in 352 px tiles), CPU of the
+decoding threads (and the helper) over 20 s: software 2.73 s (14 % of a
+core), GPU 0.64 s in the app + 1.54 s in the helper = 2.18 s (11 %). In
+that window the share is shrunk only a little, so the gain is small;
+and each picture took longer (7.6–9.5 ms against 5.7–6.1 ms for the
+share, 3.1–3.7 ms against 1.35 ms for a camera) because the share's and
+the cameras' threads share one helper and wait for each other's
+replies. Pipelining requests, or a helper per decoding thread, would
+remove the wait.
+
+Decoding is bit-exact with ffmpeg on both fixtures at full size.
+Reading back with `vaDeriveImage` takes 1.35 ms a 1080p frame against
+2.6 ms with `vaGetImage`. **Decision:** the setting is off by default
+for now. On these numbers it should be turned on: where the picture is
+shown smaller than it is (most windows and every camera tile) it takes
+3 to 6 times less CPU and less time; it loses only for a share shown at
+its full size, and costs latency when many streams share the helper.
+The real win, a decoded surface shown as a GL texture with no copy back
+(dmabuf), needs `unsafe` GL in the app or eframe on wgpu.
+
+### 6.4 VA-API binding: libva opened at run time, declarations by hand
+
+| option | build needs | runtime | verdict |
+| --- | --- | --- | --- |
+| `cros-libva` 0.0.13 (ChromeOS, BSD-3) | bindgen + libclang + libva headers (libva-dev), links libva | helper will not start without libva2 | good API, but the build and link dependency, and `cros-codecs`' decoder on top (rejected in TODO) |
+| `libva-sys` 0.1.2 | bindgen + headers | links libva | unmaintained since 2021 |
+| GStreamer / ffmpeg | large C stacks | | rejected in TODO |
+| **chosen:** `libloading` (ISC) + ~25 functions and 6 structures copied from libva 2.23's `va.h` | nothing | `libva.so.2` / `libva-drm.so.2` opened at start; missing → "no hardware" | small, checkable |
+
+The structures' sizes and field offsets were computed by clang from
+libva 2.23's headers and are asserted in tests; their C padding is
+written out as fields, so the bytes handed to libva are all
+initialized. The stateless decoding state is ours (`src/h264.rs` in
+the helper, ~650 lines without its tests): picture order count (types 0, 1, 2), sliding
+window and adaptive reference marking (all MMCO), P-slice reference
+lists with modifications, cropping; B slices, fields, interlace, data
+partitioning and slice groups are refused as `Unsupported`. The H.264
+parser is `cros-codecs`' (BSD-3), used with no features: its parser and
+bit reader need only `log` (the crate's three other `unsafe` uses are
+in its DPB, which we do not use, and its tests). Packaging: no build
+dependency, so CI needs no libva-dev; the `.deb` recommends `libva2,
+libva-drm2, mesa-va-drivers | intel-media-va-driver`, the `.rpm`
+suggests `libva.so.2`; the Flatpak runtime ships libva 2.24 and its GL
+extension Mesa's VA drivers (checked: `noslacking-video --probe` in
+`org.freedesktop.Platform//26.08` finds H.264 decoding on radeonsi);
+Intel's media driver is the `org.freedesktop.Platform.VAAPI.Intel`
+extension.
+
+### 6.5 Vulkan Video (`gpu-video`, formerly `vk-video`)
+
+`gpu-video` 0.4.0 (Software Mansion, from Smelter; MIT; renamed from
+`vk-video` in April 2026, releases monthly) decodes and encodes H.264
+(and H.265) over Vulkan Video with a safe API, on Linux and Windows
+(not macOS), into wgpu textures or, without its default `wgpu` feature,
+NV12 bytes. Its dependencies are `ash`, `vk-mem` (which compiles AMD's
+VMA, C++), `h264-reader` and small crates; wgpu and naga only with
+features. About 170 `unsafe` uses inside, none needed from us, so it
+could run in process, but a GPU driver crash would still take the app
+down: it belongs in the helper too.
+
+| | VA-API | Vulkan Video (`gpu-video`) |
+| --- | --- | --- |
+| platforms | Linux (Intel, AMD, some NVIDIA via nvidia-vaapi-driver) | Linux and Windows: NVIDIA, AMD (RADV, Mesa ≥ 24), Intel (ANV, Mesa ≥ 24) |
+| this machine | H.264 decode (Fedora's `mesa-va-drivers-freeworld`) | **no H.264**: Fedora builds RADV without the patented codecs; `vulkaninfo` lists AV1 and VP9 decode only |
+| our fixtures | bit-exact, 1.8 ms a 1080p decode | could not be tried |
+| encode, IDR control | VA encode exists; not built yet | yes, with IDR on request |
+| licence, upkeep | libva MIT; our code | MIT; active |
+| what we own | ~650 lines of H.264 state, ~900 of libva wrapper (36 `unsafe` blocks) | none of the codec logic |
+
+Chosen for the first back end: VA-API, because it is what Linux
+distributions ship H.264 support in (Fedora and others strip it from
+Mesa's Vulkan drivers but carry it in VA drivers from RPM Fusion and
+the like), it works and is verified here, and it reaches older GPUs.
+Vulkan Video is the plan for Windows (one back end for NVIDIA, AMD and
+Intel instead of Media Foundation's three paths) and a second Linux
+back end where VA-API is missing; the `Backend` trait takes it as it
+is (frames in, I420 out). `ralfbiedert/vulkan_video` (0.1.0, 2023,
+BSD-2) is early bindings with no decoder; not useful.
+
+### 6.6 V4L2 memory-to-memory (ARM Linux)
+
+Two kinds, both behind the same `Backend` trait:
+
+- **Stateful** (Qualcomm Venus/Iris on Snapdragon, also Amlogic,
+  Raspberry Pi's bcm2835-codec): the driver parses the stream; feed
+  Annex B frames into the OUTPUT queue, take NV12 from CAPTURE. Like
+  VideoToolbox in shape. `v4l2r` 0.0.8 (ChromeOS; MIT text under a
+  `license-file`, so deny.toml needs a clarify entry; ~150 `unsafe`;
+  bindgen against the kernel headers at build time, as nokhwa's V4L2
+  already does) has a stateful decoder (`v4l2r::decoder::stateful`).
+- **Stateless** (Rockchip rkvdec and Hantro, MediaTek, Allwinner
+  cedrus): the media request API with H.264 controls
+  (`V4L2_CID_STATELESS_H264_SPS/PPS/DECODE_PARAMS/SLICE_PARAMS`); we
+  parse and manage the DPB, which is exactly what `src/h264.rs` in the
+  helper already does for VA-API. `cros-codecs` 0.0.6 has a V4L2
+  stateless H.264 back end (its `v4l2` feature) to read for the control
+  layout.
+- **Detection:** enumerate `/dev/video*`, keep devices whose
+  capabilities have `V4L2_CAP_VIDEO_M2M(_MPLANE)`, and whose OUTPUT
+  formats list `V4L2_PIX_FMT_H264` (stateful) or `H264_SLICE`
+  (stateless) and CAPTURE formats `NV12`; none → "no hardware".
+- Not built: this machine is x86 with no M2M decoder, and `vicodec`
+  (the kernel's test codec, present here as a module) speaks FWHT, not
+  H.264, and needs root to load. The plan is in TODO.md.
+
+### 6.7 Back ends by platform
+
+| platform | back end | crate | state |
+| --- | --- | --- | --- |
+| desktop Linux, Intel/AMD | VA-API | libloading + own FFI + own H.264 state | **decoding works**; encoding to do |
+| desktop Linux without VA H.264, NVIDIA | Vulkan Video | `gpu-video` | planned |
+| ARM Linux (Snapdragon, Raspberry Pi) | V4L2 stateful | `v4l2r` | planned |
+| ARM Linux (Rockchip, MediaTek, Allwinner) | V4L2 stateless | `v4l2r` + `src/h264.rs` | planned |
+| Windows (x86 and Snapdragon) | Vulkan Video, else Media Foundation / D3D11 video | `gpu-video`; `windows` | planned; the helper builds and reports no hardware |
+| macOS | VideoToolbox | `objc2-video-toolbox`, `objc2-core-media` | planned; the helper builds and reports no hardware |
+| everywhere | software | rusty_h264 (decode), rusty_h264-encoder | the default and the fallback |
+
 ## Sources
 - amazon-chime-sdk-js @ dea69d268c623ab2006169d3899981fea766fa8a (Apache-2.0), files as cited.
 - HuddleFM (AGPL, read only): `src_native-media_chime-link.ts`, `src_native-media_rtp.ts`, `src_native-media_signaling.ts`, `src_slack-huddle.ts`.
@@ -842,4 +1115,5 @@ with the TODO's "+4–8 weeks" for video and screen viewing.
 - https://www.engadget.com/slack-huddles-video-screen-sharing-130033179.html
 - https://www.openh264.org/faq.html
 - https://bbhtt.in/posts/closing-the-chapter-on-openh264/
+- Hardware (§6): libva 2.23 `va/va.h`; crates.io for cros-libva, cros-codecs, libva-sys, gpu-video, vk-video, vulkan_video, v4l2r; `vulkaninfo`, `noslacking-video --probe` on this machine and in the Flatpak runtime.
 - crates.io / GitHub for: str0m, openh264, rusty_h264, rust_h264, image-webp, oxideav-vp8, env-libvpx-sys, vpx-rs, shiguredo_libvpx, nokhwa, ashpd, pipewire, xcap, scap, screencapturekit, windows-capture, yuv (awxkee/yuvutils-rs), dcv-color-primitives, rav1e, ffmpeg-next, gstreamer.
