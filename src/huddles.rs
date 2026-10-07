@@ -190,6 +190,34 @@ pub use listen::{
     ALONE_FOR, FAILED_FOR, Left, Listen, Listening, Person, Phase, Place, Roster, alone_since,
     clock, faces, leave_alone, quit, status_text, title_text,
 };
+#[cfg(feature = "huddle-video")]
+pub use listen::{Picture, Screen, Share, sharing_text, watch};
+
+/// The call window's picture: the watched share's newest, uploaded.
+#[cfg(feature = "huddle-video")]
+#[derive(Default)]
+pub struct CallPicture {
+    /// The texture it is drawn from, set again for each new picture.
+    pub texture: Option<egui::TextureHandle>,
+    /// The share's own size, for its shape.
+    pub source: [usize; 2],
+    /// Which share it is of.
+    pub of: Option<String>,
+    /// The demo draws the window inside the main one, to be in its
+    /// screenshot.
+    #[cfg(feature = "demo")]
+    pub embed: bool,
+}
+
+#[cfg(feature = "huddle-video")]
+impl std::fmt::Debug for CallPicture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallPicture")
+            .field("source", &self.source)
+            .field("of", &self.of)
+            .finish_non_exhaustive()
+    }
+}
 
 /// The app's side of huddles.
 #[derive(Debug, Default)]
@@ -200,6 +228,9 @@ pub struct State {
     /// The huddle being listened to, if any.
     #[cfg(feature = "huddle-audio")]
     pub listening: Option<Listening>,
+    /// The call window's picture of the share watched.
+    #[cfg(feature = "huddle-video")]
+    pub picture: CallPicture,
 }
 
 impl State {
@@ -244,6 +275,9 @@ pub enum Action {
     /// Mutes or unmutes the microphone in the huddle being listened to.
     #[cfg(feature = "huddle-audio")]
     Microphone(crate::huddle_mic::MicAction),
+    /// Opens the call window on a share (by key), or closes it (none).
+    #[cfg(feature = "huddle-video")]
+    Watch(Option<String>),
 }
 
 /// Applies a view's request.
@@ -295,6 +329,8 @@ pub fn apply(app: &mut App, action: Action) {
         Action::Microphone(action) => crate::huddle_mic::apply(app, action),
         #[cfg(feature = "huddle-audio")]
         Action::Leave => listen::leave(app),
+        #[cfg(feature = "huddle-video")]
+        Action::Watch(share) => listen::watch(app, share),
     }
 }
 

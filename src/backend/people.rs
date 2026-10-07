@@ -123,6 +123,8 @@ impl Hub {
             Command::ListenHuddle { .. } | Command::LeaveHuddle | Command::MuteHuddle { .. } => {
                 log::debug!("{command:?} is the worker's");
             }
+            #[cfg(feature = "huddle-video")]
+            Command::WatchShare { .. } => log::debug!("{command:?} is the worker's"),
             Command::Active => {
                 if let Some(rtm) = self
                     .teams
@@ -494,20 +496,31 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
         #[cfg(feature = "huddle-audio")]
         Command::ListenHuddle { channel } => {
             let roster = crate::demo::listening().roster;
-            [
+            let states = vec![
                 crate::huddles::Listen::Joining,
                 crate::huddles::Listen::Live,
                 crate::huddles::Listen::Roster(roster),
-            ]
-            .into_iter()
-            .map(|state| Event::People {
-                team: team.to_owned(),
-                event: people::Event::Listening {
-                    channel: channel.clone(),
-                    state,
-                },
-            })
-            .collect()
+            ];
+            // Ana shares her screen, which plays when watched.
+            #[cfg(feature = "huddle-video")]
+            let states = {
+                let mut states = states;
+                if let Some(screen) = crate::demo::share_screen() {
+                    states.push(crate::huddles::Listen::Screen(screen));
+                }
+                states.push(crate::huddles::Listen::Shares(crate::demo::shares()));
+                states
+            };
+            states
+                .into_iter()
+                .map(|state| Event::People {
+                    team: team.to_owned(),
+                    event: people::Event::Listening {
+                        channel: channel.clone(),
+                        state,
+                    },
+                })
+                .collect()
         }
         // Left at once; the demo has one huddle to leave, in #design.
         #[cfg(feature = "huddle-audio")]
@@ -518,6 +531,12 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
                 state: crate::huddles::Listen::Ended(Ok(crate::huddles::Left::Asked)),
             },
         }],
+        // The pretend share plays while watched.
+        #[cfg(feature = "huddle-video")]
+        Command::WatchShare { share } => {
+            crate::demo::watch_share(share.is_some());
+            Vec::new()
+        }
         // The demo has no microphone; it opens and closes as asked.
         #[cfg(feature = "huddle-audio")]
         Command::MuteHuddle { muted } => vec![Event::People {

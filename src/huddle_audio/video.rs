@@ -1,8 +1,9 @@
-//! What a huddle's video looks like to us, for the probe (and the app,
-//! with `--video`): the sources
-//! Chime's INDEX lists, which of them to receive, how the receiving
-//! m-lines line up with SUBSCRIBE's `receive_stream_ids`, whose stream an
-//! SSRC is, and what arrives on each, counted, never decoded.
+//! What a huddle's video looks like to us: the sources Chime's INDEX
+//! lists, who shares a screen, which streams to receive (the share the
+//! call window watches, and for the probe or `--video N` whatever it
+//! picks), how the receiving m-lines line up with SUBSCRIBE's
+//! `receive_stream_ids`, whose stream an SSRC is, and what arrives on
+//! each, counted (decoding is `decode`'s, with `huddle-video`).
 //!
 //! The rules are the JS SDK's (see docs/research/huddle-video.md §2):
 //! a source whose attendee id ends in `#content` is a screen share; a
@@ -242,6 +243,60 @@ pub fn choose(index: &Index, me: &str, n: usize) -> Vec<u32> {
     // Stable: group order is kept within shares and within cameras.
     chosen.sort_by_key(|s| !s.is_share());
     chosen.into_iter().take(n).map(|s| s.stream_id).collect()
+}
+
+/// Someone sharing their screen, as the call bar and the call window
+/// list them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Share {
+    /// Which share: its attendee id (`…#content`), steady for as long as
+    /// it lasts, while its stream ids may change.
+    pub key: String,
+    /// The Slack user sharing, when Chime's external id names one.
+    pub user: Option<String>,
+}
+
+/// The screens shared now, others' only, one per sharer, in INDEX's
+/// order.
+pub fn shares(index: &Index, me: &str) -> Vec<Share> {
+    let mut shares: Vec<Share> = Vec::new();
+    for source in index
+        .sources
+        .iter()
+        .filter(|s| s.video && s.is_share() && !s.is_ours(me))
+    {
+        if !shares.iter().any(|s| s.key == source.attendee_id) {
+            shares.push(Share {
+                key: source.attendee_id.clone(),
+                user: source.user.clone(),
+            });
+        }
+    }
+    shares
+}
+
+/// The stream to receive for the share `key`: its best, as [`choose`]
+/// picks for a group; none once it has stopped.
+pub fn share_stream(index: &Index, me: &str, key: &str) -> Option<u32> {
+    index
+        .sources
+        .iter()
+        .filter(|s| s.video && s.is_share() && !s.is_ours(me) && s.attendee_id == key)
+        .max_by_key(|s| (s.max_kbps, s.width * s.height, u32::MAX - s.stream_id))
+        .map(|s| s.stream_id)
+}
+
+/// The streams to receive: the share the call window shows, if it is
+/// still going, and with `--video N` also what [`choose`] picks. Nothing
+/// is received that is not watched.
+pub fn wanted(index: &Index, me: &str, diagnostic: usize, watched: Option<&str>) -> Vec<u32> {
+    let mut wanted = choose(index, me, diagnostic);
+    if let Some(stream) = watched.and_then(|key| share_stream(index, me, key))
+        && !wanted.contains(&stream)
+    {
+        wanted.insert(0, stream);
+    }
+    wanted
 }
 
 /// The receiving video m-lines, after the first: what each receives,
@@ -698,6 +753,71 @@ mod tests {
         assert_eq!(choose(&index, "me", 2), [6, 2]);
         assert!(choose(&index, "me", 0).is_empty());
         assert!(choose(&Index::default(), "me", 4).is_empty());
+    }
+
+    /// What is received follows the call window and INDEX: nothing until
+    /// a share is watched, its stream while it lasts, the other share's
+    /// when the window switches, nothing once it closes or the share ends.
+    #[test]
+    fn only_the_watched_share_is_received() {
+        let mut ana_share = source(6, 6, "ana#content", 1000);
+        ana_share.external_user_id = Some("T1-R1-UANA".into());
+        // A lower layer of Ana's share, and Bob's share.
+        let ana_low = source(8, 6, "ana#content", 300);
+        let bob_share = source(9, 7, "bob#content", 800);
+        let cameras = vec![source(2, 1, "alice", 1200), source(4, 3, "me", 900)];
+        let none = index(cameras.clone());
+        let one = index([cameras.clone(), vec![ana_share.clone(), ana_low.clone()]].concat());
+        let two = index([cameras.clone(), vec![ana_share, ana_low, bob_share]].concat());
+        let mine = index([cameras, vec![source(5, 4, "me#content", 1500)]].concat());
+
+        // Who shares: one entry per sharer, never us.
+        assert!(shares(&none, "me").is_empty());
+        assert_eq!(
+            shares(&one, "me"),
+            [Share {
+                key: "ana#content".into(),
+                user: Some("UANA".into())
+            }]
+        );
+        assert_eq!(
+            shares(&two, "me")
+                .iter()
+                .map(|s| s.key.as_str())
+                .collect::<Vec<_>>(),
+            ["ana#content", "bob#content"]
+        );
+        assert!(
+            shares(&mine, "me").is_empty(),
+            "our own share is not listed"
+        );
+
+        // Nobody watching: nothing, whoever shares; cameras never.
+        assert!(wanted(&one, "me", 0, None).is_empty());
+        assert!(wanted(&two, "me", 0, None).is_empty());
+        // Watching Ana: her best layer.
+        assert_eq!(wanted(&one, "me", 0, Some("ana#content")), [6]);
+        assert_eq!(wanted(&two, "me", 0, Some("ana#content")), [6]);
+        // Switched to Bob: his alone.
+        assert_eq!(wanted(&two, "me", 0, Some("bob#content")), [9]);
+        // Ana stopped sharing while watched: nothing.
+        assert!(wanted(&none, "me", 0, Some("ana#content")).is_empty());
+        // Our own share is never received, even if asked for.
+        assert!(wanted(&mine, "me", 0, Some("me#content")).is_empty());
+        // `--video N` still adds what it picks, the watched share first.
+        assert_eq!(wanted(&two, "me", 1, Some("bob#content")), [9, 6]);
+        assert_eq!(wanted(&two, "me", 3, Some("bob#content")), [6, 9, 2]);
+
+        // And the slots follow: open, switch, close.
+        let slots = Slots::default();
+        let watching = slots.after(&slots.plan(&wanted(&two, "me", 0, Some("ana#content"))));
+        assert_eq!(watching.receive_stream_ids(), [0, 6]);
+        let plan = watching.plan(&wanted(&two, "me", 0, Some("bob#content")));
+        assert_eq!((plan.free.clone(), plan.add.clone()), (vec![0], vec![9]));
+        let switched = watching.after(&plan);
+        let closed = switched.plan(&wanted(&two, "me", 0, None));
+        assert_eq!(closed.free, [1]);
+        assert!(switched.after(&closed).receiving().is_empty());
     }
 
     #[test]

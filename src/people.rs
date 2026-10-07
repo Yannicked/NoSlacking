@@ -247,6 +247,10 @@ pub enum Command {
     /// huddle being listened to.
     #[cfg(feature = "huddle-audio")]
     MuteHuddle { muted: bool },
+    /// Shows the share `share` (its key) in the call window, receiving
+    /// it, or none, receiving no share at all.
+    #[cfg(feature = "huddle-video")]
+    WatchShare { share: Option<String> },
 }
 
 /// How often, at most, Slack hears that you are active: Slack's desktop

@@ -4,6 +4,11 @@
 //! Leave, the conversation header's, Ctrl+Shift+H), when everyone else
 //! has been gone a minute, on sign-out and on quit; when the huddle ends
 //! Chime closes it and the bar says so.
+//!
+//! With `huddle-video` the bar also says who shares their screen and
+//! offers Watch, which opens the call window on that share (see
+//! `ui::call_window`); only a share being watched is received,
+//! and closing the window, leaving or the share ending stops it.
 
 use std::time::{Duration, Instant};
 
@@ -14,6 +19,10 @@ use crate::i18n::{t, tf};
 use crate::people;
 
 pub use crate::huddle_audio::roster::{Person, Roster};
+#[cfg(feature = "huddle-video")]
+pub use crate::huddle_audio::screen::{Picture, Screen};
+#[cfg(feature = "huddle-video")]
+pub use crate::huddle_audio::video::Share;
 
 /// How long you stay once everyone else has left before leaving too:
 /// long enough for someone dropping out and back in.
@@ -40,6 +49,12 @@ pub enum Listen {
     /// Who is in the huddle and speaking now. Sent when it changes, at
     /// most a few times a second.
     Roster(Roster),
+    /// Who shares their screen now, when that changes.
+    #[cfg(feature = "huddle-video")]
+    Shares(Vec<Share>),
+    /// Where the watched share's pictures arrive, once per session.
+    #[cfg(feature = "huddle-video")]
+    Screen(Screen),
     /// Left, the huddle over, or failed.
     Ended(Result<Left, Failure>),
 }
@@ -69,6 +84,15 @@ pub struct Listening {
     pub alone_since: Option<Instant>,
     /// The microphone: muted on joining.
     pub mic: crate::huddle_mic::Mic,
+    /// Who shares their screen, as last told.
+    #[cfg(feature = "huddle-video")]
+    pub shares: Vec<Share>,
+    /// Where the watched share's pictures arrive.
+    #[cfg(feature = "huddle-video")]
+    pub screen: Option<Screen>,
+    /// The share the call window shows, by key; none while it is closed.
+    #[cfg(feature = "huddle-video")]
+    pub watching: Option<String>,
 }
 
 impl Listening {
@@ -81,7 +105,20 @@ impl Listening {
             roster: Roster::default(),
             alone_since: None,
             mic: crate::huddle_mic::Mic::Muted,
+            #[cfg(feature = "huddle-video")]
+            shares: Vec::new(),
+            #[cfg(feature = "huddle-video")]
+            screen: None,
+            #[cfg(feature = "huddle-video")]
+            watching: None,
         }
+    }
+
+    /// The share being watched, while it lasts.
+    #[cfg(feature = "huddle-video")]
+    pub fn watched(&self) -> Option<&Share> {
+        let key = self.watching.as_deref()?;
+        self.shares.iter().find(|s| s.key == key)
     }
 
     /// Whether you are in the huddle, joining or listening, rather than
@@ -205,6 +242,35 @@ pub fn listen(app: &mut App, team: String, channel: String) {
     });
 }
 
+/// Opens the call window on the share `key` (switching from any other)
+/// or, with none, closes it: only the share shown is received.
+#[cfg(feature = "huddle-video")]
+pub fn watch(app: &mut App, key: Option<String>) {
+    let Some(listening) = app.huddles.listening.as_mut().filter(|l| l.in_huddle()) else {
+        return;
+    };
+    if listening.watching == key {
+        return;
+    }
+    listening.watching.clone_from(&key);
+    if let Some(screen) = &listening.screen {
+        // Not the last share's picture in the new one's window.
+        screen.clear();
+    }
+    let team = listening.team.clone();
+    app.backend.send(backend::Command::People {
+        team,
+        command: people::Command::WatchShare { share: key },
+    });
+}
+
+/// What the call bar says of someone sharing: "Ana is sharing their
+/// screen".
+#[cfg(feature = "huddle-video")]
+pub fn sharing_text(name: &str) -> String {
+    tf("{name} is sharing their screen", &[("name", name)])
+}
+
 /// Leaves the huddle being listened to, or closes the failure shown.
 pub fn leave(app: &mut App) {
     if let Some(last) = app.huddles.listening.take()
@@ -241,6 +307,17 @@ pub fn heard(app: &mut App, team: &str, channel: &str, state: Listen) {
             listening.alone_since = alone_since(listening.alone_since, &roster, live, now);
             listening.roster = roster;
         }
+        #[cfg(feature = "huddle-video")]
+        Listen::Shares(shares) => {
+            listening.shares = shares;
+            // The share watched has ended: the window closes.
+            if listening.watching.is_some() && listening.watched().is_none() {
+                watch(app, None);
+                app.toast(t("The screen share ended"), false);
+            }
+        }
+        #[cfg(feature = "huddle-video")]
+        Listen::Screen(screen) => listening.screen = Some(screen),
         Listen::Ended(Ok(Left::Asked)) => app.huddles.listening = None,
         Listen::Ended(Ok(Left::Ended)) => {
             app.huddles.listening = None;
@@ -249,6 +326,12 @@ pub fn heard(app: &mut App, team: &str, channel: &str, state: Listen) {
         Listen::Ended(Err(error)) => {
             listening.phase = Phase::Failed { error, at: now };
             listening.alone_since = None;
+            // The session is gone, and its shares with it.
+            #[cfg(feature = "huddle-video")]
+            {
+                listening.watching = None;
+                listening.shares.clear();
+            }
         }
     }
 }
@@ -421,6 +504,29 @@ mod tests {
                 (Some("U0"), true, false, true),
             ]
         );
+    }
+
+    #[cfg(feature = "huddle-video")]
+    #[test]
+    fn the_watched_share_is_the_one_still_going() {
+        let mut listening = Listening::new("T1", "C1");
+        assert!(listening.watched().is_none());
+        listening.shares = vec![
+            Share {
+                key: "a#content".into(),
+                user: Some("U2".into()),
+            },
+            Share {
+                key: "b#content".into(),
+                user: None,
+            },
+        ];
+        assert!(listening.watched().is_none(), "nothing watched");
+        listening.watching = Some("b#content".into());
+        assert_eq!(listening.watched().map(|s| s.user.clone()), Some(None));
+        listening.shares.truncate(1);
+        assert!(listening.watched().is_none(), "b stopped sharing");
+        assert_eq!(sharing_text("Ana"), "Ana is sharing their screen");
     }
 
     #[test]
