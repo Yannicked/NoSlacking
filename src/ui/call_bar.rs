@@ -242,18 +242,10 @@ fn bar(
                             }));
                         }
                     } else {
+                        // Right to left, so they read Mute, Video, Leave, as
+                        // in the call window.
                         if leave_button(ui, palette, Look::BAR) {
                             actions.push(Action::Huddle(huddles::Action::Leave));
-                        }
-                        if matches!(listening.phase, Phase::Live { .. })
-                            && let Some(action) = super::huddle_mic::mute_button(
-                                ui,
-                                palette,
-                                listening.mic,
-                                Look::BAR,
-                            )
-                        {
-                            actions.push(Action::Huddle(huddles::Action::Microphone(action)));
                         }
                         #[cfg(feature = "huddle-camera")]
                         if matches!(listening.phase, Phase::Live { .. })
@@ -265,6 +257,16 @@ fn bar(
                             )
                         {
                             actions.push(Action::Huddle(huddles::Action::Camera(action)));
+                        }
+                        if matches!(listening.phase, Phase::Live { .. })
+                            && let Some(action) = super::huddle_mic::mute_button(
+                                ui,
+                                palette,
+                                listening.mic,
+                                Look::BAR,
+                            )
+                        {
+                            actions.push(Action::Huddle(huddles::Action::Microphone(action)));
                         }
                     }
                 });
