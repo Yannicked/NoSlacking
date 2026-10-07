@@ -358,3 +358,48 @@ servers prefer SILK and X-H264UC).
   tier's `fetchShortProfile`. Work one-to-one chats are either
   `19:…@unq.gbl.spaces` or `19:uni01_…@thread.v2`. They saw a chat
   service send answer 201 and never arrive, so check sends end to end.
+
+### 6.4 What the web clients do (recordings, 2026-10-07)
+
+Three recordings of the Teams web client, of a personal account and of a
+work account signed in as a guest of another organisation, summarised;
+the recordings themselves held live tokens and were deleted.
+
+**Sign-in.** Work web client `5e3ce6c0-2b1f-4285-8d4b-75ee78787346`,
+personal web client `4b3e8f46-56d3-427f-b1e2-d239b2ea6bca`. A guest signs
+in at the home tenant and then mints every token with the host tenant in
+the token URL (`login.microsoftonline.com/{host tenant}/oauth2/v2.0/token`),
+which is what entering the organisation at sign-in does here. Scopes the
+work client mints: `api.spaces.skype.com`, `chatsvcagg.teams.microsoft.com`,
+`ic3.teams.office.com`, `presence.teams.microsoft.com`, Graph, Outlook,
+Substrate, SharePoint. Personal: `auth.fl.teams.microsoft.com/teams.auth.readwrite`,
+`mtsvc.fl.teams.microsoft.com/teams.mt.readwrite`,
+`groupssvc.fl.teams.microsoft.com/teams.readwrite`.
+
+**Endpoints by feature** (work host `teams.cloud.microsoft/api/…/{region}`,
+personal `teams.live.com/api/…`):
+
+| Feature | Work | Personal |
+|---|---|---|
+| Chat service | `chatsvc/{region}/v1/…`, Bearer **IC3** token | `chatsvc/consumer/v1/…`, skype token |
+| People | `mt/{region}/beta/users/fetchShortProfile` and `users/fetch` (spaces token); `fetchFederated` 401 for a guest | `mt/beta/users/fetchShortProfile`, `fetchFederated` (mtsvc token + skype token) |
+| Avatars | `mt/{region}/beta/users/{mri}/profilepicturev2/…`, cookie from `POST …/users/{id}/cookiev2` | `mt/beta/users/{mri}/profilepicturev2?size=HR64x64`, cookie from `POST mt/beta/imageauth/cookie`; groups `groups/v1/threads/{id}/profilepicturev2` |
+| Inline images (`<img itemtype="…/AMSImage">`) | `{region}-prod.asyncgw.teams.microsoft.com/v1/objects/{id}/views/imgo`, Bearer IC3 | `*-api.asm.skype.com/v1/objects/{id}/views/imgo`, cookie from `POST …/v1/skypetokenauth` (form `skypetoken=…`) |
+| Presence | `ups/{region}/v1/presence/getpresence/`, `me/endpoints`, `pubsub/subscriptions` (presence token) | `ups/global/v1/…` (same shapes) |
+| Read receipts | `chatsvc/…/v1/threads/{id}/consumptionhorizons` | the same |
+| Channels | CSA `api/v1/containers/{id}/posts`, `teams/{id}/channels/{id}/pins`, `…/systemmessages`, `pinnedChannels` | none |
+| Custom emoji | CSA `api/v1/customemoji/metadata` | none |
+| Activity | chat `conversations/48:notifications/messages` | `users/ME/streams/notifications/messages` |
+| Other (personal) | | rename `PUT threads/{id}/properties?name=topic` `{"topic"}`; mute `PUT conversations/{id}/properties?name=alerts` `{"alerts"}`; favourites `PUT users/ME/properties?name=favorites`; people search `POST mt/beta/users/searchUsers` `{"searchKeyWord"}`; calendar `mt/v2.0/me/calendars/default/calendarView` |
+
+**Messages.** Reactions arrive as `properties.emotions` (and
+`deltaEmotions`): `[{key, users: [{mri, time, value}]}]`. Emoji are
+`<img itemtype="http://schema.skype.com/Emoji" alt="🙁">`; quote replies are
+`<blockquote itemtype="http://schema.skype.com/Reply" itemid="{message id}">`
+with the author's MRI in `<strong itemprop="mri" itemid=…>` and
+`<p itemprop="preview">`. `Event/Call` carries `callEventType`,
+`duration`, `partlist` and, for meetings, `meetingDetails`. The web
+client's send adds `imdisplayname`, `fromUserId`, `composetime` and
+`properties` (`importance`, `subject`, `mentions`, `files`, `links`,
+`cards`, `formatVariant: "TEAMS"`). Not yet recorded: sending reactions
+and edits.
