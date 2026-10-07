@@ -423,6 +423,30 @@ impl TeamsClient {
         Ok(history_page(data))
     }
 
+    /// The people in a chat, by MRI (`8:orgid:…`, `8:live:…`), from the
+    /// thread's own record.
+    pub async fn get_members(&self, chat_id: &str) -> Result<Vec<String>, Failure> {
+        let url = format!(
+            "{}/v1/threads/{}?view=msnp24Equivalent",
+            self.chat_service_url(),
+            percent_encoding::utf8_percent_encode(chat_id, percent_encoding::NON_ALPHANUMERIC)
+        );
+        let resp = self
+            .authed_skype_request(|http, token| {
+                http.get(&url)
+                    .header("Authentication", format!("skypetoken={}", token))
+            })
+            .await?;
+        if !resp.status().is_success() {
+            return Err(refused(resp, "list a chat's members").await);
+        }
+        let thread: crate::teams::types::Thread = resp
+            .json()
+            .await
+            .map_err(|e| Failure::Unexpected(e.to_string()))?;
+        Ok(thread.members.into_iter().map(|m| m.id).collect())
+    }
+
     /// Sends an HTML message to a conversation, answering with its id
     /// when the server gave one.
     pub async fn send_message(

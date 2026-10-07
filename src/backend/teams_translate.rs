@@ -388,7 +388,9 @@ pub fn translate_conversation(conv: &types::Conversation) -> Conversation {
         // One-to-one chats come in both shapes in work tenants.
         ConversationKind::Direct
     } else {
-        ConversationKind::Private
+        // Every other thread is a chat of several people; only `tacv2`
+        // threads are channels.
+        ConversationKind::Group
     };
 
     let latest = conv
@@ -427,6 +429,19 @@ pub fn translate_conversation(conv: &types::Conversation) -> Conversation {
         is_open: Some(true),
         empty: false,
     }
+}
+
+/// The other person in a one-to-one chat whose id names both
+/// (`19:{a}_{b}@unq.gbl.spaces`), as the id messages name them by.
+pub fn other_in_pair(chat_id: &str, me: &str) -> Option<String> {
+    let pair = chat_id
+        .strip_prefix("19:")?
+        .strip_suffix("@unq.gbl.spaces")?;
+    let (a, b) = pair.split_once('_')?;
+    [a, b]
+        .into_iter()
+        .filter_map(clean_teams_user_id)
+        .find(|id| id != me)
 }
 
 /// Translates a Teams [`types::Message`] into a [`Message`].
@@ -785,10 +800,20 @@ mod tests {
             id: "19:0123abcd@thread.v2".into(),
             ..Default::default()
         };
+        assert_eq!(translate_conversation(&group).kind, ConversationKind::Group);
+    }
+
+    #[test]
+    fn the_other_in_a_pair_is_not_me() {
         assert_eq!(
-            translate_conversation(&group).kind,
-            ConversationKind::Private
+            other_in_pair("19:aaa_bbb@unq.gbl.spaces", "aaa").as_deref(),
+            Some("bbb")
         );
+        assert_eq!(
+            other_in_pair("19:aaa_bbb@unq.gbl.spaces", "bbb").as_deref(),
+            Some("aaa")
+        );
+        assert_eq!(other_in_pair("19:uni01_xyz@thread.v2", "aaa"), None);
     }
 
     #[test]

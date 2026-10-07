@@ -13,8 +13,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use super::teams_translate::{
-    clean_teams_user_id, teams_id_to_ts, translate_conversation, translate_message, translate_team,
-    translate_user, ts_to_teams_id,
+    clean_teams_user_id, other_in_pair, teams_id_to_ts, translate_conversation, translate_message,
+    translate_team, translate_user, ts_to_teams_id,
 };
 use super::{Change, Event, Gate, SignIn, Sink, Socket};
 use crate::credentials::Credentials;
@@ -59,7 +59,9 @@ impl Session {
         report: Report,
     ) -> Self {
         let team = workspace.team_id.clone();
-        let boot = tokio::spawn(boot(client.clone(), team.clone(), sink.clone())).abort_handle();
+        let me = workspace.user_id.clone();
+        let boot =
+            tokio::spawn(boot(client.clone(), team.clone(), me, sink.clone())).abort_handle();
         let trouter =
             tokio::spawn(trouter(team, client.clone(), sink.clone(), report)).abort_handle();
         Self {
@@ -103,8 +105,13 @@ impl Session {
         self.boot.abort();
         self.trouter.abort();
         let team = self.workspace.team_id.clone();
-        self.boot =
-            tokio::spawn(boot(self.client.clone(), team.clone(), self.sink.clone())).abort_handle();
+        self.boot = tokio::spawn(boot(
+            self.client.clone(),
+            team.clone(),
+            self.workspace.user_id.clone(),
+            self.sink.clone(),
+        ))
+        .abort_handle();
         self.trouter = tokio::spawn(trouter(
             team,
             self.client.clone(),
@@ -156,17 +163,26 @@ pub fn client(
 }
 
 /// Lists the chats, then the teams and their channels, then you.
-async fn boot(client: TeamsClient, team: String, sink: Sink) {
+async fn boot(client: TeamsClient, team: String, me: String, sink: Sink) {
     if let Err(err) = client.ensure_fresh_tokens().await {
         log::warn!("could not renew the Teams tokens of {team}: {err:?}");
     }
 
     match client.get_conversations(PAGE).await {
-        Ok(chats) => sink.send(Event::Conversations {
-            team: team.clone(),
-            list: chats.iter().map(translate_conversation).collect(),
-            complete: true,
-        }),
+        Ok(chats) => {
+            let (list, users) = chat_list(&client, &chats, &me).await;
+            if !users.is_empty() {
+                sink.send(Event::Users {
+                    team: team.clone(),
+                    users,
+                });
+            }
+            sink.send(Event::Conversations {
+                team: team.clone(),
+                list,
+                complete: true,
+            });
+        }
         Err(err) => log::warn!("failed to get Teams conversations of {team}: {err:?}"),
     }
 
@@ -198,6 +214,94 @@ async fn boot(client: TeamsClient, team: String, sink: Sink) {
         }),
         Err(err) => log::warn!("failed to read who is signed in to {team}: {err:?}"),
     }
+}
+
+/// The chat list as the sidebar should show it. Teams names a chat by its
+/// topic, if it has one; otherwise by who is in it, which the list does not
+/// say. So for each chat without a topic its members are asked for: a
+/// one-to-one chat becomes the other person's (named as a direct message
+/// is), a group is named after its people, and a chat with nobody else
+/// and no name, such as Teams' own streams, is left out. Answers the people
+/// it learned the names of too.
+async fn chat_list(
+    client: &TeamsClient,
+    chats: &[crate::teams::types::Conversation],
+    me: &str,
+) -> (Vec<crate::model::Conversation>, Vec<crate::model::User>) {
+    use crate::model::ConversationKind;
+    let named = |chat: &crate::teams::types::Conversation| {
+        chat.thread_properties
+            .as_ref()
+            .and_then(|p| p.topic.as_deref())
+            .is_some_and(|topic| !topic.trim().is_empty())
+    };
+    let mut list: Vec<crate::model::Conversation> =
+        chats.iter().map(translate_conversation).collect();
+    // Who else is in each chat that needs it, asked all at once.
+    let wanted: Vec<usize> = chats
+        .iter()
+        .enumerate()
+        .filter(|(i, chat)| list[*i].kind != ConversationKind::Channel && !named(chat))
+        .map(|(i, _)| i)
+        .collect();
+    let members: Vec<Vec<String>> = futures_util::future::join_all(wanted.iter().map(|&i| {
+        let id = chats[i].id.clone();
+        async move {
+            if let Some(other) = other_in_pair(&id, me) {
+                return vec![other];
+            }
+            match client.get_members(&id).await {
+                Ok(mris) => mris
+                    .iter()
+                    .filter_map(|mri| clean_teams_user_id(mri))
+                    .filter(|id| id != me)
+                    .collect(),
+                Err(error) => {
+                    log::info!("could not list a Teams chat's members: {error:?}");
+                    Vec::new()
+                }
+            }
+        }
+    }))
+    .await;
+    let mut everyone: Vec<String> = members.iter().flatten().cloned().collect();
+    everyone.sort();
+    everyone.dedup();
+    let found = if everyone.is_empty() {
+        Vec::new()
+    } else {
+        client.get_users(&everyone).await.unwrap_or_else(|error| {
+            log::info!("could not look up the people in Teams chats: {error:?}");
+            Vec::new()
+        })
+    };
+    let name_of = |id: &str| {
+        found
+            .iter()
+            .find(|u| u.id == id)
+            .and_then(|u| u.display_name.clone())
+    };
+    let mut drop = Vec::new();
+    for (&i, others) in wanted.iter().zip(&members) {
+        let conversation = &mut list[i];
+        match (conversation.kind, others.as_slice()) {
+            (ConversationKind::Direct, [other, ..]) => conversation.user = Some(other.clone()),
+            (_, []) if conversation.name == conversation.id => drop.push(i),
+            (_, []) => {}
+            (_, others) => {
+                let names: Vec<String> = others.iter().filter_map(|id| name_of(id)).collect();
+                if !names.is_empty() {
+                    conversation.name = names.join(", ");
+                }
+            }
+        }
+    }
+    for i in drop.into_iter().rev() {
+        log::debug!("leaving out a Teams chat with no name and nobody else in it");
+        list.remove(i);
+    }
+    let users = found.iter().map(translate_user).collect();
+    (list, users)
 }
 
 /// The newest page of a conversation, or the one at `cursor`.

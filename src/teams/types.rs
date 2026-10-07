@@ -80,6 +80,22 @@ pub struct Conversation {
     pub properties: Option<ConversationProperties>,
 }
 
+/// A chat's own record (`/v1/threads/{id}`), for who is in it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Thread {
+    #[serde(default)]
+    pub members: Vec<ThreadMember>,
+}
+
+/// Someone in a chat.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadMember {
+    /// Their MRI.
+    pub id: String,
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
 /// Your own state in a conversation.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationProperties {
@@ -402,5 +418,18 @@ mod tests {
         );
         assert_eq!(session.ccid.as_deref(), Some("ccid-123"));
         assert_eq!(session.connectparams.issuer, "iss");
+    }
+
+    #[test]
+    fn a_thread_names_its_members() {
+        let thread: Thread = serde_json::from_str(
+            r#"{"id":"19:x@thread.v2","type":"Thread","properties":{},"members":[
+                {"id":"8:live:.cid.aaa","role":"Admin","linkedMri":null},
+                {"id":"8:orgid:bbb","role":"User"}
+            ]}"#,
+        )
+        .expect("a thread");
+        let ids: Vec<&str> = thread.members.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["8:live:.cid.aaa", "8:orgid:bbb"]);
     }
 }
