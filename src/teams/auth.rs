@@ -140,6 +140,15 @@ impl TeamsCredentials {
             .unwrap_or("https://amer.ng.msg.teams.microsoft.com")
     }
 
+    /// The middle tier's URL from `region_gtms`, where Teams looks people
+    /// up (`https://teams.microsoft.com/api/mt/…`).
+    pub fn middle_tier_url(&self) -> Option<&str> {
+        self.region_gtms
+            .as_ref()
+            .and_then(|v| v.get("middleTier"))
+            .and_then(|s| s.as_str())
+    }
+
     /// The chat service aggregator URL from `region_gtms`.
     pub fn chatsvcagg_url(&self) -> &str {
         self.region_gtms

@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod client;
 pub mod html;
+pub mod probe;
 pub mod socket;
 pub mod types;
 

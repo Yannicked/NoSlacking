@@ -58,6 +58,10 @@ fn main() -> eframe::Result<()> {
         release_slack_links(&dirs.state);
         return Ok(());
     }
+    #[cfg(feature = "teams")]
+    if cli.teams_probe {
+        std::process::exit(noslacking::teams::probe::run(&dirs.settings_file()));
+    }
     #[cfg(feature = "huddle-audio")]
     if let Some([team, channel]) = &cli.huddle_probe {
         let code =

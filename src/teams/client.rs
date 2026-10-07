@@ -14,14 +14,55 @@ use crate::teams::types::{
     TeamsResponse, UserDetails,
 };
 
-/// Graph's lookup of directory objects by id.
-const GRAPH_BY_IDS: &str = "https://graph.microsoft.com/v1.0/directoryObjects/getByIds";
-
-/// What [`GRAPH_BY_IDS`] answers.
+/// What `fetchShortProfile` answers.
 #[derive(serde::Deserialize)]
-struct GraphUsers {
+struct ShortProfiles {
     #[serde(default)]
-    value: Vec<UserDetails>,
+    value: Vec<ShortProfile>,
+}
+
+/// One person, as the middle tier describes them.
+#[derive(serde::Deserialize)]
+struct ShortProfile {
+    #[serde(default, rename = "objectId")]
+    object_id: Option<String>,
+    #[serde(default)]
+    mri: Option<String>,
+    #[serde(default, rename = "displayName")]
+    display_name: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default, rename = "userPrincipalName")]
+    user_principal_name: Option<String>,
+}
+
+impl ShortProfile {
+    /// The person under the id messages name them by (the object id, as
+    /// `8:orgid:` MRIs carry it), if the profile has one.
+    fn into_details(self) -> Option<UserDetails> {
+        let id = self.object_id.filter(|id| !id.is_empty()).or_else(|| {
+            self.mri
+                .as_deref()
+                .and_then(|mri| mri.rsplit(':').next())
+                .map(str::to_owned)
+        })?;
+        Some(UserDetails {
+            id,
+            display_name: self.display_name.filter(|n| !n.trim().is_empty()),
+            email: self.email,
+            user_principal_name: self.user_principal_name,
+        })
+    }
+}
+
+/// The MRI of a person by their object id: `8:orgid:{id}`, unless `id` is
+/// one already.
+fn user_mri(id: &str) -> String {
+    if id.contains(':') {
+        id.to_owned()
+    } else {
+        format!("8:orgid:{id}")
+    }
 }
 
 /// The teams-and-channels list of the chat service aggregator (CSA).
@@ -436,28 +477,90 @@ impl TeamsClient {
         Ok(data.teams)
     }
 
-    /// Looks people up by their directory (object) ids through Microsoft
-    /// Graph, a thousand at most per call. People Graph does not know here,
-    /// such as guests from elsewhere, are left out.
+    /// Looks people up by their directory (object) ids: through the
+    /// middle tier, as Teams itself does, and through Microsoft Graph when
+    /// that fails. People neither knows, such as guests from elsewhere,
+    /// are left out.
     pub async fn get_users(&self, ids: &[String]) -> Result<Vec<UserDetails>, Failure> {
+        match self.short_profiles(ids).await {
+            Ok(found) => Ok(found),
+            Err(error) => {
+                log::info!("Teams people lookup failed ({error:?}), trying Graph");
+                self.graph_users(ids).await
+            }
+        }
+    }
+
+    /// `fetchShortProfile` of the middle tier, with the chat service's own
+    /// token: what the Teams client names people with.
+    async fn short_profiles(&self, ids: &[String]) -> Result<Vec<UserDetails>, Failure> {
+        let creds = self.ensure_fresh_tokens().await?;
+        let base = creds
+            .middle_tier_url()
+            .ok_or_else(|| Failure::Unexpected("no middle tier in regionGtms".into()))?
+            .trim_end_matches('/')
+            .to_owned();
+        let url = format!(
+            "{base}/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true"
+        );
+        let mris: Vec<String> = ids.iter().map(|id| user_mri(id)).collect();
         let mut found = Vec::new();
-        for batch in ids.chunks(1000) {
-            let body = serde_json::json!({ "ids": batch, "types": ["user"] });
+        for batch in mris.chunks(100) {
             let resp = self
-                .bearer(RESOURCE_GRAPH, |http, token| {
-                    http.post(GRAPH_BY_IDS).bearer_auth(token).json(&body)
-                })
-                .await?;
+                .http
+                .post(&url)
+                .bearer_auth(&creds.access_token)
+                .json(batch)
+                .send()
+                .await
+                .map_err(|e| Failure::Network(e.without_url().to_string()))?;
             if !resp.status().is_success() {
                 return Err(Failure::Http(resp.status().as_u16()));
             }
-            let page: GraphUsers = resp
+            let page: ShortProfiles = resp
                 .json()
                 .await
                 .map_err(|e| Failure::Unexpected(e.to_string()))?;
-            found.extend(page.value);
+            found.extend(
+                page.value
+                    .into_iter()
+                    .filter_map(ShortProfile::into_details),
+            );
         }
         Ok(found)
+    }
+
+    /// Graph's `/users/{id}`, one person at a time: it needs only the basic
+    /// profile permission, where looking many up at once needs directory
+    /// access the Teams sign-in may not have.
+    async fn graph_users(&self, ids: &[String]) -> Result<Vec<UserDetails>, Failure> {
+        let mut found = Vec::new();
+        let mut refused = None;
+        for id in ids {
+            let url = format!(
+                "https://graph.microsoft.com/v1.0/users/{}?$select=id,displayName,userPrincipalName,mail",
+                percent_encoding::utf8_percent_encode(id, percent_encoding::NON_ALPHANUMERIC)
+            );
+            let resp = self
+                .bearer(RESOURCE_GRAPH, |http, token| {
+                    http.get(&url).bearer_auth(token)
+                })
+                .await?;
+            match resp.status() {
+                status if status.is_success() => {
+                    if let Ok(user) = resp.json::<UserDetails>().await {
+                        found.push(user);
+                    }
+                }
+                // Someone Graph does not know here: the others may still be.
+                reqwest::StatusCode::NOT_FOUND => {}
+                status => refused = Some(Failure::Http(status.as_u16())),
+            }
+        }
+        match refused {
+            Some(error) if found.is_empty() => Err(error),
+            _ => Ok(found),
+        }
     }
 
     /// Extracts user profile information from the JWT token claims if available.
@@ -657,6 +760,30 @@ mod tests {
         let empty = r#"{"messages": [], "_metadata": {"backwardLink": "https://chat/v1/older"}}"#;
         let page = history_page(serde_json::from_str(empty).expect("valid page"));
         assert_eq!(page.older, None);
+    }
+
+    #[test]
+    fn short_profiles_are_named_by_object_id() {
+        let page: ShortProfiles = serde_json::from_str(
+            r#"{"type":"Microsoft.SkypeSpaces.MiddleTier.Models.IUserIdentity","value":[
+                {"objectId":"a-1","mri":"8:orgid:a-1","displayName":"Alice","email":"a@x.org"},
+                {"mri":"8:orgid:b-2","displayName":" "},
+                {"displayName":"Nobody"}
+            ]}"#,
+        )
+        .expect("a page");
+        let people: Vec<UserDetails> = page
+            .value
+            .into_iter()
+            .filter_map(ShortProfile::into_details)
+            .collect();
+        assert_eq!(people.len(), 2);
+        assert_eq!(people[0].id, "a-1");
+        assert_eq!(people[0].display_name.as_deref(), Some("Alice"));
+        assert_eq!(people[1].id, "b-2");
+        assert_eq!(people[1].display_name, None);
+        assert_eq!(user_mri("a-1"), "8:orgid:a-1");
+        assert_eq!(user_mri("8:live:x"), "8:live:x");
     }
 
     #[test]

@@ -269,7 +269,7 @@ pub async fn fetch_users(client: TeamsClient, team: String, ids: Vec<String>, si
             }
         }
         Err(error) => log::warn!(
-            "could not look up {} people in {team}: {error:?}",
+            "could not look up people in {team} ({} asked): {error:?}",
             ids.len()
         ),
     }

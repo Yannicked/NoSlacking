@@ -22,6 +22,9 @@ pub struct Cli {
     pub verbose: bool,
     /// `--release-slack-links`: give slack:// links back and quit.
     pub release_slack_links: bool,
+    /// `--teams-probe`: try a personal Microsoft account sign-in and quit.
+    #[cfg(feature = "teams")]
+    pub teams_probe: bool,
     /// `--huddle-probe TEAM CHANNEL`: test huddle audio and quit.
     #[cfg(feature = "huddle-audio")]
     pub huddle_probe: Option<[String; 2]>,
@@ -157,6 +160,12 @@ pub const FLAGS: &[Flag] = &[
         name: "release-slack-links",
         takes: Takes::Nothing(|cli| cli.release_slack_links = true),
         help: "Give slack:// links back to whatever had them before, if a browser sign-in left them with NoSlacking, and quit. Every start does this too",
+    },
+    #[cfg(feature = "teams")]
+    Flag {
+        name: "teams-probe",
+        takes: Takes::Nothing(|cli| cli.teams_probe = true),
+        help: "Sign in to a personal Microsoft account (Teams free) in the terminal, trying each known way and logging which steps work, and quit: a test of personal Teams accounts. Saves nothing",
     },
     #[cfg(feature = "huddle-audio")]
     Flag {
