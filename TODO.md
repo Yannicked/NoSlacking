@@ -1078,6 +1078,28 @@ engineering, as for the rest of the session sign-in.
         V4L2, which would need `--device=all`.
   - [ ] Choosing the camera (Settings) when there is more than one;
         today the first is taken.
+  - [ ] **Hardware video decoding (and maybe encoding), in a separate
+        process.** Pure Rust in software costs little today (about 0.4 ms
+        per 480×480 camera frame, 3–5 ms per 1080p share frame, 4 ms to
+        encode 640×480), so this is for 1080p shares, many tiles and weak
+        laptops. The user is fine with `unsafe` for it, ideally isolated in
+        a helper process (like the viewer's planned `--parse-file`
+        helper): the main app keeps `forbid(unsafe)`, a crash or a
+        malicious stream only kills the helper, and frames come back over
+        a pipe or shared memory. Options, none pure Rust (all drive the
+        system's C libraries and GPU drivers):
+        - GStreamer (`gstreamer-rs`, safe API; VA-API / VideoToolbox /
+          Media Foundation / NVIDIA through its plugins; LGPL system
+          libraries, which macOS and Windows would need shipped; the
+          Flatpak runtime has GStreamer with VA-API).
+        - `cros-codecs` (ChromeOS, Rust over VA-API / V4L2 stateless;
+          Linux only; decoding more mature than encoding).
+        - Direct platform APIs in the helper: VA-API, VideoToolbox, Media
+          Foundation (`unsafe` bindings, one back end each).
+        Start with decoding 1080p shares on one platform, keep the
+        pure-Rust path as the default and the fallback, and keep
+        software encoding unless quality and keyframe control hold up
+        (hardware encoders are often worse at call bitrates).
 - **Microsoft Teams:** [docs/research/microsoft-teams.md](docs/research/microsoft-teams.md)
   (2026-10-06). Not being built: the official Graph route can't do live
   updates or calls, and the route other clients take signs in as
