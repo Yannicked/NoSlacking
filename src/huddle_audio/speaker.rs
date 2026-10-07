@@ -325,7 +325,7 @@ impl Speaker {
         let (opened, result) = std::sync::mpsc::channel();
         let thread_device = device.clone();
         let thread = std::thread::Builder::new()
-            .name("noslacking-huddle-audio".into())
+            .name("noslacking-huddle-speaker".into())
             .spawn(move || {
                 let mut sink = match rodio::DeviceSinkBuilder::open_default_sink() {
                     Ok(sink) => sink,

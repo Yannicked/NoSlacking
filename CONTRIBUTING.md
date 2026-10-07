@@ -6,7 +6,7 @@ NoSlacking needs a Rust toolchain (pinned in `rust-toolchain.toml`) and the
 usual egui build dependencies. On Debian/Ubuntu:
 
 ```
-sudo apt-get install libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake
+sudo apt-get install libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake
 ```
 
 ```
@@ -14,10 +14,11 @@ cargo run                 # the real app
 cargo run --features demo # a pretend Slack, offline
 ```
 
-The default build includes huddles (`huddle-audio`), whose DTLS is
-OpenSSL's: on Linux it needs its headers too (`libssl-dev`, or
-`openssl-devel`); macOS and Windows build OpenSSL from source, which needs
-Perl. `--no-default-features` builds without huddles, sound or OpenSSL.
+Sound plays through ALSA on Linux (`libasound2-dev`, or
+`alsa-lib-devel`). Huddles' DTLS is OpenSSL's: Linux links the system's
+(`libssl-dev`, or `openssl-devel`), and macOS and Windows build it from
+source, which needs Perl. Every build has huddles, so these are always
+needed.
 
 ## Before a pull request
 

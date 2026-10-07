@@ -46,10 +46,12 @@
   <string>11.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
-  <!-- Asked when the microphone first opens: unmuting in a huddle
-       (the huddle-audio feature). Without it macOS ends the app there. -->
+  <!-- Asked when the microphone first opens: unmuting in a huddle.
+       Without it macOS ends the app there. -->
   <key>NSMicrophoneUsageDescription</key>
   <string>NoSlacking uses the microphone only while you are unmuted in a huddle.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>NoSlacking uses the camera only while you have turned on video in a huddle.</string>
   <key>NSHumanReadableCopyright</key>
   <string>Copyright (c) 2026 Yannick de Jong. MIT License.</string>
 </dict>

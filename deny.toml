@@ -18,7 +18,12 @@ targets = [
 version = 2
 unmaintained = "all"
 yanked = "deny"
-ignore = []
+ignore = [
+    # paste is finished rather than broken: a proc macro that nokhwa
+    # 0.10.11 (the `huddle-camera` feature's camera) uses at build time;
+    # nothing of it runs in the app. Drop once nokhwa moves off it.
+    { id = "RUSTSEC-2024-0436", reason = "build-time macro of nokhwa, no runtime code; no maintained nokhwa without it" },
+]
 
 [licenses]
 version = 2

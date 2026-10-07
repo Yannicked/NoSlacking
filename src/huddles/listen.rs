@@ -1,14 +1,14 @@
-//! Listening to a huddle, the app's side (the `huddle-audio` feature):
-//! one huddle at a time, shown in the call bar from joining until it is
-//! left, with who is in it and who speaks. Left when asked (the bar's
-//! Leave, the conversation header's, Ctrl+Shift+H), when everyone else
-//! has been gone a minute, on sign-out and on quit; when the huddle ends
-//! Chime closes it and the bar says so.
+//! Listening to a huddle, the app's side: one huddle at a time, shown in
+//! the call bar from joining until it is left, with who is in it and who
+//! speaks. Left when asked (the bar's Leave, the conversation header's,
+//! Ctrl+Shift+H), when everyone else has been gone a minute, on sign-out
+//! and on quit; when the huddle ends Chime closes it and the bar says so.
 //!
 //! With `huddle-video` the bar also says who shares their screen and
 //! offers Watch, which opens the call window on that share (see
-//! `ui::call_window`); only a share being watched is received,
-//! and closing the window, leaving or the share ending stops it.
+//! `ui::call_window`), and how many have a camera on, with Video, which
+//! opens it on their tiles. Only what the window shows is received;
+//! closing it or leaving stops all of it.
 
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,10 @@ use crate::failure::Failure;
 use crate::i18n::{t, tf};
 use crate::people;
 
+#[cfg(feature = "huddle-video")]
+pub use crate::huddle_audio::cameras::{Camera, MAX_TILES, Wish};
+#[cfg(feature = "huddle-video")]
+pub use crate::huddle_audio::gallery::Gallery;
 pub use crate::huddle_audio::roster::{Person, Roster};
 #[cfg(feature = "huddle-video")]
 pub use crate::huddle_audio::screen::{Picture, Screen};
@@ -55,6 +59,15 @@ pub enum Listen {
     /// Where the watched share's pictures arrive, once per session.
     #[cfg(feature = "huddle-video")]
     Screen(Screen),
+    /// Where your camera's self-preview arrives, once per session.
+    #[cfg(feature = "huddle-camera")]
+    Preview(crate::huddle_camera::Preview),
+    /// Who has a camera on now and who has a tile, when that changes.
+    #[cfg(feature = "huddle-video")]
+    Cameras(Vec<Camera>),
+    /// Where the camera tiles' pictures arrive, once per session.
+    #[cfg(feature = "huddle-video")]
+    Gallery(Gallery),
     /// Left, the huddle over, or failed.
     Ended(Result<Left, Failure>),
 }
@@ -90,9 +103,28 @@ pub struct Listening {
     /// Where the watched share's pictures arrive.
     #[cfg(feature = "huddle-video")]
     pub screen: Option<Screen>,
-    /// The share the call window shows, by key; none while it is closed.
+    /// The share the call window shows, by key; none while it is closed
+    /// or shows only cameras.
     #[cfg(feature = "huddle-video")]
     pub watching: Option<String>,
+    /// Your camera: off on joining.
+    #[cfg(feature = "huddle-camera")]
+    pub camera: crate::huddle_camera::Cam,
+    /// Where your camera's self-preview arrives.
+    #[cfg(feature = "huddle-camera")]
+    pub preview: Option<crate::huddle_camera::Preview>,
+    /// Who has a camera on, as last told; those with a tile first.
+    #[cfg(feature = "huddle-video")]
+    pub cameras: Vec<Camera>,
+    /// Where the camera tiles' pictures arrive.
+    #[cfg(feature = "huddle-video")]
+    pub gallery: Option<Gallery>,
+    /// Whether the call window is open.
+    #[cfg(feature = "huddle-video")]
+    pub window: bool,
+    /// What the session was last told the window wants.
+    #[cfg(feature = "huddle-video")]
+    pub wish: Wish,
 }
 
 impl Listening {
@@ -111,6 +143,33 @@ impl Listening {
             screen: None,
             #[cfg(feature = "huddle-video")]
             watching: None,
+            #[cfg(feature = "huddle-camera")]
+            camera: crate::huddle_camera::Cam::Off,
+            #[cfg(feature = "huddle-camera")]
+            preview: None,
+            #[cfg(feature = "huddle-video")]
+            cameras: Vec::new(),
+            #[cfg(feature = "huddle-video")]
+            gallery: None,
+            #[cfg(feature = "huddle-video")]
+            window: false,
+            #[cfg(feature = "huddle-video")]
+            wish: Wish::closed(),
+        }
+    }
+
+    /// What the call window wants, given room for `tiles` tiles of
+    /// `tile` pixels: nothing while it is closed.
+    #[cfg(feature = "huddle-video")]
+    pub fn wish_for(&self, tiles: usize, tile: [u32; 2]) -> Wish {
+        if !self.window {
+            return Wish::closed();
+        }
+        Wish {
+            open: true,
+            share: self.watching.clone(),
+            tiles: tiles.min(MAX_TILES),
+            tile,
         }
     }
 
@@ -243,25 +302,77 @@ pub fn listen(app: &mut App, team: String, channel: String) {
 }
 
 /// Opens the call window on the share `key` (switching from any other)
-/// or, with none, closes it: only the share shown is received.
+/// or, with none, closes it: only what it shows is received.
 #[cfg(feature = "huddle-video")]
 pub fn watch(app: &mut App, key: Option<String>) {
     let Some(listening) = app.huddles.listening.as_mut().filter(|l| l.in_huddle()) else {
         return;
     };
-    if listening.watching == key {
+    if listening.watching == key && listening.window == key.is_some() {
         return;
     }
-    listening.watching.clone_from(&key);
-    if let Some(screen) = &listening.screen {
+    if listening.watching != key
+        && let Some(screen) = &listening.screen
+    {
         // Not the last share's picture in the new one's window.
         screen.clear();
     }
+    listening.window = key.is_some();
+    listening.watching = key;
+    tell_wish(app, None);
+}
+
+/// Opens the call window on the cameras, and the first share if someone
+/// shares.
+#[cfg(feature = "huddle-video")]
+pub fn open_call(app: &mut App) {
+    let Some(listening) = app.huddles.listening.as_mut().filter(|l| l.in_huddle()) else {
+        return;
+    };
+    if listening.window {
+        return;
+    }
+    listening.window = true;
+    if listening.watching.is_none() {
+        listening.watching = listening.shares.first().map(|s| s.key.clone());
+    }
+    tell_wish(app, None);
+}
+
+/// Tells the session what the call window wants, if that changed: room
+/// for the tiles `room` says (count and size), or as last said when it
+/// has not drawn yet (all of them, at their largest layer, until the
+/// window's first frame says).
+#[cfg(feature = "huddle-video")]
+pub fn tell_wish(app: &mut App, room: Option<(usize, [u32; 2])>) {
+    let Some(listening) = app.huddles.listening.as_mut().filter(|l| l.in_huddle()) else {
+        return;
+    };
+    let (tiles, tile) = room.unwrap_or(if listening.wish.open {
+        (listening.wish.tiles, listening.wish.tile)
+    } else {
+        (MAX_TILES, [0, 0])
+    });
+    let wish = listening.wish_for(tiles, tile);
+    if wish == listening.wish {
+        return;
+    }
+    listening.wish = wish.clone();
     let team = listening.team.clone();
     app.backend.send(backend::Command::People {
         team,
-        command: people::Command::WatchShare { share: key },
+        command: people::Command::WatchCall { wish },
     });
+}
+
+/// What the call bar says of the cameras on: "2 cameras on".
+#[cfg(feature = "huddle-video")]
+pub fn cameras_text(count: usize) -> String {
+    crate::i18n::tn(
+        "{count} camera on",
+        "{count} cameras on",
+        u32::try_from(count).unwrap_or(u32::MAX),
+    )
 }
 
 /// What the call bar says of someone sharing: "Ana is sharing their
@@ -310,14 +421,26 @@ pub fn heard(app: &mut App, team: &str, channel: &str, state: Listen) {
         #[cfg(feature = "huddle-video")]
         Listen::Shares(shares) => {
             listening.shares = shares;
-            // The share watched has ended: the window closes.
+            // The share watched has ended: the window goes on with the
+            // cameras, or closes if there are none.
             if listening.watching.is_some() && listening.watched().is_none() {
-                watch(app, None);
+                if listening.cameras.is_empty() {
+                    watch(app, None);
+                } else {
+                    listening.watching = None;
+                    tell_wish(app, None);
+                }
                 app.toast(t("The screen share ended"), false);
             }
         }
         #[cfg(feature = "huddle-video")]
         Listen::Screen(screen) => listening.screen = Some(screen),
+        #[cfg(feature = "huddle-camera")]
+        Listen::Preview(preview) => listening.preview = Some(preview),
+        #[cfg(feature = "huddle-video")]
+        Listen::Cameras(cameras) => listening.cameras = cameras,
+        #[cfg(feature = "huddle-video")]
+        Listen::Gallery(gallery) => listening.gallery = Some(gallery),
         Listen::Ended(Ok(Left::Asked)) => app.huddles.listening = None,
         Listen::Ended(Ok(Left::Ended)) => {
             app.huddles.listening = None;
@@ -326,11 +449,20 @@ pub fn heard(app: &mut App, team: &str, channel: &str, state: Listen) {
         Listen::Ended(Err(error)) => {
             listening.phase = Phase::Failed { error, at: now };
             listening.alone_since = None;
+            // The camera closed with the session.
+            #[cfg(feature = "huddle-camera")]
+            {
+                listening.camera = crate::huddle_camera::Cam::Off;
+                listening.preview = None;
+            }
             // The session is gone, and its shares with it.
             #[cfg(feature = "huddle-video")]
             {
                 listening.watching = None;
+                listening.window = false;
+                listening.wish = Wish::closed();
                 listening.shares.clear();
+                listening.cameras.clear();
             }
         }
     }

@@ -10,9 +10,6 @@
 //!
 //! One sound plays at a time: starting another stops the first. Signing
 //! out of a workspace stops its sound.
-//!
-//! Playing needs the `audio` feature (rodio, with symphonia's decoders).
-//! Without it every sound opens in the system's player, as before.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,11 +17,8 @@ use std::time::Duration;
 use crate::failure::{Failure, Problem};
 use crate::model::{File, Media};
 
-#[cfg(feature = "audio")]
 mod device;
-#[cfg(feature = "audio")]
 pub mod guard;
-#[cfg(feature = "audio")]
 pub use device::Device;
 
 /// The most a sound may weigh to be played here. It is held in memory
@@ -134,8 +128,6 @@ pub enum Why {
     NoDecoder,
     /// Larger than [`MAX_BYTES`].
     TooLarge,
-    /// Built without the `audio` feature.
-    NotBuilt,
     /// There is no sound device, or it would not open.
     NoDevice,
     /// The decoder could not make sense of it.
@@ -146,8 +138,7 @@ pub enum Why {
 
 impl Why {
     /// The reason in a sentence for a toast, or nothing when there is
-    /// nothing to say: a build without sound opens every sound in the
-    /// system's player, and a failed fetch has its own toast.
+    /// nothing to say: a failed fetch has its own toast.
     pub fn message(self) -> Option<String> {
         use crate::i18n::t;
         let text = match self {
@@ -155,7 +146,7 @@ impl Why {
             Self::TooLarge => t("This sound is too large to play in the app."),
             Self::NoDevice => t("There is no sound device to play on."),
             Self::Unreadable => t("This sound could not be played in the app."),
-            Self::NotBuilt | Self::Unfetched => return None,
+            Self::Unfetched => return None,
         };
         Some(text.into_owned())
     }
@@ -169,12 +160,10 @@ pub enum Route {
     Elsewhere(Why),
 }
 
-/// Where `track` plays: here, unless this build has no sound, it is too
-/// large to hold, or it is stored in a way the decoders don't read.
+/// Where `track` plays: here, unless it is too large to hold or it is
+/// stored in a way the decoders don't read.
 pub fn route(track: &Track) -> Route {
-    if !cfg!(feature = "audio") {
-        Route::Elsewhere(Why::NotBuilt)
-    } else if track.size > MAX_BYTES {
+    if track.size > MAX_BYTES {
         Route::Elsewhere(Why::TooLarge)
     } else if !decodable(&track.extension(), &track.mimetype) {
         Route::Elsewhere(Why::NoDecoder)
@@ -581,28 +570,6 @@ pub fn now_for(ctx: &egui::Context, team: &str, file: &str) -> Option<Now> {
         .filter(|now| now.key.team == team && now.key.file == file)
 }
 
-/// The player without a sound stack: nothing ever plays here, so it
-/// takes no orders and has nothing to say.
-#[cfg(not(feature = "audio"))]
-#[derive(Debug, Default)]
-pub struct Device;
-
-#[cfg(not(feature = "audio"))]
-impl Device {
-    /// A device that plays nothing.
-    pub fn new(_waker: crate::backend::Waker) -> Self {
-        Self
-    }
-
-    /// Ignores `order`: [`route`] sends every sound elsewhere.
-    pub fn send(&mut self, _order: Order) {}
-
-    /// Never says anything.
-    pub fn try_recv(&self) -> Option<Report> {
-        None
-    }
-}
-
 /// A WAV of 16-bit mono samples at `rate` per second, for the demo's
 /// voice clip and the tests.
 #[cfg(any(test, feature = "demo"))]
@@ -693,15 +660,7 @@ mod tests {
 
     #[test]
     fn where_a_sound_plays() {
-        let here = if cfg!(feature = "audio") {
-            Route::Here
-        } else {
-            Route::Elsewhere(Why::NotBuilt)
-        };
-        assert_eq!(route(&clip()), here);
-        if !cfg!(feature = "audio") {
-            return;
-        }
+        assert_eq!(route(&clip()), Route::Here);
         let opus = Track {
             name: "memo.opus".into(),
             mimetype: "audio/ogg".into(),
@@ -776,9 +735,6 @@ mod tests {
 
     #[test]
     fn play_pause_and_resume() {
-        if !cfg!(feature = "audio") {
-            return;
-        }
         let mut playback = Playback::default();
         let effects = playback.request("T1", Request::Toggle(clip()));
         let id = fetch_id(&effects).expect("fetched first");
@@ -827,9 +783,6 @@ mod tests {
 
     #[test]
     fn one_sound_at_a_time_and_stale_answers_are_ignored() {
-        if !cfg!(feature = "audio") {
-            return;
-        }
         let mut playback = Playback::default();
         let first = fetch_id(&playback.request("T1", Request::Toggle(clip()))).expect("first");
         let other = Track {
@@ -865,9 +818,6 @@ mod tests {
 
     #[test]
     fn clicking_the_waveform_starts_there() {
-        if !cfg!(feature = "audio") {
-            return;
-        }
         let mut playback = Playback::default();
         let effects = playback.request(
             "T1",
@@ -888,9 +838,6 @@ mod tests {
 
     #[test]
     fn failures_fall_back_to_the_system_player() {
-        if !cfg!(feature = "audio") {
-            return;
-        }
         // No sound device: say so and open it elsewhere, keeping the
         // failure on the card.
         let mut playback = Playback::default();
@@ -951,9 +898,6 @@ mod tests {
 
     #[test]
     fn signing_out_stops_that_workspaces_sound() {
-        if !cfg!(feature = "audio") {
-            return;
-        }
         let mut playback = Playback::default();
         playback.request("T1", Request::Toggle(clip()));
         assert!(playback.signed_out("T2").is_empty());
@@ -961,18 +905,6 @@ mod tests {
         let effects = playback.signed_out("T1");
         assert!(matches!(effects.as_slice(), [Effect::Device(Order::Stop)]));
         assert_eq!(playback.now(), None);
-    }
-
-    #[test]
-    fn without_sound_everything_opens_in_the_system_player() {
-        if cfg!(feature = "audio") {
-            return;
-        }
-        let mut playback = Playback::default();
-        let effects = playback.request("T1", Request::Toggle(clip()));
-        assert!(matches!(effects.first(), Some(Effect::Tell(Why::NotBuilt))));
-        assert!(opens(&effects));
-        assert_eq!(Why::NotBuilt.message(), None);
     }
 
     #[test]

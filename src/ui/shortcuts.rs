@@ -19,8 +19,8 @@ pub enum When {
     EnterSends,
     /// With "Enter sends" off.
     EnterNewLine,
-    /// In builds that listen to huddles (the `huddle-audio` feature).
-    HuddleAudio,
+    /// In builds that send your camera (the `huddle-camera` feature).
+    Camera,
 }
 
 /// One line of the sheet.
@@ -147,13 +147,11 @@ pub const GROUPS: &[Group] = &[
         shortcuts: &[
             line("Keyboard shortcuts", &["Cmd+Slash"]),
             line("Settings", &["Cmd+Comma"]),
+            line("Leave the huddle", &["Cmd+Shift+H"]),
+            line("Mute / unmute the microphone", &["Cmd+Shift+Space"]),
             Shortcut {
-                when: When::HuddleAudio,
-                ..line("Leave the huddle", &["Cmd+Shift+H"])
-            },
-            Shortcut {
-                when: When::HuddleAudio,
-                ..line("Mute / unmute the microphone", &["Cmd+Shift+Space"])
+                when: When::Camera,
+                ..line("Turn the camera on / off", &["Cmd+Shift+O"])
             },
             Shortcut {
                 also: &["Cmd+Shift+Equals", "Cmd+Plus"],
@@ -184,9 +182,9 @@ pub fn keys_of(label: &str) -> Option<&'static str> {
 pub fn shown(group: &Group, enter_sends: bool) -> impl Iterator<Item = &Shortcut> {
     group.shortcuts.iter().filter(move |s| match s.when {
         When::Always => true,
+        When::Camera => cfg!(feature = "huddle-camera"),
         When::EnterSends => enter_sends,
         When::EnterNewLine => !enter_sends,
-        When::HuddleAudio => cfg!(feature = "huddle-audio"),
     })
 }
 

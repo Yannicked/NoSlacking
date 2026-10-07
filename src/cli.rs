@@ -26,25 +26,21 @@ pub struct Cli {
     #[cfg(feature = "teams")]
     pub teams_probe: bool,
     /// `--huddle-probe TEAM CHANNEL`: test huddle audio and quit.
-    #[cfg(feature = "huddle-audio")]
     pub huddle_probe: Option<[String; 2]>,
     /// `--seconds N`: how long the huddle probe listens.
-    #[cfg(feature = "huddle-audio")]
     pub seconds: u64,
     /// `--huddle-region REGION`: the media region the probe asks for.
-    #[cfg(feature = "huddle-audio")]
     pub huddle_region: Option<String>,
     /// `--send-tone`: the probe joins unmuted and sends a quiet tone.
-    #[cfg(feature = "huddle-audio")]
     pub send_tone: bool,
+    /// `--send-test-video`: the probe sends a moving test picture as its
+    /// camera (with the `huddle-camera` feature).
+    pub send_test_video: bool,
     /// `--video N`: how many video streams a huddle receives (app or probe).
-    #[cfg(feature = "huddle-audio")]
     pub video: usize,
     /// `--video-h264-only`: huddles offer no VP8.
-    #[cfg(feature = "huddle-audio")]
     pub video_h264_only: bool,
     /// `--video-dump DIR`: where huddles write the first video frames.
-    #[cfg(feature = "huddle-audio")]
     pub video_dump: Option<PathBuf>,
     /// `--demo`: run against a pretend Slack.
     #[cfg(feature = "demo")]
@@ -92,7 +88,6 @@ impl Cli {
     /// `--help`.
     pub fn new() -> Self {
         Self {
-            #[cfg(feature = "huddle-audio")]
             seconds: 30,
             #[cfg(feature = "demo")]
             demo_shot_delay: 1500,
@@ -119,16 +114,8 @@ pub enum Takes {
     /// A switch: no value.
     Nothing(fn(&mut Cli)),
     /// One value, named in `--help`; the setter says why a value is wrong.
-    #[cfg_attr(
-        not(any(feature = "demo", feature = "huddle-audio")),
-        expect(dead_code, reason = "only the demo and huddle flags take one value")
-    )]
     One(&'static str, fn(&mut Cli, OsString) -> Result<(), String>),
     /// Two values in a row, named in `--help`.
-    #[cfg_attr(
-        not(feature = "huddle-audio"),
-        expect(dead_code, reason = "only the huddle probe takes two values")
-    )]
     Two([&'static str; 2], fn(&mut Cli, [String; 2])),
 }
 
@@ -167,19 +154,16 @@ pub const FLAGS: &[Flag] = &[
         takes: Takes::Nothing(|cli| cli.teams_probe = true),
         help: "Sign in to a personal Microsoft account (Teams free) in the terminal, trying each known way and logging which steps work, and quit: a test of personal Teams accounts. Saves nothing",
     },
-    #[cfg(feature = "huddle-audio")]
     Flag {
         name: "huddle-probe",
         takes: Takes::Two(["TEAM", "CHANNEL"], |cli, ids| cli.huddle_probe = Some(ids)),
         help: "Join the huddle in a conversation, listen and leave, logging each step, and quit: a test of huddle audio against real Slack. Takes the workspace's team id and the channel id, and the browser sign-in saved for that workspace",
     },
-    #[cfg(feature = "huddle-audio")]
     Flag {
         name: "seconds",
         takes: Takes::One("N", |cli, v| number(v).map(|v| cli.seconds = v)),
         help: "How long the huddle probe listens, in seconds [default: 30]",
     },
-    #[cfg(feature = "huddle-audio")]
     Flag {
         name: "huddle-region",
         takes: Takes::One("REGION", |cli, v| {
@@ -187,25 +171,26 @@ pub const FLAGS: &[Flag] = &[
         }),
         help: "The media region the huddle probe asks Slack for. Without it, the nearest is asked of AWS, falling back to us-east-1",
     },
-    #[cfg(feature = "huddle-audio")]
     Flag {
         name: "send-tone",
         takes: Takes::Nothing(|cli| cli.send_tone = true),
         help: "Have the huddle probe join unmuted and send a quiet 440 Hz tone the whole time (never the microphone), to hear in Slack that our audio gets through",
     },
-    #[cfg(feature = "huddle-audio")]
+    Flag {
+        name: "send-test-video",
+        takes: Takes::Nothing(|cli| cli.send_test_video = true),
+        help: "Have the huddle probe send a moving test picture with a clock as its camera the whole time (never a real camera), to see in Slack that our video gets through. Needs a build with the huddle-camera feature",
+    },
     Flag {
         name: "video",
         takes: Takes::One("N", |cli, v| number(v).map(|v| cli.video = v)),
         help: "When joining a huddle (in the app or the probe), receive up to N video streams once the audio is live (screen shares first), logging the codec, frames, keyframes and gaps of each; nothing is decoded or shown [default: 0, only Chime's video signaling is logged]",
     },
-    #[cfg(feature = "huddle-audio")]
     Flag {
         name: "video-h264-only",
         takes: Takes::Nothing(|cli| cli.video_h264_only = true),
         help: "When joining a huddle (in the app or the probe), offer H.264 only for video (no VP8), to see whether the others' apps then send H.264",
     },
-    #[cfg(feature = "huddle-audio")]
     Flag {
         name: "video-dump",
         takes: Takes::One("DIR", |cli, v| path(v).map(|v| cli.video_dump = Some(v))),
@@ -239,7 +224,7 @@ pub const FLAGS: &[Flag] = &[
     Flag {
         name: "demo-view",
         takes: Takes::One("VIEW", |cli, v| text(v).map(|v| cli.demo_view = Some(v))),
-        help: "Open a view before the screenshot: thread, settings, sign-in, switcher, palette, picker, profile, share, upload, drafts, lightbox, media, previews, viewer-sheet, viewer-csv, viewer-zip, viewer-text, compact, held-media, shortcuts, delete-file, add-emoji or (with huddle-audio) listening or talking, and (with huddle-video) sharing or call-window",
+        help: "Open a view before the screenshot: thread, settings, sign-in, switcher, palette, picker, profile, share, upload, drafts, lightbox, media, previews, viewer-sheet, viewer-csv, viewer-zip, viewer-text, compact, held-media, shortcuts, delete-file, add-emoji, listening, talking or (with huddle-video) sharing, call-window or cameras, or (with huddle-camera) camera",
     },
     #[cfg(feature = "demo")]
     Flag {
@@ -303,10 +288,6 @@ fn text(value: OsString) -> Result<String, String> {
 }
 
 /// A value as a path, which may be any bytes the system allows.
-#[cfg_attr(
-    not(any(feature = "demo", feature = "huddle-audio")),
-    expect(dead_code, reason = "only the demo and huddle flags take paths")
-)]
 #[expect(
     clippy::unnecessary_wraps,
     reason = "every value's reader answers the same way"
@@ -316,10 +297,6 @@ fn path(value: OsString) -> Result<PathBuf, String> {
 }
 
 /// A value as a number of any kind.
-#[cfg_attr(
-    not(any(feature = "demo", feature = "huddle-audio")),
-    expect(dead_code, reason = "only the demo and huddle flags take values")
-)]
 fn number<T>(value: OsString) -> Result<T, String>
 where
     T: std::str::FromStr,
@@ -619,18 +596,17 @@ mod tests {
     }
 
     #[test]
-    fn the_huddle_and_demo_flags_exist_only_with_their_features() {
+    fn the_huddle_flags_always_exist_and_the_demo_flags_with_their_feature() {
         let names: Vec<&str> = FLAGS.iter().map(|f| f.name).collect();
-        assert_eq!(
-            names.contains(&"huddle-probe"),
-            cfg!(feature = "huddle-audio")
-        );
-        assert_eq!(names.contains(&"seconds"), cfg!(feature = "huddle-audio"));
-        assert_eq!(
-            names.contains(&"huddle-region"),
-            cfg!(feature = "huddle-audio")
-        );
-        assert_eq!(names.contains(&"send-tone"), cfg!(feature = "huddle-audio"));
+        for huddle in [
+            "huddle-probe",
+            "seconds",
+            "huddle-region",
+            "send-tone",
+            "send-test-video",
+        ] {
+            assert!(names.contains(&huddle), "{huddle}");
+        }
         assert_eq!(names.contains(&"demo"), cfg!(feature = "demo"));
         assert_eq!(names.contains(&"demo-shot"), cfg!(feature = "demo"));
         assert_eq!(
@@ -638,10 +614,7 @@ mod tests {
             if cfg!(feature = "demo") { 13 } else { 0 }
         );
         let help = help();
-        assert_eq!(
-            help.contains("--huddle-probe"),
-            cfg!(feature = "huddle-audio")
-        );
+        assert!(help.contains("--huddle-probe"));
         assert_eq!(help.contains("--demo"), cfg!(feature = "demo"));
     }
 
@@ -649,16 +622,6 @@ mod tests {
     #[test]
     fn without_the_demo_feature_demo_flags_are_unknown() {
         assert!(error(&["--demo"]).starts_with("unexpected argument '--demo' found"));
-    }
-
-    #[cfg(not(feature = "huddle-audio"))]
-    #[test]
-    fn without_huddle_audio_the_probe_is_unknown() {
-        assert!(
-            error(&["--huddle-probe", "T1", "C1"])
-                .starts_with("unexpected argument '--huddle-probe' found")
-        );
-        assert!(error(&["--seconds", "5"]).starts_with("unexpected argument '--seconds' found"));
     }
 
     #[cfg(unix)]
@@ -680,7 +643,6 @@ mod tests {
         assert!(parse([bad]).is_err());
     }
 
-    #[cfg(feature = "huddle-audio")]
     mod huddle {
         use super::*;
 
@@ -721,6 +683,13 @@ mod tests {
         fn send_tone_is_off_unless_asked() {
             assert!(!run(&["--huddle-probe", "T1", "C1"]).send_tone);
             assert!(run(&["--huddle-probe", "T1", "C1", "--send-tone"]).send_tone);
+        }
+
+        #[test]
+        fn test_video_is_off_unless_asked() {
+            assert!(!run(&["--huddle-probe", "T1", "C1"]).send_test_video);
+            assert!(run(&["--huddle-probe", "T1", "C1", "--send-test-video"]).send_test_video);
+            assert!(help().contains("--send-test-video"));
         }
 
         #[test]

@@ -13,7 +13,6 @@ pub mod desktop;
 mod fetch;
 mod files;
 pub mod huddles;
-#[cfg(feature = "huddle-audio")]
 pub mod listen;
 pub mod people;
 mod poll;
@@ -992,8 +991,9 @@ pub struct Sink {
 
 impl Sink {
     /// The interface's waker, for what reaches it other than as an event:
-    /// a huddle share's pictures, which wait in a slot of their own.
-    #[cfg(feature = "huddle-video")]
+    /// a huddle share's pictures, or your camera's preview, which wait in
+    /// a slot of their own.
+    #[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
     pub fn waker(&self) -> Waker {
         self.waker.clone()
     }

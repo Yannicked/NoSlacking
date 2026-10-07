@@ -2743,6 +2743,73 @@ msgstr "Scherm van {name} tonen"
 msgid "Waiting for the picture…"
 msgstr "Wachten op het beeld…"
 
+msgid "Your camera is off. Start video ({shortcut})"
+msgstr "Je camera staat uit. Start video ({shortcut})"
+
+msgid "Opening your camera. Stop video ({shortcut})"
+msgstr "Je camera wordt geopend. Stop video ({shortcut})"
+
+msgid "Your camera is on: everyone sees you. Stop video ({shortcut})"
+msgstr "Je camera staat aan: iedereen ziet je. Stop video ({shortcut})"
+
+msgid "Your camera, as the others see it"
+msgstr "Je camera, zoals de anderen hem zien"
+
+msgid "Turn the camera on / off"
+msgstr "Camera aan- / uitzetten"
+
+msgid "Could not turn on your camera: {error}"
+msgstr "Kon je camera niet aanzetten: {error}"
+
+msgid "no camera was found"
+msgstr "er is geen camera gevonden"
+
+msgid "the camera is not allowed; allow NoSlacking in System Settings, Privacy & Security, Camera"
+msgstr "de camera is niet toegestaan; sta NoSlacking toe in Systeeminstellingen, Privacy en beveiliging, Camera"
+
+msgid "the camera is not allowed; check that Windows' privacy settings let apps use it"
+msgstr "de camera is niet toegestaan; controleer of de privacyinstellingen van Windows apps er gebruik van laten maken"
+
+msgid "the camera is not allowed; check that you may use the video device"
+msgstr "de camera is niet toegestaan; controleer of je het videoapparaat mag gebruiken"
+
+msgid "the camera could not be opened; another app may be using it"
+msgstr "de camera kon niet worden geopend; misschien gebruikt een andere app hem"
+
+msgid "This huddle takes no more video, so your camera stays off"
+msgstr "Deze huddle neemt geen video meer aan, dus je camera blijft uit"
+
+msgid "{count} camera on"
+msgid_plural "{count} cameras on"
+msgstr[0] "{count} camera aan"
+msgstr[1] "{count} camera's aan"
+
+msgid "Video"
+msgstr "Video"
+
+msgid "Close video"
+msgstr "Video sluiten"
+
+msgid "Huddle video"
+msgstr "Video in de huddle"
+
+msgid "No one has their camera on"
+msgstr "Niemand heeft een camera aan"
+
+msgid "{name}, camera paused"
+msgstr "{name}, camera gepauzeerd"
+
+msgid "{name} · camera paused"
+msgstr "{name} · camera gepauzeerd"
+
+msgid "{count} more camera"
+msgid_plural "{count} more cameras"
+msgstr[0] "nog {count} camera"
+msgstr[1] "nog {count} camera's"
+
+msgid "{name} (you)"
+msgstr "{name} (jij)"
+
 # Microsoft Teams sign-in
 msgid "Sign in to Microsoft Teams"
 msgstr "Aanmelden bij Microsoft Teams"

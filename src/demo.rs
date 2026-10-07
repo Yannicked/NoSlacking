@@ -1192,8 +1192,18 @@ static SHARE: std::sync::OnceLock<(
     std::sync::Arc<std::sync::atomic::AtomicBool>,
 )> = std::sync::OnceLock::new();
 
-/// Sets up the pretend share, its pictures waking the window through
-/// `sink`'s waker. Only the first call counts.
+/// The demo huddle's pretend cameras: where their pictures go, and which
+/// are playing (those with a tile, not paused).
+#[cfg(feature = "huddle-video")]
+type DemoCameras = (
+    crate::huddles::Gallery,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+);
+#[cfg(feature = "huddle-video")]
+static CAMERAS: std::sync::OnceLock<DemoCameras> = std::sync::OnceLock::new();
+
+/// Sets up the pretend share and cameras, their pictures waking the
+/// window through `sink`'s waker. Only the first call counts.
 #[cfg(feature = "huddle-video")]
 fn start_share(sink: &Sink) {
     let waker = sink.waker();
@@ -1204,6 +1214,90 @@ fn start_share(sink: &Sink) {
         return;
     }
     let _ = SHARE.set((screen, watched));
+    let waker = sink.waker();
+    let gallery = crate::huddles::Gallery::new(move || waker.wake());
+    // One fixture, five people: each tinted their own way.
+    for (feed, tint) in camera_feeds().iter().zip(TINTS) {
+        gallery.tint(&feed.key, tint);
+    }
+    let playing = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    if let Err(error) = crate::huddle_audio::gallery::demo_feed(gallery.clone(), playing.clone()) {
+        log::warn!("demo: no pretend cameras: {error}");
+        return;
+    }
+    let _ = CAMERAS.set((gallery, playing));
+}
+
+/// How the pretend cameras are tinted, to tell them apart: added to the
+/// blue and red differences.
+#[cfg(feature = "huddle-video")]
+const TINTS: [[i16; 2]; 5] = [[0, 0], [50, -30], [-45, 40], [0, 0], [-30, -50]];
+
+/// The pretend cameras' gallery, once the demo has started.
+#[cfg(feature = "huddle-video")]
+pub fn camera_gallery() -> Option<crate::huddles::Gallery> {
+    CAMERAS.get().map(|(gallery, _)| gallery.clone())
+}
+
+/// Who has a camera on in #design's huddle: Ana, Bob, Carla, Dev (his
+/// paused) and Lee, as INDEX would list them.
+#[cfg(feature = "huddle-video")]
+pub fn camera_feeds() -> Vec<crate::huddle_audio::cameras::Feed> {
+    [
+        ("ana-attendee", "U01", false),
+        ("bob-attendee", "U02", false),
+        ("carla-attendee", "U03", false),
+        ("dev-attendee", "U04", true),
+        ("lee-attendee", "U06", false),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(
+        |(n, (key, user, paused))| crate::huddle_audio::cameras::Feed {
+            key: key.to_owned(),
+            user: Some(user.to_owned()),
+            layers: vec![crate::huddle_audio::cameras::Layer {
+                stream_id: 100 + u32::try_from(n).unwrap_or(0),
+                width: 480,
+                height: 480,
+                max_kbps: 500,
+            }],
+            paused,
+        },
+    )
+    .collect()
+}
+
+/// The pretend cameras as the call window `wish` would get them, Ana
+/// speaking; those with a tile play.
+#[cfg(feature = "huddle-video")]
+pub fn watch_call(wish: &crate::huddles::Wish) -> Vec<crate::huddles::Camera> {
+    use crate::huddle_audio::cameras;
+    let now = std::time::Instant::now();
+    let feeds = camera_feeds();
+    let tiles = if wish.open {
+        let spoke = HashMap::from([("ana-attendee".to_owned(), now)]);
+        cameras::pick(&feeds, &[], &spoke, wish.tiles, now)
+    } else {
+        Vec::new()
+    };
+    if let Some((_, playing)) = CAMERAS.get() {
+        let on: Vec<String> = tiles
+            .iter()
+            .filter(|key| feeds.iter().any(|f| f.key == **key && !f.paused))
+            .cloned()
+            .collect();
+        *playing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = on;
+    }
+    if let Some((_, watched)) = SHARE.get() {
+        watched.store(
+            wish.open && wish.share.is_some(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    cameras::cameras(&feeds, &tiles)
 }
 
 /// The pretend share's screen, once the demo has started.
@@ -1212,11 +1306,80 @@ pub fn share_screen() -> Option<crate::huddles::Screen> {
     SHARE.get().map(|(screen, _)| screen.clone())
 }
 
-/// Plays the pretend share, or stops it.
-#[cfg(feature = "huddle-video")]
-pub fn watch_share(on: bool) {
-    if let Some((_, watched)) = SHARE.get() {
-        watched.store(on, std::sync::atomic::Ordering::Relaxed);
+/// The demo's camera: the test picture, never a real one, feeding the
+/// self-preview while it is on.
+#[cfg(feature = "huddle-camera")]
+struct DemoCamera {
+    preview: crate::huddle_camera::Preview,
+    latest: crate::huddle_audio::camera::Latest,
+    running: std::sync::Mutex<
+        Option<(
+            crate::huddle_audio::camera::Capturing,
+            crate::huddle_audio::microphone::Running,
+        )>,
+    >,
+}
+
+#[cfg(feature = "huddle-camera")]
+static CAMERA: std::sync::OnceLock<DemoCamera> = std::sync::OnceLock::new();
+
+/// Sets up the demo's camera, its preview waking the window through
+/// `sink`'s waker. Only the first call counts.
+#[cfg(feature = "huddle-camera")]
+fn start_camera(sink: &Sink) {
+    let waker = sink.waker();
+    let _ = CAMERA.set(DemoCamera {
+        preview: crate::huddle_camera::Preview::new(move || waker.wake()),
+        latest: crate::huddle_audio::camera::Latest::default(),
+        running: std::sync::Mutex::new(None),
+    });
+}
+
+/// The demo camera's self-preview, once the demo has started.
+#[cfg(feature = "huddle-camera")]
+pub fn camera_preview() -> Option<crate::huddle_camera::Preview> {
+    CAMERA.get().map(|c| c.preview.clone())
+}
+
+/// Turns the demo's camera (the test picture) on or off.
+#[cfg(feature = "huddle-camera")]
+pub fn camera(on: bool) {
+    use crate::huddle_audio::camera::{Camera as _, TestPattern};
+    let Some(camera) = CAMERA.get() else {
+        return;
+    };
+    let mut running = camera
+        .running
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !on {
+        *running = None;
+        return;
+    }
+    if running.is_some() {
+        return;
+    }
+    let pattern = TestPattern::new(camera.latest.clone()).open();
+    let feed = crate::huddle_audio::camera_send::preview_feed(
+        camera.latest.clone(),
+        camera.preview.clone(),
+    );
+    match (pattern, feed) {
+        (Ok(pattern), Ok(feed)) => *running = Some((pattern, feed)),
+        (Err(error), _) => log::warn!("demo: no camera: {error}"),
+        (_, Err(error)) => log::warn!("demo: no camera: {error}"),
+    }
+}
+
+/// Listening to #design's huddle, talking, with your camera on: the call
+/// bar's self-preview (`--demo-view camera`).
+#[cfg(feature = "huddle-camera")]
+pub fn camera_on() -> crate::huddles::Listening {
+    crate::huddles::Listening {
+        mic: crate::huddle_mic::Mic::Live,
+        camera: crate::huddle_camera::Cam::On,
+        preview: camera_preview(),
+        ..listening()
     }
 }
 
@@ -1236,21 +1399,40 @@ pub fn shares() -> Vec<crate::huddles::Share> {
     ]
 }
 
-/// Listening to #design's huddle with Ana's share open in the call
-/// window (`--demo-view share`).
+/// Listening to #design's huddle where Ana and Carla share their
+/// screens and five people have a camera on, Dev's paused
+/// (`--demo-view sharing`, `call-window` and `cameras`).
 #[cfg(feature = "huddle-video")]
 pub fn sharing() -> crate::huddles::Listening {
+    use crate::huddles::Person;
+    let mut listening = listening();
+    let person = |user: &str, muted| Person {
+        user: Some(user.to_owned()),
+        me: false,
+        muted,
+        speaking: false,
+    };
+    // Bob, Dev and Lee are in it too, Lee muted.
+    let me = listening.roster.people.pop();
+    listening.roster.people.extend([
+        person("U02", false),
+        person("U04", false),
+        person("U06", true),
+    ]);
+    listening.roster.people.extend(me);
+    listening.roster.count = Some(6);
     crate::huddles::Listening {
         shares: shares(),
         screen: share_screen(),
-        ..listening()
+        cameras: watch_call(&crate::huddles::Wish::closed()),
+        gallery: camera_gallery(),
+        ..listening
     }
 }
 
 /// Listening to the huddle in #design for 2 min 14 s: Ana speaking,
 /// Carla muted, and you, for the call bar's screenshot
 /// (`--demo-view listening`).
-#[cfg(feature = "huddle-audio")]
 pub fn listening() -> crate::huddles::Listening {
     use crate::huddles::{Person, Phase, Roster};
     let person = |user: &str, me, muted, speaking| Person {
@@ -1405,6 +1587,8 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
     sink.send(crate::backend::people::demo_huddle(TEAM));
     #[cfg(feature = "huddle-video")]
     start_share(&sink);
+    #[cfg(feature = "huddle-camera")]
+    start_camera(&sink);
     // Ana keeps typing in her direct message, as Slack repeats it.
     let typing = sink.clone();
     tokio::spawn(async move {

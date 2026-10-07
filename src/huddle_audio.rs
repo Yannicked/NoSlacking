@@ -1,4 +1,4 @@
-//! Listening to a huddle: the `huddle-audio` feature.
+//! Listening and talking in a huddle.
 //!
 //! A huddle is an Amazon Chime meeting. `rooms.join` (a browser session's
 //! method, like the rest of [`crate::huddles`]) hands out the meeting's
@@ -29,7 +29,16 @@
 //! stream (Stage 0). With the `huddle-video` feature (Stage 1) the app
 //! watches screen shares: only the share the call window shows is
 //! received, `decode` turns its H.264 into pictures and `screen` runs
-//! that on a thread of its own, keeping only the newest picture.
+//! that on a thread of its own, keeping only the newest picture. Stage 2
+//! adds camera tiles: `cameras` chooses whose and at which layer,
+//! `gallery` decodes them on one more thread, the newest per tile.
+//!
+//! Sending our camera (the `huddle-camera` feature, Stage 3): `camera`
+//! opens it only while it is on, the probe's test picture standing in
+//! for it; `video_encoder` makes H.264 constrained baseline of it and
+//! `camera_send` runs that on a thread of its own, newest picture first,
+//! with the self-preview; the session sends it on the first video m-line,
+//! re-SUBSCRIBEd both ways (`watch`, `chime`).
 //!
 //! Secrets: the join token and the TURN password never reach the log; the
 //! types holding them print `<redacted>`. Chime's URLs are logged by host
@@ -38,11 +47,18 @@
 #![warn(missing_docs)]
 
 pub mod bitstream;
+#[cfg(feature = "huddle-camera")]
+pub mod camera;
+#[cfg(feature = "huddle-camera")]
+pub mod camera_send;
+pub mod cameras;
 pub mod chime;
 #[cfg(feature = "huddle-video")]
 pub mod decode;
 pub mod dtls;
 pub mod encoder;
+#[cfg(feature = "huddle-video")]
+pub mod gallery;
 pub mod jitter;
 pub mod join;
 pub mod media;
@@ -59,6 +75,8 @@ pub mod speaker;
 pub mod turn;
 pub mod uplink;
 pub mod video;
+#[cfg(feature = "huddle-camera")]
+pub mod video_encoder;
 pub mod watch;
 
 /// The host of `url`, for the log: what a protocol mismatch needs to

@@ -316,14 +316,14 @@ fn save(dialog: &people::StatusDialog) -> Action {
 }
 
 /// The "huddle" button in a conversation's header, while one goes on: who
-/// is in it, and a click to join it: here with huddle audio in a browser
-/// sign-in's workspace (with the microphone off), else in Slack.
+/// is in it, and a click to join it: here in a browser sign-in's workspace
+/// (with the microphone off), else in Slack.
 pub fn huddle_button(
     ui: &mut egui::Ui,
     palette: &Palette,
     workspace: &crate::app::WorkspaceState,
     channel: &str,
-    #[cfg(feature = "huddle-audio")] listening: Option<&crate::huddles::Listening>,
+    listening: Option<&crate::huddles::Listening>,
     actions: &mut Vec<Action>,
 ) {
     let Some(huddle) = workspace.people.huddles.get(channel) else {
@@ -348,8 +348,7 @@ pub fn huddle_button(
     .stroke(Stroke::new(1.0, ACTIVE))
     .corner_radius(egui::CornerRadius::same(theme::RADIUS_SMALL + 2));
     let team = &workspace.info.team_id;
-    let here = cfg!(feature = "huddle-audio")
-        && workspace.info.sign_in == crate::model::SignInKind::Session;
+    let here = workspace.info.sign_in == crate::model::SignInKind::Session;
     let tip = crate::i18n::tf(
         if here {
             "Join the huddle here: {names}"
@@ -365,7 +364,6 @@ pub fn huddle_button(
     if !response.clicked() {
         return;
     }
-    #[cfg(feature = "huddle-audio")]
     if here {
         // Already in it (or joining): nothing more to join.
         if !listening.is_some_and(|l| l.is(team, channel)) {
@@ -380,8 +378,7 @@ pub fn huddle_button(
 }
 
 /// "Joining…", then "Leave", beside the huddle button while you are in
-/// this huddle (the `huddle-audio` feature).
-#[cfg(feature = "huddle-audio")]
+/// this huddle.
 pub fn listen_button(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -419,22 +416,21 @@ pub fn listen_button(
 }
 
 /// A headphones menu in a conversation's header while no huddle goes on
-/// there: start one here (with huddle audio, in a browser sign-in's
-/// workspace, joining muted), or else in Slack. A menu rather than one click,
-/// so a huddle that tells a whole channel is never started by accident.
+/// there: start one here (in a browser sign-in's workspace, joining
+/// muted), or else in Slack. A menu rather than one click, so a huddle
+/// that tells a whole channel is never started by accident.
 pub fn start_huddle_menu(
     ui: &mut egui::Ui,
     palette: &Palette,
     workspace: &crate::app::WorkspaceState,
     channel: &str,
-    #[cfg(feature = "huddle-audio")] listening: Option<&crate::huddles::Listening>,
+    listening: Option<&crate::huddles::Listening>,
     actions: &mut Vec<Action>,
 ) {
     let team = &workspace.info.team_id;
     if workspace.people.huddles.contains_key(channel) {
         return;
     }
-    #[cfg(feature = "huddle-audio")]
     if listening.is_some_and(|l| l.is(team, channel)) {
         return;
     }
@@ -445,29 +441,26 @@ pub fn start_huddle_menu(
                 .font(theme::regular(12.5))
                 .color(palette.text),
             |ui| {
-                #[cfg(feature = "huddle-audio")]
-                if workspace.info.sign_in == crate::model::SignInKind::Session
-                    && ui
+                // Only a browser sign-in can start one here; the others
+                // open Slack's huddle in the browser.
+                if workspace.info.sign_in == crate::model::SignInKind::Session {
+                    if ui
                         .button(t("Start a huddle here"))
                         .on_hover_text(t(
                             "Start a huddle and join it here, with your microphone off",
                         ))
                         .clicked()
-                {
-                    actions.push(Action::Huddle(crate::huddles::Action::Listen {
-                        team: team.clone(),
-                        channel: channel.to_owned(),
-                    }));
-                    ui.close();
-                }
-                // Only where it can't start here: Slack's huddle in the browser.
-                let here = cfg!(feature = "huddle-audio")
-                    && workspace.info.sign_in == crate::model::SignInKind::Session;
-                if !here
-                    && ui
-                        .button(t("Start a huddle in Slack"))
-                        .on_hover_text(t("Open Slack's huddle for this conversation"))
-                        .clicked()
+                    {
+                        actions.push(Action::Huddle(crate::huddles::Action::Listen {
+                            team: team.clone(),
+                            channel: channel.to_owned(),
+                        }));
+                        ui.close();
+                    }
+                } else if ui
+                    .button(t("Start a huddle in Slack"))
+                    .on_hover_text(t("Open Slack's huddle for this conversation"))
+                    .clicked()
                 {
                     actions.push(Action::OpenUrl(people::huddle_url(team, channel)));
                     ui.close();
@@ -510,8 +503,7 @@ pub fn word(presence: Presence) -> std::borrow::Cow<'static, str> {
 }
 
 /// The huddle invitations ringing, each a card in the top right corner
-/// with Join (here with huddle audio in a browser sign-in, else in
-/// Slack) and Decline (see [`crate::huddles`]).
+/// with Join (here in a browser sign-in, else in Slack) and Decline (see [`crate::huddles`]).
 pub fn invites(app: &mut App, ctx: &egui::Context) {
     if app.huddles.invites.list().is_empty() {
         return;
@@ -593,9 +585,9 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
                         });
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
-                            // With huddle audio a browser sign-in joins here
-                            // (see `huddles::Action::Join`); else Slack does.
-                            let hint = if cfg!(feature = "huddle-audio") && session {
+                            // A browser sign-in joins here (see
+                            // `huddles::Action::Join`); else Slack does.
+                            let hint = if session {
                                 t("Join the huddle here, with your microphone off")
                             } else {
                                 t("Join the huddle in Slack")

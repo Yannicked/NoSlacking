@@ -3,7 +3,6 @@
 
 mod add_emoji;
 mod browse;
-#[cfg(feature = "huddle-audio")]
 mod call_bar;
 #[cfg(feature = "huddle-video")]
 pub(crate) mod call_window;
@@ -14,7 +13,8 @@ mod desktop;
 mod details;
 mod format;
 mod hooks;
-#[cfg(feature = "huddle-audio")]
+#[cfg(feature = "huddle-camera")]
+mod huddle_camera;
 mod huddle_mic;
 mod keys;
 mod lightbox;
@@ -88,13 +88,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     keys::global(app, ui.ctx());
     browse::keys(app, ui.ctx());
     views::keys(app, ui.ctx());
+    // Before the call bar draws it.
+    #[cfg(feature = "huddle-camera")]
+    huddle_camera::refresh(app, ui.ctx());
     match app.page {
         Page::SignIn => login::show(app, ui),
         Page::Settings => {
             sidebar::rail(app, ui);
             // The settings have no sidebar: the call bar stays in sight
             // at their foot.
-            #[cfg(feature = "huddle-audio")]
             call_bar::panel(
                 ui,
                 "settings-call-bar",

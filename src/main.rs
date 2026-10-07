@@ -62,7 +62,6 @@ fn main() -> eframe::Result<()> {
     if cli.teams_probe {
         std::process::exit(noslacking::teams::probe::run(&dirs.settings_file()));
     }
-    #[cfg(feature = "huddle-audio")]
     if let Some([team, channel]) = &cli.huddle_probe {
         let code =
             noslacking::huddle_audio::probe::run(&noslacking::huddle_audio::probe::Options {
@@ -72,6 +71,7 @@ fn main() -> eframe::Result<()> {
                 region: cli.huddle_region.clone(),
                 settings: dirs.settings_file(),
                 send_tone: cli.send_tone,
+                send_test_video: cli.send_test_video,
                 video: noslacking::huddle_audio::video::Options {
                     streams: cli.video,
                     h264_only: cli.video_h264_only,
@@ -81,7 +81,6 @@ fn main() -> eframe::Result<()> {
         std::process::exit(code);
     }
     // The same video logging in the app's own huddles, when asked.
-    #[cfg(feature = "huddle-audio")]
     if cli.video > 0 || cli.video_h264_only || cli.video_dump.is_some() {
         noslacking::huddle_audio::video::set_for_app(noslacking::huddle_audio::video::Options {
             streams: cli.video,
@@ -681,13 +680,11 @@ impl DemoSetup {
             // #design, with a huddle going on.
             Some("huddle") => app.actions.push(Action::OpenConversation("C03".into())),
             // Listening to #design's huddle: the call bar.
-            #[cfg(feature = "huddle-audio")]
             Some("listening") => {
                 app.huddles.listening = Some(noslacking::demo::listening());
                 app.actions.push(Action::OpenConversation("C03".into()));
             }
             // The same with your microphone live.
-            #[cfg(feature = "huddle-audio")]
             Some("talking") => {
                 app.huddles.listening = Some(noslacking::huddles::Listening {
                     mic: noslacking::huddle_mic::Mic::Live,
@@ -695,7 +692,16 @@ impl DemoSetup {
                 });
                 app.actions.push(Action::OpenConversation("C03".into()));
             }
-            // Ana and Carla share their screens: the call bar's rows.
+            // Your camera on (the test picture): the call bar's
+            // self-preview.
+            #[cfg(feature = "huddle-camera")]
+            Some("camera") => {
+                noslacking::demo::camera(true);
+                app.huddles.listening = Some(noslacking::demo::camera_on());
+                app.actions.push(Action::OpenConversation("C03".into()));
+            }
+            // Ana and Carla share their screens and five have a camera
+            // on: the call bar's rows.
             #[cfg(feature = "huddle-video")]
             Some("sharing") => {
                 app.huddles.listening = Some(noslacking::demo::sharing());
@@ -715,6 +721,19 @@ impl DemoSetup {
                 app.actions.push(Action::OpenConversation("C02".into()));
                 app.actions
                     .push(Action::Huddle(noslacking::huddles::Action::Watch(first)));
+            }
+            // The call window on the cameras alone: the grid of tiles,
+            // drawn inside the main window as above.
+            #[cfg(feature = "huddle-video")]
+            Some("cameras") => {
+                app.huddles.listening = Some(noslacking::huddles::Listening {
+                    shares: Vec::new(),
+                    ..noslacking::demo::sharing()
+                });
+                app.huddles.picture.embed = true;
+                app.actions.push(Action::OpenConversation("C02".into()));
+                app.actions
+                    .push(Action::Huddle(noslacking::huddles::Action::OpenCall));
             }
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             // The deploy bot's Approve button pressed: its question.

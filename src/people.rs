@@ -238,19 +238,22 @@ pub enum Command {
     CheckHuddle { channel: String, room: String },
     /// Joins the huddle in `channel` and plays it, muted, leaving any
     /// other first (see [`crate::huddle_audio`]).
-    #[cfg(feature = "huddle-audio")]
     ListenHuddle { channel: String },
     /// Leaves the huddle being listened to.
-    #[cfg(feature = "huddle-audio")]
     LeaveHuddle,
     /// Mutes (closing the microphone) or unmutes (opening it) in the
     /// huddle being listened to.
-    #[cfg(feature = "huddle-audio")]
     MuteHuddle { muted: bool },
-    /// Shows the share `share` (its key) in the call window, receiving
-    /// it, or none, receiving no share at all.
+    /// What the call window wants: open or closed, the share it shows,
+    /// room for how many camera tiles. Only that is received.
     #[cfg(feature = "huddle-video")]
-    WatchShare { share: Option<String> },
+    WatchCall {
+        wish: crate::huddle_audio::cameras::Wish,
+    },
+    /// Turns the camera on (opening it) or off (closing it) in the huddle
+    /// being listened to.
+    #[cfg(feature = "huddle-camera")]
+    CameraHuddle { on: bool },
 }
 
 /// How often, at most, Slack hears that you are active: Slack's desktop
@@ -345,16 +348,20 @@ pub enum Event {
     /// down never came.
     Reconnected,
     /// Where listening to the huddle in `channel` got to.
-    #[cfg(feature = "huddle-audio")]
     Listening {
         channel: String,
         state: crate::huddles::Listen,
     },
     /// What the microphone did in the huddle in `channel`.
-    #[cfg(feature = "huddle-audio")]
     Microphone {
         channel: String,
         news: crate::huddle_mic::MicNews,
+    },
+    /// What the camera did in the huddle in `channel`.
+    #[cfg(feature = "huddle-camera")]
+    Camera {
+        channel: String,
+        news: crate::huddle_camera::CamNews,
     },
 }
 
@@ -793,9 +800,11 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
         | Event::HuddleRoom { .. }
         | Event::HuddleChecked { .. }
         | Event::InviteDeclined { .. }
-        | Event::Reconnected => {}
-        #[cfg(feature = "huddle-audio")]
-        Event::Listening { .. } | Event::Microphone { .. } => {}
+        | Event::Reconnected
+        | Event::Listening { .. }
+        | Event::Microphone { .. } => {}
+        #[cfg(feature = "huddle-camera")]
+        Event::Camera { .. } => {}
     }
     if let Some((text, error)) = toast {
         app.toast(text, error);

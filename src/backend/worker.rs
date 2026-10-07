@@ -338,8 +338,7 @@ pub struct Worker {
     uploads: HashMap<u64, Running>,
     /// Presence and the like for the people on screen.
     people: super::people::Hub,
-    /// The huddle being listened to (`huddle-audio`).
-    #[cfg(feature = "huddle-audio")]
+    /// The huddle being listened to.
     huddle_audio: super::listen::Listener,
 }
 
@@ -371,7 +370,6 @@ impl Worker {
             waiting: Some(Vec::new()),
             uploads: HashMap::new(),
             people: super::people::Hub::default(),
-            #[cfg(feature = "huddle-audio")]
             huddle_audio: super::listen::Listener::default(),
         }
     }
@@ -2003,7 +2001,6 @@ impl Worker {
             self.skipped("acting on people", &team);
             return;
         };
-        #[cfg(feature = "huddle-audio")]
         let command = match command {
             crate::people::Command::ListenHuddle { channel } => {
                 self.huddle_audio.start(client, team, channel, sink);
@@ -2018,8 +2015,13 @@ impl Worker {
                 return;
             }
             #[cfg(feature = "huddle-video")]
-            crate::people::Command::WatchShare { share } => {
-                self.huddle_audio.watch_share(share);
+            crate::people::Command::WatchCall { wish } => {
+                self.huddle_audio.watch_call(wish);
+                return;
+            }
+            #[cfg(feature = "huddle-camera")]
+            crate::people::Command::CameraHuddle { on } => {
+                self.huddle_audio.set_camera(on);
                 return;
             }
             other => other,

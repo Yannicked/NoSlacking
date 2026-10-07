@@ -32,7 +32,7 @@ jobs:
       - name: GUI build dependencies and packaging validators
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake desktop-file-utils appstream
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake desktop-file-utils appstream libclang-dev
       - name: Desktop entry
         run: desktop-file-validate packaging/applications/cloud.yannick.NoSlacking.desktop
       # The project has no public homepage yet; drop the override once
@@ -63,14 +63,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Toolchain
         run: rustup toolchain install
-      # libssl-dev: huddle-audio's DTLS links the system's OpenSSL on
-      # Linux; macOS and Windows build their own (Perl, and NASM if the
-      # runner has it, else OpenSSL's C code alone).
+      # libclang-dev: the all-features build's camera (nokhwa) generates its
+      # V4L2 bindings with bindgen, which loads libclang.
+      # libssl-dev: huddles' DTLS links the system's OpenSSL on Linux;
+      # macOS and Windows build their own (Perl, and NASM if the runner
+      # has it, else OpenSSL's C code alone).
       - name: GUI build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake libclang-dev
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Linux is linted in `quality`; the macOS and Windows `cfg` code
       # (keyring stores, single instance, the URL scheme) only here.

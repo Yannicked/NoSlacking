@@ -183,15 +183,16 @@ pub fn check_due(last: Option<&Check>, now: Instant) -> Instant {
     last.map_or(now, |last| last.at + check_wait(last.failures))
 }
 
-#[cfg(feature = "huddle-audio")]
 mod listen;
-#[cfg(feature = "huddle-audio")]
 pub use listen::{
     ALONE_FOR, FAILED_FOR, Left, Listen, Listening, Person, Phase, Place, Roster, alone_since,
     clock, faces, leave_alone, quit, status_text, title_text,
 };
 #[cfg(feature = "huddle-video")]
-pub use listen::{Picture, Screen, Share, sharing_text, watch};
+pub use listen::{
+    Camera, Gallery, MAX_TILES, Picture, Screen, Share, Wish, cameras_text, open_call,
+    sharing_text, tell_wish, watch,
+};
 
 /// The call window's picture: the watched share's newest, uploaded.
 #[cfg(feature = "huddle-video")]
@@ -203,6 +204,9 @@ pub struct CallPicture {
     pub source: [usize; 2],
     /// Which share it is of.
     pub of: Option<String>,
+    /// Each camera tile's newest picture, uploaded, and the camera's own
+    /// size, by camera.
+    pub tiles: std::collections::BTreeMap<String, (egui::TextureHandle, [usize; 2])>,
     /// The demo draws the window inside the main one, to be in its
     /// screenshot.
     #[cfg(feature = "demo")]
@@ -215,6 +219,26 @@ impl std::fmt::Debug for CallPicture {
         f.debug_struct("CallPicture")
             .field("source", &self.source)
             .field("of", &self.of)
+            .field("tiles", &self.tiles.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The self-preview's picture, uploaded (the `huddle-camera` feature).
+#[cfg(feature = "huddle-camera")]
+#[derive(Default)]
+pub struct PreviewPicture {
+    /// The texture it is drawn from, set again for each new picture.
+    pub texture: Option<egui::TextureHandle>,
+    /// Its size in pixels.
+    pub size: [usize; 2],
+}
+
+#[cfg(feature = "huddle-camera")]
+impl std::fmt::Debug for PreviewPicture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreviewPicture")
+            .field("size", &self.size)
             .finish_non_exhaustive()
     }
 }
@@ -226,11 +250,13 @@ pub struct State {
     /// The checks made, by workspace and room.
     checks: HashMap<(String, String), Check>,
     /// The huddle being listened to, if any.
-    #[cfg(feature = "huddle-audio")]
     pub listening: Option<Listening>,
     /// The call window's picture of the share watched.
     #[cfg(feature = "huddle-video")]
     pub picture: CallPicture,
+    /// Your camera's self-preview.
+    #[cfg(feature = "huddle-camera")]
+    pub preview: PreviewPicture,
 }
 
 impl State {
@@ -263,30 +289,31 @@ pub enum Action {
     /// Declines it.
     Decline { team: String, room: String },
     /// Listens to the huddle in `channel` here, muted, leaving any other.
-    #[cfg(feature = "huddle-audio")]
     Listen { team: String, channel: String },
     /// Answers an invitation by listening here: opens the huddle's
     /// conversation, where its Leave button is, and listens.
-    #[cfg(feature = "huddle-audio")]
     ListenInvite { team: String, room: String },
     /// Leaves the huddle being listened to.
-    #[cfg(feature = "huddle-audio")]
     Leave,
     /// Mutes or unmutes the microphone in the huddle being listened to.
-    #[cfg(feature = "huddle-audio")]
     Microphone(crate::huddle_mic::MicAction),
     /// Opens the call window on a share (by key), or closes it (none).
     #[cfg(feature = "huddle-video")]
     Watch(Option<String>),
+    /// Opens the call window on the cameras (and a share, if any).
+    #[cfg(feature = "huddle-video")]
+    OpenCall,
+    /// Turns the camera on or off in the huddle being listened to.
+    #[cfg(feature = "huddle-camera")]
+    Camera(crate::huddle_camera::CamAction),
 }
 
 /// Applies a view's request.
 pub fn apply(app: &mut App, action: Action) {
     match action {
         Action::Join { team, room } => {
-            // With huddle audio a browser sign-in joins here; only the
-            // others hand the huddle to Slack.
-            #[cfg(feature = "huddle-audio")]
+            // A browser sign-in joins here; only the others hand the
+            // huddle to Slack.
             if is_session(app, &team) {
                 apply(app, Action::ListenInvite { team, room });
                 return;
@@ -306,7 +333,6 @@ pub fn apply(app: &mut App, action: Action) {
                 });
             }
         }
-        #[cfg(feature = "huddle-audio")]
         Action::ListenInvite { team, room } => {
             if let Some(invite) = app.huddles.invites.answered(&team, &room) {
                 app.actions
@@ -323,14 +349,15 @@ pub fn apply(app: &mut App, action: Action) {
                 );
             }
         }
-        #[cfg(feature = "huddle-audio")]
         Action::Listen { team, channel } => listen::listen(app, team, channel),
-        #[cfg(feature = "huddle-audio")]
         Action::Microphone(action) => crate::huddle_mic::apply(app, action),
-        #[cfg(feature = "huddle-audio")]
         Action::Leave => listen::leave(app),
         #[cfg(feature = "huddle-video")]
         Action::Watch(share) => listen::watch(app, share),
+        #[cfg(feature = "huddle-video")]
+        Action::OpenCall => listen::open_call(app),
+        #[cfg(feature = "huddle-camera")]
+        Action::Camera(action) => crate::huddle_camera::apply(app, action),
     }
 }
 
@@ -358,7 +385,6 @@ fn check(app: &mut App, team: &str, channel: &str, room: &str, now: Instant) {
 /// Runs every frame: drops invitations that rang long enough, and checks
 /// the huddle in the open conversation when due.
 pub fn frame(app: &mut App, now: Instant) {
-    #[cfg(feature = "huddle-audio")]
     listen::frame(app, now);
     if let Some(next) = app.huddles.invites.expire(now) {
         app.waker.wake_after(next.saturating_duration_since(now));
@@ -469,14 +495,17 @@ pub fn handle(app: &mut App, team: &str, event: people::Event) -> Option<people:
             }
             None
         }
-        #[cfg(feature = "huddle-audio")]
         people::Event::Listening { channel, state } => {
             listen::heard(app, team, &channel, state);
             None
         }
-        #[cfg(feature = "huddle-audio")]
         people::Event::Microphone { channel, news } => {
             crate::huddle_mic::news(app, team, &channel, news);
+            None
+        }
+        #[cfg(feature = "huddle-camera")]
+        people::Event::Camera { channel, news } => {
+            crate::huddle_camera::news(app, team, &channel, news);
             None
         }
         people::Event::InviteDeclined { result } => {

@@ -630,6 +630,7 @@ mod tests {
             attendee_id: "A1".into(),
             muted: true,
             receive_stream_ids: vec![0],
+            video: None,
         }
     }
 

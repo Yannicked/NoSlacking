@@ -1,8 +1,7 @@
-//! The worker's side of listening to a huddle (the `huddle-audio`
-//! feature): one huddle at a time, joined through Slack, played through
-//! [`crate::huddle_audio`], left when asked, on sign-out, or when another
-//! starts. Its news goes to the interface as
-//! [`crate::people::Event::Listening`]; failures as a
+//! The worker's side of listening to a huddle: one huddle at a time,
+//! joined through Slack, played through [`crate::huddle_audio`], left
+//! when asked, on sign-out, or when another starts. Its news goes to the
+//! interface as [`crate::people::Event::Listening`]; failures as a
 //! [`Failure`], their technical detail only in the log.
 //!
 //! Joined muted. The microphone opens only when the interface unmutes
@@ -18,9 +17,19 @@
 //! nothing.
 //!
 //! With `huddle-video`, the session also says who shares their screen
-//! (`Listen::Shares`) and hands over the `Screen` the watched share's
-//! pictures arrive in (`Listen::Screen`); the interface says which
-//! share its call window shows, and only that one is received.
+//! (`Listen::Shares`) and who has a camera on (`Listen::Cameras`), and
+//! hands over the `Screen` the watched share's pictures arrive in
+//! (`Listen::Screen`) and the `Gallery` the camera tiles' do
+//! (`Listen::Gallery`); the interface says what its call window wants,
+//! and only that is received, nothing while it is closed.
+//!
+//! With `huddle-camera`, joined with the camera off. The camera opens
+//! only when the interface turns it on and closes when it turns it off,
+//! when Chime takes no video from us, or when the huddle is left, as the
+//! microphone does; what it is doing goes back as
+//! `people::Event::Camera`. Its pictures are encoded on a
+//! thread of their own for the session, and its self-preview arrives in
+//! the `Preview` handed over as `Listen::Preview`.
 
 use std::time::Duration;
 
@@ -28,6 +37,11 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{Event, Sink};
 use crate::failure::{Failure, HuddleTrouble};
+use crate::huddle_audio::cameras::Camera;
+#[cfg(feature = "huddle-video")]
+use crate::huddle_audio::cameras::Wish;
+#[cfg(feature = "huddle-video")]
+use crate::huddle_audio::gallery::Gallery;
 use crate::huddle_audio::join::{self, JoinFailure};
 use crate::huddle_audio::media::{self, Stage, Uplink};
 use crate::huddle_audio::microphone::{Cpal, MicControl, Wiring};
@@ -59,9 +73,12 @@ struct Running {
     stop: watch::Sender<bool>,
     /// Whether the interface wants the microphone muted.
     muted: watch::Sender<bool>,
-    /// Which share the call window shows.
+    /// What the call window wants.
     #[cfg(feature = "huddle-video")]
-    watched: watch::Sender<Option<String>>,
+    wish: watch::Sender<Wish>,
+    /// Whether the interface wants the camera on.
+    #[cfg(feature = "huddle-camera")]
+    camera: watch::Sender<bool>,
 }
 
 /// The one listening session there may be.
@@ -78,12 +95,17 @@ impl Listener {
         let (stop, stopped) = watch::channel(false);
         let (muted, wanted) = watch::channel(true);
         #[cfg(feature = "huddle-video")]
-        let (watched, watching) = watch::channel(None);
+        let (wish, wishes) = watch::channel(Wish::closed());
+        // Joined with the camera off.
+        #[cfg(feature = "huddle-camera")]
+        let (camera, camera_wanted) = watch::channel(false);
         let controls = Controls {
             stopped,
             wanted,
             #[cfg(feature = "huddle-video")]
-            watching,
+            wishes,
+            #[cfg(feature = "huddle-camera")]
+            camera_wanted,
         };
         tokio::spawn(run(client, team.clone(), channel, controls, sink));
         self.running = Some(Running {
@@ -91,16 +113,25 @@ impl Listener {
             stop,
             muted,
             #[cfg(feature = "huddle-video")]
-            watched,
+            wish,
+            #[cfg(feature = "huddle-camera")]
+            camera,
         });
     }
 
-    /// Shows the share `key` in the call window, or none: only that one
-    /// is received.
-    #[cfg(feature = "huddle-video")]
-    pub fn watch_share(&mut self, key: Option<String>) {
+    /// Turns the camera on or off in the huddle, if there is one.
+    #[cfg(feature = "huddle-camera")]
+    pub fn set_camera(&mut self, on: bool) {
         if let Some(running) = &self.running {
-            let _ = running.watched.send(key);
+            let _ = running.camera.send(on);
+        }
+    }
+
+    /// The call window wants `wish`: only that is received.
+    #[cfg(feature = "huddle-video")]
+    pub fn watch_call(&mut self, wish: Wish) {
+        if let Some(running) = &self.running {
+            let _ = running.wish.send(wish);
         }
     }
 
@@ -203,6 +234,132 @@ async fn microphone(
     }
 }
 
+/// What the camera's task needs: where the camera's pictures go, and
+/// what the encoder thread sends from.
+#[cfg(feature = "huddle-camera")]
+struct CameraWiring {
+    latest: crate::huddle_audio::camera::Latest,
+    frames: mpsc::Sender<crate::huddle_audio::camera_send::VideoFrame>,
+    control: crate::huddle_audio::camera_send::SendControl,
+    preview: crate::huddle_camera::Preview,
+}
+
+/// What a camera that would not open tells the interface.
+#[cfg(feature = "huddle-camera")]
+fn camera_failure(error: &crate::huddle_audio::camera::CameraError) -> Failure {
+    use crate::huddle_audio::camera::CameraError;
+    Failure::Huddle(match error {
+        CameraError::NoDevice => HuddleTrouble::NoCamera,
+        CameraError::Denied => HuddleTrouble::CameraDenied,
+        CameraError::Open(_) => HuddleTrouble::Camera,
+    })
+}
+
+/// Opens and closes the camera as `wanted` says, until `done`, telling
+/// the session through `on` and the interface through `tell`; closes it
+/// when Chime takes no video from us (`refusals`), and at the end
+/// whatever happened. The encoder's thread runs from the first time the
+/// camera opens until the end.
+#[cfg(feature = "huddle-camera")]
+async fn camera(
+    mut wanted: watch::Receiver<bool>,
+    on: watch::Sender<bool>,
+    wiring: CameraWiring,
+    mut refusals: mpsc::Receiver<()>,
+    mut done: oneshot::Receiver<()>,
+    tell: impl Fn(crate::huddle_camera::CamNews),
+) {
+    use crate::huddle_audio::camera::{CameraControl, Nokhwa};
+    use crate::huddle_audio::camera_send::Encoding;
+    use crate::huddle_camera::CamNews;
+
+    let CameraWiring {
+        latest,
+        frames,
+        control: send_control,
+        preview,
+    } = wiring;
+    let mut control = Some(CameraControl::new(Nokhwa::new(latest.clone())));
+    let mut encoding: Option<Encoding> = None;
+    let mut frames = Some(frames);
+    loop {
+        let (want, refused) = tokio::select! {
+            _ = &mut done => break,
+            changed = wanted.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                (*wanted.borrow_and_update(), false)
+            }
+            refused = refusals.recv() => match refused {
+                Some(()) => (false, true),
+                None => break,
+            },
+        };
+        let Some(mut held) = control.take() else {
+            break;
+        };
+        // Opening and closing wait on the camera's thread: not on this one.
+        let (held, result) = match tokio::task::spawn_blocking(move || {
+            let result = held.set_on(want);
+            (held, result)
+        })
+        .await
+        {
+            Ok(done) => done,
+            Err(error) => {
+                log::warn!("huddle camera: the camera thread failed: {error}");
+                let _ = on.send(false);
+                tell(CamNews::Failed(Failure::Huddle(HuddleTrouble::Camera)));
+                return;
+            }
+        };
+        control = Some(held);
+        match result {
+            Ok(()) if refused => {
+                let _ = on.send(false);
+                preview.clear();
+                tell(CamNews::Failed(Failure::Huddle(HuddleTrouble::ViewOnly)));
+            }
+            Ok(()) => {
+                if want && encoding.is_none() {
+                    match frames.take().map(|frames| {
+                        Encoding::spawn(
+                            latest.clone(),
+                            frames,
+                            send_control.clone(),
+                            Some(preview.clone()),
+                        )
+                    }) {
+                        Some(Ok(started)) => encoding = Some(started),
+                        Some(Err(why)) => log::warn!("huddle camera: {why}"),
+                        None => {}
+                    }
+                }
+                if !want {
+                    preview.clear();
+                }
+                let _ = on.send(want);
+                tell(if want { CamNews::On } else { CamNews::Off });
+            }
+            Err(error) => {
+                log::warn!("huddle camera: {error}");
+                let _ = on.send(false);
+                tell(CamNews::Failed(camera_failure(&error)));
+            }
+        }
+    }
+    let _ = on.send(false);
+    // Closing joins the camera's and the encoder's threads: not on this
+    // one.
+    let _ = tokio::task::spawn_blocking(move || {
+        drop(control);
+        drop(encoding);
+    })
+    .await;
+    preview.clear();
+}
+
 /// Lets go of a speaker that stopped and opens the device again for the
 /// same feed, off this thread: both wait on the device's.
 async fn reopen(old: Speaker, feed: Feed, tap: RenderTap) -> Result<Speaker, String> {
@@ -244,9 +401,12 @@ struct Controls {
     stopped: watch::Receiver<bool>,
     /// Whether the microphone should be muted.
     wanted: watch::Receiver<bool>,
-    /// Which share the call window shows.
+    /// What the call window wants.
     #[cfg(feature = "huddle-video")]
-    watching: watch::Receiver<Option<String>>,
+    wishes: watch::Receiver<Wish>,
+    /// Whether the camera should be on.
+    #[cfg(feature = "huddle-camera")]
+    camera_wanted: watch::Receiver<bool>,
 }
 
 /// The next list of who shares, or never while there is none.
@@ -262,13 +422,28 @@ async fn next_shares(
     }
 }
 
+/// The next list of cameras, or never while there is none.
+async fn next_cameras(
+    cameras: &mut Option<watch::Receiver<Vec<Camera>>>,
+) -> Result<Vec<Camera>, watch::error::RecvError> {
+    match cameras {
+        Some(cameras) => {
+            cameras.changed().await?;
+            Ok(cameras.borrow_and_update().clone())
+        }
+        None => std::future::pending().await,
+    }
+}
+
 /// One listening session, start to end.
 async fn run(client: Client, team: String, channel: String, controls: Controls, sink: Sink) {
     let Controls {
         mut stopped,
         wanted,
         #[cfg(feature = "huddle-video")]
-        watching,
+        wishes,
+        #[cfg(feature = "huddle-camera")]
+        camera_wanted,
     } = controls;
     let tell = |state: Listen| {
         sink.send(Event::People {
@@ -344,23 +519,73 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
     let mut sound_stopped = false;
     let mut checks = tokio::time::interval(SPEAKER_CHECK);
     checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // Who shares, for the call bar, and the screen the watched share's
-    // pictures go to, woken as the events are.
+    // Who shares and who has a camera on, for the call bar, and where the
+    // watched share's and the tiles' pictures go, woken as the events are.
     #[cfg(feature = "huddle-video")]
-    let (viewer, mut shares) = {
+    let (viewer, mut shares, mut cameras) = {
         let waker = sink.waker();
         let screen = Screen::new(move || waker.wake());
         tell(Listen::Screen(screen.clone()));
+        let waker = sink.waker();
+        let gallery = Gallery::new(move || waker.wake());
+        tell(Listen::Gallery(gallery.clone()));
         let (shares, told) = watch::channel(Vec::new());
+        let (cameras, cameras_told) = watch::channel(Vec::new());
         let viewer = crate::huddle_audio::watch::Viewer {
             shares,
-            watched: watching,
+            cameras,
+            wish: wishes,
             screen,
+            gallery,
         };
-        (Some(viewer), Some(told))
+        (Some(viewer), Some(told), Some(cameras_told))
     };
     #[cfg(not(feature = "huddle-video"))]
-    let (viewer, mut shares) = (None, None);
+    let (viewer, mut shares, mut cameras) = (None, None, None);
+    // The camera: closed until turned on, its pictures encoded on a
+    // thread of their own, its preview for the call bar.
+    #[cfg(feature = "huddle-camera")]
+    let (camera_uplink, camera_task, close_camera) = {
+        let waker = sink.waker();
+        let preview = crate::huddle_camera::Preview::new(move || waker.wake());
+        tell(Listen::Preview(preview.clone()));
+        let latest = crate::huddle_audio::camera::Latest::default();
+        let (frames, frames_in) = mpsc::channel(crate::huddle_audio::camera_send::QUEUE);
+        let control = crate::huddle_audio::camera_send::SendControl::default();
+        let (refused, refusals) = mpsc::channel(1);
+        let (on, on_rx) = watch::channel(false);
+        let (close_camera, camera_done) = oneshot::channel();
+        let camera_sink = sink.clone();
+        let (camera_team, camera_channel) = (team.clone(), channel.clone());
+        let task = tokio::spawn(camera(
+            camera_wanted,
+            on,
+            CameraWiring {
+                latest,
+                frames,
+                control: control.clone(),
+                preview,
+            },
+            refusals,
+            camera_done,
+            move |news| {
+                camera_sink.send(Event::People {
+                    team: camera_team.clone(),
+                    event: people::Event::Camera {
+                        channel: camera_channel.clone(),
+                        news,
+                    },
+                });
+            },
+        ));
+        let uplink = crate::huddle_audio::camera_send::CameraUplink {
+            frames: frames_in,
+            on: on_rx,
+            control,
+            refused,
+        };
+        (Some(uplink), task, close_camera)
+    };
     let listening = media::listen(
         &joined,
         Some(feed.clone()),
@@ -371,6 +596,8 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
         media::Video {
             options: crate::huddle_audio::video::for_app(),
             viewer,
+            #[cfg(feature = "huddle-camera")]
+            camera: camera_uplink,
         },
     );
     tokio::pin!(listening);
@@ -456,11 +683,22 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
                 Ok(_) => {}
                 Err(_) => shares = None,
             },
+            told = next_cameras(&mut cameras) => match told {
+                #[cfg(feature = "huddle-video")]
+                Ok(now) => tell(Listen::Cameras(now)),
+                #[cfg(not(feature = "huddle-video"))]
+                Ok(_) => {}
+                Err(_) => cameras = None,
+            },
         }
     };
-    // Left: the microphone closes before anything else.
+    // Left: the microphone and the camera close before anything else.
     let _ = close_mic.send(());
+    #[cfg(feature = "huddle-camera")]
+    let _ = close_camera.send(());
     let _ = mic.await;
+    #[cfg(feature = "huddle-camera")]
+    let _ = camera_task.await;
     // Stopping the device waits for its thread; not on this one.
     let _ = tokio::task::spawn_blocking(move || drop(speaker)).await;
     log::info!(
@@ -518,6 +756,24 @@ mod tests {
                 })
             ),
             Err(Failure::Huddle(HuddleTrouble::Lost))
+        );
+    }
+
+    #[cfg(feature = "huddle-camera")]
+    #[test]
+    fn each_camera_failure_has_its_words() {
+        use crate::huddle_audio::camera::CameraError;
+        assert_eq!(
+            camera_failure(&CameraError::NoDevice),
+            Failure::Huddle(HuddleTrouble::NoCamera)
+        );
+        assert_eq!(
+            camera_failure(&CameraError::Denied),
+            Failure::Huddle(HuddleTrouble::CameraDenied)
+        );
+        assert_eq!(
+            camera_failure(&CameraError::Open("busy".into())),
+            Failure::Huddle(HuddleTrouble::Camera)
         );
     }
 }
