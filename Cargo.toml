@@ -222,7 +222,7 @@ assets = [
 ]
 
 [features]
-default = ["highlight", "bundled-emoji", "audio"]
+default = ["highlight", "bundled-emoji", "audio", "huddle-audio"]
 # Plays voice clips and sound files in the app. Without it they open in
 # the system's player, and the build needs no sound libraries.
 audio = ["dep:rodio"]
@@ -234,9 +234,10 @@ audio = ["dep:rodio"]
 bundled-emoji = []
 # Sample data and the screenshot flag; never part of a release build.
 demo = []
-# Listening and talking in huddles (src/huddle_audio.rs): off until it
-# has been tried more widely. Adds `noslacking --huddle-probe`. Needs
-# OpenSSL's headers on Linux (libssl-dev, openssl-devel).
+# Listening and talking in huddles (src/huddle_audio.rs), on by default.
+# Adds `noslacking --huddle-probe`. Needs OpenSSL's headers on Linux
+# (libssl-dev, openssl-devel); macOS and Windows build OpenSSL from
+# source, which needs Perl.
 huddle-audio = ["audio", "dep:prost", "dep:str0m", "dep:openssl", "dep:opus-decoder", "dep:hmac", "dep:md-5", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:tracing", "tokio/signal", "dep:opus-rs", "dep:sonora", "dep:sonora-agc2", "dep:sonora-common-audio", "dep:sonora-simd"]
 # Colours code blocks that name their language (```` ```rust ````). Our own
 # small lexer, a few kilobytes; turn it off for plain code blocks.

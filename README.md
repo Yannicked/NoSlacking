@@ -69,6 +69,12 @@ One small window for all your workspaces. No Electron, no browser engine.
 - Mark unread, save for later, share to another conversation, pin, copy a
   link, edit, delete, and delete your own files.
 
+**Huddles** (with browser sign-in)
+- Join, start, listen and talk in huddles right in the app, with echo
+  cancellation and noise suppression, a call bar showing who is talking,
+  and Leave and mute on keyboard shortcuts.
+- Huddle invitations as a card and a desktop notification.
+
 **Writing**
 - `@mention`, `@group`, `#channel` and `:emoji:` autocomplete, slash
   commands, formatting shortcuts, Shift+Enter for a new line, and spell
