@@ -1,7 +1,9 @@
 //! `noslacking-video`, the video helper process (crates/noslacking-video):
 //! every video stream we watch (the `huddle-video` feature) is decoded
-//! there, on the GPU or in software, and our camera and screen are
-//! encoded there on the GPU when it can (the `huddle-camera` feature).
+//! there, on the GPU or in software; our camera is encoded there on the
+//! GPU when it can (the `huddle-camera` feature); and the screen we share
+//! is captured and encoded there, so only its H.264 crosses the pipe
+//! (the `huddle-share` feature, [`Helper::start_share`]).
 //!
 //! Decoders read strangers' streams, and the GPU's video APIs are C
 //! libraries and drivers that take `unsafe` code this crate forbids; a
@@ -10,8 +12,9 @@
 //! the first time a stream needs it and talks to over its standard input
 //! and output (`noslacking-video-ipc`'s messages). The helper is found
 //! next to this program, else on `PATH`. Without it there is no video
-//! to watch: the call window says so, and the call goes on. Encoding
-//! falls back to software in the app (`video_encoder`).
+//! to watch (the call window says so, and the call goes on) and no
+//! screen to share. Encoding the camera falls back to software in the
+//! app (`video_encoder`).
 //!
 //! Each [`Lane`] has a helper of its own, so the share's decoding, the
 //! cameras' and our own encoding never wait for each other's replies.
@@ -164,23 +167,27 @@ pub enum Lane {
     Share,
     /// Decoding the camera tiles.
     Cameras,
-    /// Encoding our camera and our screen on the GPU.
+    /// Encoding our camera on the GPU.
     Sending,
+    /// Capturing and encoding the screen we share: its own process, as
+    /// the system's dialog may keep a request waiting for the user.
+    Screen,
 }
 
 /// The helper for `lane`, made the first time it is asked for and
 /// started the first time it is used; none when the program is not
 /// installed.
 pub fn shared(lane: Lane) -> Option<Helper> {
-    static SHARED: OnceLock<Option<[Helper; 3]>> = OnceLock::new();
+    static SHARED: OnceLock<Option<[Helper; 4]>> = OnceLock::new();
     let helpers = SHARED.get_or_init(|| {
         let launcher = launcher()?;
-        Some([(); 3].map(|()| Helper::new(Arc::clone(&launcher))))
+        Some([(); 4].map(|()| Helper::new(Arc::clone(&launcher))))
     });
     let index = match lane {
         Lane::Share => 0,
         Lane::Cameras => 1,
         Lane::Sending => 2,
+        Lane::Screen => 3,
     };
     helpers.as_ref().map(|helpers| helpers[index].clone())
 }
@@ -460,6 +467,186 @@ impl Helper {
             other => Err(self.fail(&mut state, &format!("an answer to open: {other:?}"))),
         }
     }
+
+    /// What can be shared: `(dialog, sources)`, `dialog` when the system
+    /// shows its own when the share starts. Starts the helper if it is
+    /// not running.
+    #[cfg(feature = "huddle-share")]
+    pub fn sources(&self) -> Result<(bool, Vec<ipc::Source>), ShareTrouble> {
+        let mut state = self.state();
+        self.ensure_started(&mut state)
+            .map_err(ShareTrouble::lost)?;
+        match self
+            .exchange(&mut state, Request::ListSources, SOURCES_TIMEOUT)
+            .map_err(ShareTrouble::lost)?
+        {
+            Reply::Sources { dialog, sources } => Ok((dialog, sources)),
+            Reply::ShareProblem { problem, detail } => Err(ShareTrouble::Problem(problem, detail)),
+            other => Err(ShareTrouble::lost(
+                self.fail(&mut state, &format!("an answer to the sources: {other:?}")),
+            )),
+        }
+    }
+
+    /// Starts capturing and encoding `choice` (on the GPU if `gpu` and it
+    /// can), at `bitrate` bit/s to begin with; `restore` is the portal's
+    /// token from the last share (empty: none). The share, and the token
+    /// to give next time. Waits as long as the system's dialog is open.
+    #[cfg(feature = "huddle-share")]
+    pub fn start_share(
+        &self,
+        choice: ipc::ShareChoice,
+        gpu: bool,
+        bitrate: u32,
+        restore: &str,
+    ) -> Result<(RemoteShare, String), ShareTrouble> {
+        let mut state = self.state();
+        self.ensure_started(&mut state)
+            .map_err(ShareTrouble::lost)?;
+        let request = Request::StartShare {
+            choice,
+            hardware: gpu,
+            bitrate,
+            restore: restore.to_owned(),
+        };
+        let generation = state.generation;
+        match self
+            .exchange(&mut state, request, SHARE_START_TIMEOUT)
+            .map_err(ShareTrouble::lost)?
+        {
+            Reply::ShareStarted { id, restore } => Ok((
+                RemoteShare {
+                    helper: self.clone(),
+                    id,
+                    generation,
+                },
+                restore,
+            )),
+            Reply::ShareProblem { problem, detail } => Err(ShareTrouble::Problem(problem, detail)),
+            // Too many open: the helper is fine.
+            Reply::Failed { kind, detail } => Err(ShareTrouble::Problem(
+                ipc::ShareProblem::Failed,
+                format!("{kind:?}: {detail}"),
+            )),
+            other => Err(ShareTrouble::lost(
+                self.fail(&mut state, &format!("an answer to the share: {other:?}")),
+            )),
+        }
+    }
+}
+
+/// How long the helper may take to list what can be shared: windows and
+/// screens are asked of the system, which can take a moment.
+#[cfg(feature = "huddle-share")]
+const SOURCES_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long starting a share may take: the system's dialog waits for
+/// the user. Past this the helper is taken for stuck, and stopping it
+/// closes the dialog.
+#[cfg(feature = "huddle-share")]
+const SHARE_START_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Why a share did not start, or stopped.
+#[cfg(feature = "huddle-share")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShareTrouble {
+    /// What the helper said: cancelled, not allowed, gone, ended…
+    Problem(ipc::ShareProblem, String),
+    /// The helper is not there, failed or stopped answering.
+    Lost(String),
+}
+
+#[cfg(feature = "huddle-share")]
+impl ShareTrouble {
+    fn lost(lost: Lost) -> Self {
+        Self::Lost(lost.0)
+    }
+}
+
+/// Our screen share, captured and encoded in the helper. Stopped (its
+/// capture with it) when dropped.
+#[cfg(feature = "huddle-share")]
+#[derive(Debug)]
+pub struct RemoteShare {
+    helper: Helper,
+    id: u32,
+    generation: u64,
+}
+
+#[cfg(feature = "huddle-share")]
+impl RemoteShare {
+    /// The next picture, encoded (see `Request::NextShareFrame`): none
+    /// when nothing new came within `wait`. Its NAL units are checked:
+    /// a slice, and an IDR with its parameter sets when one was asked.
+    pub fn next(
+        &mut self,
+        force_keyframe: bool,
+        repeat: bool,
+        wait: Duration,
+    ) -> Result<Option<ipc::ShareFrame>, ShareTrouble> {
+        let request = Request::NextShareFrame {
+            id: self.id,
+            force_keyframe,
+            repeat,
+            wait_ms: u32::try_from(wait.as_millis())
+                .unwrap_or(u32::MAX)
+                .min(ipc::MAX_SHARE_WAIT_MS),
+        };
+        match self
+            .helper
+            .call(self.generation, request)
+            .map_err(ShareTrouble::lost)?
+        {
+            Reply::ShareFrame(frame) => {
+                let types = super::video_encoder::nal_types(&frame.data);
+                let keyframe = types.contains(&5);
+                let whole = types.iter().any(|&t| t == 1 || t == 5)
+                    && keyframe == frame.keyframe
+                    && (!keyframe || types.starts_with(&[7, 8]))
+                    && (keyframe || !force_keyframe);
+                if whole {
+                    Ok(Some(frame))
+                } else {
+                    Err(ShareTrouble::Lost(format!(
+                        "the helper's frame is not what was asked (NAL units {types:?})"
+                    )))
+                }
+            }
+            Reply::NoPicture => Ok(None),
+            Reply::ShareProblem { problem, detail } => Err(ShareTrouble::Problem(problem, detail)),
+            other => Err(ShareTrouble::Lost(format!(
+                "an answer to the next frame: {other:?}"
+            ))),
+        }
+    }
+
+    /// Aims at `bitrate` bit/s from the next picture on.
+    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<(), ShareTrouble> {
+        let request = Request::SetBitrate {
+            id: self.id,
+            bitrate,
+        };
+        match self
+            .helper
+            .call(self.generation, request)
+            .map_err(ShareTrouble::lost)?
+        {
+            Reply::Done => Ok(()),
+            other => Err(ShareTrouble::Lost(format!(
+                "an answer to the bit rate: {other:?}"
+            ))),
+        }
+    }
+}
+
+#[cfg(feature = "huddle-share")]
+impl Drop for RemoteShare {
+    fn drop(&mut self) {
+        // The helper stops the capture; one that restarted has stopped
+        // it already.
+        let _ = self
+            .helper
+            .call(self.generation, Request::Close { id: self.id });
+    }
 }
 
 /// Starts the threads that write to and read from a launched helper.
@@ -723,7 +910,17 @@ pub(crate) mod pretend {
                     let mut input = std::io::BufReader::new(from_app);
                     let mut output = BufWriter::new(to_app);
                     let mut backend = noslacking_video::backend::Nothing::new("none: a test");
-                    let _ = noslacking_video::server::serve(&mut input, &mut output, &mut backend);
+                    // Only the test screen, and a few pretend sources:
+                    // no test captures a real one.
+                    let mut screens = noslacking_video::capture::Pretend {
+                        sources: pretend::sources(),
+                    };
+                    let _ = noslacking_video::server::serve(
+                        &mut input,
+                        &mut output,
+                        &mut backend,
+                        &mut screens,
+                    );
                 })?;
             Ok(Link {
                 input: Box::new(to_helper),
@@ -731,6 +928,23 @@ pub(crate) mod pretend {
                 stop: Box::new(|| {}),
             })
         }
+    }
+
+    /// The screens and windows the helper on a thread offers to share,
+    /// all of them the test screen.
+    pub fn sources() -> Vec<ipc::Source> {
+        vec![
+            ipc::Source {
+                id: "pretend:1".into(),
+                name: "A pretend screen".into(),
+                kind: ipc::SourceKind::Screen,
+            },
+            ipc::Source {
+                id: "pretend:2".into(),
+                name: "A pretend window".into(),
+                kind: ipc::SourceKind::Window,
+            },
+        ]
     }
 
     /// What the pretend helper does with a request.

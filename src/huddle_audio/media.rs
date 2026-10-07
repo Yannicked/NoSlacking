@@ -3229,19 +3229,29 @@ mod tests {
             join_token: super::super::join::JoinToken::new("the-token"),
         }
         .content();
-        // The test screen, encoded as a share is (no GPU in a test).
+        // The helper's test screen, encoded as a share is (the helper's
+        // own code on a thread, no GPU in a test).
         use super::super::camera_send::{QUEUE, SendControl};
-        use super::super::share::{Choice, Frames, ShareControl, TestShare};
+        use super::super::helper::{self, Lane};
         use super::super::share_send::{self, Encoding};
-        let frames = Frames::default();
-        let mut capture = ShareControl::new(TestShare::new(frames.clone()));
-        capture
-            .start(&Choice::System { again: false })
-            .expect("the test screen");
+        let (share, _) = tokio::task::spawn_blocking(|| {
+            helper::shared(Lane::Screen)
+                .expect("in tests, always")
+                .start_share(
+                    noslacking_video_ipc::ShareChoice::Test,
+                    false,
+                    1_000_000,
+                    "",
+                )
+        })
+        .await
+        .expect("a thread")
+        .expect("the test screen");
         let (encoded, encoded_in) = tokio::sync::mpsc::channel(QUEUE);
         let control = SendControl::new(super::super::video_encoder::Limits::SHARE);
+        let (ending, _ended) = tokio::sync::watch::channel(None);
         let encoding =
-            Encoding::spawn_with(frames, encoded, control.clone(), || None).expect("an encoder");
+            Encoding::spawn(share, encoded, control.clone(), ending).expect("an encoder");
         let (_on, on) = tokio::sync::watch::channel(true);
         let (refused, _refusals) = tokio::sync::mpsc::channel(1);
         let uplink = share_send::uplink(encoded_in, on, control, refused);
@@ -3264,8 +3274,9 @@ mod tests {
             },
         )
         .await;
-        drop(encoding);
-        capture.stop();
+        tokio::task::spawn_blocking(move || drop(encoding))
+            .await
+            .expect("stopped");
 
         assert_eq!(result, Ok(()), "{report:?}");
         assert_eq!(report.ending.as_deref(), Some("left"));
@@ -3301,7 +3312,7 @@ mod tests {
             let picture = decoder.decode(unit).expect("decodes").expect("a picture");
             assert_eq!(
                 (picture.width, picture.height),
-                super::super::share::REDUCED_SIZE,
+                (1280, 720),
                 "720p from software"
             );
         }

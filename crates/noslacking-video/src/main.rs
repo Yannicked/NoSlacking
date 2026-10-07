@@ -25,9 +25,14 @@ fn serve() -> ExitCode {
     noslacking_video::pipe::enlarge_stdout();
     let mut backend = noslacking_video::choose_backend();
     eprintln!("noslacking-video: back end {}", backend.name());
+    let mut screens = noslacking_video::capture::System::new();
+    eprintln!(
+        "noslacking-video: screens are captured through {}",
+        screens.name()
+    );
     let mut input = BufReader::new(std::io::stdin().lock());
     let mut output = BufWriter::with_capacity(1 << 16, std::io::stdout().lock());
-    match noslacking_video::server::serve(&mut input, &mut output, backend.as_mut()) {
+    match noslacking_video::server::serve(&mut input, &mut output, backend.as_mut(), &mut screens) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("noslacking-video: {error}");
@@ -50,6 +55,15 @@ fn probe() -> ExitCode {
             capability.codec, capability.direction, capability.max_width, capability.max_height
         );
     }
+    println!(
+        "screen sharing: through {}; dma-bufs to the GPU: {}",
+        noslacking_video::capture::System::new().name(),
+        if backend.share_gpu().is_some() {
+            "where it imports them"
+        } else {
+            "no (no GPU encoder)"
+        }
+    );
     ExitCode::SUCCESS
 }
 

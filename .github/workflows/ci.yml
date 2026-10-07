@@ -67,8 +67,9 @@ jobs:
         run: rustup toolchain install
       # libclang-dev: the all-features build's camera (nokhwa) generates its
       # V4L2 bindings with bindgen, which loads libclang.
-      # libpipewire-0.3-dev: the all-features build's screen share
-      # (pipewire) generates its bindings against PipeWire's headers.
+      # libpipewire-0.3-dev: the video helper's `pipewire` feature (screen
+      # sharing under Wayland; the app itself no longer links PipeWire)
+      # generates its bindings against PipeWire's headers.
       # libssl-dev: huddles' DTLS links the system's OpenSSL on Linux;
       # macOS and Windows build their own (Perl, and NASM if the runner
       # has it, else OpenSSL's C code alone).

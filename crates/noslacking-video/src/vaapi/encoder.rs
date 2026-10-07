@@ -372,22 +372,47 @@ impl VaapiEncoder {
     }
 }
 
-impl Encoder for VaapiEncoder {
-    fn encode(&mut self, picture: &Planes, force_keyframe: bool) -> Result<Encoded, Failure> {
+impl VaapiEncoder {
+    /// The surface it encodes from, `coded_size()` large: a picture put
+    /// there (video processing does, for a shared screen) is encoded by
+    /// [`Self::encode_input`].
+    pub fn input(&self) -> u32 {
+        self.input
+    }
+
+    /// The pictures' size.
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    /// The input surface's size: the pictures', rounded up to whole
+    /// macroblocks.
+    pub fn coded_size(&self) -> (u32, u32) {
+        self.coded_size
+    }
+
+    /// Writes `picture` (I420, of the encoder's size) into the input
+    /// surface.
+    pub fn write(&mut self, picture: &Planes) -> Result<(), Failure> {
         if (picture.width, picture.height) != self.size {
             return Err(Failure::broken(format!(
                 "a {}x{} picture for a {}x{} encoder",
                 picture.width, picture.height, self.size.0, self.size.1
             )));
         }
+        self.display
+            .write_i420(self.input, self.coded_size, picture)
+            .map_err(Failure::device)
+    }
+
+    /// Encodes what the input surface holds, an IDR if `force_keyframe`
+    /// (or one is due).
+    pub fn encode_input(&mut self, force_keyframe: bool) -> Result<Encoded, Failure> {
         let idr = force_keyframe || self.reference.is_none() || self.since_idr >= self.idr_period();
         if idr {
             self.since_idr = 0;
             self.idr_pic_id = self.idr_pic_id.wrapping_add(1);
         }
-        self.display
-            .write_i420(self.input, self.coded_size, picture)
-            .map_err(Failure::device)?;
         let frame_num = self.since_idr % (1 << (LOG2_MAX_FRAME_NUM_MINUS4 + 4));
         // Picture order type 2: twice the pictures since the IDR.
         let poc = i32::try_from(self.since_idr.wrapping_mul(2)).unwrap_or(0);
@@ -537,6 +562,13 @@ impl Encoder for VaapiEncoder {
         self.send_rate = false;
         self.rate_changed = false;
         Ok(Encoded { keyframe, data })
+    }
+}
+
+impl Encoder for VaapiEncoder {
+    fn encode(&mut self, picture: &Planes, force_keyframe: bool) -> Result<Encoded, Failure> {
+        self.write(picture)?;
+        self.encode_input(force_keyframe)
     }
 
     fn set_bitrate(&mut self, bitrate: u32) -> Result<(), Failure> {

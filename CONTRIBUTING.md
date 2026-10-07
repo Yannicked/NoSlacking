@@ -20,6 +20,20 @@ looks for beside its own binary. `cargo build` builds both; `cargo run`
 builds the app alone, so run `cargo build` (with the same features)
 first, or the call window says there is no video.
 
+Screen sharing (the `huddle-share` feature) is captured and encoded by
+the same helper; the app itself has no capture dependency. On X11 (and
+on macOS and Windows) the helper needs nothing more. To share under
+Wayland or in the Flatpak, build the helper with its `pipewire` feature,
+which needs PipeWire's headers and libclang (`libpipewire-0.3-dev
+libclang-dev`, or `pipewire-devel clang-devel`):
+
+```
+cargo build --features huddle-share,noslacking-video/pipewire
+```
+
+The camera (`huddle-camera`) still needs libclang on Linux for its V4L2
+bindings. `--all-features` (the checks below) turns on both.
+
 Sound plays through ALSA on Linux (`libasound2-dev`, or
 `alsa-lib-devel`). Huddles' DTLS is OpenSSL's: Linux links the system's
 (`libssl-dev`, or `openssl-devel`), and macOS and Windows build it from
