@@ -1019,6 +1019,18 @@ impl Sink {
     /// A sink for one workspace's tasks, and the gate that silences it when
     /// the workspace signs out. A task that is still running then cannot
     /// bring the workspace back with a late event.
+    /// A sink whose events go nowhere, for what runs without an
+    /// interface (a probe).
+    #[cfg(feature = "teams")]
+    pub fn nowhere() -> Sink {
+        let (sender, _) = mpsc::channel();
+        Sink {
+            sender,
+            waker: Waker::default(),
+            gate: Some(Arc::new(Mutex::new(false))),
+        }
+    }
+
     pub fn gated(&self) -> (Sink, Gate) {
         let gate = Arc::new(Mutex::new(true));
         let sink = Sink {

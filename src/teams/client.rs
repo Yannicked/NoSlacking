@@ -398,6 +398,12 @@ impl TeamsClient {
         }
     }
 
+    /// This app's endpoint id with Teams, once the live connection has
+    /// said we are here: calls name it as theirs.
+    pub fn endpoint_id(&self) -> Option<String> {
+        self.endpoint.read().ok().and_then(|e| e.clone())
+    }
+
     /// Where this account's call pushes go, and the live connection's
     /// address for their callbacks.
     pub fn calls(&self) -> &crate::teams::calling::router::Router {

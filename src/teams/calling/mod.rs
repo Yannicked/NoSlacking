@@ -13,6 +13,7 @@
 //! - [`media`]: the media session, on the huddle stack's audio pipeline.
 
 pub mod api;
+pub mod call;
 pub mod codes;
 pub mod links;
 pub mod media;

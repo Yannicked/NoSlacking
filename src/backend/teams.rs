@@ -880,7 +880,7 @@ fn workspace_id(me: &str) -> String {
 
 /// Keeps the Trouter connection open, reconnecting when it drops, and
 /// passes live messages on. Reports each change of status.
-async fn trouter(team: String, client: TeamsClient, sink: Sink, report: Report) {
+pub(crate) async fn trouter(team: String, client: TeamsClient, sink: Sink, report: Report) {
     let http = crate::slack::net::api();
     loop {
         report(Socket::Connecting);

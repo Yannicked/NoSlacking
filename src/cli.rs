@@ -25,6 +25,9 @@ pub struct Cli {
     /// `--teams-probe`: try a personal Microsoft account sign-in and quit.
     #[cfg(feature = "teams")]
     pub teams_probe: bool,
+    /// `--teams-call-probe TEAM MRI`: call someone on Teams and quit.
+    #[cfg(feature = "teams")]
+    pub teams_call_probe: Option<[String; 2]>,
     /// `--huddle-probe TEAM CHANNEL`: test huddle audio and quit.
     pub huddle_probe: Option<[String; 2]>,
     /// `--seconds N`: how long the huddle probe listens.
@@ -153,6 +156,14 @@ pub const FLAGS: &[Flag] = &[
         name: "teams-probe",
         takes: Takes::Nothing(|cli| cli.teams_probe = true),
         help: "Sign in to a personal Microsoft account (Teams free) in the terminal, trying each known way and logging which steps work, and quit: a test of personal Teams accounts. Saves nothing",
+    },
+    #[cfg(feature = "teams")]
+    Flag {
+        name: "teams-call-probe",
+        takes: Takes::Two(["TEAM", "MRI"], |cli, args| {
+            cli.teams_call_probe = Some(args)
+        }),
+        help: "Call someone on Teams with a quiet tone, stay in the call for --seconds once it is live, hang up, logging each step, and quit: a test of Teams calls. Takes the Teams workspace's id and the MRI to call (8:live:… or 8:orgid:…), and the sign-in saved for that workspace",
     },
     Flag {
         name: "huddle-probe",
