@@ -36,8 +36,10 @@ use std::io::{self, Read, Write};
 pub const MAGIC: [u8; 4] = *b"NSVH";
 
 /// This protocol's version. Both sides must have the same; the app uses
-/// software video with a helper of another version.
-pub const VERSION: u16 = 1;
+/// software video with a helper of another version (they ship together,
+/// so that only happens with a broken install). Version 2 added
+/// [`Request::SetOutputSize`].
+pub const VERSION: u16 = 2;
 
 /// The largest frame either side accepts, in bytes: room for an I420
 /// picture at [`MAX_SIDE`] square (24 MiB) and its header.
@@ -521,6 +523,48 @@ pub enum Request {
         /// The decoder or encoder.
         id: u32,
     },
+    /// Decoder `id`'s pictures from now on are shrunk to cover a
+    /// `width`×`height` box ([`output_size`]): the size the app shows
+    /// them at. 0×0 (the start) means at their own size. The reply is
+    /// [`Reply::Done`].
+    SetOutputSize {
+        /// The decoder.
+        id: u32,
+        /// The box's width in pixels.
+        width: u32,
+        /// The box's height in pixels.
+        height: u32,
+    },
+}
+
+/// The size a `source`-sized picture is shrunk to so it still covers a
+/// `fit`-sized box both ways: the aspect ratio kept (to within the
+/// rounding), never larger than the source, and even each way so its
+/// chroma halves exactly. The source itself when the box is as large or
+/// has no size (0).
+pub fn output_size(source: (u32, u32), fit: (u32, u32)) -> (u32, u32) {
+    let (sw, sh) = (u64::from(source.0), u64::from(source.1));
+    let (fw, fh) = (u64::from(fit.0), u64::from(fit.1));
+    if sw == 0 || sh == 0 || fw == 0 || fh == 0 {
+        return source;
+    }
+    // Scale by the larger of the two ratios, so both sides cover the box.
+    let (w, h) = if fw * sh >= fh * sw {
+        (fw, (sh * fw).div_ceil(sw))
+    } else {
+        ((sw * fh).div_ceil(sh), fh)
+    };
+    if w >= sw || h >= sh {
+        return source;
+    }
+    let even = |n: u64, limit: u64| -> u32 {
+        let n = (n + (n & 1)).max(2);
+        // Rounding up to even never passes the source unless it was odd
+        // and as large: then one less.
+        let n = if n > limit { limit & !1 } else { n };
+        u32::try_from(n.max(2)).unwrap_or(u32::MAX)
+    };
+    (even(w, sw), even(h, sh))
 }
 
 /// What the helper answers.
@@ -732,6 +776,9 @@ impl Request {
                 .done(),
             Self::SetBitrate { id, bitrate } => Out::new(6).u32(*id).u32(*bitrate).done(),
             Self::Close { id } => Out::new(7).u32(*id).done(),
+            Self::SetOutputSize { id, width, height } => {
+                Out::new(8).u32(*id).u32(*width).u32(*height).done()
+            }
         }
     }
 
@@ -772,6 +819,11 @@ impl Request {
                 bitrate: input.u32()?,
             },
             7 => Self::Close { id: input.u32()? },
+            8 => Self::SetOutputSize {
+                id: input.u32()?,
+                width: input.side("width")?,
+                height: input.side("height")?,
+            },
             tag => return Err(Error::UnknownTag(tag)),
         };
         input.end()?;
@@ -906,6 +958,11 @@ mod tests {
                 bitrate: 900_000,
             },
             Request::Close { id: 7 },
+            Request::SetOutputSize {
+                id: 7,
+                width: 960,
+                height: 540,
+            },
         ]
     }
 
@@ -1128,6 +1185,44 @@ mod tests {
             read_reply(&mut huge.as_slice()),
             Err(Error::BadValue("picture size"))
         ));
+    }
+
+    #[test]
+    fn output_sizes_cover_the_box_keep_the_shape_and_never_grow() {
+        // No box yet, or one as large: the source.
+        assert_eq!(output_size((1920, 1080), (0, 0)), (1920, 1080));
+        assert_eq!(output_size((1920, 1080), (1920, 1080)), (1920, 1080));
+        assert_eq!(output_size((1920, 1080), (2560, 1440)), (1920, 1080));
+        assert_eq!(output_size((1920, 1080), (3000, 10)), (1920, 1080));
+        // Half and a third.
+        assert_eq!(output_size((1920, 1080), (960, 540)), (960, 540));
+        assert_eq!(output_size((1920, 1080), (640, 360)), (640, 360));
+        // A box of another shape: the picture covers it both ways.
+        assert_eq!(output_size((1920, 1080), (960, 200)), (960, 540));
+        assert_eq!(output_size((1920, 1080), (100, 540)), (960, 540));
+        // A square camera in a 4:3 tile.
+        assert_eq!(output_size((480, 480), (256, 192)), (256, 256));
+        // Odd results round up to even, odd sources keep their own size.
+        assert_eq!(output_size((1920, 1080), (961, 100)), (962, 542));
+        assert_eq!(output_size((321, 181), (0, 0)), (321, 181));
+        assert_eq!(output_size((321, 181), (161, 10)), (162, 92));
+        for source in [(1920, 1080), (480, 480), (1280, 720), (321, 181), (2, 2)] {
+            for fit in [(1, 1), (7, 3), (200, 150), (959, 541), (5000, 5000)] {
+                let (w, h) = output_size(source, fit);
+                assert!(w <= source.0 && h <= source.1, "{source:?} in {fit:?}");
+                if (w, h) != source {
+                    assert!(w % 2 == 0 && h % 2 == 0, "{source:?} in {fit:?}");
+                    assert!(w >= fit.0.min(source.0) && h >= fit.1.min(source.1));
+                    // The shape to within the rounding.
+                    let a = f64::from(w) / f64::from(h);
+                    let b = f64::from(source.0) / f64::from(source.1);
+                    assert!(
+                        (a / b - 1.0).abs() < 0.05 || w <= 4 || h <= 4,
+                        "{source:?} in {fit:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

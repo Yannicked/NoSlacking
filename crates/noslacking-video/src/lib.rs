@@ -20,6 +20,7 @@ pub mod h264;
 #[allow(unsafe_code)]
 pub mod pipe;
 pub mod server;
+pub mod shrink;
 #[cfg(target_os = "linux")]
 pub mod vaapi;
 

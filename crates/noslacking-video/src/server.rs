@@ -164,6 +164,13 @@ impl Server<'_> {
                     Err(failure) => failed(failure.kind, &failure.detail),
                 }
             }
+            Request::SetOutputSize { id, width, height } => {
+                let Some(decoder) = self.decoders.get_mut(&id) else {
+                    return failed(FailKind::UnknownId, "no such decoder");
+                };
+                decoder.set_output_size(width, height);
+                Reply::Done
+            }
             Request::Close { id } => {
                 if self.decoders.remove(&id).is_some() || self.encoders.remove(&id).is_some() {
                     Reply::Done
@@ -235,7 +242,12 @@ mod tests {
                 open.encode(),
                 decode(1, false),
                 decode(1, true),
-                decode(1, false),
+                Request::SetOutputSize {
+                    id: 1,
+                    width: 32,
+                    height: 24,
+                }
+                .encode(),
                 decode(9, true),
                 Request::Close { id: 1 }.encode(),
                 Request::Close { id: 1 }.encode(),
@@ -287,7 +299,7 @@ mod tests {
         assert_eq!(replies[1], Reply::Opened { id: 1 });
         assert_eq!(kind(&replies[2]), Some(FailKind::NeedKeyframe));
         assert!(matches!(&replies[3], Reply::Picture(p) if (p.width, p.height) == (64, 48)));
-        assert!(matches!(&replies[4], Reply::Picture(_)));
+        assert_eq!(replies[4], Reply::Done, "the output size, set");
         assert_eq!(kind(&replies[5]), Some(FailKind::UnknownId));
         assert_eq!(replies[6], Reply::Done);
         assert_eq!(

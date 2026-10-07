@@ -3,7 +3,9 @@
 //! "encodes" a picture into a made-up NAL unit. Chosen with
 //! `NOSLACKING_VIDEO_BACKEND=fake`.
 
-use noslacking_video_ipc::{Capability, Codec, Direction, MAX_SIDE, Planes, chroma_size};
+use noslacking_video_ipc::{
+    Capability, Codec, Direction, MAX_SIDE, Planes, chroma_size, output_size,
+};
 
 use crate::backend::{Backend, Decoder, Encoded, Encoder, Failure};
 
@@ -40,6 +42,7 @@ impl Backend for Fake {
         Ok(Box::new(FakeDecoder {
             width,
             height,
+            fit: (0, 0),
             started: false,
             frames: 0,
         }))
@@ -64,6 +67,7 @@ impl Backend for Fake {
 struct FakeDecoder {
     width: u32,
     height: u32,
+    fit: (u32, u32),
     started: bool,
     frames: u8,
 }
@@ -81,15 +85,20 @@ impl Decoder for FakeDecoder {
             return Err(Failure::need_keyframe("no keyframe yet"));
         }
         self.frames = self.frames.wrapping_add(1);
-        let (cw, ch) = chroma_size(self.width, self.height);
+        let (width, height) = output_size((self.width, self.height), self.fit);
+        let (cw, ch) = chroma_size(width, height);
         let size = |w: u32, h: u32| usize::try_from(w * h).unwrap_or(0);
         Ok(Some(Planes {
-            width: self.width,
-            height: self.height,
-            y: vec![self.frames; size(self.width, self.height)],
+            width,
+            height,
+            y: vec![self.frames; size(width, height)],
             u: vec![128; size(cw, ch)],
             v: vec![128; size(cw, ch)],
         }))
+    }
+
+    fn set_output_size(&mut self, width: u32, height: u32) {
+        self.fit = (width, height);
     }
 }
 

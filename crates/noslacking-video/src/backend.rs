@@ -91,8 +91,11 @@ pub trait Backend {
 /// One stream's decoder.
 pub trait Decoder {
     /// Decodes one frame: its picture, or none for a frame of parameter
-    /// sets only.
+    /// sets only. Shrunk to cover the output box, if one was set.
     fn decode(&mut self, frame: &[u8], keyframe: bool) -> Result<Option<Planes>, Failure>;
+    /// The box pictures from now on should cover
+    /// (`noslacking_video_ipc::output_size`); 0×0 for their own size.
+    fn set_output_size(&mut self, width: u32, height: u32);
 }
 
 /// One stream's encoder.

@@ -31,6 +31,16 @@ pub const PROFILE_H264_HIGH: i32 = 7;
 pub const PROFILE_H264_CONSTRAINED_BASELINE: i32 = 13;
 /// `VAEntrypointVLD`: decoding.
 pub const ENTRYPOINT_VLD: i32 = 1;
+/// `VAProfileNone`: what video processing is configured with.
+pub const PROFILE_NONE: i32 = -1;
+/// `VAEntrypointVideoProc`: video processing (scaling).
+pub const ENTRYPOINT_VIDEO_PROC: i32 = 10;
+/// `VAProcColorStandardBT601`: what WebRTC senders' H.264 is.
+const PROC_COLOR_STANDARD_BT601: u32 = 1;
+/// `VA_SOURCE_RANGE_REDUCED`: studio range.
+const SOURCE_RANGE_REDUCED: u8 = 1;
+/// `VA_FILTER_SCALING_DEFAULT`.
+const FILTER_SCALING_DEFAULT: u32 = 0;
 /// `VAConfigAttribRTFormat`.
 const ATTRIB_RT_FORMAT: i32 = 0;
 /// `VAConfigAttribMaxPictureWidth`.
@@ -69,6 +79,125 @@ pub enum BufferType {
     SliceParameter = 4,
     /// `VASliceDataBufferType`.
     SliceData = 5,
+    /// `VAProcPipelineParameterBufferType`.
+    ProcPipelineParameter = 41,
+}
+
+/// `VARectangle`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct Rectangle {
+    /// Left edge.
+    pub x: i16,
+    /// Top edge.
+    pub y: i16,
+    /// Width.
+    pub width: u16,
+    /// Height.
+    pub height: u16,
+}
+
+/// `VAProcColorProperties`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct ProcColorProperties {
+    /// `chroma_sample_location`.
+    pub chroma_sample_location: u8,
+    /// `color_range`: `VA_SOURCE_RANGE_*`.
+    pub color_range: u8,
+    /// `colour_primaries`.
+    pub colour_primaries: u8,
+    /// `transfer_characteristics`.
+    pub transfer_characteristics: u8,
+    /// `matrix_coefficients`.
+    pub matrix_coefficients: u8,
+    /// `reserved`.
+    pub reserved: [u8; 3],
+}
+
+/// `VAProcPipelineParameterBuffer`: one surface (or a region of it)
+/// scaled into the target. Its pointers are to the two rectangles,
+/// which must outlive the picture it is rendered in; [`Scaler::scale`]
+/// keeps them on its stack across the whole picture. The C padding is
+/// written out (`pad*`).
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct ProcPipelineParameterBuffer {
+    surface: u32,
+    pad0: u32,
+    surface_region: *const Rectangle,
+    surface_color_standard: u32,
+    pad1: u32,
+    output_region: *const Rectangle,
+    output_background_color: u32,
+    output_color_standard: u32,
+    pipeline_flags: u32,
+    filter_flags: u32,
+    filters: *mut u32,
+    num_filters: u32,
+    pad2: u32,
+    forward_references: *mut u32,
+    num_forward_references: u32,
+    pad3: u32,
+    backward_references: *mut u32,
+    num_backward_references: u32,
+    rotation_state: u32,
+    blend_state: *const c_void,
+    mirror_state: u32,
+    pad4: u32,
+    additional_outputs: *mut u32,
+    num_additional_outputs: u32,
+    input_surface_flag: u32,
+    output_surface_flag: u32,
+    input_color_properties: ProcColorProperties,
+    output_color_properties: ProcColorProperties,
+    processing_mode: u32,
+    output_hdr_metadata: *const c_void,
+    reserved: [u32; 16],
+}
+
+impl ProcPipelineParameterBuffer {
+    /// `region` of `surface` scaled into all of the target (`output`),
+    /// BT.601 studio range in and out, so nothing but the size changes.
+    fn scale(surface: u32, region: &Rectangle, output: &Rectangle) -> Self {
+        let colour = ProcColorProperties {
+            color_range: SOURCE_RANGE_REDUCED,
+            ..ProcColorProperties::default()
+        };
+        Self {
+            surface,
+            pad0: 0,
+            surface_region: region,
+            surface_color_standard: PROC_COLOR_STANDARD_BT601,
+            pad1: 0,
+            output_region: output,
+            output_background_color: 0xff00_0000,
+            output_color_standard: PROC_COLOR_STANDARD_BT601,
+            pipeline_flags: 0,
+            filter_flags: FILTER_SCALING_DEFAULT,
+            filters: std::ptr::null_mut(),
+            num_filters: 0,
+            pad2: 0,
+            forward_references: std::ptr::null_mut(),
+            num_forward_references: 0,
+            pad3: 0,
+            backward_references: std::ptr::null_mut(),
+            num_backward_references: 0,
+            rotation_state: 0,
+            blend_state: std::ptr::null(),
+            mirror_state: 0,
+            pad4: 0,
+            additional_outputs: std::ptr::null_mut(),
+            num_additional_outputs: 0,
+            input_surface_flag: 0,
+            output_surface_flag: 0,
+            input_color_properties: colour,
+            output_color_properties: colour,
+            processing_mode: 0,
+            output_hdr_metadata: std::ptr::null(),
+            reserved: [0; 16],
+        }
+    }
 }
 
 /// `VAPictureH264`.
@@ -432,11 +561,13 @@ mod private {
     impl Sealed for super::PictureParameterBufferH264 {}
     impl Sealed for super::IqMatrixBufferH264 {}
     impl Sealed for super::SliceParameterBufferH264 {}
+    impl Sealed for super::ProcPipelineParameterBuffer {}
 }
 
 impl Parameter for PictureParameterBufferH264 {}
 impl Parameter for IqMatrixBufferH264 {}
 impl Parameter for SliceParameterBufferH264 {}
+impl Parameter for ProcPipelineParameterBuffer {}
 
 /// libva's functions, looked up once.
 struct Functions {
@@ -760,6 +891,15 @@ pub struct Config {
 impl Config {
     /// A configuration for decoding `profile` into 4:2:0 surfaces.
     pub fn new(display: &Rc<Display>, profile: i32) -> Result<Self, String> {
+        Self::with_entrypoint(display, profile, ENTRYPOINT_VLD)
+    }
+
+    /// A configuration for `profile` at `entrypoint`, on 4:2:0 surfaces.
+    pub fn with_entrypoint(
+        display: &Rc<Display>,
+        profile: i32,
+        entrypoint: i32,
+    ) -> Result<Self, String> {
         let mut attribute = ConfigAttrib {
             kind: ATTRIB_RT_FORMAT,
             value: RT_FORMAT_YUV420,
@@ -770,7 +910,7 @@ impl Config {
             (display.libva.functions.create_config)(
                 display.raw,
                 profile,
-                ENTRYPOINT_VLD,
+                entrypoint,
                 &mut attribute,
                 1,
                 &mut id,
@@ -830,8 +970,22 @@ impl Surfaces {
     }
 }
 
+impl Surfaces {
+    /// No surfaces: for a video processing context, which is given its
+    /// target with each picture.
+    pub fn none(display: &Rc<Display>) -> Self {
+        Self {
+            display: Rc::clone(display),
+            ids: Vec::new(),
+        }
+    }
+}
+
 impl Drop for Surfaces {
     fn drop(&mut self) {
+        if self.ids.is_empty() {
+            return;
+        }
         let count = c_int::try_from(self.ids.len()).unwrap_or(0);
         // SAFETY: surfaces made on this display; the context that renders
         // into them owns them, and is destroyed first.
@@ -877,7 +1031,11 @@ impl Context {
                 int(width)?,
                 int(height)?,
                 PROGRESSIVE,
-                targets.as_mut_ptr(),
+                if targets.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    targets.as_mut_ptr()
+                },
                 count,
                 &mut id,
             )
@@ -915,10 +1073,11 @@ impl Context {
         })
     }
 
-    /// Decodes one picture into surface `target` from `buffers` (its
-    /// picture parameters, matrix, and each slice's parameters and data),
-    /// and waits until it is done.
-    pub fn decode(&self, target: u32, buffers: &[(BufferType, &[u8])]) -> Result<(), String> {
+    /// Renders one picture into surface `target` from `buffers` (for
+    /// decoding its picture parameters, matrix, and each slice's
+    /// parameters and data; for scaling the pipeline parameters), and
+    /// waits until it is done.
+    pub fn render(&self, target: u32, buffers: &[(BufferType, &[u8])]) -> Result<(), String> {
         let made: Vec<Buffer<'_>> = buffers
             .iter()
             .map(|(kind, data)| self.buffer(*kind, data))
@@ -948,6 +1107,88 @@ impl Drop for Context {
     fn drop(&mut self) {
         // SAFETY: a context made on this display, not yet destroyed.
         unsafe { (self.display.libva.functions.destroy_context)(self.display.raw, self.id) };
+    }
+}
+
+/// Scales decoded surfaces on the GPU (VA-API video processing), into
+/// output surfaces kept for reuse by size.
+pub struct Scaler {
+    display: Rc<Display>,
+    context: Context,
+    /// Output surfaces by size, most recently used last.
+    outputs: Vec<((u32, u32), Surfaces)>,
+}
+
+/// How many output sizes are kept: a share and a few camera tile sizes.
+const SCALER_OUTPUTS: usize = 4;
+
+impl Scaler {
+    /// A scaler on `display`, if its driver does video processing.
+    pub fn new(display: &Rc<Display>) -> Result<Self, String> {
+        if !display
+            .entrypoints(PROFILE_NONE)?
+            .contains(&ENTRYPOINT_VIDEO_PROC)
+        {
+            return Err("the driver has no video processing".into());
+        }
+        let config = Config::with_entrypoint(display, PROFILE_NONE, ENTRYPOINT_VIDEO_PROC)?;
+        let context = Context::new(config, Surfaces::none(display), 0, 0)?;
+        Ok(Self {
+            display: Rc::clone(display),
+            context,
+            outputs: Vec::new(),
+        })
+    }
+
+    /// An output surface of `size`, made or reused.
+    fn output(&mut self, size: (u32, u32)) -> Result<u32, String> {
+        if let Some(i) = self.outputs.iter().position(|(s, _)| *s == size) {
+            let entry = self.outputs.remove(i);
+            let id = entry.1.ids[0];
+            self.outputs.push(entry);
+            return Ok(id);
+        }
+        if self.outputs.len() >= SCALER_OUTPUTS {
+            self.outputs.remove(0);
+        }
+        let surfaces = Surfaces::new(&self.display, size.0, size.1, 1)?;
+        let id = surfaces.ids[0];
+        self.outputs.push((size, surfaces));
+        Ok(id)
+    }
+
+    /// Scales `region` (left, top, width, height) of `source` to `size`
+    /// and returns the surface it is in, valid until the next call.
+    pub fn scale(
+        &mut self,
+        source: u32,
+        region: (u32, u32, u32, u32),
+        size: (u32, u32),
+    ) -> Result<u32, String> {
+        let side = |n: u32| u16::try_from(n).map_err(|e| e.to_string());
+        let edge = |n: u32| i16::try_from(n).map_err(|e| e.to_string());
+        let from = Rectangle {
+            x: edge(region.0)?,
+            y: edge(region.1)?,
+            width: side(region.2)?,
+            height: side(region.3)?,
+        };
+        let to = Rectangle {
+            x: 0,
+            y: 0,
+            width: side(size.0)?,
+            height: side(size.1)?,
+        };
+        let target = self.output(size)?;
+        // `from` and `to` live on this stack until `render` has ended
+        // the picture and waited for it, the whole time the driver may
+        // read them through the parameters' pointers.
+        let parameters = ProcPipelineParameterBuffer::scale(source, &from, &to);
+        self.context.render(
+            target,
+            &[(BufferType::ProcPipelineParameter, parameters.bytes())],
+        )?;
+        Ok(target)
     }
 }
 
@@ -1267,6 +1508,36 @@ mod tests {
         assert_eq!(offset_of!(Image, offsets), 80);
         assert_eq!(offset_of!(Image, component_order), 100);
         assert_eq!(size_of::<ConfigAttrib>(), 8);
+        // va_vpp.h, the same way.
+        type P = ProcPipelineParameterBuffer;
+        assert_eq!(size_of::<P>(), 224);
+        assert_eq!(size_of::<Rectangle>(), 8);
+        assert_eq!(size_of::<ProcColorProperties>(), 8);
+        assert_eq!(offset_of!(P, surface_region), 8);
+        assert_eq!(offset_of!(P, surface_color_standard), 16);
+        assert_eq!(offset_of!(P, output_region), 24);
+        assert_eq!(offset_of!(P, output_background_color), 32);
+        assert_eq!(offset_of!(P, output_color_standard), 36);
+        assert_eq!(offset_of!(P, pipeline_flags), 40);
+        assert_eq!(offset_of!(P, filter_flags), 44);
+        assert_eq!(offset_of!(P, filters), 48);
+        assert_eq!(offset_of!(P, num_filters), 56);
+        assert_eq!(offset_of!(P, forward_references), 64);
+        assert_eq!(offset_of!(P, num_forward_references), 72);
+        assert_eq!(offset_of!(P, backward_references), 80);
+        assert_eq!(offset_of!(P, num_backward_references), 88);
+        assert_eq!(offset_of!(P, rotation_state), 92);
+        assert_eq!(offset_of!(P, blend_state), 96);
+        assert_eq!(offset_of!(P, mirror_state), 104);
+        assert_eq!(offset_of!(P, additional_outputs), 112);
+        assert_eq!(offset_of!(P, num_additional_outputs), 120);
+        assert_eq!(offset_of!(P, input_surface_flag), 124);
+        assert_eq!(offset_of!(P, output_surface_flag), 128);
+        assert_eq!(offset_of!(P, input_color_properties), 132);
+        assert_eq!(offset_of!(P, output_color_properties), 140);
+        assert_eq!(offset_of!(P, processing_mode), 148);
+        assert_eq!(offset_of!(P, output_hdr_metadata), 152);
+        assert_eq!(offset_of!(P, reserved), 160);
     }
 
     #[test]

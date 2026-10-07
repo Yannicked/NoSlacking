@@ -58,6 +58,27 @@ fn the_helper_answers_over_its_pipes_and_ends_when_they_close() {
         },
     );
     assert!(matches!(picture, Reply::Picture(p) if (p.width, p.height) == (320, 180)));
+    // Shown at half size: the pictures come at half size.
+    assert_eq!(
+        call(
+            4,
+            Request::SetOutputSize {
+                id,
+                width: 160,
+                height: 90,
+            },
+        ),
+        Reply::Done
+    );
+    let picture = call(
+        5,
+        Request::Decode {
+            id,
+            keyframe: false,
+            data: vec![0, 0, 0, 1, 0x41, 0x88],
+        },
+    );
+    assert!(matches!(picture, Reply::Picture(p) if (p.width, p.height) == (160, 90)));
     // Closing its input ends it, cleanly.
     input.flush().expect("flushed");
     drop(input);
@@ -89,7 +110,7 @@ fn the_helper_says_its_version_and_probes() {
         .output()
         .expect("runs");
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("protocol 1"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("protocol 2"));
     let output = Command::new(env!("CARGO_BIN_EXE_noslacking-video"))
         .arg("--probe")
         .env("NOSLACKING_VIDEO_BACKEND", "none")

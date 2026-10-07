@@ -13,13 +13,14 @@ pub mod va;
 use std::rc::Rc;
 
 use cros_codecs::codec::h264::parser::{Pps, SliceType, Sps};
-use noslacking_video_ipc::{Capability, Codec, Direction, FailKind, MAX_SIDE, Planes};
+use noslacking_video_ipc::{Capability, Codec, Direction, FailKind, MAX_SIDE, Planes, output_size};
 
 use crate::backend::{Backend, Decoder, Failure};
 use crate::h264::{FrontEnd, Picture, Reference};
+use crate::shrink;
 use va::{
     BufferType, Config, Context, Display, IqMatrixBufferH264, Parameter, PicFields, PictureH264,
-    PictureParameterBufferH264, SeqFields, SliceParameterBufferH264, Surfaces,
+    PictureParameterBufferH264, Scaler, SeqFields, SliceParameterBufferH264, Surfaces,
 };
 
 /// The VA-API back end: a display with an H.264 decoder.
@@ -122,6 +123,11 @@ impl Backend for Vaapi {
             max_size: self.max_size,
             front: FrontEnd::new(),
             session: None,
+            fit: (0, 0),
+            scaler: None,
+            // NOSLACKING_VIDEO_GPU_SCALE=0 shrinks on the CPU instead,
+            // to compare the two (examples/bench.rs).
+            no_scaler: std::env::var_os("NOSLACKING_VIDEO_GPU_SCALE").is_some_and(|v| v == "0"),
         }))
     }
 }
@@ -147,6 +153,12 @@ struct VaapiDecoder {
     max_size: (u32, u32),
     front: FrontEnd,
     session: Option<Session>,
+    /// The box pictures should cover; 0×0 for their own size.
+    fit: (u32, u32),
+    /// Scaling on the GPU, made on first need.
+    scaler: Option<Scaler>,
+    /// The driver cannot scale: shrink on the CPU.
+    no_scaler: bool,
 }
 
 impl VaapiDecoder {
@@ -238,10 +250,18 @@ impl VaapiDecoder {
         }
         session
             .context
-            .decode(target, &buffers)
+            .render(target, &buffers)
             .map_err(Failure::broken)?;
+        let coded = session.shape.coded;
+        let shown = (crop.2, crop.3);
+        let size = output_size(shown, self.fit);
+        if size != shown
+            && let Some(planes) = self.scaled(target, crop, size)
+        {
+            return Ok((target, planes));
+        }
         let (y, u, v) = display
-            .read_i420(target, session.shape.coded, crop)
+            .read_i420(target, coded, crop)
             .map_err(Failure::device)?;
         let planes = Planes {
             width: crop.2,
@@ -250,11 +270,57 @@ impl VaapiDecoder {
             u,
             v,
         };
-        Ok((target, planes))
+        // No scaling on the GPU: shrunk here, so the pipe still carries
+        // no more than is shown.
+        Ok((target, shrink::shrink(planes, self.fit)))
+    }
+
+    /// `crop` of decoded surface `target` scaled to `size` on the GPU
+    /// and read back; none if the driver cannot, which is then not
+    /// tried again for this stream.
+    fn scaled(
+        &mut self,
+        target: u32,
+        crop: (u32, u32, u32, u32),
+        size: (u32, u32),
+    ) -> Option<Planes> {
+        if self.scaler.is_none() && !self.no_scaler {
+            match Scaler::new(&self.display) {
+                Ok(scaler) => self.scaler = Some(scaler),
+                Err(why) => {
+                    eprintln!("noslacking-video: no scaling on the GPU ({why}): on the CPU");
+                    self.no_scaler = true;
+                }
+            }
+        }
+        let scaler = self.scaler.as_mut()?;
+        let result = scaler.scale(target, crop, size).and_then(|surface| {
+            self.display
+                .read_i420(surface, size, (0, 0, size.0, size.1))
+        });
+        match result {
+            Ok((y, u, v)) => Some(Planes {
+                width: size.0,
+                height: size.1,
+                y,
+                u,
+                v,
+            }),
+            Err(why) => {
+                eprintln!("noslacking-video: scaling on the GPU failed ({why}): on the CPU");
+                self.scaler = None;
+                self.no_scaler = true;
+                None
+            }
+        }
     }
 }
 
 impl Decoder for VaapiDecoder {
+    fn set_output_size(&mut self, width: u32, height: u32) {
+        self.fit = (width, height);
+    }
+
     fn decode(&mut self, frame: &[u8], _keyframe: bool) -> Result<Option<Planes>, Failure> {
         let picture = match self.front.begin(frame) {
             Ok(Some(picture)) => picture,
@@ -505,6 +571,81 @@ mod tests {
             );
             let hex: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
             assert_eq!(hex, expected, "{}x{}", size.0, size.1);
+        }
+    }
+
+    /// Decodes the 1080p share scaled to 960×540 on the GPU (and the
+    /// cameras to 240×240) and compares each picture with the software
+    /// decoder's (bit-exact with ffmpeg) shrunk on the CPU: scaling
+    /// filters differ, so within a small mean difference.
+    /// `cargo test -p noslacking-video -- --ignored vaapi --nocapture`
+    #[test]
+    #[ignore = "needs a GPU with VA-API"]
+    #[allow(clippy::print_stdout, reason = "the timings are for the reader")]
+    fn vaapi_scales_on_the_gpu_close_to_a_software_shrink() {
+        let mut backend = Vaapi::open().expect("VA-API with H.264");
+        for (stream, size, fit) in [
+            (
+                &include_bytes!("../../../../src/huddle_audio/fixtures/screen-1920x1080.h264")[..],
+                (1920, 1080),
+                (960, 540),
+            ),
+            (
+                &include_bytes!("../../../../src/huddle_audio/fixtures/camera-480x480.h264")[..],
+                (480, 480),
+                (240, 240),
+            ),
+        ] {
+            let mut decoder = backend
+                .open_decoder(Codec::H264, size.0, size.1)
+                .expect("a decoder");
+            decoder.set_output_size(fit.0, fit.1);
+            let mut software = rusty_h264_decoder::Decoder::new();
+            let frames = crate::h264::tests::frames(stream);
+            let started = std::time::Instant::now();
+            let mut worst = 0f64;
+            for frame in &frames {
+                let picture = decoder
+                    .decode(frame, false)
+                    .expect("decodes")
+                    .expect("a picture");
+                assert_eq!((picture.width, picture.height), fit);
+                assert!(picture.check().is_ok());
+                let reference = software.decode(frame).expect("decodes").expect("a picture");
+                let reference = shrink::shrink(
+                    Planes {
+                        width: u32::try_from(reference.width).expect("small"),
+                        height: u32::try_from(reference.height).expect("small"),
+                        y: reference.y,
+                        u: reference.u,
+                        v: reference.v,
+                    },
+                    fit,
+                );
+                for (ours, theirs) in [
+                    (&picture.y, &reference.y),
+                    (&picture.u, &reference.u),
+                    (&picture.v, &reference.v),
+                ] {
+                    let total: u64 = ours
+                        .iter()
+                        .zip(theirs.iter())
+                        .map(|(a, b)| u64::from(a.abs_diff(*b)))
+                        .sum();
+                    worst = worst.max(total as f64 / ours.len() as f64);
+                }
+            }
+            let took = started.elapsed().as_secs_f64() * 1000.0;
+            println!(
+                "{}x{} shown at {}x{}: {:.2} ms a frame with the software reference, \
+                 worst mean difference {worst:.2}",
+                size.0,
+                size.1,
+                fit.0,
+                fit.1,
+                took / frames.len() as f64
+            );
+            assert!(worst < 4.0, "{worst}");
         }
     }
 }

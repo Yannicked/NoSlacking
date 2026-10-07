@@ -37,8 +37,9 @@ cros-codecs = { version = "0.0.6", default-features = false }
 # The tests hash decoded pictures to compare them with the software
 # decoder's.
 sha2 = "0.11"
-# The benchmark (examples/bench.rs) sets the hardware against the app's
-# software decoder; the same version and features as the app's.
+# The benchmark (examples/bench.rs) and the GPU tests set the hardware
+# against the app's software decoder; the same version and features as
+# the app's.
 rusty_h264-decoder = { version = "0.16", default-features = false, features = ["std", "asm"] }
 
 [lints.rust]
