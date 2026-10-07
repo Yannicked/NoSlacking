@@ -11,6 +11,14 @@
 //! they speak, as the call bar's faces have. The tiles come from a list,
 //! so your own preview is one more entry once there is one.
 //!
+//! At its foot, the call's controls, as a call has them: the huddle's
+//! name and how long it has run on the left, and in the middle the same
+//! Mute, camera and Leave the call bar has (the same widgets, pushing the
+//! same actions), worded in a wide window and icons alone in a narrow
+//! one. Their chords work here too while this window has the focus: it
+//! has input of its own, and the buttons and [`super::keys::leave_chord`]
+//! take them from it. Leaving ends the huddle and so closes the window.
+//!
 //! The window works out how many tiles it has room for and how large,
 //! and the app tells the session, which receives no more than that.
 //! Closing it, here or with the window's own button, stops receiving
@@ -18,6 +26,8 @@
 
 use egui::{Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke, Vec2};
 
+use super::call_bar::{self, Look};
+use crate::huddle_mic::Mic;
 use crate::huddles;
 use crate::i18n::{t, tf, tn};
 use crate::model::Action;
@@ -30,6 +40,29 @@ pub const TILE_ASPECT: f32 = 4.0 / 3.0;
 pub const MIN_TILE: f32 = 200.0;
 /// Between tiles, and between the share and the tiles.
 pub const GAP: f32 = 8.0;
+/// The header's width, in points, below which it has only the title
+/// and Close.
+const HEADER_EXTRAS: f32 = 520.0;
+/// The control bar's height, in points.
+pub const CONTROLS_HEIGHT: f32 = 60.0;
+/// The room a worded control takes in the control bar, its gap
+/// included.
+const WORDED: f32 = 116.0;
+/// The room an icon control takes, its gap included.
+const ICON: f32 = 48.0;
+/// The room the huddle's name and time want on each side of the
+/// controls, which stay in the middle.
+const INFO: f32 = 170.0;
+/// The control bar's margin at each side.
+const SIDE: f32 = 16.0;
+/// The controls' look in the window: larger than the call bar's.
+const LOOK: Look = Look {
+    height: 38.0,
+    icon: 17.0,
+    text: 14.0,
+    labelled: true,
+    leave_icon: true,
+};
 /// The tile size the session hears is rounded up to this many pixels,
 /// so resizing the window does not tell it of every pixel.
 const TILE_STEP: u32 = 32;
@@ -69,6 +102,59 @@ pub struct CallView {
     pub tiles: Vec<TileView>,
     /// Cameras on that have no tile, for want of room.
     pub more: usize,
+    /// The call's controls at the window's foot.
+    pub controls: Controls,
+}
+
+/// The call's controls, as the window's control bar draws them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Controls {
+    /// The huddle's name: "#design", "Ana".
+    pub name: String,
+    /// How long it has run ("12:34"), or "Joining…".
+    pub time: String,
+    /// Live: the microphone and camera can be used; before that, only
+    /// Leave.
+    pub live: bool,
+    /// Your microphone.
+    pub mic: Mic,
+    /// Your camera.
+    #[cfg(feature = "huddle-camera")]
+    pub camera: crate::huddle_camera::Cam,
+}
+
+impl Controls {
+    /// How many buttons the bar has: Mute and the camera only while
+    /// live, Leave always.
+    pub fn buttons(&self) -> usize {
+        let camera = cfg!(feature = "huddle-camera");
+        1 + if self.live {
+            1 + usize::from(camera)
+        } else {
+            0
+        }
+    }
+}
+
+/// What the control bar has room for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fit {
+    /// The buttons with their words; icons alone otherwise.
+    pub labelled: bool,
+    /// The huddle's name and time beside them.
+    pub info: bool,
+}
+
+/// What a control bar `width` points wide has room for, with `buttons`
+/// buttons kept in the middle: the words while they fit, the name and
+/// time while there is room for them on both sides too (so the buttons
+/// stay centred).
+pub fn fit(width: f32, buttons: usize) -> Fit {
+    let worded = buttons as f32 * WORDED + 2.0 * SIDE;
+    Fit {
+        labelled: width >= worded,
+        info: width >= worded + 2.0 * INFO,
+    }
 }
 
 /// What drawing the window found out, for the decoders and the session.
@@ -246,6 +332,19 @@ pub fn show(
             );
             ui.horizontal_centered(|ui| header(ui, palette, view, actions));
         });
+    egui::Panel::bottom("call-window-controls")
+        .exact_size(CONTROLS_HEIGHT)
+        .show_separator_line(false)
+        .frame(egui::Frame::new().fill(palette.panel))
+        .show(ui, |ui| {
+            let rect = ui.max_rect();
+            ui.painter().hline(
+                rect.x_range(),
+                rect.top() + 0.5,
+                Stroke::new(1.0, palette.outline),
+            );
+            control_bar(ui, palette, &view.controls, actions);
+        });
     let mut shown = Shown::default();
     // The stage is dark in both themes: a picture reads best on black.
     let stage = if palette.dark {
@@ -298,6 +397,102 @@ fn share_stage(ui: &mut egui::Ui, view: &CallView, area: Rect, pixels: f32) -> [
             [area.width(), area.height()].map(|n| (n * pixels).round() as usize)
         }
     }
+}
+
+/// The control bar: the name and time on the left, the buttons in the
+/// middle; and the chords, which this window's own input carries while
+/// it has the focus.
+fn control_bar(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    controls: &Controls,
+    actions: &mut Vec<Action>,
+) {
+    let area = ui.max_rect();
+    let fit = fit(area.width(), controls.buttons());
+    let look = Look {
+        labelled: fit.labelled,
+        ..LOOK
+    };
+    // The buttons' width, measured last frame: the first guesses.
+    let id = ui.id().with("call-controls-width");
+    let guess = controls.buttons() as f32 * if fit.labelled { WORDED } else { ICON };
+    let width = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(guess);
+    let middle = Rect::from_center_size(area.center(), Vec2::new(width, look.height));
+    let mut row = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(middle.expand2(Vec2::new(area.width(), 0.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    row.set_clip_rect(area);
+    row.add_space((middle.left() - row.max_rect().left()).max(0.0));
+    row.spacing_mut().item_spacing.x = 10.0;
+    let start = row.cursor().left();
+    if controls.live {
+        if let Some(action) = super::huddle_mic::mute_button(&mut row, palette, controls.mic, look)
+        {
+            actions.push(Action::Huddle(huddles::Action::Microphone(action)));
+        }
+        #[cfg(feature = "huddle-camera")]
+        if let Some(action) =
+            super::huddle_camera::camera_button(&mut row, palette, controls.camera, look)
+        {
+            actions.push(Action::Huddle(huddles::Action::Camera(action)));
+        }
+    }
+    let leave = call_bar::leave_button(&mut row, palette, look);
+    let used = row.min_rect().right() - start;
+    if (used - width).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(id, used));
+        ui.ctx().request_repaint();
+    }
+    if leave || ui.input_mut(super::keys::leave_chord) {
+        actions.push(Action::Huddle(huddles::Action::Leave));
+    }
+    if fit.info {
+        let room = Rect::from_min_max(
+            egui::pos2(area.left() + SIDE, area.top()),
+            egui::pos2(middle.left() - 16.0, area.bottom()),
+        );
+        info(ui, palette, controls, room);
+    }
+    if controls.live {
+        // The clock moves each second.
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(1000));
+    }
+}
+
+/// The huddle's name over how long it has run, cut to `room`.
+fn info(ui: &egui::Ui, palette: &Palette, controls: &Controls, room: Rect) {
+    if room.width() < 40.0 {
+        return;
+    }
+    let painter = ui.painter().with_clip_rect(room);
+    let wrap = |text: &str, font, color| {
+        let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(room.width());
+        ui.painter().layout_job(job)
+    };
+    let name = wrap(&controls.name, theme::semibold(14.0), palette.text);
+    let time = wrap(&controls.time, theme::regular(12.5), palette.secondary);
+    let dot = if controls.live { 14.0 } else { 0.0 };
+    let height = name.size().y + 2.0 + time.size().y;
+    let top = room.center().y - height / 2.0;
+    painter.galley(egui::pos2(room.left(), top), name, palette.text);
+    let below = top + height - time.size().y;
+    if controls.live {
+        painter.circle_filled(
+            egui::pos2(room.left() + 4.0, below + time.size().y / 2.0),
+            4.0,
+            super::people::ACTIVE,
+        );
+    }
+    painter.galley(
+        egui::pos2(room.left() + dot, below),
+        time,
+        palette.secondary,
+    );
 }
 
 /// One camera: the picture filling the tile, or the person's face; their
@@ -400,12 +595,15 @@ fn name_plate(ui: &egui::Ui, palette: &Palette, rect: Rect, tile: &TileView) {
 }
 
 /// The bar: whose screen, the tabs, how many cameras have no tile, Close.
+/// A narrow window keeps the title and Close: the call bar has a Watch
+/// for each share.
 fn header(ui: &mut egui::Ui, palette: &Palette, view: &CallView, actions: &mut Vec<Action>) {
+    let wide = ui.available_width() >= HEADER_EXTRAS;
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         if theme::icon_button(ui, palette, Icon::X, 16.0, &t("Close")).clicked() {
             actions.push(Action::Huddle(huddles::Action::Watch(None)));
         }
-        if view.more > 0 {
+        if wide && view.more > 0 {
             ui.add(egui::Label::new(
                 RichText::new(tn(
                     "{count} more camera",
@@ -432,7 +630,9 @@ fn header(ui: &mut egui::Ui, palette: &Palette, view: &CallView, actions: &mut V
                 )
                 .truncate(),
             );
-            if view.shares.len() > 1 || (view.current.is_none() && !view.shares.is_empty()) {
+            if wide
+                && (view.shares.len() > 1 || (view.current.is_none() && !view.shares.is_empty()))
+            {
                 ui.add_space(8.0);
                 for (key, name) in &view.shares {
                     let current = view.current.as_deref() == Some(key.as_str());
@@ -600,6 +800,146 @@ mod tests {
         // More cameras than room: only as many tiles as fit.
         let small = layout(rect(320.0, 240.0), false, 6);
         assert_eq!((small.room, small.tiles.len()), (1, 1));
+    }
+
+    #[test]
+    fn the_controls_drop_the_name_then_their_words_as_the_window_narrows() {
+        // Three buttons: wide, the lot; middling, the words alone; narrow,
+        // icons.
+        assert_eq!(
+            fit(1280.0, 3),
+            Fit {
+                labelled: true,
+                info: true
+            }
+        );
+        assert_eq!(
+            fit(560.0, 3),
+            Fit {
+                labelled: true,
+                info: false
+            }
+        );
+        assert_eq!(
+            fit(360.0, 3),
+            Fit {
+                labelled: false,
+                info: false
+            }
+        );
+        // The edges: just room is room.
+        let worded = 3.0 * WORDED + 2.0 * SIDE;
+        assert!(fit(worded, 3).labelled);
+        assert!(!fit(worded - 1.0, 3).labelled);
+        assert!(fit(worded + 2.0 * INFO, 3).info);
+        assert!(!fit(worded + 2.0 * INFO - 1.0, 3).info);
+        // Fewer buttons (joining: Leave alone) fit in less.
+        assert_eq!(
+            fit(560.0, 1),
+            Fit {
+                labelled: true,
+                info: true
+            }
+        );
+        // Never the name without the words.
+        for width in (0..2000).step_by(10) {
+            let fit = fit(width as f32, 3);
+            assert!(fit.labelled || !fit.info, "{width}: {fit:?}");
+        }
+    }
+
+    /// A call window in `mic` with the camera off, live or joining.
+    fn view(live: bool, mic: Mic) -> CallView {
+        CallView {
+            title: cameras_title(),
+            shares: Vec::new(),
+            current: None,
+            picture: None,
+            tiles: Vec::new(),
+            more: 0,
+            controls: Controls {
+                name: "#design".into(),
+                time: "2:17".into(),
+                live,
+                mic,
+                #[cfg(feature = "huddle-camera")]
+                camera: crate::huddle_camera::Cam::Off,
+            },
+        }
+    }
+
+    /// The huddle actions drawing the window `view` pushes, with `key`
+    /// pressed with Ctrl+Shift (⌘⇧) in the window's own input, as its
+    /// viewport has it while it has the focus.
+    fn pressed(view: &CallView, key: egui::Key) -> Vec<huddles::Action> {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let modifiers = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        let input = |events| egui::RawInput {
+            screen_rect: Some(rect(900.0, 600.0)),
+            events,
+            ..egui::RawInput::default()
+        };
+        let palette = Palette::dark();
+        let mut actions = Vec::new();
+        // A first frame to lay out, then the key.
+        for events in [
+            Vec::new(),
+            vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+        ] {
+            let mut out = ctx.run_ui(input(events), |ui| {
+                show(ui, &palette, view, &mut actions);
+            });
+            out.textures_delta.clear();
+        }
+        actions
+            .into_iter()
+            .filter_map(|action| match action {
+                Action::Huddle(action) => Some(action),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_call_shortcuts_work_in_the_call_window() {
+        use crate::huddle_mic::MicAction;
+        assert_eq!(
+            pressed(&view(true, Mic::Muted), egui::Key::Space),
+            vec![huddles::Action::Microphone(MicAction::Unmute)]
+        );
+        assert_eq!(
+            pressed(&view(true, Mic::Live), egui::Key::Space),
+            vec![huddles::Action::Microphone(MicAction::Mute)]
+        );
+        assert_eq!(
+            pressed(&view(true, Mic::Muted), egui::Key::H),
+            vec![huddles::Action::Leave]
+        );
+        // Joining: no microphone yet, but Leave.
+        assert_eq!(pressed(&view(false, Mic::Muted), egui::Key::Space), vec![]);
+        assert_eq!(
+            pressed(&view(false, Mic::Muted), egui::Key::H),
+            vec![huddles::Action::Leave]
+        );
+        // Nothing pressed, nothing asked.
+        assert_eq!(pressed(&view(true, Mic::Muted), egui::Key::A), vec![]);
+    }
+
+    #[cfg(feature = "huddle-camera")]
+    #[test]
+    fn the_camera_shortcut_works_in_the_call_window() {
+        use crate::huddle_camera::CamAction;
+        assert_eq!(
+            pressed(&view(true, Mic::Muted), egui::Key::O),
+            vec![huddles::Action::Camera(CamAction::On)]
+        );
     }
 
     #[test]

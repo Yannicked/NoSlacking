@@ -31,7 +31,7 @@ const FACE: f32 = 26.0;
 const FACE_GAP: f32 = 5.0;
 /// Leave's red: deep enough for white text on both themes (the dark
 /// palette's own red is too light for it).
-const LEAVE: Color32 = Color32::from_rgb(0xcc, 0x2e, 0x45);
+pub const LEAVE: Color32 = Color32::from_rgb(0xcc, 0x2e, 0x45);
 /// Watch's green: the call's own colour, deep enough for white text.
 #[cfg(feature = "huddle-video")]
 const ACTIVE_BUTTON: Color32 = Color32::from_rgb(0x00, 0x7a, 0x5a);
@@ -242,29 +242,31 @@ fn bar(
                             }));
                         }
                     } else {
-                        let shortcut =
-                            super::shortcuts::spell("Cmd+Shift+H", cfg!(target_os = "macos"));
-                        if small_button(ui, palette, &t("Leave"), Some(LEAVE))
-                            .on_hover_text(tf(
-                                "Leave the huddle ({shortcut})",
-                                &[("shortcut", &shortcut)],
-                            ))
-                            .clicked()
-                        {
+                        // Right to left, so they read Mute, Video, Leave, as
+                        // in the call window.
+                        if leave_button(ui, palette, Look::BAR) {
                             actions.push(Action::Huddle(huddles::Action::Leave));
-                        }
-                        if matches!(listening.phase, Phase::Live { .. })
-                            && let Some(action) =
-                                super::huddle_mic::mute_button(ui, palette, listening.mic)
-                        {
-                            actions.push(Action::Huddle(huddles::Action::Microphone(action)));
                         }
                         #[cfg(feature = "huddle-camera")]
                         if matches!(listening.phase, Phase::Live { .. })
-                            && let Some(action) =
-                                super::huddle_camera::camera_button(ui, palette, listening.camera)
+                            && let Some(action) = super::huddle_camera::camera_button(
+                                ui,
+                                palette,
+                                listening.camera,
+                                Look::BAR,
+                            )
                         {
                             actions.push(Action::Huddle(huddles::Action::Camera(action)));
+                        }
+                        if matches!(listening.phase, Phase::Live { .. })
+                            && let Some(action) = super::huddle_mic::mute_button(
+                                ui,
+                                palette,
+                                listening.mic,
+                                Look::BAR,
+                            )
+                        {
+                            actions.push(Action::Huddle(huddles::Action::Microphone(action)));
                         }
                     }
                 });
@@ -417,6 +419,93 @@ fn status_row(ui: &mut egui::Ui, palette: &Palette, bar: &Bar, phase: &Phase, ti
             egui::Label::new(RichText::new(text).font(theme::regular(12.0)).color(color)).wrap(),
         );
     });
+}
+
+/// How a call control is drawn: the call bar's compact buttons, or the
+/// call window's larger ones, with their words or as icons alone. The
+/// controls themselves ([`leave_button`],
+/// [`super::huddle_mic::mute_button`], the camera's) are the same
+/// widgets in both places, so what they do lives in one place.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Look {
+    /// The button's height, in points.
+    pub height: f32,
+    /// The icon's side, in points.
+    pub icon: f32,
+    /// The word's size, in points.
+    pub text: f32,
+    /// With its word ("Mute"), or the icon alone (a narrow window).
+    pub labelled: bool,
+    /// Leave shows the hung-up phone beside its word, as calls have it.
+    pub leave_icon: bool,
+}
+
+impl Look {
+    /// The call bar's: compact, worded, Leave a word alone.
+    pub const BAR: Self = Self {
+        height: 28.0,
+        icon: 14.0,
+        text: 13.0,
+        labelled: true,
+        leave_icon: false,
+    };
+}
+
+/// One call control in `look`: `icon` in its ink, then `label` in `ink`
+/// unless the look is icons alone (the label then is what a screen
+/// reader says), on `fill`.
+pub fn control(
+    ui: &mut egui::Ui,
+    look: Look,
+    icon: (Icon, Color32),
+    label: &str,
+    ink: Color32,
+    fill: Color32,
+) -> egui::Response {
+    let image = icon.0.image(icon.1, look.icon);
+    let button = if look.labelled {
+        egui::Button::image_and_text(
+            image,
+            RichText::new(label)
+                .font(theme::medium(look.text))
+                .color(ink),
+        )
+        .min_size(Vec2::new(0.0, look.height))
+    } else {
+        egui::Button::image(image).min_size(Vec2::splat(look.height))
+    };
+    let response = ui
+        .add(
+            button
+                .fill(fill)
+                .corner_radius(CornerRadius::same(theme::RADIUS_SMALL + 2)),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if !look.labelled {
+        theme::describe(&response, egui::WidgetType::Button, label);
+    }
+    response
+}
+
+/// Leave, in red, in `look`; whether it was clicked. Its chord is
+/// [`super::keys::leave_chord`], taken by the window with the focus.
+pub fn leave_button(ui: &mut egui::Ui, palette: &Palette, look: Look) -> bool {
+    let shortcut = super::shortcuts::spell("Cmd+Shift+H", cfg!(target_os = "macos"));
+    let tip = tf("Leave the huddle ({shortcut})", &[("shortcut", &shortcut)]);
+    let label = t("Leave");
+    let response = if look.labelled && !look.leave_icon {
+        small_button(ui, palette, &label, Some(LEAVE))
+    } else {
+        control(
+            ui,
+            look,
+            (Icon::PhoneOff, Color32::WHITE),
+            &label,
+            Color32::WHITE,
+            LEAVE,
+        )
+    };
+    response.on_hover_text(tip).clicked()
 }
 
 /// A compact button, filled with `fill` (white text) or the surface.

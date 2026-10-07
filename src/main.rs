@@ -416,6 +416,9 @@ struct DemoSetup {
     shot: Option<std::path::PathBuf>,
     hover: Option<egui::Pos2>,
     view: Option<String>,
+    /// `--demo-size`, which the call window takes when the view opens it.
+    #[cfg(feature = "huddle-video")]
+    call_size: Option<[f32; 2]>,
     frames: u32,
     asked: bool,
     /// When the screenshot is due.
@@ -495,6 +498,12 @@ impl DemoSetup {
                 // A wheel scrolls what is under the pointer: the messages.
                 .or(cli.demo_wheel.map(|_| egui::pos2(900.0, 450.0))),
             view: cli.demo_view.clone(),
+            #[cfg(feature = "huddle-video")]
+            call_size: cli
+                .demo_size
+                .as_deref()
+                .and_then(|s| s.split_once('x'))
+                .and_then(|(w, h)| Some([w.parse().ok()?, h.parse().ok()?])),
             frames: 0,
             asked: false,
             edit: None,
@@ -712,6 +721,7 @@ impl DemoSetup {
                 let first = listening.shares.first().map(|s| s.key.clone());
                 app.huddles.listening = Some(listening);
                 app.huddles.picture.embed = true;
+                app.huddles.picture.size = self.call_size;
                 // #engineering behind it: #design would ring Bob's
                 // invitation over it.
                 app.actions.push(Action::OpenConversation("C02".into()));
@@ -727,6 +737,19 @@ impl DemoSetup {
                     ..noslacking::demo::sharing()
                 });
                 app.huddles.picture.embed = true;
+                app.huddles.picture.size = self.call_size;
+                app.actions.push(Action::OpenConversation("C02".into()));
+                app.actions
+                    .push(Action::Huddle(noslacking::huddles::Action::OpenCall));
+            }
+            // Your camera on and the call window open on it: your own
+            // tile, and the controls with the microphone and camera on.
+            #[cfg(all(feature = "huddle-video", feature = "huddle-camera"))]
+            Some("camera-window") => {
+                noslacking::demo::camera(true);
+                app.huddles.listening = Some(noslacking::demo::camera_on());
+                app.huddles.picture.embed = true;
+                app.huddles.picture.size = self.call_size;
                 app.actions.push(Action::OpenConversation("C02".into()));
                 app.actions
                     .push(Action::Huddle(noslacking::huddles::Action::OpenCall));

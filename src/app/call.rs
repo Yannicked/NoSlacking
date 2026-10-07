@@ -5,7 +5,8 @@
 //! It is open from Watch or Video until closed; each frame the newest
 //! pictures, if any came, replace the textures they are drawn from, and
 //! the session hears how many tiles of what size the window has room
-//! for.
+//! for. Its controls push the same actions as the call bar's, applied
+//! with the main window's.
 
 use super::App;
 use crate::huddles;
@@ -58,6 +59,7 @@ impl App {
         let gallery = listening.gallery.clone();
         let faces = huddles::faces(&listening.roster);
         let cameras: Vec<huddles::Camera> = listening.cameras.clone();
+        let controls = controls(listening, workspace, std::time::Instant::now());
         // Your own camera, while it is on: one more tile, never received,
         // its picture the call bar's self-preview.
         #[cfg(feature = "huddle-camera")]
@@ -172,12 +174,22 @@ impl App {
             picture: picture.texture.as_ref().map(|t| (t.id(), picture.source)),
             more: cameras.iter().filter(|c| !c.tile).count(),
             tiles,
+            controls,
         };
-        let builder = egui::ViewportBuilder::default()
+        #[cfg_attr(not(feature = "demo"), allow(unused_mut))]
+        let mut builder = egui::ViewportBuilder::default()
             .with_title(format!("{} – NoSlacking", view.title))
             .with_app_id(crate::paths::APP_ID)
             .with_inner_size([1280.0, 780.0])
-            .with_min_inner_size([480.0, 320.0]);
+            .with_min_inner_size([360.0, 320.0]);
+        // The demo's size holds even over a size the window remembers.
+        #[cfg(feature = "demo")]
+        if let Some(size) = picture.size {
+            builder = builder
+                .with_inner_size(size)
+                .with_min_inner_size(size)
+                .with_max_inner_size(size);
+        }
         let palette = self.palette;
         let mut actions = Vec::new();
         #[cfg(feature = "demo")]
@@ -213,5 +225,38 @@ impl App {
             actions.push(Action::Huddle(huddles::Action::Watch(None)));
         }
         self.actions.append(&mut actions);
+    }
+}
+
+/// The call window's controls for `listening` at `now`: the huddle's
+/// name as the sidebar has it, how long it has run, and your microphone
+/// and camera.
+fn controls(
+    listening: &huddles::Listening,
+    workspace: Option<&super::WorkspaceState>,
+    now: std::time::Instant,
+) -> call_window::Controls {
+    let conversation = workspace.and_then(|w| {
+        w.conversation(&listening.channel)
+            .map(|c| (c.kind.is_dm(), w.title(c)))
+    });
+    let name = match conversation {
+        Some((true, name)) => name,
+        Some((false, name)) => format!("#{name}"),
+        None => listening.channel.clone(),
+    };
+    let (live, time) = match listening.phase {
+        huddles::Phase::Live { since } => {
+            (true, huddles::clock(now.saturating_duration_since(since)))
+        }
+        _ => (false, crate::i18n::t("Joining…").into_owned()),
+    };
+    call_window::Controls {
+        name,
+        time,
+        live,
+        mic: listening.mic,
+        #[cfg(feature = "huddle-camera")]
+        camera: listening.camera,
     }
 }

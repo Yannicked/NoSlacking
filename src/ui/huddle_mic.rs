@@ -1,13 +1,16 @@
 //! The microphone's mute button in the call bar, beside Leave while the
-//! huddle is live: one self-contained widget.
+//! huddle is live, and in the call window's controls: one self-contained
+//! widget, drawn in either's [`Look`].
 //!
 //! Muted it is a quiet button with a red, struck-through microphone;
 //! live it is filled with the huddle's green and a white microphone, so
 //! an open microphone is never missed and never looks like Leave's red.
-//! Cmd+Shift+Space toggles it (Slack's own chord) wherever the bar shows.
+//! Cmd+Shift+Space toggles it (Slack's own chord) wherever the button
+//! shows: the window that has the focus takes it.
 
-use egui::{Color32, Key, Modifiers, RichText, Vec2};
+use egui::{Color32, Key, Modifiers};
 
+use super::call_bar::{Look, control};
 use super::people::ACTIVE;
 use super::shortcuts::spell;
 use crate::huddle_mic::{Mic, MicAction};
@@ -25,9 +28,14 @@ pub fn toggled(mic: Mic) -> MicAction {
     }
 }
 
-/// Draws the button for `mic`; returns what was asked, by a click or the
-/// chord.
-pub fn mute_button(ui: &mut egui::Ui, palette: &Palette, mic: Mic) -> Option<MicAction> {
+/// Draws the button for `mic` in `look`; returns what was asked, by a
+/// click or the chord.
+pub fn mute_button(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    mic: Mic,
+    look: Look,
+) -> Option<MicAction> {
     let shortcut = spell(TOGGLE, cfg!(target_os = "macos"));
     let (icon, label, tip) = match mic {
         Mic::Muted => (
@@ -60,17 +68,7 @@ pub fn mute_button(ui: &mut egui::Ui, palette: &Palette, mic: Mic) -> Option<Mic
         Mic::Opening => (palette.surface_hover, palette.secondary, palette.secondary),
         Mic::Muted => (palette.surface_hover, palette.text, palette.danger),
     };
-    let button = egui::Button::image_and_text(
-        icon.image(icon_ink, 14.0),
-        RichText::new(label).font(theme::medium(13.0)).color(ink),
-    )
-    .fill(fill)
-    .corner_radius(egui::CornerRadius::same(theme::RADIUS_SMALL + 2))
-    .min_size(Vec2::new(0.0, 28.0));
-    let response = ui
-        .add(button)
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(tip);
+    let response = control(ui, look, (icon, icon_ink), &label, ink, fill).on_hover_text(tip);
     let chord =
         ui.input_mut(|input| input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Space));
     (response.clicked() || chord).then(|| toggled(mic))
