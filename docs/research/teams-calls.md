@@ -743,23 +743,46 @@ with a non-zero code (not captured); map `code`/`subCode` to a
 `Failure` in one place, as `backend/api.rs` does for Slack, with
 `(0, _)` as a normal end.
 
-### C.5 Hanging up ourselves
+### C.5 Hanging up ourselves, and declining
 
-Not in the capture (the far end hung up all three times). The candidates:
+Recorded since (a second Chromium capture, three calls):
 
-1. `DELETE {callLeg}` with the `callLeg` link from the acceptance (A.3)
-   or the acceptance answer (B.5): the call leg's own URL, which is how
-   such REST call legs are usually ended.
-2. `POST {conversation links.leave}`: §6.5 of microsoft-teams.md recorded
-   it for a "Meet now" call with a body carrying `conversationTransactionEnd`
-   and `callTransactionEnd` (exact fields not kept there).
-3. While an outgoing call still rings there is no call leg yet; `leave`
-   is then the only candidate.
+**Hanging up**, ringing or connected, is `POST {conversation links.leave}`
+(the `leave` link of the `cpconv` answer), answered `204`. No request
+goes to the call leg.
 
-Proposal: record a hang-up from the web app before writing it; until
-then try (1) and fall back to (2), and treat "no `call/end` push within a
-few seconds" as ended anyway. Either way, close the media locally at
-once (the optimistic rule): a hang-up must never wait on the network.
+While it still rings:
+
+```json
+{"participants": {"from": {"id": "8:live:<me>", "displayName": "<name>",
+                           "endpointId": "{endpoint id}", "languageId": "en-us"}},
+ "conversationTransactionEnd": {"reason": "noError", "code": 0,
+                                "phrase": "ConversationEndNoModalityConnected"},
+ "callTransactionEnd": {"code": 487, "subCode": 0,
+                        "phrase": "CallEndReasonLocalUserInitiated",
+                        "resultCategories": ["Success"],
+                        "callQualityDiagnosticsInformation": {"cancelationDuration": 4}}}
+```
+
+`cancelationDuration` is whole seconds since the call started. Once
+connected, `from` also carries our `participantId`, and
+`callTransactionEnd` is `{code: 0, subCode: 0, phrase:
+"CallEndReasonLocalUserInitiated", resultCategories: ["Success"]}`.
+The server then pushes `call/end` (ringing: `reason: "clientError"`,
+`code: 487`; connected: `reason: "noError"`, `code: 0`) and
+`conversation/conversationEnd` (`code: 0, subCode: 5002`). Our own 487 is
+a normal end.
+
+**Declining** an incoming call is `DELETE {callInvitation.links.reject}`
+(the attach answer's `…/cc/v1/incoming/{id}/…/reject?…`), answered `202`:
+
+```json
+{"callEnd": {"code": 603, "subCode": 0, "phrase": "CallEndReasonLocalUserInitiated",
+             "resultCategories": ["Success"], "applicationType": "TFL"}}
+```
+
+followed by a `conversation/conversationEnd` push. Either way, close the
+media locally at once: a hang-up must never wait on the network.
 
 ---
 
@@ -1190,8 +1213,9 @@ hang up, and see their hang-up. First as a probe, then in the app.
 Each of these should be recorded from the web app (Chrome, with
 WebSocket frames) before the code that depends on it is written:
 
-1. **Our own hang-up**, in a ringing and in a connected call (C.5).
-2. **Declining** an incoming call, and letting it ring out (B.7).
+1. ~~Our own hang-up~~ and ~~declining~~: recorded, see C.5. Letting an
+   incoming call ring out is still unrecorded (B.7).
+2. (see 1)
 3. **Calls that fail**: declined, busy, unanswered, offline; the codes in
    `call/end` and how the progress callback reports ringing to us.
 4. **The Trouter registration** the web app makes for calls (app id,
