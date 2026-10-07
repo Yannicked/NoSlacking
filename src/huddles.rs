@@ -211,6 +211,9 @@ pub struct CallPicture {
     /// screenshot.
     #[cfg(feature = "demo")]
     pub embed: bool,
+    /// The demo's call window size (`--demo-size`), to see it narrow.
+    #[cfg(feature = "demo")]
+    pub size: Option<[f32; 2]>,
 }
 
 #[cfg(feature = "huddle-video")]

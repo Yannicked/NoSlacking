@@ -380,6 +380,7 @@ fastframe_icons::icons! {
         Mic => lucide "mic",
         Paperclip => "paperclip",
         Pencil => lucide "pencil",
+        PhoneOff => "phone-off",
         Pin => lucide "pin",
         PinOff => lucide "pin-off",
         Play => lucide "play",

@@ -1,16 +1,18 @@
 //! Your camera in the call bar (the `huddle-camera` feature): its button
-//! beside the microphone's while the huddle is live, and the small
+//! beside the microphone's while the huddle is live (and in the call
+//! window's controls, in their [`Look`]), and the small
 //! self-preview above the buttons while it is on. Self-contained, so the
 //! call bar only places them.
 //!
 //! Off it is a quiet button with a red, struck-through camera; on it is
 //! filled with the huddle's green and a white camera, so a camera that
 //! is on is never missed. Cmd+Shift+O toggles it (Teams' chord: Slack's
-//! own is the composer's paste without formatting here) wherever the bar
-//! shows. The preview is mirrored, as a mirror shows you.
+//! own is the composer's paste without formatting here) wherever the
+//! button shows: the window that has the focus takes it. The preview is mirrored, as a mirror shows you.
 
-use egui::{Color32, CornerRadius, Key, Modifiers, RichText, Sense, Vec2};
+use egui::{Color32, CornerRadius, Key, Modifiers, Sense, Vec2};
 
+use super::call_bar::{Look, control};
 use super::people::ACTIVE;
 use super::shortcuts::spell;
 use crate::app::App;
@@ -31,9 +33,14 @@ pub fn toggled(cam: Cam) -> CamAction {
     }
 }
 
-/// Draws the button for `cam`; returns what was asked, by a click or the
-/// chord.
-pub fn camera_button(ui: &mut egui::Ui, palette: &Palette, cam: Cam) -> Option<CamAction> {
+/// Draws the button for `cam` in `look`; returns what was asked, by a
+/// click or the chord.
+pub fn camera_button(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    cam: Cam,
+    look: Look,
+) -> Option<CamAction> {
     let shortcut = spell(TOGGLE, cfg!(target_os = "macos"));
     let (icon, label, tip) = match cam {
         Cam::Off => (
@@ -66,17 +73,7 @@ pub fn camera_button(ui: &mut egui::Ui, palette: &Palette, cam: Cam) -> Option<C
         Cam::Opening => (palette.surface_hover, palette.secondary, palette.secondary),
         Cam::Off => (palette.surface_hover, palette.text, palette.danger),
     };
-    let button = egui::Button::image_and_text(
-        icon.image(icon_ink, 14.0),
-        RichText::new(label).font(theme::medium(13.0)).color(ink),
-    )
-    .fill(fill)
-    .corner_radius(CornerRadius::same(theme::RADIUS_SMALL + 2))
-    .min_size(Vec2::new(0.0, 28.0));
-    let response = ui
-        .add(button)
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(tip);
+    let response = control(ui, look, (icon, icon_ink), &label, ink, fill).on_hover_text(tip);
     let chord =
         ui.input_mut(|input| input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::O));
     (response.clicked() || chord).then(|| toggled(cam))

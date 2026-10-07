@@ -70,9 +70,7 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
             app.actions.push(Action::ShowShortcuts);
         }
     }
-    if app.huddles.listening.is_some()
-        && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::H))
-    {
+    if app.huddles.listening.is_some() && ctx.input_mut(leave_chord) {
         app.actions
             .push(Action::Huddle(crate::huddles::Action::Leave));
     }
@@ -161,6 +159,12 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
             app.actions.push(Action::OpenConversation(next));
         }
     }
+}
+
+/// Takes Ctrl+Shift+H (⌘⇧H), which leaves the huddle, from `input`:
+/// the main window's, or the call window's while it has the focus.
+pub fn leave_chord(input: &mut egui::InputState) -> bool {
+    input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::H)
 }
 
 /// How a hint spells the command key with `key`: "⌘K" on macOS, where
