@@ -342,7 +342,7 @@ impl Speaker {
                     std::thread::park_timeout(std::time::Duration::from_millis(200));
                 }
                 player.stop();
-                guard::let_go(sink, &thread_device.health);
+                guard::let_go(sink, thread_device.health.thread_gone());
             })
             .map_err(|e| format!("no audio thread: {e}"))?;
         result

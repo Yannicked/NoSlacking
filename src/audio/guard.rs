@@ -63,12 +63,12 @@ impl Health {
     }
 }
 
-/// Lets go of a device: drops it, or, when its thread was ended by a
-/// panic, leaks it, since dropping it then panics in cpal (see the
-/// module's notes). Leaking holds the device open until the app exits;
-/// it only happens after a bug has already stopped the sound.
-pub fn let_go<D>(device: D, health: &Health) {
-    if health.thread_gone() {
+/// Lets go of a device: drops it, or, when its callback's thread is gone
+/// (ended by a panic), leaks it, since dropping it then panics in cpal
+/// (see the module's notes). Leaking holds the device open until the app
+/// exits; it only happens after a bug has already stopped the sound.
+pub fn let_go<D>(device: D, thread_gone: bool) {
+    if thread_gone {
         log::warn!("the sound device's thread panicked; leaving the device open");
         std::mem::forget(device);
     } else {
@@ -232,13 +232,13 @@ mod tests {
     fn a_device_whose_thread_is_gone_is_not_dropped() {
         let healthy = Health::default();
         let dropped = Arc::new(AtomicBool::new(false));
-        let_go(Device(dropped.clone()), &healthy);
+        let_go(Device(dropped.clone()), healthy.thread_gone());
         assert!(dropped.load(Ordering::Relaxed));
 
         let broken = Health::default();
         broken.gone.store(true, Ordering::Relaxed);
         let dropped = Arc::new(AtomicBool::new(false));
-        let_go(Device(dropped.clone()), &broken);
+        let_go(Device(dropped.clone()), broken.thread_gone());
         assert!(!dropped.load(Ordering::Relaxed));
     }
 }

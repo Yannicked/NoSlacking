@@ -118,7 +118,7 @@ struct Output {
 impl Drop for Output {
     fn drop(&mut self) {
         if let Some(sink) = self.sink.take() {
-            guard::let_go(sink, &self.health);
+            guard::let_go(sink, self.health.thread_gone());
         }
     }
 }
