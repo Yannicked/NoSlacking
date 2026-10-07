@@ -178,7 +178,10 @@ pub(crate) enum RelayIo {
 }
 
 /// A TCP or TLS stream.
-pub(crate) trait Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+pub(crate) trait Stream:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send
+{
+}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Stream for T {}
 
 impl RelayIo {

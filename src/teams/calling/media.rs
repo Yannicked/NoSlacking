@@ -359,7 +359,7 @@ impl MediaSession {
     /// peer and runs it on a task of its own; hands back the session and
     /// what our SDP is to say, its candidates all gathered (Microsoft's
     /// clients send no trickle candidates). `setup` in it is `actpass`,
-    /// for an offer; an answer writes [`answer_setup`] instead.
+    /// for an offer; an answer writes [`super::sdp::answer_setup`] instead.
     pub async fn start(
         config: MediaConfig,
         audio: Audio,
@@ -424,19 +424,11 @@ impl MediaSession {
 /// makes us active; active makes us passive; `actpass` in an offer leaves
 /// it to us and we answer active, as the web client does; and the native
 /// client's offers, which say nothing, were answered active by the web
-/// client too (§D.3), where str0m's own SDP code would go passive.
+/// client too (§D.3), where str0m's own SDP code would go passive. The
+/// same choice as the answer [`super::sdp::answer_setup`] writes, so the
+/// SDP and the handshake agree.
 pub fn dtls_active(remote: Setup) -> bool {
-    remote != Setup::Active
-}
-
-/// What our answer's `a=setup` says, for a far end's offer that said
-/// `remote`.
-pub fn answer_setup(remote: Setup) -> Setup {
-    if dtls_active(remote) {
-        Setup::Active
-    } else {
-        Setup::Passive
-    }
+    super::sdp::answer_setup(remote) == Setup::Active
 }
 
 /// Whether we send and whether we receive, from the direction the far
@@ -536,10 +528,7 @@ fn plan(remote: &RemoteMedia, opus_pt: u8) -> Result<Plan, String> {
     if remote.ice_ufrag.is_empty() || remote.ice_pwd.is_empty() {
         return Err("no ICE credentials".into());
     }
-    let fingerprint = remote
-        .fingerprint
-        .as_deref()
-        .ok_or("no DTLS fingerprint")?;
+    let fingerprint = remote.fingerprint.as_deref().ok_or("no DTLS fingerprint")?;
     let fingerprint =
         parse_fingerprint(fingerprint).ok_or("the DTLS fingerprint is not a SHA-256 one")?;
     let audio = remote.audio().ok_or("no audio m-line")?;
@@ -551,7 +540,8 @@ fn plan(remote: &RemoteMedia, opus_pt: u8) -> Result<Plan, String> {
         Some(pt) => return Err(format!("Opus at payload type {pt}, not {opus_pt}")),
         None => return Err("no Opus".into()),
     }
-    let candidates: Vec<IceCandidate> = remote.candidates.iter().filter_map(ice_candidate).collect();
+    let candidates: Vec<IceCandidate> =
+        remote.candidates.iter().filter_map(ice_candidate).collect();
     if candidates.is_empty() {
         return Err("no candidate to reach".into());
     }
@@ -744,6 +734,12 @@ fn local_media(
         audio_ssrc,
         opus_pt,
         audio_direction: Direction::SendRecv,
+        // No data channel offered: audio only, the third attempt of §F.3.
+        data_ssrc: None,
+        session_id: rand::random::<u64>() >> 1,
+        // The o= line's first version; the signalling raises it per
+        // renegotiation.
+        session_version: 2,
     }
 }
 
@@ -753,7 +749,10 @@ fn local_media(
 fn relay_attempts(relay: &Relay) -> Vec<Server> {
     let mut attempts = Vec::new();
     for (transport, port) in [
-        (Transport::Udp, (|s: &RelayServer| s.udp_port) as fn(&RelayServer) -> Option<u16>),
+        (
+            Transport::Udp,
+            (|s: &RelayServer| s.udp_port) as fn(&RelayServer) -> Option<u16>,
+        ),
         (Transport::Tcp, |s| s.tcp_port),
         (Transport::Tls, |s| s.tls_port),
     ] {
@@ -975,7 +974,10 @@ impl Session {
         while let Some(server) = self.attempts.pop_front() {
             log::info!("relay: trying {server}");
             let opened = match server.transport {
-                Transport::Udp => self.shared_link(&server).await,
+                Transport::Udp => match self.host_or_socket() {
+                    Ok(local) => shared_link(&server, local).await,
+                    Err(why) => Err(why),
+                },
                 Transport::Tcp | Transport::Tls => {
                     match tokio::time::timeout(RELAY_TIMEOUT, connect_relay(&server)).await {
                         Ok(Ok((io, local))) => Ok((LinkIo::Stream(io), local)),
@@ -1007,23 +1009,13 @@ impl Session {
         self.finish_gathering();
     }
 
-    /// TURN over UDP from our own socket: the server's IPv4 address.
-    async fn shared_link(&self, server: &Server) -> Result<(LinkIo, SocketAddr), String> {
-        let address = tokio::time::timeout(
-            RELAY_TIMEOUT,
-            tokio::net::lookup_host((server.host.as_str(), server.port)),
-        )
-        .await
-        .map_err(|_| "no address in time".to_owned())?
-        .map_err(|e| format!("{}: {e}", server.host))?
-        .find(SocketAddr::is_ipv4)
-        .ok_or_else(|| format!("{} has no IPv4 address", server.host))?;
-        let local = match self.host {
-            Some(host) => host,
-            None => self.socket.local_addr().map_err(|e| e.to_string())?,
-        };
-        log::info!("relay: {server} at {address}, from our socket");
-        Ok((LinkIo::Shared(address), local))
+    /// Our end of TURN over UDP: the host candidate's address, or the
+    /// socket's own when there is none.
+    fn host_or_socket(&self) -> Result<SocketAddr, String> {
+        match self.host {
+            Some(host) => Ok(host),
+            None => self.socket.local_addr().map_err(|e| e.to_string()),
+        }
     }
 
     /// Hands back [`LocalMedia`] once, when the candidates are all there.
@@ -1477,10 +1469,7 @@ impl Session {
         if self.connect_deadline.is_some_and(|at| at <= now) {
             self.over.get_or_insert(Err(failure(
                 Stage::Connect,
-                format!(
-                    "no media connection within {} s",
-                    CONNECT_TIMEOUT.as_secs()
-                ),
+                format!("no media connection within {} s", CONNECT_TIMEOUT.as_secs()),
             )));
             return;
         }
@@ -1529,6 +1518,22 @@ impl Session {
             }
         });
     }
+}
+
+/// TURN over UDP from our own socket, which is at `local`: the server's
+/// IPv4 address.
+async fn shared_link(server: &Server, local: SocketAddr) -> Result<(LinkIo, SocketAddr), String> {
+    let address = tokio::time::timeout(
+        RELAY_TIMEOUT,
+        tokio::net::lookup_host((server.host.as_str(), server.port)),
+    )
+    .await
+    .map_err(|_| "no address in time".to_owned())?
+    .map_err(|e| format!("{}: {e}", server.host))?
+    .find(SocketAddr::is_ipv4)
+    .ok_or_else(|| format!("{} has no IPv4 address", server.host))?;
+    log::info!("relay: {server} at {address}, from our socket");
+    Ok((LinkIo::Shared(address), local))
 }
 
 /// The next messages from a TURN server reached over a stream, or never.
@@ -1671,10 +1676,18 @@ mod tests {
             candidates: vec![
                 candidate(CandidateKind::Relay, "20.202.0.1:3478", 33_553_407),
                 candidate(CandidateKind::Host, "192.168.1.20:50000", 2_130_706_431),
-                candidate(CandidateKind::ServerReflexive, "198.51.100.7:50000", 1_694_498_815),
+                candidate(
+                    CandidateKind::ServerReflexive,
+                    "198.51.100.7:50000",
+                    1_694_498_815,
+                ),
                 candidate(CandidateKind::Host, "0.0.0.0:9", 1),
                 candidate(CandidateKind::Host, "[2001:db8::1]:50000", 2_130_706_430),
-                candidate(CandidateKind::ServerReflexive, "198.51.100.7:50002", 1_694_498_814),
+                candidate(
+                    CandidateKind::ServerReflexive,
+                    "198.51.100.7:50002",
+                    1_694_498_814,
+                ),
             ],
             opus_pt: Some(111),
             lines: vec![
@@ -1696,9 +1709,6 @@ mod tests {
         assert!(!dtls_active(Setup::Active), "they are the client");
         assert!(dtls_active(Setup::ActPass), "we answer active");
         assert!(dtls_active(Setup::Unsaid), "as the web client did");
-        assert_eq!(answer_setup(Setup::ActPass), Setup::Active);
-        assert_eq!(answer_setup(Setup::Unsaid), Setup::Active);
-        assert_eq!(answer_setup(Setup::Active), Setup::Passive);
     }
 
     #[test]
@@ -1728,7 +1738,13 @@ mod tests {
         let srflx = ice_candidate(&candidate(CandidateKind::ServerReflexive, "1.2.3.4:5", 7))
             .expect("a candidate");
         assert_eq!(srflx.kind(), IceKind::ServerReflexive);
-        for unreachable in ["0.0.0.0:9", "1.2.3.4:0", "224.0.0.1:5", "169.254.1.1:5", "[::]:5"] {
+        for unreachable in [
+            "0.0.0.0:9",
+            "1.2.3.4:0",
+            "224.0.0.1:5",
+            "169.254.1.1:5",
+            "[::]:5",
+        ] {
             assert!(
                 ice_candidate(&candidate(CandidateKind::Host, unreachable, 1)).is_none(),
                 "{unreachable}"
@@ -1789,8 +1805,14 @@ mod tests {
         assert_eq!(refused(|_| {}, 102), "Opus at payload type 111, not 102");
         assert_eq!(refused(|r| r.opus_pt = None, 111), "no Opus");
         assert_eq!(refused(|r| r.ice_pwd.clear(), 111), "no ICE credentials");
-        assert_eq!(refused(|r| r.fingerprint = None, 111), "no DTLS fingerprint");
-        assert_eq!(refused(|r| r.lines[0].port = 0, 111), "the audio m-line is refused");
+        assert_eq!(
+            refused(|r| r.fingerprint = None, 111),
+            "no DTLS fingerprint"
+        );
+        assert_eq!(
+            refused(|r| r.lines[0].port = 0, 111),
+            "the audio m-line is refused"
+        );
         assert_eq!(refused(|r| r.lines.clear(), 111), "no audio m-line");
         assert_eq!(
             refused(|r| r.candidates.retain(|c| c.addr.port() == 9), 111),
@@ -1860,7 +1882,11 @@ mod tests {
             pass: "pass".into(),
         };
         let candidates = vec![
-            listed(addr("192.168.1.2:40000"), CandidateKind::Host, 2_130_706_431),
+            listed(
+                addr("192.168.1.2:40000"),
+                CandidateKind::Host,
+                2_130_706_431,
+            ),
             listed(addr("52.114.0.9:3478"), CandidateKind::Relay, 16_777_215),
         ];
         let local = local_media(&creds, &[0xAB, 0x01], candidates, 1234, 111);
@@ -1871,6 +1897,8 @@ mod tests {
         assert_eq!(local.audio_ssrc, 1234);
         assert_eq!(local.opus_pt, 111);
         assert_eq!(local.audio_direction, Direction::SendRecv);
+        assert_eq!(local.data_ssrc, None);
+        assert_eq!(local.session_version, 2);
         assert_eq!(local.candidates[0].foundation, "1");
         assert_eq!(local.candidates[1].foundation, "3");
         assert_eq!(local.candidates[1].kind, CandidateKind::Relay);
@@ -1950,7 +1978,13 @@ mod tests {
 
         fn take(&mut self, t: &str0m::net::Transmit, opus_pt: u8, now: Instant) {
             assert_eq!(t.destination, self.at);
-            expect_remote(&mut self.rtc, self.mid, opus_pt, &mut self.seen, &t.contents);
+            expect_remote(
+                &mut self.rtc,
+                self.mid,
+                opus_pt,
+                &mut self.seen,
+                &t.contents,
+            );
             let receive =
                 Receive::new(Protocol::Udp, t.source, t.destination, &t.contents).expect("read");
             self.rtc
@@ -1977,7 +2011,7 @@ mod tests {
         let mut theirs = Side::new("192.168.1.3:50000", false, pt, 3079, now);
 
         let offer = ours.as_remote(Setup::ActPass, pt, 1111);
-        let answer = theirs.as_remote(answer_setup(Setup::ActPass), pt, 3079);
+        let answer = theirs.as_remote(super::super::sdp::answer_setup(Setup::ActPass), pt, 3079);
         let to_theirs = plan(&offer, pt).expect("the offer is usable");
         assert!(to_theirs.active, "the answerer takes active");
         let to_ours = plan(&answer, pt).expect("the answer is usable");
@@ -2005,7 +2039,14 @@ mod tests {
                 for side in [&mut ours, &mut theirs] {
                     let stamp = side.outbound.stamp(0);
                     let payload = vec![0xF8, 0xFF, 0xFE, sent];
-                    assert!(write_opus(&mut side.rtc, side.mid, pt, stamp, payload, (40, true)));
+                    assert!(write_opus(
+                        &mut side.rtc,
+                        side.mid,
+                        pt,
+                        stamp,
+                        payload,
+                        (40, true)
+                    ));
                 }
                 sent = sent.wrapping_add(1);
                 next_send = now + AUDIO_TICK;
@@ -2014,16 +2055,18 @@ mod tests {
                 .min(theirs_at)
                 .min(next_send.max(now + Duration::from_millis(1)));
             now = next.max(now);
-            ours.rtc
-                .handle_input(Input::Timeout(now))
-                .expect("timeout");
+            ours.rtc.handle_input(Input::Timeout(now)).expect("timeout");
             theirs
                 .rtc
                 .handle_input(Input::Timeout(now))
                 .expect("timeout");
         }
         assert!(ours.connected() && theirs.connected(), "never connected");
-        assert!(ours.received.len() >= 10, "we heard {}", ours.received.len());
+        assert!(
+            ours.received.len() >= 10,
+            "we heard {}",
+            ours.received.len()
+        );
         assert!(
             theirs.received.len() >= 10,
             "they heard {}",
