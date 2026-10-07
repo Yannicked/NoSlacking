@@ -2752,6 +2752,12 @@ msgstr "Scherm van {name} tonen"
 msgid "Waiting for the picture…"
 msgstr "Wachten op het beeld…"
 
+msgid "No video"
+msgstr "Geen video"
+
+msgid "NoSlacking's video helper is missing or keeps failing."
+msgstr "De videohulp van NoSlacking ontbreekt of loopt steeds vast."
+
 msgid "Your camera is off. Start video ({shortcut})"
 msgstr "Je camera staat uit. Start video ({shortcut})"
 
@@ -2823,11 +2829,81 @@ msgstr "{name} (jij)"
 msgid "Huddles"
 msgstr "Huddles"
 
-msgid "Decode video on the graphics card"
-msgstr "Video op de videokaart decoderen"
+msgid "Use the graphics card for video"
+msgstr "De videokaart voor video gebruiken"
 
-msgid "When it can. Off: shared screens and cameras are always decoded by the processor."
-msgstr "Waar dat kan. Uit: gedeelde schermen en camera's worden altijd door de processor gedecodeerd."
+msgid "When it can: shared screens and cameras in, your camera out. Off: all on the processor."
+msgstr "Waar dat kan: gedeelde schermen en camera's binnen, je camera naar buiten. Uit: alles op de processor."
+
+# Huddles: sharing your screen.
+msgid "Share your screen / stop sharing"
+msgstr "Je scherm delen / stoppen met delen"
+
+msgid "Choose what to share"
+msgstr "Kies wat je deelt"
+
+msgid "Could not share your screen: {error}"
+msgstr "Kon je scherm niet delen: {error}"
+
+msgid "Screen sharing was cancelled"
+msgstr "Scherm delen is geannuleerd"
+
+msgid "Share something else…"
+msgstr "Iets anders delen…"
+
+msgid "Share your screen ({shortcut})"
+msgstr "Je scherm delen ({shortcut})"
+
+msgid "Sharing"
+msgstr "Delen"
+
+msgid "Starting to share your screen. Cancel ({shortcut})"
+msgstr "Je scherm wordt gedeeld. Annuleren ({shortcut})"
+
+msgid "Starting to share your screen…"
+msgstr "Je scherm wordt gedeeld…"
+
+msgid "Stop sharing"
+msgstr "Stoppen met delen"
+
+msgid "Two people are already sharing their screen, the most a huddle takes"
+msgstr "Er delen al twee mensen hun scherm, meer kan niet in een huddle"
+
+msgid "You are sharing your screen"
+msgstr "Je deelt je scherm"
+
+msgid "You are sharing your screen: everyone sees it. Stop sharing ({shortcut})"
+msgstr "Je deelt je scherm: iedereen ziet het. Stoppen met delen ({shortcut})"
+
+msgid "Your screen share ended"
+msgstr "Je scherm wordt niet meer gedeeld"
+
+msgid "Your screen share stopped: {error}"
+msgstr "Je scherm wordt niet meer gedeeld: {error}"
+
+msgid "nothing was chosen to share"
+msgstr "er is niets gekozen om te delen"
+
+msgid "screen recording is not allowed; allow NoSlacking in System Settings, Privacy & Security, Screen & System Audio Recording, then open it again"
+msgstr "schermopname is niet toegestaan; sta NoSlacking toe in Systeeminstellingen, Privacy en beveiliging, Scherm- en systeemaudio-opname en open het daarna opnieuw"
+
+msgid "the huddle's server did not take your share"
+msgstr "de server van de huddle nam je gedeelde scherm niet aan"
+
+msgid "the screen cannot be captured here; screen sharing needs xdg-desktop-portal and PipeWire, or an X11 session"
+msgstr "het scherm kan hier niet worden opgenomen; scherm delen heeft xdg-desktop-portal en PipeWire nodig, of een X11-sessie"
+
+msgid "the screen could not be captured"
+msgstr "het scherm kon niet worden opgenomen"
+
+msgid "the screen or window you chose is gone"
+msgstr "het scherm of venster dat je koos is er niet meer"
+
+msgid "the share's connection was lost"
+msgstr "de verbinding van het gedeelde scherm is verbroken"
+
+msgid "the system did not allow screen sharing"
+msgstr "het systeem stond scherm delen niet toe"
 
 # Microsoft Teams sign-in
 msgid "Sign in to Microsoft Teams"

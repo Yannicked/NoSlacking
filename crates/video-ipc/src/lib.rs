@@ -1,12 +1,14 @@
-//! What NoSlacking and `noslacking-video`, its hardware video helper, say
-//! to each other over the helper's standard input and output.
+//! What NoSlacking and `noslacking-video`, its video helper, say to each
+//! other over the helper's standard input and output.
 //!
-//! The helper drives the GPU's video engine through the platform's C
-//! libraries (VA-API on Linux), which takes `unsafe` code and trusts
-//! drivers with whatever a stranger's stream holds. It runs as its own
-//! process so the app keeps `forbid(unsafe_code)` and a crash or a hang
-//! only costs the helper. This crate is the one thing both sides share:
-//! the framing and the messages, in plain safe Rust.
+//! The helper decodes every video stream the app shows: on the GPU
+//! through the platform's C libraries (VA-API on Linux), which takes
+//! `unsafe` code and trusts drivers with whatever a stranger's stream
+//! holds, and otherwise in software. It runs as its own process so the
+//! app keeps `forbid(unsafe_code)` and a decoder's crash or hang (a
+//! panic aborts a release build) only costs the helper. This crate is
+//! the one thing both sides share: the framing and the messages, in
+//! plain safe Rust.
 //!
 //! # Framing
 //!
@@ -35,11 +37,14 @@ use std::io::{self, Read, Write};
 /// version.
 pub const MAGIC: [u8; 4] = *b"NSVH";
 
-/// This protocol's version. Both sides must have the same; the app uses
-/// software video with a helper of another version (they ship together,
-/// so that only happens with a broken install). Version 2 added
-/// [`Request::SetOutputSize`].
-pub const VERSION: u16 = 2;
+/// This protocol's version. Both sides must have the same; with a helper
+/// of another version the app shows no video (they ship together, so
+/// that only happens with a broken install). Version 2 added
+/// [`Request::SetOutputSize`]; version 3 made the helper decode in
+/// software too: [`Request::OpenDecoder`] says whether to try the GPU,
+/// and a picture says its stream's size and which decoded it
+/// ([`Decoded`]).
+pub const VERSION: u16 = 3;
 
 /// The largest frame either side accepts, in bytes: room for an I420
 /// picture at [`MAX_SIDE`] square (24 MiB) and its header.
@@ -165,20 +170,45 @@ pub fn read_frame(input: &mut impl Read) -> Result<Option<Frame>, Error> {
 /// Writes `reply` as one frame. A picture's planes go straight from its
 /// vectors to the pipe, without first being copied into one message.
 pub fn write_reply(out: &mut impl Write, seq: u32, reply: &Reply) -> Result<(), Error> {
-    let Reply::Picture(planes) = reply else {
+    let Reply::Picture(decoded) = reply else {
         return write_frame(out, seq, &reply.encode());
     };
+    let mut head = [PICTURE, 0, 0, 0, 0, 0, 0, 0, 0, u8::from(decoded.hardware)];
+    head[1..5].copy_from_slice(&decoded.source.0.to_le_bytes());
+    head[5..9].copy_from_slice(&decoded.source.1.to_le_bytes());
+    write_planes(out, seq, &head, &decoded.planes)
+}
+
+/// Writes `request` as one frame. A picture to encode goes straight from
+/// its vectors to the pipe, without first being copied into one message.
+pub fn write_request(out: &mut impl Write, seq: u32, request: &Request) -> Result<(), Error> {
+    let Request::Encode {
+        id,
+        force_keyframe,
+        picture,
+    } = request
+    else {
+        return write_frame(out, seq, &request.encode());
+    };
+    let mut head = [ENCODE, 0, 0, 0, 0, u8::from(*force_keyframe)];
+    head[1..5].copy_from_slice(&id.to_le_bytes());
+    write_planes(out, seq, &head, picture)
+}
+
+/// Writes a frame of `head` (the tag and any fields before the picture)
+/// and `planes`, each plane straight from its vector.
+fn write_planes(out: &mut impl Write, seq: u32, head: &[u8], planes: &Planes) -> Result<(), Error> {
     let planes_length = planes.y.len() + planes.u.len() + planes.v.len();
-    // Sequence number, tag, size, three plane lengths, the planes.
-    let length = 4 + 1 + 8 + 12 + planes_length;
+    // Sequence number, head, size, three plane lengths, the planes.
+    let length = 4 + head.len() + 8 + 12 + planes_length;
     if length > MAX_MESSAGE {
         return Err(Error::TooLarge(length));
     }
-    let mut header = Vec::with_capacity(4 + 4 + 1 + 8 + 4);
+    let mut header = Vec::with_capacity(4 + 4 + head.len() + 8 + 4);
     let length = u32::try_from(length).map_err(|_| Error::TooLarge(length))?;
     header.extend_from_slice(&length.to_le_bytes());
     header.extend_from_slice(&seq.to_le_bytes());
-    header.push(PICTURE);
+    header.extend_from_slice(head);
     header.extend_from_slice(&planes.width.to_le_bytes());
     header.extend_from_slice(&planes.height.to_le_bytes());
     out.write_all(&header)?;
@@ -191,11 +221,10 @@ pub fn write_reply(out: &mut impl Write, seq: u32, reply: &Reply) -> Result<(), 
     Ok(())
 }
 
-/// Reads one reply and its sequence number: none when the input ended
-/// cleanly between frames. A picture's planes are read straight into
-/// their own vectors, each checked against the frame's length and the
-/// picture's size before anything is allocated for it.
-pub fn read_reply(input: &mut impl Read) -> Result<Option<(u32, Reply)>, Error> {
+/// A frame's sequence number and tag, read with its length: none when
+/// the input ended cleanly between frames; else also the bytes left
+/// after the tag.
+fn read_head(input: &mut impl Read) -> Result<Option<(u32, u8, usize)>, Error> {
     let mut length = [0u8; 4];
     let mut got = 0;
     while got < length.len() {
@@ -222,33 +251,45 @@ pub fn read_reply(input: &mut impl Read) -> Result<Option<(u32, Reply)>, Error> 
         seq_and_tag[2],
         seq_and_tag[3],
     ]);
-    let tag = seq_and_tag[4];
-    let mut left = length - 5;
-    if tag != PICTURE {
-        let mut body = vec![0u8; left + 1];
-        body[0] = tag;
-        input.read_exact(&mut body[1..])?;
-        return Ok(Some((seq, Reply::decode(&body)?)));
+    Ok(Some((seq, seq_and_tag[4], length - 5)))
+}
+
+/// The rest of a frame whose tag was read: the whole message, tag first.
+fn read_body(input: &mut impl Read, tag: u8, left: usize) -> Result<Vec<u8>, Error> {
+    let mut body = vec![0u8; left + 1];
+    body[0] = tag;
+    input.read_exact(&mut body[1..])?;
+    Ok(body)
+}
+
+/// Reads `n` of the `left` bytes of a frame.
+fn read_exact_of(input: &mut impl Read, left: &mut usize, n: usize) -> Result<Vec<u8>, Error> {
+    if n > *left {
+        return Err(Error::Truncated);
     }
-    let mut take = |n: usize, input: &mut dyn Read| -> Result<Vec<u8>, Error> {
-        if n > left {
-            return Err(Error::Truncated);
-        }
-        left -= n;
-        let mut bytes = Vec::with_capacity(n);
-        input.take(n as u64).read_to_end(&mut bytes)?;
-        if bytes.len() != n {
-            return Err(Error::Truncated);
-        }
-        Ok(bytes)
-    };
-    let word = |bytes: Vec<u8>| -> u32 {
-        let mut word = [0u8; 4];
-        word.copy_from_slice(&bytes);
-        u32::from_le_bytes(word)
-    };
-    let width = word(take(4, input)?);
-    let height = word(take(4, input)?);
+    *left -= n;
+    let mut bytes = Vec::with_capacity(n);
+    input.take(n as u64).read_to_end(&mut bytes)?;
+    if bytes.len() != n {
+        return Err(Error::Truncated);
+    }
+    Ok(bytes)
+}
+
+/// Reads a `u32` of the `left` bytes of a frame.
+fn read_u32_of(input: &mut impl Read, left: &mut usize) -> Result<u32, Error> {
+    let bytes = read_exact_of(input, left, 4)?;
+    let mut word = [0u8; 4];
+    word.copy_from_slice(&bytes);
+    Ok(u32::from_le_bytes(word))
+}
+
+/// Reads a picture, the last field of a frame with `left` bytes to go,
+/// each plane straight into its own vector once its length is checked
+/// against the frame's and the picture's size.
+fn read_planes(input: &mut impl Read, mut left: usize) -> Result<Planes, Error> {
+    let width = read_u32_of(input, &mut left)?;
+    let height = read_u32_of(input, &mut left)?;
     if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
         return Err(Error::BadValue("picture size"));
     }
@@ -260,14 +301,12 @@ pub fn read_reply(input: &mut impl Read) -> Result<Option<(u32, Reply)>, Error> 
     ];
     let mut planes = Vec::with_capacity(3);
     for size in sizes {
-        let n = word(take(4, input)?);
+        let n = read_u32_of(input, &mut left)?;
         if u64::from(n) != size {
             return Err(Error::BadValue("plane length"));
         }
-        planes.push(take(
-            usize::try_from(n).map_err(|_| Error::TooLarge(usize::MAX))?,
-            input,
-        )?);
+        let n = usize::try_from(n).map_err(|_| Error::TooLarge(usize::MAX))?;
+        planes.push(read_exact_of(input, &mut left, n)?);
     }
     if left != 0 {
         return Err(Error::Trailing(left));
@@ -283,11 +322,79 @@ pub fn read_reply(input: &mut impl Read) -> Result<Option<(u32, Reply)>, Error> 
         v,
     };
     planes.check()?;
-    Ok(Some((seq, Reply::Picture(planes))))
+    Ok(planes)
+}
+
+/// Reads one reply and its sequence number: none when the input ended
+/// cleanly between frames. A picture's planes are read straight into
+/// their own vectors, each checked against the frame's length and the
+/// picture's size before anything is allocated for it.
+pub fn read_reply(input: &mut impl Read) -> Result<Option<(u32, Reply)>, Error> {
+    let Some((seq, tag, left)) = read_head(input)? else {
+        return Ok(None);
+    };
+    if tag != PICTURE {
+        let body = read_body(input, tag, left)?;
+        return Ok(Some((seq, Reply::decode(&body)?)));
+    }
+    let mut left = left;
+    let source = (
+        read_u32_of(input, &mut left)?,
+        read_u32_of(input, &mut left)?,
+    );
+    let hardware = match read_exact_of(input, &mut left, 1)?[0] {
+        0 => false,
+        1 => true,
+        _ => return Err(Error::BadValue("flag")),
+    };
+    let decoded = Decoded {
+        planes: read_planes(input, left)?,
+        source,
+        hardware,
+    };
+    decoded.check()?;
+    Ok(Some((seq, Reply::Picture(decoded))))
+}
+
+/// One request off the pipe: its sequence number and the request, or
+/// why its message (read whole, so the next frame still lines up) did
+/// not decode.
+pub type Incoming = (u32, Result<Request, Error>);
+
+/// Reads one request and its sequence number: none when the input ended
+/// cleanly between frames. A picture to encode is read as [`read_reply`]
+/// reads a decoded one; one that does not read breaks the framing (its
+/// frame is not read to its end), anything else that does not decode
+/// does not.
+pub fn read_request(input: &mut impl Read) -> Result<Option<Incoming>, Error> {
+    let Some((seq, tag, mut left)) = read_head(input)? else {
+        return Ok(None);
+    };
+    if tag != ENCODE {
+        let body = read_body(input, tag, left)?;
+        return Ok(Some((seq, Request::decode(&body))));
+    }
+    let id = read_u32_of(input, &mut left)?;
+    let force_keyframe = match read_exact_of(input, &mut left, 1)?[0] {
+        0 => false,
+        1 => true,
+        _ => return Err(Error::BadValue("flag")),
+    };
+    let picture = read_planes(input, left)?;
+    Ok(Some((
+        seq,
+        Ok(Request::Encode {
+            id,
+            force_keyframe,
+            picture,
+        }),
+    )))
 }
 
 /// The picture reply's tag.
 const PICTURE: u8 = 3;
+/// The encode request's tag.
+const ENCODE: u8 = 5;
 
 /// A video coding format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -458,6 +565,34 @@ impl Planes {
     }
 }
 
+/// A decoded picture and where it came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Decoded {
+    /// The picture, shrunk to cover the decoder's output box
+    /// ([`Request::SetOutputSize`]) if it has one.
+    pub planes: Planes,
+    /// The stream's own size (its SPS, cropped), before any shrinking.
+    pub source: (u32, u32),
+    /// Whether the GPU decoded it (else software did).
+    pub hardware: bool,
+}
+
+impl Decoded {
+    /// Whether the planes are whole ([`Planes::check`]) and no larger
+    /// than the source, itself a size a picture can have.
+    pub fn check(&self) -> Result<(), Error> {
+        self.planes.check()?;
+        let (width, height) = self.source;
+        if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
+            return Err(Error::BadValue("source size"));
+        }
+        if self.planes.width > width || self.planes.height > height {
+            return Err(Error::BadValue("picture larger than its source"));
+        }
+        Ok(())
+    }
+}
+
 /// What the app asks the helper.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
@@ -467,7 +602,9 @@ pub enum Request {
         version: u16,
     },
     /// A decoder for one stream; the reply is [`Reply::Opened`] or a
-    /// failure. The size is a hint (the stream's SPS decides).
+    /// failure. The size is a hint (the stream's SPS decides). The
+    /// helper decodes in software whatever the GPU cannot, and
+    /// everything when `hardware` is off.
     OpenDecoder {
         /// The stream's format.
         codec: Codec,
@@ -475,6 +612,9 @@ pub enum Request {
         width: u32,
         /// The expected height.
         height: u32,
+        /// Try the GPU first (Settings → Huddles → Use the graphics card
+        /// for video).
+        hardware: bool,
     },
     /// One frame (an access unit, Annex B) for decoder `id`; the reply is
     /// a picture, no picture (parameter sets only), or a failure.
@@ -576,7 +716,8 @@ pub enum Reply {
         version: u16,
         /// Which back end it uses ("vaapi", "none", …), for the log.
         backend: String,
-        /// What it can do; empty when it found no hardware.
+        /// What its GPU can do; empty when it found no hardware. Decoding
+        /// H.264 in software needs no capability: the helper always can.
         capabilities: Vec<Capability>,
     },
     /// A decoder or encoder was opened with this number.
@@ -585,7 +726,7 @@ pub enum Reply {
         id: u32,
     },
     /// A decoded picture.
-    Picture(Planes),
+    Picture(Decoded),
     /// The frame decoded to no picture (it held parameter sets only).
     NoPicture,
     /// An encoded frame: Annex B NAL units.
@@ -742,10 +883,12 @@ impl Request {
                 codec,
                 width,
                 height,
+                hardware,
             } => Out::new(2)
                 .u8(codec.to_byte())
                 .u32(*width)
                 .u32(*height)
+                .u8(u8::from(*hardware))
                 .done(),
             Self::Decode { id, keyframe, data } => Out::new(3)
                 .u32(*id)
@@ -769,7 +912,7 @@ impl Request {
                 id,
                 force_keyframe,
                 picture,
-            } => Out::new(5)
+            } => Out::new(ENCODE)
                 .u32(*id)
                 .u8(u8::from(*force_keyframe))
                 .planes(picture)
@@ -796,6 +939,7 @@ impl Request {
                 codec: Codec::from_byte(input.u8()?)?,
                 width: input.side("width")?,
                 height: input.side("height")?,
+                hardware: input.flag()?,
             },
             3 => Self::Decode {
                 id: input.u32()?,
@@ -809,7 +953,7 @@ impl Request {
                 fps: input.u32()?,
                 bitrate: input.u32()?,
             },
-            5 => Self::Encode {
+            ENCODE => Self::Encode {
                 id: input.u32()?,
                 force_keyframe: input.flag()?,
                 picture: input.planes()?,
@@ -854,7 +998,12 @@ impl Reply {
                 out.done()
             }
             Self::Opened { id } => Out::new(2).u32(*id).done(),
-            Self::Picture(planes) => Out::new(PICTURE).planes(planes).done(),
+            Self::Picture(decoded) => Out::new(PICTURE)
+                .u32(decoded.source.0)
+                .u32(decoded.source.1)
+                .u8(u8::from(decoded.hardware))
+                .planes(&decoded.planes)
+                .done(),
             Self::NoPicture => Out::new(4).done(),
             Self::Encoded { keyframe, data } => {
                 Out::new(5).u8(u8::from(*keyframe)).bytes(data).done()
@@ -893,7 +1042,17 @@ impl Reply {
                 }
             }
             2 => Self::Opened { id: input.u32()? },
-            3 => Self::Picture(input.planes()?),
+            3 => {
+                let source = (input.u32()?, input.u32()?);
+                let hardware = input.flag()?;
+                let decoded = Decoded {
+                    planes: input.planes()?,
+                    source,
+                    hardware,
+                };
+                decoded.check()?;
+                Self::Picture(decoded)
+            }
             4 => Self::NoPicture,
             5 => Self::Encoded {
                 keyframe: input.flag()?,
@@ -928,6 +1087,15 @@ mod tests {
         }
     }
 
+    /// A picture from software at its stream's own size.
+    fn decoded(planes: Planes) -> Decoded {
+        Decoded {
+            source: (planes.width, planes.height),
+            hardware: false,
+            planes,
+        }
+    }
+
     fn requests() -> Vec<Request> {
         vec![
             Request::Hello { version: VERSION },
@@ -935,6 +1103,7 @@ mod tests {
                 codec: Codec::H264,
                 width: 1920,
                 height: 1080,
+                hardware: true,
             },
             Request::Decode {
                 id: 7,
@@ -979,7 +1148,7 @@ mod tests {
                 }],
             },
             Reply::Opened { id: 1 },
-            Reply::Picture(picture(3, 3)),
+            Reply::Picture(decoded(picture(3, 3))),
             Reply::NoPicture,
             Reply::Encoded {
                 keyframe: true,
@@ -1081,7 +1250,7 @@ mod tests {
         }
         // An unknown codec, a flag that is neither 0 nor 1, a size over
         // the bound, a failure kind from a later version.
-        assert!(Request::decode(&[2, 9, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
+        assert!(Request::decode(&[2, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
         let mut decode = Request::Decode {
             id: 1,
             keyframe: false,
@@ -1097,6 +1266,7 @@ mod tests {
             codec: Codec::H264,
             width: MAX_SIDE + 1,
             height: 1,
+            hardware: false,
         };
         assert!(matches!(
             Request::decode(&open.encode()),
@@ -1137,14 +1307,39 @@ mod tests {
         };
         assert!(zero.check().is_err());
         // A picture reply whose planes lie about the size never decodes.
-        let lying = Reply::Picture(Planes {
-            width: 8,
-            ..picture(4, 4)
+        let lying = Reply::Picture(Decoded {
+            source: (8, 4),
+            ..decoded(Planes {
+                width: 8,
+                ..picture(4, 4)
+            })
         });
         assert!(matches!(
             Reply::decode(&lying.encode()),
             Err(Error::BadValue("plane length"))
         ));
+        // Nor does a picture larger than the stream it came from, or
+        // from a stream of no size.
+        for source in [(3, 4), (4, 3), (0, 4), (MAX_SIDE + 1, 4)] {
+            let larger = Reply::Picture(Decoded {
+                source,
+                ..decoded(picture(4, 4))
+            });
+            assert!(Reply::decode(&larger.encode()).is_err(), "{source:?}");
+            let mut streamed = Vec::new();
+            write_reply(&mut streamed, 1, &larger).expect("written");
+            assert!(read_reply(&mut streamed.as_slice()).is_err(), "{source:?}");
+        }
+        // Shrunk below its source, and from the GPU, it does.
+        let shrunk = Reply::Picture(Decoded {
+            source: (1920, 1080),
+            hardware: true,
+            planes: picture(960, 540),
+        });
+        assert_eq!(
+            Reply::decode(&shrunk.encode()).expect("decodes"),
+            shrunk.clone()
+        );
     }
 
     #[test]
@@ -1161,7 +1356,11 @@ mod tests {
         }
         assert!(read_reply(&mut input).expect("a clean end").is_none());
         // Both ways of writing a picture read both ways.
-        let picture = Reply::Picture(picture(7, 5));
+        let picture = Reply::Picture(Decoded {
+            source: (14, 10),
+            hardware: true,
+            planes: picture(7, 5),
+        });
         let mut framed = Vec::new();
         write_frame(&mut framed, 9, &picture.encode()).expect("written");
         let mut streamed = Vec::new();
@@ -1171,19 +1370,86 @@ mod tests {
         for n in 1..streamed.len() {
             assert!(read_reply(&mut &streamed[..n]).is_err(), "cut at {n}");
         }
-        // Planes that lie about their length are refused before reading.
+        // Planes that lie about their length are refused before reading
+        // (length, sequence, tag, source, flag, size: 26 bytes in).
         let mut lying = streamed.clone();
-        lying[17] = lying[17].wrapping_add(1);
+        lying[26] = lying[26].wrapping_add(1);
         assert!(matches!(
             read_reply(&mut lying.as_slice()),
             Err(Error::BadValue("plane length"))
         ));
         // A size over the bound.
-        let mut huge = streamed;
-        huge[9..13].copy_from_slice(&(MAX_SIDE + 1).to_le_bytes());
+        let mut huge = streamed.clone();
+        huge[18..22].copy_from_slice(&(MAX_SIDE + 1).to_le_bytes());
         assert!(matches!(
             read_reply(&mut huge.as_slice()),
             Err(Error::BadValue("picture size"))
+        ));
+        // A flag that is neither 0 nor 1.
+        let mut bad_flag = streamed;
+        bad_flag[17] = 2;
+        assert!(matches!(
+            read_reply(&mut bad_flag.as_slice()),
+            Err(Error::BadValue("flag"))
+        ));
+    }
+
+    #[test]
+    fn pictures_to_encode_stream_through_too() {
+        let mut pipe = Vec::new();
+        let sent = requests();
+        for (seq, request) in sent.iter().enumerate() {
+            write_request(&mut pipe, seq as u32, request).expect("written");
+        }
+        let mut input = pipe.as_slice();
+        for (seq, request) in sent.iter().enumerate() {
+            let (got_seq, got) = read_request(&mut input).expect("reads").expect("a request");
+            assert_eq!(
+                (got_seq, got.expect("decodes")),
+                (seq as u32, request.clone())
+            );
+        }
+        assert!(read_request(&mut input).expect("a clean end").is_none());
+        // A message that does not decode leaves the next one readable.
+        let mut pipe = Vec::new();
+        write_frame(&mut pipe, 1, &[42]).expect("written");
+        write_request(&mut pipe, 2, &sent[6]).expect("written");
+        let mut input = pipe.as_slice();
+        let (_, bad) = read_request(&mut input).expect("framed").expect("a frame");
+        assert!(matches!(bad, Err(Error::UnknownTag(42))));
+        let (seq, good) = read_request(&mut input).expect("framed").expect("a frame");
+        assert_eq!((seq, good.expect("decodes")), (2, sent[6].clone()));
+        // Streamed or framed, the bytes are the same, and either reader
+        // reads them.
+        let encode = Request::Encode {
+            id: 3,
+            force_keyframe: true,
+            picture: picture(7, 5),
+        };
+        let mut framed = Vec::new();
+        write_frame(&mut framed, 9, &encode.encode()).expect("written");
+        let mut streamed = Vec::new();
+        write_request(&mut streamed, 9, &encode).expect("written");
+        assert_eq!(framed, streamed);
+        let frame = read_frame(&mut streamed.as_slice())
+            .expect("reads")
+            .expect("a frame");
+        assert_eq!(Request::decode(&frame.body).expect("decodes"), encode);
+        for n in 1..streamed.len() {
+            assert!(read_request(&mut &streamed[..n]).is_err(), "cut at {n}");
+        }
+        // A flag that is neither 0 nor 1, and planes that lie.
+        let mut bad_flag = streamed.clone();
+        bad_flag[13] = 2;
+        assert!(matches!(
+            read_request(&mut bad_flag.as_slice()),
+            Err(Error::BadValue("flag"))
+        ));
+        let mut lying = streamed;
+        lying[22] = lying[22].wrapping_add(1);
+        assert!(matches!(
+            read_request(&mut lying.as_slice()),
+            Err(Error::BadValue("plane length"))
         ));
     }
 

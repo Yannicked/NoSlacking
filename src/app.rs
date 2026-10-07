@@ -451,8 +451,8 @@ impl App {
     pub fn new(waker: &Waker, dirs: AppDirs, settings: Settings, options: AppOptions) -> Self {
         let locale = settings.language.unwrap_or_else(i18n::Locale::detect);
         i18n::set_locale(locale);
-        #[cfg(feature = "huddle-video")]
-        crate::huddle_audio::hardware::set_enabled(settings.hardware_video);
+        #[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
+        crate::huddle_audio::helper::set_gpu(settings.hardware_video);
         let source = if options.demo {
             #[cfg(feature = "demo")]
             {

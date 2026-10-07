@@ -52,6 +52,10 @@
   <string>NoSlacking uses the microphone only while you are unmuted in a huddle.</string>
   <key>NSCameraUsageDescription</key>
   <string>NoSlacking uses the camera only while you have turned on video in a huddle.</string>
+  <!-- Screen Recording is granted in System Settings, not by this key;
+       macOS shows this text where it explains why (huddle-share builds). -->
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>NoSlacking records the screen or window you choose only while you share it in a huddle.</string>
   <key>NSHumanReadableCopyright</key>
   <string>Copyright (c) 2026 Yannick de Jong. MIT License.</string>
 </dict>

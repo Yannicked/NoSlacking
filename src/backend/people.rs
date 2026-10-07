@@ -138,6 +138,8 @@ impl Hub {
             Command::WatchCall { .. } => log::debug!("{command:?} is the worker's"),
             #[cfg(feature = "huddle-camera")]
             Command::CameraHuddle { .. } => log::debug!("{command:?} is the worker's"),
+            #[cfg(feature = "huddle-share")]
+            Command::ShareHuddle { .. } => log::debug!("{command:?} is the worker's"),
             Command::Active => {
                 if let Some(rtm) = self
                     .teams
@@ -592,6 +594,27 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
                     } else {
                         crate::huddle_camera::CamNews::Off
                     },
+                },
+            }]
+        }
+        // The demo shares nobody's screen: sharing turns on at once, as
+        // after the system's dialog; choosing again lists pretend
+        // screens and windows, as without one.
+        #[cfg(feature = "huddle-share")]
+        Command::ShareHuddle { request } => {
+            use crate::huddle_share::{ShareNews, ShareRequest};
+            let news = match request {
+                ShareRequest::Start { again: true } => {
+                    ShareNews::Choose(crate::demo::share_sources())
+                }
+                ShareRequest::Start { again: false } | ShareRequest::Pick(_) => ShareNews::On,
+                ShareRequest::Stop => ShareNews::Off,
+            };
+            vec![Event::People {
+                team: team.to_owned(),
+                event: people::Event::Share {
+                    channel: "C03".into(),
+                    news,
                 },
             }]
         }

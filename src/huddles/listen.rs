@@ -122,6 +122,12 @@ pub struct Listening {
     /// Where your camera's self-preview arrives.
     #[cfg(feature = "huddle-camera")]
     pub preview: Option<crate::huddle_camera::Preview>,
+    /// Your screen share: off on joining.
+    #[cfg(feature = "huddle-share")]
+    pub sharing: crate::huddle_share::Sharing,
+    /// What can be shared, while the call bar offers the choice.
+    #[cfg(feature = "huddle-share")]
+    pub share_sources: Vec<crate::huddle_share::Source>,
     /// Who has a camera on, as last told; those with a tile first.
     #[cfg(feature = "huddle-video")]
     pub cameras: Vec<Camera>,
@@ -158,6 +164,10 @@ impl Listening {
             camera: crate::huddle_camera::Cam::Off,
             #[cfg(feature = "huddle-camera")]
             preview: None,
+            #[cfg(feature = "huddle-share")]
+            sharing: crate::huddle_share::Sharing::Off,
+            #[cfg(feature = "huddle-share")]
+            share_sources: Vec::new(),
             #[cfg(feature = "huddle-video")]
             cameras: Vec::new(),
             #[cfg(feature = "huddle-video")]
@@ -566,6 +576,12 @@ pub fn heard(app: &mut App, team: &str, channel: &str, state: Listen) {
             {
                 listening.camera = crate::huddle_camera::Cam::Off;
                 listening.preview = None;
+            }
+            // And the share with it.
+            #[cfg(feature = "huddle-share")]
+            {
+                listening.sharing = crate::huddle_share::Sharing::Off;
+                listening.share_sources.clear();
             }
             // The session is gone, and its shares with it.
             #[cfg(feature = "huddle-video")]

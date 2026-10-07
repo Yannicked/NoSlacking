@@ -1,26 +1,34 @@
-//! NoSlacking's hardware video helper.
+//! NoSlacking's video helper: every huddle video stream the app shows
+//! is decoded here.
 //!
-//! The app starts `noslacking-video` the first time it would decode a
-//! video stream on the GPU and talks to it over its standard input and
-//! output in the messages of `noslacking-video-ipc`. The helper drives
-//! the platform's video API through a [`backend::Backend`]: VA-API on
-//! Linux ([`vaapi`]); on other systems, and where VA-API has no H.264
-//! decoder, it reports no capabilities and the app decodes in software.
+//! The app starts `noslacking-video` the first time it decodes a video
+//! stream and talks to it over its standard input and output in the
+//! messages of `noslacking-video-ipc`. The helper decodes on the GPU
+//! through the platform's video API, a [`backend::Backend`] (VA-API on
+//! Linux, `vaapi`), when the app asks for it and the GPU can; and
+//! otherwise, or once the GPU fails, in software ([`software`]). On
+//! other systems, and where VA-API has no H.264 decoder, it reports no
+//! hardware and decodes everything in software. It also encodes the
+//! app's camera on the GPU when it can (the app encodes in software
+//! itself otherwise).
 //!
 //! Why a separate process: the platform APIs are C, so calling them
-//! takes `unsafe` code the app forbids, and a GPU driver handed a
-//! stranger's malformed stream may crash or hang. Here that costs only
-//! the helper, which the app restarts a few times and then does without.
+//! takes `unsafe` code the app forbids, and a GPU driver or a decoder
+//! handed a stranger's malformed stream may crash or hang (release
+//! builds abort on a panic). Here that costs only the helper, which the
+//! app restarts a few times and then shows no video without.
 
 pub mod backend;
 pub mod fake;
 #[cfg(target_os = "linux")]
 pub mod h264;
+pub mod nal;
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 pub mod pipe;
 pub mod server;
 pub mod shrink;
+pub mod software;
 #[cfg(target_os = "linux")]
 pub mod vaapi;
 
@@ -48,7 +56,7 @@ fn platform_backend() -> Box<dyn backend::Backend> {
 #[cfg(not(target_os = "linux"))]
 fn platform_backend() -> Box<dyn backend::Backend> {
     // VideoToolbox (macOS) and Media Foundation (Windows) are planned;
-    // until then the app decodes in software there.
+    // until then the helper decodes in software there.
     Box::new(backend::Nothing::new(
         "none: no back end for this system yet",
     ))

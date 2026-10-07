@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 
 use noslacking_video_ipc::{self as ipc, FailKind, Reply, Request};
 
-use crate::backend::{Backend, Decoder, Encoder};
+use crate::backend::{self, Backend, Decoder, Encoder};
 
 /// The most decoders and encoders open at once: a huddle's share, its
 /// camera tiles and your own camera are far fewer.
@@ -29,10 +29,10 @@ pub fn serve(
         encoders: HashMap::new(),
         next_id: 1,
     };
-    let Some(first) = ipc::read_frame(input)? else {
+    let Some((first, hello)) = ipc::read_request(input)? else {
         return Ok(());
     };
-    match Request::decode(&first.body) {
+    match hello {
         Ok(Request::Hello { .. }) => {
             // The app compares versions; ours goes back either way.
             let welcome = Reply::Welcome {
@@ -40,20 +40,21 @@ pub fn serve(
                 backend: server.backend.name(),
                 capabilities: server.backend.capabilities(),
             };
-            ipc::write_frame(output, first.seq, &welcome.encode())?;
+            ipc::write_frame(output, first, &welcome.encode())?;
         }
         _ => {
             let reply = failed(FailKind::Protocol, "the first message must be the hello");
-            ipc::write_frame(output, first.seq, &reply.encode())?;
+            ipc::write_frame(output, first, &reply.encode())?;
             return Err(ipc::Error::BadValue("first message"));
         }
     }
-    while let Some(frame) = ipc::read_frame(input)? {
-        let reply = match Request::decode(&frame.body) {
+    // Pictures to encode are read straight into their planes.
+    while let Some((seq, request)) = ipc::read_request(input)? {
+        let reply = match request {
             Ok(request) => server.handle(request),
             Err(error) => failed(FailKind::Protocol, &error.to_string()),
         };
-        ipc::write_reply(output, frame.seq, &reply)?;
+        ipc::write_reply(output, seq, &reply)?;
     }
     Ok(())
 }
@@ -90,18 +91,15 @@ impl Server<'_> {
                 codec,
                 width,
                 height,
+                hardware,
             } => {
                 if self.full() {
                     return failed(FailKind::Unsupported, "too many open");
                 }
-                match self.backend.open_decoder(codec, width, height) {
-                    Ok(decoder) => {
-                        let id = self.id();
-                        self.decoders.insert(id, decoder);
-                        Reply::Opened { id }
-                    }
-                    Err(failure) => failed(failure.kind, &failure.detail),
-                }
+                let decoder = backend::open_decoder(self.backend, codec, width, height, hardware);
+                let id = self.id();
+                self.decoders.insert(id, decoder);
+                Reply::Opened { id }
             }
             Request::Decode { id, keyframe, data } => {
                 let Some(decoder) = self.decoders.get_mut(&id) else {
@@ -185,9 +183,11 @@ impl Server<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::Nothing;
+    use crate::backend::{Failure, Nothing};
     use crate::fake::Fake;
     use noslacking_video_ipc::{Codec, Planes};
+
+    const CAMERA: &[u8] = include_bytes!("../../../src/huddle_audio/fixtures/camera-480x480.h264");
 
     /// Runs `requests` through a server with `backend` and returns its
     /// replies, each with the sequence number it carried.
@@ -226,6 +226,7 @@ mod tests {
             codec: Codec::H264,
             width: 64,
             height: 48,
+            hardware: true,
         };
         let decode = |id, keyframe| {
             Request::Decode {
@@ -298,7 +299,10 @@ mod tests {
         assert_eq!(capabilities.len(), 2);
         assert_eq!(replies[1], Reply::Opened { id: 1 });
         assert_eq!(kind(&replies[2]), Some(FailKind::NeedKeyframe));
-        assert!(matches!(&replies[3], Reply::Picture(p) if (p.width, p.height) == (64, 48)));
+        assert!(matches!(
+            &replies[3],
+            Reply::Picture(p) if (p.planes.width, p.planes.height) == (64, 48) && p.hardware
+        ));
         assert_eq!(replies[4], Reply::Done, "the output size, set");
         assert_eq!(kind(&replies[5]), Some(FailKind::UnknownId));
         assert_eq!(replies[6], Reply::Done);
@@ -312,27 +316,189 @@ mod tests {
         assert_eq!(replies[10], Reply::Done);
     }
 
-    #[test]
-    fn without_hardware_everything_is_unsupported() {
-        let (replies, ok) = talk(
-            &mut Nothing::new("none: no libva"),
-            &[
-                hello(),
-                Request::OpenDecoder {
-                    codec: Codec::H264,
-                    width: 1920,
-                    height: 1080,
+    /// Decodes `frames` (each with whether it is a keyframe) through a
+    /// server on `backend`, asking for the GPU or not, at a 240×180
+    /// box: the replies after the hello, the open and the box.
+    fn decode_through(
+        backend: &mut dyn Backend,
+        hardware: bool,
+        frames: &[(&[u8], bool)],
+    ) -> Vec<Reply> {
+        let mut requests = vec![
+            hello(),
+            Request::OpenDecoder {
+                codec: Codec::H264,
+                width: 480,
+                height: 480,
+                hardware,
+            }
+            .encode(),
+            Request::SetOutputSize {
+                id: 1,
+                width: 240,
+                height: 180,
+            }
+            .encode(),
+        ];
+        for (frame, keyframe) in frames {
+            requests.push(
+                Request::Decode {
+                    id: 1,
+                    keyframe: *keyframe,
+                    data: frame.to_vec(),
                 }
                 .encode(),
-            ],
-        );
+            );
+        }
+        let (replies, ok) = talk(backend, &requests);
+        assert!(ok);
+        assert_eq!(replies[1].1, Reply::Opened { id: 1 });
+        assert_eq!(replies[2].1, Reply::Done);
+        replies
+            .into_iter()
+            .skip(3)
+            .map(|(_, reply)| reply)
+            .collect()
+    }
+
+    /// Whether `reply` is a software picture of the camera, halved.
+    fn software_picture(reply: &Reply) -> bool {
+        matches!(
+            reply,
+            Reply::Picture(p) if !p.hardware
+                && p.source == (480, 480)
+                && (p.planes.width, p.planes.height) == (240, 240)
+        )
+    }
+
+    #[test]
+    fn without_hardware_streams_decode_in_software() {
+        let frames = crate::nal::access_units(CAMERA);
+        let (replies, ok) = talk(&mut Nothing::new("none: no libva"), &[hello()]);
         assert!(ok);
         assert!(matches!(
             &replies[0].1,
             Reply::Welcome { capabilities, backend, .. }
                 if capabilities.is_empty() && backend == "none: no libva"
         ));
-        assert_eq!(kind(&replies[1].1), Some(FailKind::Unsupported));
+        let replies = decode_through(
+            &mut Nothing::new("none: no libva"),
+            true,
+            &[(&frames[3], false), (&frames[0], true), (&frames[1], false)],
+        );
+        assert_eq!(kind(&replies[0]), Some(FailKind::NeedKeyframe));
+        assert!(software_picture(&replies[1]), "{:?}", replies[1]);
+        assert!(software_picture(&replies[2]), "{:?}", replies[2]);
+        // With the GPU there but not wanted: software too.
+        let replies = decode_through(&mut Fake, false, &[(&frames[0], true)]);
+        assert!(software_picture(&replies[0]), "{:?}", replies[0]);
+    }
+
+    /// A back end whose GPU decoder fails as `fail` says for each frame
+    /// (counted from 0), and else gives a grey picture.
+    struct Scripted(fn(usize) -> Option<Failure>);
+
+    struct ScriptedDecoder {
+        fail: fn(usize) -> Option<Failure>,
+        frames: usize,
+    }
+
+    impl Backend for Scripted {
+        fn name(&self) -> String {
+            "scripted".into()
+        }
+
+        fn capabilities(&self) -> Vec<ipc::Capability> {
+            Vec::new()
+        }
+
+        fn open_decoder(
+            &mut self,
+            _: Codec,
+            _: u32,
+            _: u32,
+        ) -> Result<Box<dyn Decoder>, crate::backend::Failure> {
+            Ok(Box::new(ScriptedDecoder {
+                fail: self.0,
+                frames: 0,
+            }))
+        }
+    }
+
+    impl Decoder for ScriptedDecoder {
+        fn decode(
+            &mut self,
+            _: &[u8],
+            _: bool,
+        ) -> Result<Option<ipc::Decoded>, crate::backend::Failure> {
+            let n = self.frames;
+            self.frames += 1;
+            if let Some(failure) = (self.fail)(n) {
+                return Err(failure);
+            }
+            Ok(Some(ipc::Decoded {
+                planes: Planes {
+                    width: 2,
+                    height: 2,
+                    y: vec![200; 4],
+                    u: vec![128],
+                    v: vec![128],
+                },
+                source: (480, 480),
+                hardware: true,
+            }))
+        }
+
+        fn set_output_size(&mut self, _: u32, _: u32) {}
+    }
+
+    #[test]
+    fn software_takes_over_where_the_gpu_fails() {
+        let frames = crate::nal::access_units(CAMERA);
+        let gpu = |reply: &Reply| matches!(reply, Reply::Picture(p) if p.hardware);
+        // The GPU cannot decode the stream: software decodes the
+        // keyframe in hand, and what follows.
+        let replies = decode_through(
+            &mut Scripted(|_| Some(Failure::unsupported("B slices"))),
+            true,
+            &[(&frames[0], true), (&frames[1], false)],
+        );
+        assert!(software_picture(&replies[0]), "{:?}", replies[0]);
+        assert!(software_picture(&replies[1]), "{:?}", replies[1]);
+        // The device fails between keyframes: a keyframe is asked for,
+        // and software starts on it.
+        let replies = decode_through(
+            &mut Scripted(|n| (n == 1).then(|| Failure::device("hung"))),
+            true,
+            &[
+                (&frames[0], true),
+                (&frames[1], false),
+                (&frames[2], false),
+                (&frames[44], true),
+                (&frames[45], false),
+            ],
+        );
+        assert!(gpu(&replies[0]));
+        assert_eq!(kind(&replies[1]), Some(FailKind::NeedKeyframe));
+        assert_eq!(kind(&replies[2]), Some(FailKind::NeedKeyframe));
+        assert!(software_picture(&replies[3]), "{:?}", replies[3]);
+        assert!(software_picture(&replies[4]), "{:?}", replies[4]);
+        // A frame broken between keyframes stays on the GPU; one broken
+        // on a keyframe goes to software.
+        let replies = decode_through(
+            &mut Scripted(|n| matches!(n, 1 | 3).then(|| Failure::broken("bad slice"))),
+            true,
+            &[
+                (&frames[0], true),
+                (&frames[1], false),
+                (&frames[2], false),
+                (&frames[44], true),
+            ],
+        );
+        assert!(gpu(&replies[0]));
+        assert_eq!(kind(&replies[1]), Some(FailKind::Broken));
+        assert!(gpu(&replies[2]));
+        assert!(software_picture(&replies[3]), "{:?}", replies[3]);
     }
 
     #[test]

@@ -1383,6 +1383,37 @@ pub fn camera_on() -> crate::huddles::Listening {
     }
 }
 
+/// Screens and windows the demo offers to share where the system has no
+/// dialog of its own (`--demo-view share-pick`): pretend ones, nothing
+/// is captured.
+#[cfg(feature = "huddle-share")]
+pub fn share_sources() -> Vec<crate::huddle_share::Source> {
+    use crate::huddle_share::{Source, SourceKind};
+    let source = |id: &str, name: &str, kind| Source {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        kind,
+    };
+    vec![
+        source("demo:1", "DP-1 (2560×1440)", SourceKind::Screen),
+        source("demo:2", "eDP-1 (1920×1200)", SourceKind::Screen),
+        source("demo:3", "Release plan.md — Editor", SourceKind::Window),
+        source("demo:4", "Grafana — Firefox", SourceKind::Window),
+    ]
+}
+
+/// Listening to #design's huddle, talking and sharing your screen: the
+/// call bar's "You are sharing your screen" (`--demo-view
+/// sharing-self`, and `share-window` for the call window's controls).
+#[cfg(feature = "huddle-share")]
+pub fn sharing_self() -> crate::huddles::Listening {
+    crate::huddles::Listening {
+        mic: crate::huddle_mic::Mic::Live,
+        sharing: crate::huddle_share::Sharing::On,
+        ..listening()
+    }
+}
+
 /// Who shares in #design's huddle: Ana, and Carla too, so the call
 /// window has two tabs.
 #[cfg(feature = "huddle-video")]

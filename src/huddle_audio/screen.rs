@@ -2,12 +2,14 @@
 //! (the `huddle-video` feature).
 //!
 //! The media session (on the tokio runtime) hands each frame of the
-//! watched share to a [`Decoding`], whose own thread decodes it and turns
-//! it into egui's pixels at the size the call window shows. The newest
+//! watched share to a [`Decoding`], whose own thread has it decoded by
+//! the video helper (its own process, `helper::Lane::Share`) at the size
+//! the call window shows and turns it into egui's pixels. The newest
 //! picture waits in the [`Screen`] for the window to take; an older one
 //! still waiting is dropped, never queued, and the window is woken only
 //! when it has taken the last one, so at most once a frame. Neither the
-//! runtime nor the interface ever decodes.
+//! runtime nor the interface ever decodes. Without a helper the screen
+//! says there is no video ([`Screen::no_video`]).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -17,6 +19,7 @@ use std::time::{Duration, Instant};
 use egui::ColorImage;
 
 use super::decode::{self, H264, Trouble};
+use super::helper::Lane;
 
 /// Frames waiting for the decoder at most: about three seconds of a
 /// share. More means it cannot keep up; they are dropped and a keyframe
@@ -48,6 +51,8 @@ struct Shared {
     fit: AtomicU64,
     /// The decoder wants a keyframe: set by it, taken by the session.
     keyframe: AtomicBool,
+    /// There is no video helper to decode with.
+    no_video: AtomicBool,
     /// Pictures put since the start, for the window to tell one from the
     /// next and for tests.
     pictures: AtomicUsize,
@@ -79,6 +84,7 @@ impl Screen {
                 newest: Mutex::new(None),
                 fit: AtomicU64::new(0),
                 keyframe: AtomicBool::new(false),
+                no_video: AtomicBool::new(false),
                 pictures: AtomicUsize::new(0),
                 wake: Box::new(wake),
             }),
@@ -140,6 +146,17 @@ impl Screen {
     /// Whether a keyframe was wanted since last asked.
     pub fn take_keyframe_wish(&self) -> bool {
         self.shared.keyframe.swap(false, Ordering::Relaxed)
+    }
+
+    /// Says whether there is a video helper to decode with.
+    pub fn set_no_video(&self, no_video: bool) {
+        self.shared.no_video.store(no_video, Ordering::Relaxed);
+    }
+
+    /// Whether the share cannot be shown: the video helper is missing or
+    /// failed too often. The window says so instead of waiting.
+    pub fn no_video(&self) -> bool {
+        self.shared.no_video.load(Ordering::Relaxed)
     }
 }
 
@@ -271,7 +288,7 @@ struct Timings {
     errors: u32,
     size: [usize; 2],
     shown: [usize; 2],
-    /// Whether the last picture came from the GPU.
+    /// Whether the helper decoded the last picture on the GPU.
     gpu: bool,
 }
 
@@ -288,8 +305,9 @@ impl Timings {
             let per =
                 |total: Duration| total.as_secs_f64() * 1000.0 / f64::from(self.pictures.max(1));
             log::info!(
-                "video: decoded {} pictures in {:.0} s ({}x{} shown at {}x{}) {}: {:.1} ms a \
-                 picture (slowest {:.1} ms), {:.1} ms converting; {} frames did not decode",
+                "video: decoded {} pictures in {:.0} s ({}x{} shown at {}x{}) in the helper {}: \
+                 {:.1} ms a picture (slowest {:.1} ms), {:.1} ms converting; {} frames did not \
+                 decode",
                 self.pictures,
                 now.duration_since(since).as_secs_f64(),
                 self.size[0],
@@ -321,7 +339,9 @@ fn run(jobs: &Jobs, screen: &Screen) {
     while let Some(job) = next(jobs) {
         match job {
             Job::Start => {
-                decoder = Some(H264::new());
+                let fresh = H264::new(Lane::Share);
+                screen.set_no_video(fresh.no_helper());
+                decoder = Some(fresh);
                 screen.clear();
                 // A keyframe to start on, asked for by the session too.
                 screen.want_keyframe();
@@ -341,15 +361,15 @@ fn run(jobs: &Jobs, screen: &Screen) {
                 decoder.set_fit(screen.fit().0, screen.fit().1);
                 let decoded = decoder.decode(&unit);
                 let took = started.elapsed();
-                timings.gpu = decoder.on_hardware();
                 match decoded {
-                    Ok(Some(yuv)) => {
+                    Ok(Some(picture)) => {
+                        screen.set_no_video(false);
                         timings.decoding += took;
                         timings.slowest = timings.slowest.max(took);
+                        timings.gpu = picture.gpu;
                         let started = Instant::now();
-                        let source = [yuv.width, yuv.height];
-                        let by = decode::reduction((yuv.width, yuv.height), screen.fit());
-                        match decode::to_image(&decode::shrink(&yuv, by)) {
+                        let source = picture.source;
+                        match decode::to_image(&picture.yuv) {
                             Ok(image) => {
                                 timings.pictures += 1;
                                 timings.size = source;
@@ -368,6 +388,7 @@ fn run(jobs: &Jobs, screen: &Screen) {
                     }
                     Ok(None) => {}
                     Err(Trouble::NeedKeyframe) => screen.want_keyframe(),
+                    Err(Trouble::NoHelper) => screen.set_no_video(true),
                     Err(error) => {
                         timings.errors += 1;
                         log::debug!("video: {error}");
@@ -460,13 +481,16 @@ mod tests {
         assert!(!screen.take_keyframe_wish());
         screen.want_keyframe();
         assert!(screen.take_keyframe_wish() && !screen.take_keyframe_wish());
+        assert!(!screen.no_video());
+        screen.set_no_video(true);
+        assert!(screen.clone().no_video(), "shared with its clones");
         assert_eq!(screen.clone(), screen);
         assert_ne!(Screen::new(|| {}), screen);
     }
 
-    /// The thread decodes the camera fixture into pictures of the size
-    /// the window asks, asks for a keyframe when it must, and goes idle
-    /// on stop.
+    /// The thread has the camera fixture decoded (by the helper's own
+    /// code, on a thread in tests) into pictures of the size the window
+    /// asks, asks for a keyframe when it must, and goes idle on stop.
     #[test]
     fn the_decoder_thread_fills_the_screen() {
         let stream = include_bytes!("fixtures/camera-480x480.h264");

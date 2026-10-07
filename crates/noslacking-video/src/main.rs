@@ -1,4 +1,5 @@
-//! `noslacking-video`: NoSlacking's hardware video helper. The app
+//! `noslacking-video`: NoSlacking's video helper, which decodes every
+//! huddle video stream the app shows (on the GPU when it can). The app
 //! starts it and talks to it over standard input and output; see the
 //! library's documentation. `noslacking-video --probe` prints what this
 //! system's hardware can do.
@@ -41,7 +42,7 @@ fn probe() -> ExitCode {
     println!("back end: {}", backend.name());
     let capabilities = backend.capabilities();
     if capabilities.is_empty() {
-        println!("no hardware video: NoSlacking decodes in software");
+        println!("no hardware video: this helper decodes in software");
     }
     for capability in capabilities {
         println!(

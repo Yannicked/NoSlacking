@@ -337,6 +337,23 @@ impl Failure {
                 HuddleTrouble::ViewOnly => {
                     t("This huddle takes no more video, so your camera stays off")
                 }
+                HuddleTrouble::ShareCancelled => t("nothing was chosen to share"),
+                // Each system keeps apps from the screen its own way; say
+                // where to let NoSlacking see it.
+                HuddleTrouble::ShareDenied if cfg!(target_os = "macos") => t(
+                    "screen recording is not allowed; allow NoSlacking in System Settings, Privacy & Security, Screen & System Audio Recording, then open it again",
+                ),
+                HuddleTrouble::ShareDenied => t("the system did not allow screen sharing"),
+                HuddleTrouble::NoScreenCapture => t(
+                    "the screen cannot be captured here; screen sharing needs xdg-desktop-portal and PipeWire, or an X11 session",
+                ),
+                HuddleTrouble::ShareGone => t("the screen or window you chose is gone"),
+                HuddleTrouble::ShareCapture => t("the screen could not be captured"),
+                HuddleTrouble::ShareLimit => {
+                    t("Two people are already sharing their screen, the most a huddle takes")
+                }
+                HuddleTrouble::ShareRefused => t("the huddle's server did not take your share"),
+                HuddleTrouble::ShareLost => t("the share's connection was lost"),
             },
             Self::Slack(code) => return code.replace('_', " "),
             Self::Other(text) => return text.clone(),
@@ -374,6 +391,24 @@ pub enum HuddleTrouble {
     Camera,
     /// The huddle takes no video from us (Chime's "view only").
     ViewOnly,
+    /// The screen-sharing dialog was closed without choosing.
+    ShareCancelled,
+    /// The system did not let the app capture the screen (macOS's Screen
+    /// Recording permission, a portal that refused).
+    ShareDenied,
+    /// Nothing here can capture the screen (no portal, no X server).
+    NoScreenCapture,
+    /// The screen or window chosen is gone.
+    ShareGone,
+    /// Capturing the screen failed.
+    ShareCapture,
+    /// Two people already share their screen, the most a huddle takes.
+    ShareLimit,
+    /// The huddle's server did not take the share (its join or its
+    /// connection failed).
+    ShareRefused,
+    /// The share's own connection to the huddle broke.
+    ShareLost,
 }
 
 /// Why the system keyring did not do what was asked. The worker hands this
@@ -630,6 +665,14 @@ mod tests {
             Failure::Huddle(HuddleTrouble::CameraDenied),
             Failure::Huddle(HuddleTrouble::Camera),
             Failure::Huddle(HuddleTrouble::ViewOnly),
+            Failure::Huddle(HuddleTrouble::ShareCancelled),
+            Failure::Huddle(HuddleTrouble::ShareDenied),
+            Failure::Huddle(HuddleTrouble::NoScreenCapture),
+            Failure::Huddle(HuddleTrouble::ShareGone),
+            Failure::Huddle(HuddleTrouble::ShareCapture),
+            Failure::Huddle(HuddleTrouble::ShareLimit),
+            Failure::Huddle(HuddleTrouble::ShareRefused),
+            Failure::Huddle(HuddleTrouble::ShareLost),
             Failure::Slack("some_new_code".into()),
             Failure::Other("disk full".into()),
         ]

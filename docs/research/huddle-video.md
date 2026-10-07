@@ -29,14 +29,28 @@ copied. Line refs are `file:line` at those commits.
   PipeWire portals. *(Stage 1 update: the spike found rusty_h264, pure
   Rust, bit-exact and fast enough for 1080p shares; it is what Stage 1
   uses. Real Slack sends H.264 CB, so VP8 is not needed.)*
+- **All decoding in a helper (§6.9, 2026-10-07):** the app decodes no
+  video itself any more; `noslacking-video` does, on the GPU when it can
+  and in software (rusty_h264, moved there) otherwise. Without the
+  helper there is no video. A decoder panic now ends the helper, which
+  restarts, not the app.
 - **Hardware decoding (§6, 2026-10-07):** a helper process,
   `noslacking-video`, decodes H.264 with VA-API on Linux, bit-exact,
-  with software as the fallback for anything it cannot do or any crash.
+  with software as the fallback for anything it cannot do or any crash
+  (in the app until §6.9, in the helper since).
   Pictures are scaled on the GPU to the size shown before they are
   copied back: for a share shown at half size that is 6 times less CPU
   than software; at full size software still wins. Off by default for
   now. Vulkan Video, V4L2,
   VideoToolbox and Media Foundation are planned behind the same trait.
+  Our camera is encoded on the GPU too (§6.8): 1 ms and 0.4 ms of CPU a
+  640×480 picture through the helper against 4.3 ms in software.
+- **Sharing your screen (Stage 4, 2026-10-07):** built behind
+  `huddle-share`: the ScreenCast portal (ashpd) and PipeWire on Wayland,
+  x11rb on X11, xcap on macOS/Windows; a second `#content` Chime session
+  that only sends; 1080p at 15 fps from the GPU (5 ms, 1.9 ms of CPU a
+  picture here), 720p in software (25 ms a 1080p picture is too much).
+  Untried against Slack.
 - **Plan**: probe (days) → receive screen shares (2–3 wk) → camera tiles
   (2–3 wk) → send camera (3–5 wk) → share screen (3–5 wk, Wayland the
   risk). Drawing, stickers and effects: not realistic (undocumented,
@@ -302,7 +316,7 @@ others' codecs today: log INDEX's `supported_receive_codec_intersection`.
 - macOS needs `NSCameraUsageDescription` in Info.plist, next to the
   microphone key we already have.
 
-### 3.5 Screen capture
+### 3.5 Screen capture (see Stage 4 in §5 for what was chosen)
 - **`xcap` 0.9.8** (2026-08, Apache-2.0, active) has a `VideoRecorder`.
   On Wayland it goes through the ScreenCast portal over zbus plus pipewire
   0.10, with a restore token; on X11 it uses xcb; on macOS objc2; on
@@ -811,6 +825,132 @@ against a real camera here).
   - It works in the Flatpak on GNOME and KDE.
   - The two-share limit is reported cleanly.
 
+**Stage 4: built (2026-10-07), behind `huddle-share` (brings
+`huddle-camera`); not yet tried against Slack.**
+
+*Capture: the comparison.* The rule is pure Rust where it can be;
+bindings to the system's own capture APIs are allowed if what they pull
+in is said. Read from the crates' sources (registry copies), and built
+here where possible.
+
+| | Wayland (portal) | X11 | macOS | Windows | Frames | What it builds |
+|---|---|---|---|---|---|---|
+| **`xcap` 0.9.8** (Apache-2.0, active) | its `VideoRecorder`: ScreenCast portal over zbus, but monitors only (`types: 1`), no cursor mode, **no restore token**, and it connects to PipeWire's default socket (`connect_rc(None)`) instead of the portal's `OpenPipeWireRemote` fd, so not in the Flatpak; "video recording (WIP)" | xcb (links libxcb) | `objc2` CoreGraphics / AVFoundation; screenshots per call | `windows` crate (GDI, DXGI) | RGBA images (`capture_image`), or the recorder's frames | Linux: `pipewire` (bindgen + C shims, below), `xcb`, `libwayshot-xcap` (wayland-client, drm); macOS/Windows: bindings only, nothing compiled |
+| **`ashpd` 0.13.13** (MIT) + **`pipewire` 0.10.1** (MIT) | the whole portal: monitors and windows, cursor modes, persist mode and restore token, `OpenPipeWireRemote` (works in the Flatpak with no finish-args) | – | – | – | PipeWire buffers: SHM/MemFd mapped (`MAP_BUFFERS`), DMA-BUF if modifiers are offered; any raw format asked for; max frame rate negotiable | ashpd: pure Rust on the tree's zbus (async-io feature, as the tree's zbus). pipewire: `pipewire-sys`/`libspa-sys` run **bindgen (libclang)** against **libpipewire-0.3-dev's headers** (pkg-config), and libspa-sys **compiles five small C files** (wrappers for SPA's inline functions, plus libspa's test `pod.c`); the binary links `libpipewire-0.3.so.0` |
+| `pipewire-native` 0.2.0 (MIT, PipeWire's own pure-Rust client, WIP) | – | – | – | – | "Further work is required for sending and receiving audio/video": no streams yet | and it still compiles C (`cc`, SPA support shims) |
+| `scap` 0.1.0-beta.1 (MIT) | PipeWire + portal | – | ScreenCaptureKit | Windows Graphics Capture | | beta; pulls the same pipewire bindings |
+| `lamco-pipewire` 0.8 (MIT/Apache) | PipeWire with DMA-BUF | – | – | – | | pipewire bindings again |
+| **`x11rb` 0.13.2** (MIT/Apache, already in the tree) | – | GetImage on the root window per picture, RandR monitors by name; pure Rust connection (no libxcb) | – | – | 32-bit BGRX | nothing |
+| Native: ScreenCaptureKit (`objc2-screen-capture-kit`), Windows Graphics Capture (`windows`) | – | – | yes | yes | IOSurface / D3D textures | bindings, but calls are `unsafe`: not in our crate (only the helper may) |
+
+**Chosen:** Linux: **ashpd + pipewire** for the portal (Wayland, and X11
+desktops whose portal does ScreenCast), the only option with restore
+tokens, windows, cursor and the Flatpak's fd; **x11rb** when there is no
+portal and an X server (screens only: without a compositor an X window's
+own pixels are not kept). macOS and Windows: **xcap** (bindings, nothing
+compiled; its per-call screenshots at 15 a second), behind its target
+`cfg` so none of its Linux crates are built. No crate here compiles
+C/C++ except libspa-sys's wrapper shims, which are bindings glue for
+SPA's header-only API; a pure-Rust PipeWire stream client
+(`pipewire-native`) is not there yet. Build needs per platform:
+- Linux: libclang (already for nokhwa) and **libpipewire-0.3-dev**
+  (CI's Linux jobs install it), a C compiler (already for OpenSSL).
+  Run time: libpipewire-0.3.so.0 is linked; the portal
+  (xdg-desktop-portal with a GNOME/KDE/wlr backend) and PipeWire must
+  run for Wayland; the .deb recommends `xdg-desktop-portal, pipewire`.
+- macOS: `objc2` crates (in the tree through xcap's deps), nothing
+  compiled; Screen Recording permission asked with
+  `CGPreflightScreenCaptureAccess`/`CGRequestScreenCaptureAccess`
+  (objc2-core-graphics, safe functions) before the first capture; the
+  Info.plist has `NSScreenCaptureUsageDescription`.
+- Windows: the `windows` crate, nothing compiled.
+- macOS and Windows were **not built here** (no cross targets); the xcap
+  code was type-checked and linted against xcap 0.9.8's signatures
+  transcribed into a stub crate. CI's macOS/Windows jobs will build it.
+- Flatpak: the ScreenCast portal needs **no finish-args** (no
+  `--filesystem=xdg-run/pipewire-0`: the portal hands over a PipeWire fd
+  that sees only the chosen stream). The Flatpak does not build
+  `huddle-share` yet; the freedesktop SDK has PipeWire's headers.
+- A quick local test captured from Xvfb (`xvfb-run cargo test
+  --features huddle-share -- --ignored x11_capture`); the portal path was
+  not run here (it would show the desktop's dialog).
+
+*The content session.* As the JS SDK's `DefaultContentShareController`
+(`createContentShareMeetingSessionConfigure`, quoted on
+`ChimeJoin::content`): same meeting and URLs, `attendeeId + "#content"`,
+`joinToken + "#content"`, same external user id, and
+`NoVideoDownlinkBandwidthPolicy`. A second `media::listen` with no
+speaker, no microphone (Opus silence goes out, as the JS SDK
+synthesizes a silent track for a share without sound), no viewer, and
+the share as its "camera": the session code is shared as it was, the
+uplink now carrying its own SUBSCRIBE description
+(`CameraUplink::descriptor`: 1920×1080, 15 fps, 2,500 kbit/s) and the
+bandwidth target following it. Its SUBSCRIBE is RX for the audio, then
+DUPLEX with the video send stream, `receive_stream_ids = [0]` however
+much video INDEX lists. The main session never subscribes to our own
+`#content` (it never did: `Source::is_ours`), and the roster no longer
+counts anyone's `#content` attendee as a person. **Slack-side
+announcement:** none is sent. HuddleFM's sources make no Slack call
+about shares (they only use `rooms.join`, `rooms.info`,
+`screenhero.rooms.info` and `rooms.inviteResponse`), and Slack's own
+shares were seen only as Chime `#content` sources. The log says so when
+a share starts; the probe's summary says whether the `#content` join was
+taken. Unknown until tried: whether Slack's join token accepts the
+`#content` suffix, and whether Slack's UI shows a share that Slack
+itself was not told about.
+
+*Encoding.* Main's `Encoder` (GPU through the helper, software as the
+fallback), with `Limits`: a share may be 1920×1080 on the GPU, at most
+1280×720 in software. Measured on this machine (Ryzen AI 7 350, Radeon
+860M, release, one thread):
+
+| 1080p share, 15 fps, 2.5 Mbit/s | time a picture | CPU a picture |
+|---|---|---|
+| software (rusty_h264, Fast), mostly still screen | 24.9 ms (p95 30.9) | 24.9 ms |
+| software, everything moving | 24.5 ms (p95 26.5) | 24.5 ms |
+| software, the helper's bench (the 1080p fixture) | 24.5 ms | 24.5 ms |
+| GPU (VA-API) in process | 4.3 ms | 1.0 ms |
+| **GPU through the helper** (what the share uses here) | **5.0 ms** | **1.9 ms** |
+
+| 720p share in software | 9.1 ms mostly still, 9.9 ms everything moving (p95 ≤ 11.3) |
+|---|---|
+
+Software 1080p would take 37 % of a core at 15 fps here and more than a
+frame's time on older laptops, so software shares are 720p
+(`share_encode_cost`, ignored test; `examples/encode` in the helper).
+On this machine with "Use the graphics card for video" on, a share goes
+out at **1080p at 15 fps from the GPU**. The encoder thread also: skips
+pictures equal to the last (GNOME's PipeWire sends frames only on
+damage anyway), sends a still screen's picture again once a second and
+as an IDR every 4 s (and on PLI/FIR, at most every 500 ms; Chime asks
+content senders every 10 s), follows the bandwidth estimate in steps up
+to 2.5 Mbit/s (in place on the GPU), steps down to 720p if 1080p takes
+over 45 ms a picture on average, and to 720p at once when no encoder
+takes 1080p (no GPU, or the GPU failing).
+
+*Rules and UI.* `ShareControl` keeps the camera's rule (nothing captured
+until asked; stop, leaving, a failed or refused share session, the
+capture ending by itself all stop it), tested with a pretend capturer.
+Share sits beside Mute and Video in the call bar (icons alone there when
+the bar is narrow) and in the call window, Ctrl+Shift+E (Teams' chord;
+on the shortcut sheet); on, the bar says "You are sharing your screen"
+with Stop sharing; without a system dialog the bar lists screens and
+windows to pick; right click Share for "Share something else…" (asks
+the portal again). Toasts: cancelled, not allowed (macOS names where),
+no capture available, the source gone, capture failed, two shares
+already (Chime's 206/509, or two in INDEX with `huddle-video`), the
+share's connection refused or lost. Demo: `--demo-view sharing-self`,
+`share-pick`, `share-window`.
+
+*Probe.* `--send-test-share`: once the audio is live, shares a 1080p
+test screen (colour bars, a moving clock and frame count) as the
+`#content` attendee; the summary's "share" lines say how it went.
+
+*Not yet known:* everything Slack-side (above); GNOME vs KDE portal
+behaviour (frame rates, cursor, restore tokens), and DMA-BUF-only
+compositors (frames arriving that are not in memory are logged once);
+xcap's speed on real Macs and Windows machines.
+
 **Not recommended:** drawing on shares, effects, backgrounds, stickers.
 Reactions only if Stage 0 shows they are plain data messages.
 
@@ -868,7 +1008,7 @@ and nowhere in the app.
   the timeout (5 s for the hello, which opens the GPU; 1 s per frame).
   Its stderr goes to the app's debug log. It exits when its stdin
   closes, which happens when the app drops it or exits.
-- **Protocol (version 2; §6.2 for what 2 added).** Each frame is `u32` length, `u32` sequence
+- **Protocol (version 2; §6.2 for what 2 added, §6.9 for 3).** Each frame is `u32` length, `u32` sequence
   number (the reply repeats it), a tag and fields, little-endian; byte
   strings carry a `u32` length; frames over 32 MiB and pictures over
   4096 a side are refused before anything is allocated. `Hello{magic,
@@ -887,7 +1027,7 @@ and nowhere in the app.
   against its size), and the app also refuses a picture larger than the
   helper's welcome promised. Malformed messages, cut frames and lying
   plane lengths are tested.
-- **Fallback is always software.** Hardware is tried only when the
+- **Fallback is always software** (in the app until §6.9, which moved it into the helper and made a lost helper mean no video). Hardware is tried only when the
   setting is on, the helper is there and its welcome covers H.264 at the
   stream's SPS size. A stream whose helper crashes, hangs (timeout →
   killed) or garbles a reply goes on in software at once if the frame in
@@ -897,8 +1037,10 @@ and nowhere in the app.
   off until the app restarts. `Unsupported` (B slices, fields,
   interlace, a profile the driver lacks) and a GPU failure on a keyframe
   keep that stream in software without counting against the helper.
-- **Setting.** Settings → Huddles → "Decode video on the graphics card"
-  (`hardware_video`), for streams that start afterwards; on by default
+- **Setting.** Settings → Huddles → "Use the graphics card for video"
+  (first "Decode video on the graphics card"; `hardware_video`, which
+  since §6.8 also covers encoding our camera), for streams that start
+  afterwards; on by default
   since 2026-10-07, on the §6.3 numbers (off before GPU scaling, when
   it did not yet beat software).
 
@@ -1053,7 +1195,7 @@ down: it belongs in the helper too.
 | platforms | Linux (Intel, AMD, some NVIDIA via nvidia-vaapi-driver) | Linux and Windows: NVIDIA, AMD (RADV, Mesa ≥ 24), Intel (ANV, Mesa ≥ 24) |
 | this machine | H.264 decode (Fedora's `mesa-va-drivers-freeworld`) | **no H.264**: Fedora builds RADV without the patented codecs; `vulkaninfo` lists AV1 and VP9 decode only |
 | our fixtures | bit-exact, 1.8 ms a 1080p decode | could not be tried |
-| encode, IDR control | VA encode exists; not built yet | yes, with IDR on request |
+| encode, IDR control | built (§6.8): CB, CBR, IDR on request | yes, with IDR on request |
 | licence, upkeep | libva MIT; our code | MIT; active |
 | what we own | ~650 lines of H.264 state, ~900 of libva wrapper (36 `unsafe` blocks) | none of the codec logic |
 
@@ -1097,13 +1239,213 @@ Two kinds, both behind the same `Backend` trait:
 
 | platform | back end | crate | state |
 | --- | --- | --- | --- |
-| desktop Linux, Intel/AMD | VA-API | libloading + own FFI + own H.264 state | **decoding works**; encoding to do |
+| desktop Linux, Intel/AMD | VA-API | libloading + own FFI + own H.264 state | **decoding and encoding work** (§6.8) |
 | desktop Linux without VA H.264, NVIDIA | Vulkan Video | `gpu-video` | planned |
 | ARM Linux (Snapdragon, Raspberry Pi) | V4L2 stateful | `v4l2r` | planned |
 | ARM Linux (Rockchip, MediaTek, Allwinner) | V4L2 stateless | `v4l2r` + `src/h264.rs` | planned |
 | Windows (x86 and Snapdragon) | Vulkan Video, else Media Foundation / D3D11 video | `gpu-video`; `windows` | planned; the helper builds and reports no hardware |
 | macOS | VideoToolbox | `objc2-video-toolbox`, `objc2-core-media` | planned; the helper builds and reports no hardware |
 | everywhere | software | rusty_h264 (decode), rusty_h264-encoder | the default and the fallback |
+
+### 6.8 Encoding on the GPU (VA-API, `feat/hw-encode`, 2026-10-07)
+
+Our camera (and later a share) encoded by the GPU through the same
+helper, with rusty_h264-encoder as the fallback.
+
+**What the driver offers here** (radeonsi, Mesa 26.2.3, Radeon 860M):
+constrained baseline, Main and High at `VAEntrypointEncSlice` only (no
+`EncSliceLP`, Intel's low-power entry point, which is preferred where
+it exists); rate control CBR, VBR, CQP and QVBR (`0x416`); packed
+headers sequence, picture, slice, misc and raw (`0x1f`); two list-0
+references; up to 4096×4096.
+
+**Design** (`crates/noslacking-video/src/vaapi/encoder.rs`, bindings in
+`vaapi/va/enc.rs`):
+
+- Constrained baseline (`VAProfileH264ConstrainedBaseline`): CAVLC, one
+  reference (each P from the picture before), no B-frames, one slice a
+  picture (packetization-mode 1 splits it), picture order type 2 (no
+  order count in slice headers), every picture a reference. Level 3.1
+  up to 720p@30 (the software encoder's), then 3.2, 4.0 (1080p@15–30),
+  4.2 (1080p@60, 2048×1088); past 4.2 refused. Sizes not whole
+  macroblocks are cropped in the SPS, the surface padded by repeating
+  the last row and column.
+- **Headers are ours, packed**: the SPS and PPS together as
+  `VAEncPackedHeaderSequence` at each IDR, and each picture's slice
+  header as `VAEncPackedHeaderSlice` (`src/nal.rs`, ~120 lines and
+  tests; parsed back by cros-codecs' parser in a test). Mesa needs them:
+  without packed headers it wrote no SPS or PPS and a slice NAL header
+  of `0x00` (type 0); with only SPS and PPS packed, the same. With both
+  (what ffmpeg does there; seen with `LIBVA_TRACE`) Mesa writes our
+  SPS/PPS as they are and rewrites the slice header with its QP. A
+  driver that takes no packed headers writes its own, and ours go in
+  front of an IDR that came without them. The SPS says `42e0xx`
+  (constraint_set0–2, as WebRTC) and, in its VUI, timing and
+  `max_dec_frame_buffering` 1, so decoders show each picture at once.
+- **Rate control**: CBR where the driver has it, else VBR (target
+  100 %), window 1 s, HRD buffer half a second, frame skipping and bit
+  stuffing off (a still screen costs nothing). `SetBitrate` sends a new
+  `VAEncMiscParameterRateControl` (with `reset`) with the next picture:
+  no keyframe, no new context. Followed: 900 → 450 kbit/s mid-sequence
+  came out 832 then 462.
+- **IDRs** when asked and at least every 4 s (`fps × 4` pictures).
+- **Pictures in**: the app's I420 is written into an NV12 surface
+  through `vaDeriveImage` (else `vaCreateImage` + `vaPutImage`), checked
+  against the image's pitches and size before a byte is written.
+  **Out**: one coded buffer (raw size, at least 256 KiB) read with
+  `vaMapBuffer`, its segments walked (at most 64, each checked to fit)
+  and joined. Every picture's NAL units are checked (a slice; an IDR
+  when one was asked, SPS and PPS before it) before they go out, in the
+  helper and again in the app.
+- **Bindings**: `VAEncSequenceParameterBufferH264` (1132 bytes),
+  `…Picture…` (648), `…Slice…` (3140), the rate control (60), frame
+  rate and HRD (24) misc payloads, the packed header parameter (28) and
+  `VACodedBufferSegment` (48): sizes and offsets from clang over libva
+  2.23's headers asserted in tests, padding written out, bit fields
+  checked against what clang made of the same assignments. 11 more
+  `unsafe` blocks (map/unmap, coded segments, `vaPutImage`, the coded
+  buffer), each with its SAFETY note.
+- **Protocol**: unchanged (version 2; `OpenEncoder`, `Encode`,
+  `SetBitrate` were defined): the welcome now lists `Encode` for H.264
+  (meaning constrained baseline) up to 2048×1088. A picture to encode
+  is streamed from its planes into the pipe and read straight into its
+  own (`write_request`/`read_request`), as decoded pictures come back.
+
+**The app** (`src/huddle_audio/video_encoder.rs`): `Encoder` wraps
+either rusty_h264 (`VideoEncoder`) or the helper's (`HwEncoder` in
+`hardware.rs`). It takes the GPU when the setting is on ("Use the
+graphics card for video", the `hardware_video` key kept) and the
+helper's welcome covers the size; `retune(bitrate)` changes the GPU's
+rate in place (the camera thread follows the bitrate steps within a
+second; software still makes a new encoder at most every 8 s). Any
+GPU failure (a crash, a hang past 1 s, a failure reply, a stream that is
+not what was asked) encodes that same picture in software as a
+keyframe, and the camera stays in software for the session. The
+helper's crash counts against its restarts as for decoding.
+`huddle-camera` now builds `hardware.rs` (and the protocol crate) too.
+
+**Measurements** (release, `examples/encode.rs`, five rounds each:
+the 480×480 camera fixture stretched to 640×480 at 30 fps and
+900 kbit/s, the 1080p share fixture at 15 fps and 2.5 Mbit/s; CPU is
+the bench's and the helper's; PSNR is luma against the source,
+decoded by rusty_h264):
+
+| 640×480@30, 900 kbit/s | per picture | CPU | out | PSNR |
+| --- | --- | --- | --- | --- |
+| software (rusty_h264, Fast) | 4.33 ms | 4.30 ms | 902 kbit/s | 35.3 dB |
+| GPU, in process | 0.87 ms | 0.24 ms | 916 kbit/s | 38.0 dB |
+| GPU, through the helper | 1.02 ms | 0.42 ms | 916 kbit/s | 38.0 dB |
+
+| 1920×1080@15, 2.5 Mbit/s | per picture | CPU | out | PSNR |
+| --- | --- | --- | --- | --- |
+| software (level 4.0) | 31.0 ms | 30.7 ms | 2375 kbit/s | 56.8 dB |
+| GPU, in process | 2.68 ms | 1.00 ms | 1447 kbit/s | 52.7 dB |
+| GPU, through the helper | 5.2 ms | 2.2 ms | 1447 kbit/s | 52.7 dB |
+
+At camera rates the GPU is better and 4× faster at a tenth of the
+CPU. A share is mostly still: CBR without stuffing leaves the GPU well
+under its rate and a little behind software's quality, which spends
+the whole budget at 31 ms a picture (two thirds of a 15 fps frame's
+time on one core). Through the pipe a 1080p picture costs 2.6 ms more
+(3 MB in); a 1 MiB input pipe made it worse (11.8 ms, writer and reader
+no longer overlap), so the helper's input stays at 64 KiB. Checked
+with ffmpeg: both streams decode without an error as Constrained
+Baseline (level 3.1 and 4.0), and against the sources give PSNR
+36.4 dB (camera, whole stream) and 49.8 dB (share), as rusty_h264's
+decoding of them does. Forced IDRs and the 4 s ones come where asked
+(ignored GPU test `vaapi_encodes_what_the_software_decoder_reads_back`).
+
+### 6.9 All decoding in the helper (step 1 of "All video in the helper", 2026-10-07)
+
+The app no longer links a decoder: rusty_h264-decoder and the
+whole-step shrink moved into `noslacking-video`, and every stream the
+call window shows is decoded there, on the GPU or in software. Why
+(TODO.md): release builds abort on any panic, and a decoder reads
+strangers' network data, so its bug should end the helper (which the
+app starts again) rather than the app; and one place holds the codec
+and hardware choices.
+
+- **Protocol 3.** `OpenDecoder` gains `hardware` (try the GPU: Settings
+  → Huddles → Use the graphics card for video, now GPU against
+  software *inside* the helper), and always opens. A picture
+  (`Decoded`) carries its stream's own size before shrinking and
+  whether the GPU decoded it; it is refused if larger than that
+  source. The welcome's capabilities stay the GPU's; software decoding
+  needs none. Version 2 and 3 do not mix: another version means no
+  video.
+- **In the helper** (`software.rs`, `backend::open_decoder`): software
+  is rusty_h264 made afresh after an error and waiting for a keyframe,
+  then `shrink.rs` to the box shown. With `hardware`, the GPU's decoder
+  goes first and software takes over (for that decoder) on
+  `Unsupported`, a device failure or a keyframe the GPU breaks on, the
+  keyframe in hand decoded at once, any other frame answered
+  `NeedKeyframe`. Bit-exact with ffmpeg on both fixtures (tests in the
+  helper and, through the helper's code on a thread, in the app).
+- **In the app** (`decode::H264`, `helper::RemoteDecoder`): each start
+  (a keyframe after waiting) opens a decoder in the helper. A picture
+  that came from software while the GPU was asked for marks the stream
+  software-only, so the next start does not try the GPU again; so does
+  a helper failure (crash, hang past 1 s, a garbled reply), since the
+  stream may have caused it: the stream waits for a keyframe (PLI) and
+  starts again, in software, in the restarted helper. After
+  `MAX_RESTARTS` failures, or with no helper installed or one of
+  another version, the call window says "No video" (translated) instead
+  of waiting, and camera tiles show faces without spinners.
+- **A helper per lane.** The share, the camera tiles and our own
+  encoding each get their own helper process (`helper::Lane`), so the
+  share's and the cameras' threads no longer wait for each other's
+  replies (§6.3's 3.1 ms camera pictures) and keep the parallelism the
+  two decoding threads had in the app. Each loads the GPU driver once
+  (a few hundred milliseconds on its first stream, some MB of memory).
+- **Builds.** `default-members` makes `cargo build` (and the CI demo
+  build) build the helper beside the app; `cargo run` alone does not,
+  so the demo shows "No video" until it is built. Every package
+  already shipped the helper; the macOS bundle script now requires it.
+  The app binary lost the decoder (52.3 → 51.4 MB, release, with demo
+  and huddle-video); the helper grew from 0.6 to 1.5 MB. App tests run
+  the helper's server on a thread (`helper::pretend::InThread`, the
+  helper crate as a dev-dependency), never the program.
+
+**Measured** (this machine as §6.3, release). `examples/bench.rs`, CPU
+of the bench and the helper together, per frame:
+
+| | in the app before (software) | helper, software | helper, GPU |
+| --- | --- | --- | --- |
+| 1080p share, full size | 2.0 ms (2.0 CPU) | 3.2 ms (3.5 CPU) | 5.1 ms (3.1 CPU) |
+| 1080p share shown 960 wide | 5.0 ms (4.9) | 5.7 ms (5.8) | 1.6 ms (0.6) |
+| 1080p share shown 640 wide | 3.5 ms (3.5) | 4.2 ms (4.2) | 1.4 ms (0.4) |
+| 480×480 camera, full size | 0.30 ms (0.29) | 0.42 ms (0.44) | 0.75 ms (0.36) |
+| 480×480 camera in a 240 tile | 0.60 ms (0.61) | 0.67 ms (0.68) | 0.70 ms (0.20) |
+
+The demo's call window (Xvfb 1600×1000; the 1080p share at 12 fps
+shown about 1580 wide, so not shrunk in software, and three 480×480
+cameras at 22 fps in tiles too large to shrink), CPU over 20 s, two
+runs each:
+
+| | app, all threads | of it, video threads | helpers | video in all |
+| --- | --- | --- | --- | --- |
+| before: software in the app | 6.9–7.4 s | 2.6–2.8 s (decoding, converting) | — | 2.6–2.8 s |
+| after: software in the helpers | 6.0–6.1 s | 1.3 s (converting 0.8, pipe 0.5) | 3.0 s | 4.3 s |
+| after: GPU in the helpers | 5.3 s | 0.9 s | 2.0 s | 2.9 s |
+
+So the app itself spends half what it did on video, and the rest of
+its time is drawing (llvmpipe under Xvfb). In software the whole costs
+about 1.6 s more per 20 s (8 % of a core), nearly all the pipe: a
+1080p picture at full size is 3 MB each way through the kernel, read
+on the app's `video-helper-out` thread (1.2 ms more a 1080p frame in the
+bench; 0.1 ms for a camera). Where pictures are shown smaller, the pipe
+carries the small one and the difference is small (0.7 ms at 960
+wide). Each 1080p picture also takes longer to arrive (7 ms against
+4.5 ms in the demo's log), still far inside a 12 fps frame.
+
+**For steps 2 and 3** (capture and encoding in the helper): the lane
+split already gives sending its own helper; a full-size 1080p picture
+over the pipe is the expensive case, both ways, so capture should hand
+the helper dmabufs or stay in the helper rather than send raw frames
+(the share path's 3 MB pictures in, §6.8, cost the same 2.6 ms);
+shared memory would also cut the full-size decoding cost above. A
+faster shrink (a 2× special case) now pays in the helper. The software
+encoder is the next thing to move, behind the same `hardware` switch.
 
 ## Sources
 - amazon-chime-sdk-js @ dea69d268c623ab2006169d3899981fea766fa8a (Apache-2.0), files as cited.

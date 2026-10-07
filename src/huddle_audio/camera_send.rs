@@ -3,8 +3,9 @@
 //! turns (keyframes, bitrate), and the self-preview the call bar shows.
 //!
 //! The camera's thread puts each picture in a [`Latest`]; [`Encoding`]'s
-//! thread takes the newest, encodes it ([`VideoEncoder`]) and hands it to
-//! the session as a [`VideoFrame`] with its 90 kHz RTP time. Nothing
+//! thread takes the newest, encodes it ([`Encoder`]: on the GPU when the
+//! setting is on and the video helper can, else in software) and hands
+//! it to the session as a [`VideoFrame`] with its 90 kHz RTP time. Nothing
 //! queues: a picture the encoder had no time for is replaced by the next,
 //! and an encoded one the session cannot take (its queue full) is dropped
 //! and the next made a keyframe, since what follows would refer to it.
@@ -21,8 +22,9 @@ use tokio::sync::mpsc;
 
 use super::camera::{FPS, I420, Latest, MAX_HEIGHT, MAX_WIDTH};
 use super::chime::VideoSend;
+use super::helper::{self, Helper, Lane};
 use super::microphone::Running;
-use super::video_encoder::{self, Settings, VideoEncoder};
+use super::video_encoder::{self, Encoder, Limits, Settings};
 
 /// How SUBSCRIBE describes our camera: what it sends at most.
 pub const DESCRIPTOR: VideoSend = VideoSend {
@@ -34,9 +36,12 @@ pub const DESCRIPTOR: VideoSend = VideoSend {
 /// Encoded frames waiting for the session at most: a few, since a frame
 /// late by more than that is better dropped.
 pub const QUEUE: usize = 8;
-/// The bitrate changes the encoder follows at most this often: each
-/// change starts a new encoder, and so costs a keyframe.
-const RETUNE_EVERY: Duration = Duration::from_secs(8);
+/// The bitrate changes the software encoder follows at most this often:
+/// each change starts a new encoder, and so costs a keyframe.
+pub(crate) const RETUNE_EVERY: Duration = Duration::from_secs(8);
+/// The GPU's encoder takes a new bitrate without a keyframe, so it
+/// follows the estimate's steps sooner.
+pub(crate) const RETUNE_GPU_EVERY: Duration = Duration::from_secs(1);
 /// A keyframe asked for by a receiver at most this often: Chime may pass
 /// on several receivers' PLIs at once.
 const KEYFRAME_EVERY: Duration = Duration::from_millis(500);
@@ -66,6 +71,7 @@ pub struct VideoFrame {
 #[derive(Clone, Debug)]
 pub struct SendControl {
     shared: Arc<ControlShared>,
+    limits: Limits,
 }
 
 #[derive(Debug)]
@@ -74,34 +80,50 @@ struct ControlShared {
     bitrate: AtomicU32,
 }
 
+/// A camera's.
 impl Default for SendControl {
     fn default() -> Self {
-        Self {
-            shared: Arc::new(ControlShared {
-                keyframe: AtomicBool::new(false),
-                bitrate: AtomicU32::new(video_encoder::START_BITRATE),
-            }),
-        }
+        Self::new(Limits::CAMERA)
     }
 }
 
 impl SendControl {
+    /// The controls of an encoder kept within `limits`.
+    pub fn new(limits: Limits) -> Self {
+        Self {
+            shared: Arc::new(ControlShared {
+                keyframe: AtomicBool::new(false),
+                bitrate: AtomicU32::new(limits.bitrate(video_encoder::START_BITRATE)),
+            }),
+            limits,
+        }
+    }
+
+    /// What the encoder is kept within.
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
+    /// Whether a keyframe has been asked for and not yet made.
+    pub fn keyframe_wanted(&self) -> bool {
+        self.shared.keyframe.load(Ordering::Relaxed)
+    }
+
     /// The next picture should be a keyframe.
     pub fn want_keyframe(&self) {
         self.shared.keyframe.store(true, Ordering::Relaxed);
     }
 
     /// Whether a keyframe was asked for since the last call.
-    fn take_keyframe(&self) -> bool {
+    pub(crate) fn take_keyframe(&self) -> bool {
         self.shared.keyframe.swap(false, Ordering::Relaxed)
     }
 
     /// The bitrate to aim at, in bit/s, kept within what is sent.
     pub fn set_bitrate(&self, bitrate: u32) {
-        self.shared.bitrate.store(
-            bitrate.clamp(video_encoder::MIN_BITRATE, video_encoder::MAX_BITRATE),
-            Ordering::Relaxed,
-        );
+        self.shared
+            .bitrate
+            .store(self.limits.bitrate(bitrate), Ordering::Relaxed);
     }
 
     /// The bitrate aimed at now.
@@ -110,17 +132,22 @@ impl SendControl {
     }
 }
 
-/// The bitrate an encoder made for `wanted` uses: a few steps, so small
-/// swings of the estimate do not each cost a keyframe.
+/// The bitrate a camera's encoder made for `wanted` uses: a few steps, so
+/// small swings of the estimate do not each cost a keyframe.
 pub fn step(wanted: u32) -> u32 {
-    const STEPS: [u32; 7] = [
-        150_000, 250_000, 400_000, 600_000, 900_000, 1_300_000, 1_800_000,
+    step_within(wanted, video_encoder::MAX_BITRATE)
+}
+
+/// [`step`], up to `max` instead of the camera's most.
+pub fn step_within(wanted: u32, max: u32) -> u32 {
+    const STEPS: [u32; 8] = [
+        150_000, 250_000, 400_000, 600_000, 900_000, 1_300_000, 1_800_000, 2_500_000,
     ];
     STEPS
         .iter()
         .rev()
         .copied()
-        .find(|&s| s <= wanted)
+        .find(|&s| s <= wanted.min(max))
         .unwrap_or(STEPS[0])
 }
 
@@ -252,6 +279,8 @@ pub struct EncodeCounts {
     pub failed: u64,
     /// Bytes encoded.
     pub bytes: u64,
+    /// Times the GPU's encoder failed and software took over.
+    pub gpu_failures: u64,
 }
 
 /// The encoder's thread for one session: it waits for pictures while the
@@ -263,18 +292,46 @@ pub struct Encoding {
 
 impl Encoding {
     /// Starts encoding what arrives in `latest` into `frames`, as
-    /// `control` says; `preview` gets every picture.
+    /// `control` says; `preview` gets every picture. On the GPU when the
+    /// setting is on and the video helper can.
     pub fn spawn(
         latest: Latest,
         frames: mpsc::Sender<VideoFrame>,
         control: SendControl,
         preview: Option<Preview>,
     ) -> Result<Self, String> {
+        Self::spawn_with(latest, frames, control, preview, || {
+            helper::gpu()
+                .then(|| helper::shared(Lane::Sending))
+                .flatten()
+        })
+    }
+
+    /// The same, on the GPU through the helper `gpu` gives, if any.
+    fn spawn_with(
+        latest: Latest,
+        frames: mpsc::Sender<VideoFrame>,
+        control: SendControl,
+        preview: Option<Preview>,
+        gpu: impl FnOnce() -> Option<Helper> + Send + 'static,
+    ) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let thread = std::thread::Builder::new()
             .name("noslacking-huddle-encoder".into())
-            .spawn(move || encode(&latest, &frames, &control, preview.as_ref(), &thread_stop))
+            .spawn(move || {
+                // Asked for here, not on the caller's thread: starting the
+                // helper may take a moment.
+                let gpu = gpu();
+                let sending = Sending {
+                    latest: &latest,
+                    frames: &frames,
+                    control: &control,
+                    preview: preview.as_ref(),
+                    stop: &thread_stop,
+                };
+                encode(&sending, gpu);
+            })
             .map_err(|e| format!("no encoder thread: {e}"))?;
         Ok(Self {
             _running: Running::new(stop, thread),
@@ -288,15 +345,26 @@ pub fn rtp_time(epoch: Instant, at: Instant) -> u64 {
     u64::try_from(micros * 9 / 100).unwrap_or(u64::MAX)
 }
 
-/// The encoder's thread.
-fn encode(
-    latest: &Latest,
-    frames: &mpsc::Sender<VideoFrame>,
-    control: &SendControl,
-    preview: Option<&Preview>,
-    stop: &AtomicBool,
-) {
-    let mut encoder: Option<VideoEncoder> = None;
+/// What the encoder's thread works with.
+struct Sending<'a> {
+    latest: &'a Latest,
+    frames: &'a mpsc::Sender<VideoFrame>,
+    control: &'a SendControl,
+    preview: Option<&'a Preview>,
+    stop: &'a AtomicBool,
+}
+
+/// The encoder's thread: on the GPU through `gpu` while it serves, in
+/// software once it has failed (for the rest of the session).
+fn encode(sending: &Sending<'_>, mut gpu: Option<Helper>) {
+    let Sending {
+        latest,
+        frames,
+        control,
+        preview,
+        stop,
+    } = *sending;
+    let mut encoder: Option<Encoder> = None;
     let mut epoch: Option<Instant> = None;
     let mut last_time = 0u64;
     let mut retuned = Instant::now();
@@ -324,12 +392,30 @@ fn encode(
             preview.put(image);
         }
         let wanted = step(control.bitrate());
-        let rebuild = match &encoder {
+        let rebuild = match &mut encoder {
             None => true,
             Some(e) => {
                 let s = e.settings();
-                (s.width, s.height) != (picture.width, picture.height)
-                    || (s.bitrate != wanted && now >= retuned + RETUNE_EVERY)
+                if (s.width, s.height) != (picture.width, picture.height) {
+                    true
+                } else if s.bitrate == wanted {
+                    false
+                } else if e.on_gpu() {
+                    // In place, no keyframe; if the helper is gone, the
+                    // encoder went to software and the next step rebuilds.
+                    if now >= retuned + RETUNE_GPU_EVERY {
+                        if e.retune(wanted) {
+                            log::debug!("huddle camera: now {} kbit/s", wanted / 1000);
+                        } else {
+                            gpu = None;
+                            counts.gpu_failures += 1;
+                        }
+                        retuned = now;
+                    }
+                    false
+                } else {
+                    now >= retuned + RETUNE_EVERY
+                }
             }
         };
         if rebuild {
@@ -338,14 +424,20 @@ fn encode(
                 height: picture.height,
                 fps: FPS,
                 bitrate: wanted,
+                limits: control.limits(),
             };
-            match VideoEncoder::new(settings) {
+            match Encoder::new(settings, gpu.as_ref()) {
                 Ok(fresh) => {
                     log::info!(
-                        "huddle camera: encoding {}x{} at {} kbit/s",
+                        "huddle camera: encoding {}x{} at {} kbit/s {}",
                         settings.width,
                         settings.height,
-                        fresh.settings().bitrate / 1000
+                        fresh.settings().bitrate / 1000,
+                        if fresh.on_gpu() {
+                            "on the GPU"
+                        } else {
+                            "in software"
+                        }
                     );
                     encoder = Some(fresh);
                     retuned = now;
@@ -371,6 +463,7 @@ fn encode(
             active.request_keyframe();
         }
         let started = Instant::now();
+        let was_on_gpu = active.on_gpu();
         let encoded = match active.encode(picture) {
             Ok(encoded) => encoded,
             Err(error) => {
@@ -381,6 +474,12 @@ fn encode(
                 continue;
             }
         };
+        if was_on_gpu && !active.on_gpu() {
+            // The GPU failed this picture, which software made a
+            // keyframe: no GPU again for this session's camera.
+            gpu = None;
+            counts.gpu_failures += 1;
+        }
         busy += started.elapsed();
         counts.encoded += 1;
         counts.bytes += encoded.data.len() as u64;
@@ -455,6 +554,9 @@ pub struct CameraUplink {
     pub control: SendControl,
     /// Told when Chime takes no video from us (view only, its 206).
     pub refused: mpsc::Sender<()>,
+    /// How SUBSCRIBE describes what is sent: [`DESCRIPTOR`] for a camera,
+    /// the share's own for a screen share.
+    pub descriptor: VideoSend,
 }
 
 /// The test picture as a camera that is always on: for the probe's
@@ -620,6 +722,108 @@ mod tests {
         put(4, (640, 360));
         assert!(next(&mut out, wait).is_some());
         drop(encoding);
+    }
+
+    /// The encoder thread on a pretend GPU (software in the pretend
+    /// helper, so the stream is real) that crashes on the fourth picture:
+    /// that picture comes out of software as a keyframe, and the session
+    /// gets one stream the decoder reads from start to end.
+    #[test]
+    fn the_encoder_thread_goes_on_in_software_when_the_gpu_fails() {
+        use super::super::helper::pretend::{Act, Pretend, welcome};
+        use noslacking_video_ipc::{Reply, Request};
+        let gpu_encoder: Arc<Mutex<Option<video_encoder::VideoEncoder>>> = Arc::default();
+        let encodes = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&encodes);
+        let pretend = Pretend::new(move |request| match request {
+            Request::Hello { .. } => Act::Reply(welcome()),
+            Request::OpenEncoder {
+                width,
+                height,
+                fps,
+                bitrate,
+                ..
+            } => {
+                let settings = Settings {
+                    width: *width as usize,
+                    height: *height as usize,
+                    fps: *fps,
+                    bitrate: *bitrate,
+                    limits: Limits::CAMERA,
+                };
+                *gpu_encoder.lock().expect("not poisoned") =
+                    Some(video_encoder::VideoEncoder::new(settings).expect("an encoder"));
+                Act::Reply(Reply::Opened { id: 1 })
+            }
+            Request::Encode {
+                picture,
+                force_keyframe,
+                ..
+            } => {
+                if counted.fetch_add(1, Ordering::Relaxed) == 3 {
+                    return Act::Crash;
+                }
+                let mut slot = gpu_encoder.lock().expect("not poisoned");
+                let encoder = slot.as_mut().expect("opened");
+                if *force_keyframe {
+                    encoder.request_keyframe();
+                }
+                let encoded = encoder
+                    .encode(&I420 {
+                        width: picture.width as usize,
+                        height: picture.height as usize,
+                        y: picture.y.clone(),
+                        u: picture.u.clone(),
+                        v: picture.v.clone(),
+                    })
+                    .expect("encoded");
+                Act::Reply(Reply::Encoded {
+                    keyframe: encoded.keyframe,
+                    data: encoded.data,
+                })
+            }
+            _ => Act::Reply(Reply::Done),
+        });
+        let helper = Helper::with_timeouts(
+            Arc::new(pretend),
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+        );
+        let latest = Latest::default();
+        let (frames, mut out) = mpsc::channel(QUEUE);
+        let encoding = Encoding::spawn_with(
+            latest.clone(),
+            frames,
+            SendControl::default(),
+            None,
+            move || Some(helper),
+        )
+        .expect("a thread");
+        let wait = Duration::from_secs(5);
+        let mut got = Vec::new();
+        for n in 0..8u64 {
+            latest.put(Frame {
+                picture: pattern(320, 240, n, Duration::ZERO),
+                at: Instant::now(),
+            });
+            got.push(next(&mut out, wait).expect("a frame"));
+        }
+        drop(encoding);
+        let keyframes: Vec<bool> = got.iter().map(|f| f.keyframe).collect();
+        assert_eq!(
+            keyframes,
+            [true, false, false, true, false, false, false, false],
+            "the first, and the one software took over at"
+        );
+        assert_eq!(encodes.load(Ordering::Relaxed), 4, "the GPU no more after");
+        let mut decoder = rusty_h264_decoder::Decoder::new();
+        for frame in &got {
+            let picture = decoder
+                .decode(&frame.data)
+                .expect("decodes")
+                .expect("a picture");
+            assert_eq!((picture.width, picture.height), (320, 240));
+        }
     }
 
     #[test]

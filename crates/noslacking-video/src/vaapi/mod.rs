@@ -1,21 +1,22 @@
-//! The VA-API back end (Linux): H.264 decoding on Intel, AMD and other
-//! GPUs whose driver implements VA-API (Mesa's for AMD and others,
-//! intel-media-driver for Intel), through libva's stateless decoding
-//! interface. [`crate::h264`] works out what each picture needs; this
-//! fills in libva's parameter buffers, decodes into a surface and reads
-//! the picture back as I420.
-//!
-//! Encoding is not offered yet (see docs/research/huddle-video.md).
+//! The VA-API back end (Linux): H.264 decoding and encoding on Intel,
+//! AMD and other GPUs whose driver implements VA-API (Mesa's for AMD and
+//! others, intel-media-driver for Intel). Decoding goes through libva's
+//! stateless interface: [`crate::h264`] works out what each picture
+//! needs; this fills in libva's parameter buffers, decodes into a surface
+//! and reads the picture back as I420. Encoding is [`encoder`]'s.
 
+pub mod encoder;
 #[allow(unsafe_code)]
 pub mod va;
 
 use std::rc::Rc;
 
 use cros_codecs::codec::h264::parser::{Pps, SliceType, Sps};
-use noslacking_video_ipc::{Capability, Codec, Direction, FailKind, MAX_SIDE, Planes, output_size};
+use noslacking_video_ipc::{
+    Capability, Codec, Decoded, Direction, FailKind, MAX_SIDE, Planes, output_size,
+};
 
-use crate::backend::{Backend, Decoder, Failure};
+use crate::backend::{Backend, Decoder, Encoder, Failure};
 use crate::h264::{FrontEnd, Picture, Reference};
 use crate::shrink;
 use va::{
@@ -23,13 +24,16 @@ use va::{
     PictureParameterBufferH264, Scaler, SeqFields, SliceParameterBufferH264, Surfaces,
 };
 
-/// The VA-API back end: a display with an H.264 decoder.
+/// The VA-API back end: a display with an H.264 decoder, an encoder, or
+/// both.
 pub struct Vaapi {
     display: Rc<Display>,
     /// The H.264 profiles the driver decodes, by preference for a
     /// constrained baseline stream.
     profiles: Vec<i32>,
     max_size: (u32, u32),
+    /// How the driver encodes constrained baseline, if it does.
+    encode: Option<encoder::EncodeSupport>,
 }
 
 impl std::fmt::Debug for Vaapi {
@@ -37,13 +41,14 @@ impl std::fmt::Debug for Vaapi {
         f.debug_struct("Vaapi")
             .field("display", &self.display)
             .field("profiles", &self.profiles)
+            .field("encode", &self.encode)
             .finish_non_exhaustive()
     }
 }
 
 impl Vaapi {
-    /// Opens libva on the first render node whose driver decodes H.264;
-    /// why not, if none.
+    /// Opens libva on the first render node; why not, if its driver
+    /// neither decodes nor encodes H.264.
     pub fn open() -> Result<Self, String> {
         let display = Display::open()?;
         let known = display.profiles()?;
@@ -61,20 +66,24 @@ impl Vaapi {
                 profiles.push(profile);
             }
         }
-        let Some(&first) = profiles.first() else {
+        let encode = encoder::EncodeSupport::query(&display);
+        if profiles.is_empty() && encode.is_none() {
             return Err(format!(
-                "{} ({}) does not decode H.264",
+                "{} ({}) neither decodes nor encodes H.264",
                 display.vendor(),
                 display.path
             ));
+        }
+        let limits = match profiles.first() {
+            Some(&first) => display
+                .attributes(
+                    first,
+                    va::ENTRYPOINT_VLD,
+                    &[va::ATTRIB_MAX_PICTURE_WIDTH, va::ATTRIB_MAX_PICTURE_HEIGHT],
+                )
+                .unwrap_or_default(),
+            None => Vec::new(),
         };
-        let limits = display
-            .attributes(
-                first,
-                va::ENTRYPOINT_VLD,
-                &[va::ATTRIB_MAX_PICTURE_WIDTH, va::ATTRIB_MAX_PICTURE_HEIGHT],
-            )
-            .unwrap_or_default();
         let limit = |i: usize| {
             limits
                 .get(i)
@@ -87,6 +96,7 @@ impl Vaapi {
             display,
             profiles,
             max_size: (limit(0), limit(1)),
+            encode,
         })
     }
 }
@@ -97,12 +107,44 @@ impl Backend for Vaapi {
     }
 
     fn capabilities(&self) -> Vec<Capability> {
-        vec![Capability {
-            codec: Codec::H264,
-            direction: Direction::Decode,
-            max_width: self.max_size.0,
-            max_height: self.max_size.1,
-        }]
+        let mut capabilities = Vec::new();
+        if !self.profiles.is_empty() {
+            capabilities.push(Capability {
+                codec: Codec::H264,
+                direction: Direction::Decode,
+                max_width: self.max_size.0,
+                max_height: self.max_size.1,
+            });
+        }
+        if let Some(support) = self.encode {
+            // Constrained baseline (what Direction::Encode means for
+            // H.264), up to what the driver takes and level 4.2 holds:
+            // 2048×1088 landscape (encoder::level).
+            capabilities.push(Capability {
+                codec: Codec::H264,
+                direction: Direction::Encode,
+                max_width: support.max_size.0.min(2048),
+                max_height: support.max_size.1.min(1088),
+            });
+        }
+        capabilities
+    }
+
+    fn open_encoder(
+        &mut self,
+        codec: Codec,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate: u32,
+    ) -> Result<Box<dyn Encoder>, Failure> {
+        let Codec::H264 = codec;
+        let Some(support) = self.encode else {
+            return Err(Failure::unsupported("the driver does not encode H.264"));
+        };
+        let encoder =
+            encoder::VaapiEncoder::new(&self.display, support, (width, height), fps, bitrate)?;
+        Ok(Box::new(encoder))
     }
 
     fn open_decoder(
@@ -112,6 +154,9 @@ impl Backend for Vaapi {
         height: u32,
     ) -> Result<Box<dyn Decoder>, Failure> {
         let Codec::H264 = codec;
+        if self.profiles.is_empty() {
+            return Err(Failure::unsupported("the driver does not decode H.264"));
+        }
         if width > self.max_size.0 || height > self.max_size.1 {
             return Err(Failure::unsupported(format!(
                 "{width}x{height} is too large"
@@ -321,7 +366,7 @@ impl Decoder for VaapiDecoder {
         self.fit = (width, height);
     }
 
-    fn decode(&mut self, frame: &[u8], _keyframe: bool) -> Result<Option<Planes>, Failure> {
+    fn decode(&mut self, frame: &[u8], _keyframe: bool) -> Result<Option<Decoded>, Failure> {
         let picture = match self.front.begin(frame) {
             Ok(Some(picture)) => picture,
             Ok(None) => return Ok(None),
@@ -338,7 +383,12 @@ impl Decoder for VaapiDecoder {
                     self.front.reset();
                     return Err(failure);
                 }
-                Ok(Some(planes))
+                let (_, _, width, height) = picture.visible()?;
+                Ok(Some(Decoded {
+                    planes,
+                    source: (width, height),
+                    hardware: true,
+                }))
             }
             Err(failure) => {
                 self.front.reset();
@@ -552,10 +602,13 @@ mod tests {
             let started = std::time::Instant::now();
             let frames = crate::h264::tests::frames(stream);
             for frame in &frames {
-                let picture = decoder
+                let decoded = decoder
                     .decode(frame, false)
                     .expect("decodes")
                     .expect("a picture");
+                assert!(decoded.hardware);
+                assert_eq!(decoded.source, size);
+                let picture = decoded.planes;
                 assert_eq!((picture.width, picture.height), size);
                 hash.update(&picture.y);
                 hash.update(&picture.u);
@@ -605,10 +658,12 @@ mod tests {
             let started = std::time::Instant::now();
             let mut worst = 0f64;
             for frame in &frames {
-                let picture = decoder
+                let decoded = decoder
                     .decode(frame, false)
                     .expect("decodes")
                     .expect("a picture");
+                assert_eq!(decoded.source, size);
+                let picture = decoded.planes;
                 assert_eq!((picture.width, picture.height), fit);
                 assert!(picture.check().is_ok());
                 let reference = software.decode(frame).expect("decodes").expect("a picture");

@@ -102,6 +102,9 @@ pub struct CallView {
     pub tiles: Vec<TileView>,
     /// Cameras on that have no tile, for want of room.
     pub more: usize,
+    /// No picture will come: the video helper is missing or failed too
+    /// often. Said in place of waiting for one.
+    pub no_video: bool,
     /// The call's controls at the window's foot.
     pub controls: Controls,
 }
@@ -121,15 +124,19 @@ pub struct Controls {
     /// Your camera.
     #[cfg(feature = "huddle-camera")]
     pub camera: crate::huddle_camera::Cam,
+    /// Your screen share.
+    #[cfg(feature = "huddle-share")]
+    pub sharing: crate::huddle_share::Sharing,
 }
 
 impl Controls {
-    /// How many buttons the bar has: Mute and the camera only while
-    /// live, Leave always.
+    /// How many buttons the bar has: Mute, the camera and Share only
+    /// while live, Leave always.
     pub fn buttons(&self) -> usize {
         let camera = cfg!(feature = "huddle-camera");
+        let share = cfg!(feature = "huddle-share");
         1 + if self.live {
-            1 + usize::from(camera)
+            1 + usize::from(camera) + usize::from(share)
         } else {
             0
         }
@@ -367,11 +374,19 @@ pub fn show(
             if let Some(share) = layout.share {
                 shown.share = share_stage(ui, view, share, pixels);
             }
-            for (rect, view) in layout.tiles.iter().zip(&view.tiles) {
-                camera_tile(ui, palette, *rect, view);
+            for (rect, tile) in layout.tiles.iter().zip(&view.tiles) {
+                camera_tile(ui, palette, *rect, tile, view.no_video);
             }
             if layout.share.is_none() && view.tiles.is_empty() {
                 note(ui, area, &t("No one has their camera on"));
+            } else if layout.share.is_none() && view.no_video {
+                // The tiles show faces; say why, over their tops, clear
+                // of the name plates at their foot.
+                let top = Rect::from_min_max(
+                    area.left_top(),
+                    egui::pos2(area.right(), area.top() + 64.0),
+                );
+                no_video(ui, top, true);
             }
         });
     shown
@@ -392,11 +407,43 @@ fn share_stage(ui: &mut egui::Ui, view: &CallView, area: Rect, pixels: f32) -> [
             theme::describe(&response, egui::WidgetType::Image, &view.title);
             [rect.width(), rect.height()].map(|n| (n * pixels).round() as usize)
         }
+        None if view.no_video => {
+            no_video(ui, area, false);
+            [area.width(), area.height()].map(|n| (n * pixels).round() as usize)
+        }
         None => {
             waiting(ui, area);
             [area.width(), area.height()].map(|n| (n * pixels).round() as usize)
         }
     }
+}
+
+/// No video can be shown: what happened, in the middle of `area`; on a
+/// dark band if `over` other things.
+fn no_video(ui: &egui::Ui, area: Rect, over: bool) {
+    let center = area.center();
+    if over {
+        ui.painter().rect_filled(
+            Rect::from_center_size(center, Vec2::new(area.width().min(460.0), 46.0)),
+            CornerRadius::same(theme::RADIUS),
+            Color32::from_black_alpha(200),
+        );
+    }
+    let line = |offset: f32, text: &str, size: f32| {
+        ui.painter().text(
+            center + Vec2::new(0.0, offset),
+            egui::Align2::CENTER_CENTER,
+            text,
+            theme::regular(size),
+            Color32::from_gray(0xc8),
+        );
+    };
+    line(-10.0, &t("No video"), 14.0);
+    line(
+        10.0,
+        &t("NoSlacking's video helper is missing or keeps failing."),
+        12.0,
+    );
 }
 
 /// The control bar: the name and time on the left, the buttons in the
@@ -438,6 +485,12 @@ fn control_bar(
             super::huddle_camera::camera_button(&mut row, palette, controls.camera, look)
         {
             actions.push(Action::Huddle(huddles::Action::Camera(action)));
+        }
+        #[cfg(feature = "huddle-share")]
+        if let Some(action) =
+            super::huddle_share::share_button(&mut row, palette, controls.sharing, look)
+        {
+            actions.push(Action::Huddle(huddles::Action::Share(action)));
         }
     }
     let leave = call_bar::leave_button(&mut row, palette, look);
@@ -497,7 +550,7 @@ fn info(ui: &egui::Ui, palette: &Palette, controls: &Controls, room: Rect) {
 
 /// One camera: the picture filling the tile, or the person's face; their
 /// name, muted mark and speaking ring.
-fn camera_tile(ui: &mut egui::Ui, palette: &Palette, rect: Rect, tile: &TileView) {
+fn camera_tile(ui: &mut egui::Ui, palette: &Palette, rect: Rect, tile: &TileView, no_video: bool) {
     let radius = CornerRadius::same(theme::RADIUS + 2);
     ui.painter()
         .rect_filled(rect, radius, Color32::from_rgb(0x2a, 0x2d, 0x33));
@@ -513,7 +566,7 @@ fn camera_tile(ui: &mut egui::Ui, palette: &Palette, rect: Rect, tile: &TileView
             let face =
                 Rect::from_center_size(rect.center() - Vec2::new(0.0, 8.0), Vec2::splat(side));
             super::paint_avatar(ui, face, tile.avatar.as_deref(), &tile.name, &tile.seed);
-            if !tile.paused {
+            if !tile.paused && !no_video {
                 // The first picture is on its way.
                 egui::Spinner::new()
                     .size(14.0)
@@ -857,6 +910,7 @@ mod tests {
             picture: None,
             tiles: Vec::new(),
             more: 0,
+            no_video: false,
             controls: Controls {
                 name: "#design".into(),
                 time: "2:17".into(),
@@ -864,6 +918,8 @@ mod tests {
                 mic,
                 #[cfg(feature = "huddle-camera")]
                 camera: crate::huddle_camera::Cam::Off,
+                #[cfg(feature = "huddle-share")]
+                sharing: crate::huddle_share::Sharing::Off,
             },
         }
     }
@@ -940,6 +996,24 @@ mod tests {
             pressed(&view(true, Mic::Muted), egui::Key::O),
             vec![huddles::Action::Camera(CamAction::On)]
         );
+    }
+
+    #[cfg(feature = "huddle-share")]
+    #[test]
+    fn the_share_shortcut_works_in_the_call_window() {
+        use crate::huddle_share::{ShareAction, Sharing};
+        assert_eq!(
+            pressed(&view(true, Mic::Muted), egui::Key::E),
+            vec![huddles::Action::Share(ShareAction::Start)]
+        );
+        let mut sharing = view(true, Mic::Muted);
+        sharing.controls.sharing = Sharing::On;
+        assert_eq!(
+            pressed(&sharing, egui::Key::E),
+            vec![huddles::Action::Share(ShareAction::Stop)]
+        );
+        // Joining: no Share yet.
+        assert_eq!(pressed(&view(false, Mic::Muted), egui::Key::E), vec![]);
     }
 
     #[test]

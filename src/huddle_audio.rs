@@ -59,8 +59,8 @@ pub mod dtls;
 pub mod encoder;
 #[cfg(feature = "huddle-video")]
 pub mod gallery;
-#[cfg(feature = "huddle-video")]
-pub mod hardware;
+#[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
+pub mod helper;
 pub mod jitter;
 pub mod join;
 pub mod media;
@@ -72,6 +72,10 @@ pub mod roster;
 #[cfg(feature = "huddle-video")]
 pub mod screen;
 pub mod sdp;
+#[cfg(feature = "huddle-share")]
+pub mod share;
+#[cfg(feature = "huddle-share")]
+pub mod share_send;
 pub mod signaling;
 pub mod speaker;
 pub mod turn;

@@ -2082,6 +2082,11 @@ impl Worker {
                 self.huddle_audio.set_camera(on);
                 return;
             }
+            #[cfg(feature = "huddle-share")]
+            crate::people::Command::ShareHuddle { request } => {
+                self.huddle_audio.share(request);
+                return;
+            }
             other => other,
         };
         if let Some(command) = super::people::call(client, team.clone(), command, sink) {

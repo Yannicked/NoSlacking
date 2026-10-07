@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.98"
 license = "MIT"
 publish = false
-description = "NoSlacking's hardware video helper: decodes H.264 on the GPU, in a process of its own"
+description = "NoSlacking's video helper: decodes H.264 on the GPU or in software, in a process of its own"
 repository = "https://github.com/Yannicked/NoSlacking"
 
 [lib]
@@ -18,6 +18,13 @@ path = "src/main.rs"
 
 [dependencies]
 noslacking-video-ipc = { path = "../video-ipc" }
+# H.264 decoded in software where the GPU cannot (or is not wanted): pure
+# Rust (rusty_h264, BSD-2-Clause; the decoder itself forbids unsafe, its
+# SIMD kernels in rusty_h264-accel, the `asm` feature, are intrinsics
+# behind runtime CPU checks, no assembly or C). Its default features are
+# off: they would install its own global allocator. Here rather than in
+# the app since it reads strangers' streams; see src/software.rs.
+rusty_h264-decoder = { version = "0.16", default-features = false, features = ["std", "asm"] }
 
 # VA-API, Linux's video acceleration API. libva is opened at run time
 # (libloading, ISC), never linked: the helper builds without libva's
@@ -34,18 +41,18 @@ libc = "0.2.189"
 cros-codecs = { version = "0.0.6", default-features = false }
 
 [dev-dependencies]
-# The tests hash decoded pictures to compare them with the software
-# decoder's.
+# The tests hash decoded pictures to compare them with ffmpeg's.
 sha2 = "0.11"
-# The benchmark (examples/bench.rs) and the GPU tests set the hardware
-# against the app's software decoder; the same version and features as
-# the app's.
-rusty_h264-decoder = { version = "0.16", default-features = false, features = ["std", "asm"] }
+# The encoding benchmark (examples/encode.rs) sets the GPU encoder against
+# the app's software one, set up the same way.
+rusty_h264-encoder = { version = "0.16", default-features = false, features = ["std", "asm"] }
+rusty_h264-common = { version = "0.16", default-features = false, features = ["std", "asm"] }
 
 [lints.rust]
 # This crate is where the unsafe code lives that the app forbids: the
-# calls into libva. Everything else in it is denied unsafe code, and the
-# one module that needs it says so (`#[allow(unsafe_code)]`).
+# calls into libva (and one fcntl). Everything else in it is denied
+# unsafe code, and the modules that need it say so
+# (`#[allow(unsafe_code)]`).
 unsafe_code = "deny"
 missing_docs = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }

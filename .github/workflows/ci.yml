@@ -32,7 +32,7 @@ jobs:
       - name: GUI build dependencies and packaging validators
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake desktop-file-utils appstream libclang-dev
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake desktop-file-utils appstream libclang-dev libpipewire-0.3-dev
       - name: Desktop entry
         run: desktop-file-validate packaging/applications/cloud.yannick.NoSlacking.desktop
       # The project has no public homepage yet; drop the override once
@@ -42,7 +42,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Formatting
         run: cargo fmt --all --check
-      # --workspace: the app, and the hardware video helper and its
+      # --workspace: the app, and the video helper and its
       # protocol under crates/.
       - name: Clippy (default features)
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -67,6 +67,8 @@ jobs:
         run: rustup toolchain install
       # libclang-dev: the all-features build's camera (nokhwa) generates its
       # V4L2 bindings with bindgen, which loads libclang.
+      # libpipewire-0.3-dev: the all-features build's screen share
+      # (pipewire) generates its bindings against PipeWire's headers.
       # libssl-dev: huddles' DTLS links the system's OpenSSL on Linux;
       # macOS and Windows build their own (Perl, and NASM if the runner
       # has it, else OpenSSL's C code alone).
@@ -74,7 +76,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake libclang-dev
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake libclang-dev libpipewire-0.3-dev
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Linux is linted in `quality`; the macOS and Windows `cfg` code
       # (keyring stores, single instance, the URL scheme) only here.

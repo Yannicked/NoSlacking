@@ -45,6 +45,7 @@ fn the_helper_answers_over_its_pipes_and_ends_when_they_close() {
             codec: Codec::H264,
             width: 320,
             height: 180,
+            hardware: true,
         },
     ) else {
         panic!("a decoder");
@@ -57,7 +58,9 @@ fn the_helper_answers_over_its_pipes_and_ends_when_they_close() {
             data: vec![0, 0, 0, 1, 0x65, 0x88],
         },
     );
-    assert!(matches!(picture, Reply::Picture(p) if (p.width, p.height) == (320, 180)));
+    assert!(
+        matches!(picture, Reply::Picture(p) if (p.planes.width, p.planes.height) == (320, 180))
+    );
     // Shown at half size: the pictures come at half size.
     assert_eq!(
         call(
@@ -78,7 +81,10 @@ fn the_helper_answers_over_its_pipes_and_ends_when_they_close() {
             data: vec![0, 0, 0, 1, 0x41, 0x88],
         },
     );
-    assert!(matches!(picture, Reply::Picture(p) if (p.width, p.height) == (160, 90)));
+    assert!(matches!(
+        picture,
+        Reply::Picture(p) if (p.planes.width, p.planes.height) == (160, 90) && p.source == (320, 180)
+    ));
     // Closing its input ends it, cleanly.
     input.flush().expect("flushed");
     drop(input);
@@ -87,18 +93,53 @@ fn the_helper_answers_over_its_pipes_and_ends_when_they_close() {
 }
 
 #[test]
-fn without_hardware_the_welcome_lists_nothing() {
+fn without_hardware_the_welcome_lists_nothing_and_software_decodes() {
     let mut child = helper("none");
     let mut input = child.stdin.take().expect("stdin");
     let mut output = BufReader::new(child.stdout.take().expect("stdout"));
-    let hello = Request::Hello {
-        version: ipc::VERSION,
+    let mut call = |seq: u32, request: Request| {
+        ipc::write_request(&mut input, seq, &request).expect("sent");
+        let (got, reply) = ipc::read_reply(&mut output)
+            .expect("read")
+            .expect("a reply");
+        assert_eq!(got, seq);
+        reply
     };
-    ipc::write_frame(&mut input, 1, &hello.encode()).expect("sent");
-    let (_, reply) = ipc::read_reply(&mut output)
-        .expect("read")
-        .expect("a reply");
-    assert!(matches!(reply, Reply::Welcome { capabilities, .. } if capabilities.is_empty()));
+    let welcome = call(
+        1,
+        Request::Hello {
+            version: ipc::VERSION,
+        },
+    );
+    assert!(matches!(welcome, Reply::Welcome { capabilities, .. } if capabilities.is_empty()));
+    let Reply::Opened { id } = call(
+        2,
+        Request::OpenDecoder {
+            codec: Codec::H264,
+            width: 480,
+            height: 480,
+            hardware: true,
+        },
+    ) else {
+        panic!("a decoder");
+    };
+    let frames = noslacking_video::nal::access_units(include_bytes!(
+        "../../../src/huddle_audio/fixtures/camera-480x480.h264"
+    ));
+    for (seq, frame) in (3..).zip(&frames[..3]) {
+        let picture = call(
+            seq,
+            Request::Decode {
+                id,
+                keyframe: noslacking_video::nal::is_keyframe(frame),
+                data: frame.clone(),
+            },
+        );
+        assert!(
+            matches!(&picture, Reply::Picture(p) if !p.hardware && p.source == (480, 480)),
+            "{picture:?}"
+        );
+    }
     drop(input);
     assert!(child.wait().expect("it ends").success());
 }
@@ -110,7 +151,7 @@ fn the_helper_says_its_version_and_probes() {
         .output()
         .expect("runs");
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("protocol 2"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("protocol 3"));
     let output = Command::new(env!("CARGO_BIN_EXE_noslacking-video"))
         .arg("--probe")
         .env("NOSLACKING_VIDEO_BACKEND", "none")
