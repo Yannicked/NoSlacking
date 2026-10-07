@@ -22,7 +22,7 @@
 //! for 15 a second beside everything else.
 //!
 //! [`Encoder`] is what a sender holds: the GPU's encoder through the
-//! video helper ([`super::hardware`]) when the setting is on and the
+//! video helper ([`super::helper`]) when the setting is on and the
 //! helper encodes the size, else this one. A GPU that fails, a helper
 //! that crashes or hangs, or a stream from it that is not what was asked
 //! hands over to software at once, the picture in hand encoded again
