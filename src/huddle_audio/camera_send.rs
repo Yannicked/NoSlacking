@@ -817,6 +817,91 @@ fn send(
     ending
 }
 
+/// Our encoded pictures on their way into the peer, a huddle's or a
+/// Teams call's: each written on its line, from a keyframe on. Until one
+/// has gone out, after a picture that was not sent, and whenever sending
+/// starts again ([`Self::restart`]), pictures are held back until a
+/// keyframe, since what follows would refer to one the far end never
+/// got; the encoder is asked for one meanwhile.
+#[derive(Debug, Default)]
+pub struct VideoSender {
+    /// The last picture went out: the next need not be a keyframe.
+    flowing: bool,
+    /// Pictures sent.
+    pub sent: u64,
+    /// Their bytes.
+    pub bytes: u64,
+    /// Pictures held back.
+    pub held: u64,
+}
+
+impl VideoSender {
+    /// The next picture sent must be a keyframe: sending starts (again).
+    pub fn restart(&mut self) {
+        self.flowing = false;
+    }
+
+    /// Writes `frame` on line `mid` of `rtc` as H.264 at `pt` while
+    /// `live` (sending, connected, the far end taking it), asking
+    /// `control` for a keyframe while one is needed and live. True when
+    /// it was the first picture sent.
+    pub fn send(
+        &mut self,
+        rtc: &mut str0m::Rtc,
+        mid: str0m::media::Mid,
+        pt: Option<str0m::media::Pt>,
+        frame: VideoFrame,
+        live: bool,
+        control: &SendControl,
+    ) -> bool {
+        use str0m::media::{Frequency, MediaTime};
+        if live && !self.flowing && !frame.keyframe {
+            control.want_keyframe();
+        }
+        let bytes = frame.data.len() as u64;
+        let time = MediaTime::new(frame.time, Frequency::NINETY_KHZ);
+        let written = (live && (self.flowing || frame.keyframe))
+            .then_some(pt)
+            .flatten()
+            .and_then(|pt| {
+                rtc.writer(mid)
+                    .map(|writer| writer.write(pt, frame.at, time, frame.data))
+            });
+        self.flowing = matches!(written, Some(Ok(())));
+        match written {
+            Some(Ok(())) => {
+                self.sent += 1;
+                self.bytes += bytes;
+            }
+            Some(Err(error)) => {
+                log::debug!("media: could not send a picture: {error}");
+                self.held += 1;
+            }
+            None => self.held += 1,
+        }
+        self.flowing && self.sent == 1
+    }
+}
+
+/// The H.264 payload type to send at, of those `rtc` negotiated on
+/// `mid`: constrained baseline in packetization mode 1, as Chime's
+/// receivers take it, or any mode-1 H.264 if that is not there. Read
+/// once per negotiation, not per picture.
+pub fn h264_pt(rtc: &mut str0m::Rtc, mid: str0m::media::Mid) -> Option<str0m::media::Pt> {
+    let writer = rtc.writer(mid)?;
+    let params: Vec<_> = writer
+        .payload_params()
+        .filter(|p| {
+            p.spec().codec == str0m::format::Codec::H264
+                && p.spec().format.packetization_mode == Some(1)
+        })
+        .collect();
+    let best = params
+        .iter()
+        .find(|p| p.spec().format.profile_level_id == Some(0x42e01f));
+    best.or(params.first()).map(|p| p.pt())
+}
+
 /// What a session is handed to send our camera (or a share) with.
 #[derive(Debug)]
 pub struct CameraUplink {
@@ -842,6 +927,40 @@ mod tests {
     use noslacking_video_ipc::{CameraChoice, CaptureProblem, Reply, Request};
 
     const FRAME: Duration = Duration::from_millis(33);
+
+    /// Pictures wait for a keyframe at the start, after one that could
+    /// not go and whenever sending starts again; a keyframe is asked for
+    /// only while live.
+    #[test]
+    fn pictures_are_held_back_until_a_keyframe() {
+        let frame = |keyframe: bool| VideoFrame {
+            data: vec![0, 0, 0, 1, 0x65],
+            keyframe,
+            time: 0,
+            at: Instant::now(),
+        };
+        // A peer with no line: nothing can be written.
+        let mut rtc = str0m::RtcConfig::new()
+            .set_crypto_provider(Arc::new(super::super::dtls::provider()))
+            .build(Instant::now());
+        let mid = str0m::media::Mid::from("1");
+        let pt = Some(str0m::media::Pt::from(108));
+        let control = SendControl::default();
+        let mut sender = VideoSender::default();
+
+        let first = sender.send(&mut rtc, mid, pt, frame(false), false, &control);
+        assert!(!first);
+        assert!(!control.keyframe_wanted(), "not asked while not live");
+        let first = sender.send(&mut rtc, mid, pt, frame(false), true, &control);
+        assert!(!first);
+        assert!(control.take_keyframe(), "asked for once live");
+        // A keyframe with nowhere to go is held too, and the next must be
+        // one again.
+        let first = sender.send(&mut rtc, mid, pt, frame(true), true, &control);
+        assert!(!first);
+        assert!(!control.keyframe_wanted());
+        assert_eq!((sender.sent, sender.held), (0, 3));
+    }
 
     #[test]
     fn the_chosen_camera_is_started_by_where_it_is_now() {
