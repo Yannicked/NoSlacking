@@ -430,11 +430,14 @@ pub fn answer_setup(offer: Setup) -> Setup {
 /// mids and labels its side keys streams by.
 pub fn offer(local: &LocalMedia) -> String {
     let (address, port) = media_address(local);
+    // More cameras' lines before the data line, which comes last, as the
+    // web client orders them (recorded); after it, the meeting took the
+    // lines but neither answered on the data channel nor sent audio.
     let mut mids = vec!["0", "1", "2"];
+    mids.extend(local.receive_cameras.iter().map(String::as_str));
     if local.data_ssrc.is_some() {
         mids.push("3");
     }
-    mids.extend(local.receive_cameras.iter().map(String::as_str));
 
     let mut out = String::new();
     session_part(&mut out, local, &mids);
@@ -559,12 +562,12 @@ pub fn offer(local: &LocalMedia) -> String {
         push(&mut out, &format!("a=label:{label}"));
     }
 
-    if let Some(ssrc) = local.data_ssrc {
-        data_line(&mut out, local, "3", ssrc, setup_text(local.setup), false);
-    }
     for mid in &local.receive_cameras {
         let line = receiving_camera(mid, local.video_pt, local.video_rtx);
         video_line(&mut out, local, &line, setup_text(local.setup), false);
+    }
+    if let Some(ssrc) = local.data_ssrc {
+        data_line(&mut out, local, "3", ssrc, setup_text(local.setup), false);
     }
     out
 }
@@ -1840,7 +1843,15 @@ mod tests {
             ..local()
         };
         let sdp = offer(&local);
-        assert!(sdp.contains("a=group:BUNDLE 0 1 2 3 4 5\r\n"), "{sdp}");
+        // The data line last, as the web client has it.
+        assert!(sdp.contains("a=group:BUNDLE 0 1 2 4 5 3\r\n"), "{sdp}");
+        let order: Vec<String> = read(&sdp)
+            .expect("reads")
+            .lines
+            .into_iter()
+            .map(|l| l.mid)
+            .collect();
+        assert_eq!(order, ["0", "1", "2", "4", "5", "3"]);
         let offered = read(&sdp).expect("our offer reads back");
         let extra: Vec<(&str, Direction)> = offered
             .lines
