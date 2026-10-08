@@ -146,7 +146,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         thread: Some(ts.clone()),
                         enter_sends: settings.enter_sends,
                         focus,
-                        channel_name: Some(channel_name.clone()),
+                        // Teams has no "also send to the channel".
+                        channel_name: (!workspace.info.is_teams()).then(|| channel_name.clone()),
                         uploads: transfers,
                     };
                     let before = taken.draft.text.clone();

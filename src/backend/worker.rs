@@ -1188,6 +1188,17 @@ impl Worker {
     }
 
     fn load_thread(&self, team: String, channel: String, ts: Ts) {
+        #[cfg(feature = "teams")]
+        if let Some(session) = self.teams_session(&team) {
+            tokio::spawn(super::teams::thread(
+                session.client.clone(),
+                team,
+                channel,
+                ts,
+                session.sink.clone(),
+            ));
+            return;
+        }
         if let Some((client, sink)) = self.slack(&team) {
             tokio::spawn(thread(client, team, channel, ts, sink));
         } else {
@@ -1211,6 +1222,7 @@ impl Worker {
                     client_msg_id: outgoing.client_msg_id,
                     me: session.workspace.user_id.clone(),
                     me_name: session.client.own_name(),
+                    thread: outgoing.thread,
                 };
                 tokio::spawn(super::teams::send(
                     session.client.clone(),

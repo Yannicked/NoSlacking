@@ -403,7 +403,9 @@ pub async fn history(
             if !senders.is_empty() {
                 sink.send(people_event(&client, &team, senders, &[]));
             }
-            let translated: Vec<_> = page.messages.iter().filter_map(translate_message).collect();
+            let mut translated: Vec<_> =
+                page.messages.iter().filter_map(translate_message).collect();
+            crate::backend::teams_translate::thread_posts(&mut translated);
             name_the_rest(&client, &team, &translated, &named, &sink);
             sink.send(Event::History {
                 team,
@@ -529,6 +531,56 @@ pub async fn open(client: TeamsClient, team: String, me: String, users: Vec<Stri
     sink.send(Event::Convos {
         team,
         event: crate::convos::Event::Opened { channel: chat },
+    });
+}
+
+/// A channel post's thread, `post` in `channel`: its replies from the
+/// post's reply chain, the post first, every reply's thread set to it,
+/// as Slack answers for a thread. A reply chain that cannot be read (the
+/// address is the web client's, not yet seen in a recording) falls back
+/// to the replies the channel's newest messages hold.
+pub async fn thread(client: TeamsClient, team: String, channel: String, post: Ts, sink: Sink) {
+    let post_id = ts_to_teams_id(&post);
+    let chain = match client.get_replies(&channel, &post_id, PAGE).await {
+        Ok(page) => Ok(page),
+        Err(error) => {
+            log::info!("could not read a Teams post's replies ({error:?}); looking in the channel");
+            client.get_messages(&channel, None, PAGE).await
+        }
+    };
+    let page = match chain {
+        Ok(page) => page,
+        Err(error) => {
+            log::warn!("could not read a Teams post's thread: {error:?}");
+            sink.send(Event::Error(crate::failure::Problem {
+                doing: crate::failure::Doing::LoadThread,
+                failure: error,
+            }));
+            return;
+        }
+    };
+    let senders = senders(&page.messages);
+    let named: std::collections::HashSet<String> = senders.iter().map(|u| u.id.clone()).collect();
+    if !senders.is_empty() {
+        sink.send(people_event(&client, &team, senders, &[]));
+    }
+    let mut messages: Vec<crate::model::Message> = page
+        .messages
+        .iter()
+        .filter_map(translate_message)
+        .filter(|m| m.ts == post || m.thread_ts.as_ref() == Some(&post))
+        .collect();
+    messages.sort_by(|a, b| a.ts.cmp(&b.ts));
+    for message in &mut messages {
+        message.thread_ts = Some(post.clone());
+    }
+    crate::backend::teams_translate::thread_posts(&mut messages);
+    name_the_rest(&client, &team, &messages, &named, &sink);
+    sink.send(Event::Thread {
+        team,
+        channel,
+        ts: post,
+        messages,
     });
 }
 
@@ -674,6 +726,8 @@ pub struct Post {
     pub me: String,
     /// Your name, which Teams shows with the message, if known.
     pub me_name: Option<String>,
+    /// The channel post this replies to, if it is a reply.
+    pub thread: Option<Ts>,
 }
 
 impl Post {
@@ -767,6 +821,7 @@ pub async fn send(client: TeamsClient, post: Post, sink: Sink) {
     let result = client
         .send_message(
             &post.channel,
+            post.thread.as_ref().map(ts_to_teams_id).as_deref(),
             &content,
             post.client_msg_id.as_deref(),
             &post.author(),
@@ -812,6 +867,11 @@ fn posted(
         }),
         client_message_id: post.client_msg_id.clone(),
         ..Default::default()
+    })
+    .map(|mut message| {
+        // A reply shows in its thread at once.
+        message.thread_ts.clone_from(&post.thread);
+        message
     })
     .ok_or(Failure::NoMessage)
 }
@@ -1181,7 +1241,22 @@ mod tests {
             client_msg_id: client_msg_id.map(str::to_owned),
             me: "me".into(),
             me_name: None,
+            thread: None,
         }
+    }
+
+    #[test]
+    fn a_reply_shows_in_its_thread_at_once() {
+        let mut reply = post(None);
+        reply.thread = Some(teams_id_to_ts("1700000000000"));
+        let message = posted(
+            Some("1700000000999".into()),
+            &reply,
+            crate::teams::html::wire_to_teams("me too"),
+        )
+        .expect("a message");
+        assert!(message.is_reply());
+        assert_eq!(message.thread_ts, Some(teams_id_to_ts("1700000000000")));
     }
 
     #[test]

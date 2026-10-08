@@ -56,6 +56,20 @@ mention). Mentions are `<at id="n">` tags plus a `mentions[]` array.
 Replies exist only in channels ("posts with replies"); chats have
 quote-replies (`replyWithQuote`) but no threads.
 
+In the chat service the Teams clients use (not Graph), a mention is
+`<span itemtype="http://schema.skype.com/Mention" itemscope=""
+itemid="n">Name</span>` and `properties.mentions` is a JSON array as
+text: `[{"@type":"http://schema.skype.com/Mention","itemid":n,
+"mri":"8:…","mentionType":"person","displayName":"Name"}]`; the web
+client splits a name into one span per word, each its own entry with the
+same MRI (recorded, received). A channel reply lives in its post's
+reply chain, `19:…@thread.tacv2;messageid={post}` (in a message's
+`conversationLink`; live events also say `parentmessageid`, which a post
+gives as its own id); its replies are read from and posted to
+`conversations/{channel};messageid={post}/messages`, the `;messageid=`
+left unencoded (from the web client's code; no work-account traffic has
+been recorded yet).
+
 Sources:
 [chatMessage](https://learn.microsoft.com/graph/api/resources/chatmessage),
 [list chats](https://learn.microsoft.com/graph/api/chat-list),

@@ -663,6 +663,13 @@ impl TeamsClient {
 
     /// A conversation's address on the chat service; its id holds `:` and
     /// `@`, so it is escaped, as the messages page always was.
+    /// A channel post's reply chain: the channel with `;messageid=` and
+    /// the post's id, which stays as it is (encoded, Teams would not know
+    /// it), as the web client addresses a post's replies.
+    fn reply_chain_url(&self, channel: &str, post: &str) -> String {
+        format!("{};messageid={post}", self.conversation_url(channel))
+    }
+
     fn conversation_url(&self, chat_id: &str) -> String {
         format!(
             "{}/v1/users/ME/conversations/{}",
@@ -719,10 +726,29 @@ impl TeamsClient {
                 limit
             ),
         };
+        self.messages_at(&url).await
+    }
 
+    /// The replies to the post `post` of the channel `channel`, newest
+    /// first as any history, from its reply chain.
+    pub async fn get_replies(
+        &self,
+        channel: &str,
+        post: &str,
+        limit: usize,
+    ) -> Result<HistoryPage, Failure> {
+        let url = format!(
+            "{}/messages?pageSize={limit}",
+            self.reply_chain_url(channel, post)
+        );
+        self.messages_at(&url).await
+    }
+
+    /// A page of messages from `url`.
+    async fn messages_at(&self, url: &str) -> Result<HistoryPage, Failure> {
         let resp = self
             .authed_skype_request(|http, token| {
-                http.get(&url)
+                http.get(url)
                     .header("Authentication", format!("skypetoken={}", token))
             })
             .await?;
@@ -767,13 +793,25 @@ impl TeamsClient {
     pub async fn send_message(
         &self,
         chat_id: &str,
+        reply_to: Option<&str>,
         content: &crate::teams::html::Outgoing,
         client_message_id: Option<&str>,
         me: &Author,
     ) -> Result<Option<String>, Failure> {
-        let url = format!("{}/messages", self.conversation_url(chat_id));
+        // A reply goes to its post's reply chain, which names the post in
+        // the conversation id too, as the web client writes it.
+        let (url, conversation) = match reply_to {
+            Some(post) => (
+                format!("{}/messages", self.reply_chain_url(chat_id, post)),
+                format!("{chat_id};messageid={post}"),
+            ),
+            None => (
+                format!("{}/messages", self.conversation_url(chat_id)),
+                chat_id.to_owned(),
+            ),
+        };
 
-        let mut body = message_body(chat_id, content, me);
+        let mut body = message_body(&conversation, content, me);
         if let Some(id) = client_message_id {
             body["clientmessageid"] = numeric_message_id(id).into();
         }

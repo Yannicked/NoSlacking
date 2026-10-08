@@ -300,6 +300,17 @@ impl WorkspaceState {
         }
     }
 
+    /// Whether messages in `channel` can be replied to in a thread: any
+    /// Slack conversation, and a Microsoft Teams channel, whose posts have
+    /// replies (Teams chats have none).
+    pub fn threads_in(&self, channel: &str) -> bool {
+        self.info.offers(crate::model::Ability::Threads)
+            || (self.info.is_teams()
+                && self
+                    .conversation(channel)
+                    .is_some_and(|c| c.kind == ConversationKind::Channel))
+    }
+
     /// A conversation named as running text names it: a Slack channel
     /// with its `#` ("#design"), a Microsoft Teams channel as Teams writes
     /// it, plainly ("General"), a direct message by who is in it.

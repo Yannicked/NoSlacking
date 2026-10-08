@@ -228,6 +228,44 @@ pub struct Message {
     /// sent from here carries back.
     #[serde(default, rename = "clientmessageid")]
     pub client_message_id: Option<String>,
+    /// Where the message lives: `…/conversations/{id}`, and for a reply
+    /// in a channel `…/conversations/{channel};messageid={post}`.
+    #[serde(default, rename = "conversationLink")]
+    pub conversation_link: Option<String>,
+    /// The post a channel message belongs to: its own id for the post
+    /// itself (live events say this; history says it in the link).
+    #[serde(default, rename = "parentmessageid")]
+    pub parent_message_id: Option<serde_json::Value>,
+}
+
+impl Message {
+    /// The id of the channel post this message replies to; `None` for a
+    /// post, and for anything in a chat. Teams names it in the message's
+    /// link (`;messageid={post}`) or its `parentmessageid`, which a post
+    /// gives as its own id.
+    pub fn post_id(&self) -> Option<String> {
+        let from_link = self
+            .conversation_link
+            .as_deref()
+            .and_then(|link| link.split_once(";messageid="))
+            .map(|(_, rest)| {
+                rest.split(['/', '?', ';'])
+                    .next()
+                    .unwrap_or(rest)
+                    .to_owned()
+            });
+        let from_parent = self
+            .parent_message_id
+            .as_ref()
+            .and_then(|value| match value {
+                serde_json::Value::String(text) => Some(text.clone()),
+                serde_json::Value::Number(number) => Some(number.to_string()),
+                _ => None,
+            });
+        from_link
+            .or(from_parent)
+            .filter(|post| !post.is_empty() && *post != self.id)
+    }
 }
 
 /// Message properties carrying reactions, edits, and deletions.

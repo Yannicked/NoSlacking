@@ -23,7 +23,7 @@ pub(super) fn toolbar(
     let palette = row.palette;
     let offers = |ability| row.workspace.info.offers(ability);
     let reacts = offers(Ability::Reactions);
-    let reply = !row.in_thread && offers(Ability::Threads);
+    let reply = !row.in_thread && row.workspace.threads_in(row.channel);
     let edit = me && offers(Ability::Edit);
     let quick: std::sync::Arc<Vec<String>> = if reacts {
         ui.data(|d| d.get_temp(crate::ui::quick_reactions_id()))
@@ -281,7 +281,10 @@ pub(super) fn context_menu(
             });
             ui.close();
         }
-        if !row.in_thread && offers(Ability::Threads) && ui.button(t("Reply in thread")).clicked() {
+        if !row.in_thread
+            && row.workspace.threads_in(row.channel)
+            && ui.button(t("Reply in thread")).clicked()
+        {
             actions.push(Action::OpenThread {
                 channel: row.channel.to_owned(),
                 ts: message

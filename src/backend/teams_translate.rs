@@ -458,6 +458,41 @@ fn mrkdwn_escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Gives each channel post in `messages` what its replies there say: the
+/// thread's counts, the people in it and its latest reply, as Slack gives
+/// a thread's parent. A Teams history holds a channel's replies among
+/// its posts; posts with no reply here are left as they are.
+pub fn thread_posts(messages: &mut [Message]) {
+    let mut threads: std::collections::HashMap<Ts, (u32, Vec<String>, Ts)> =
+        std::collections::HashMap::new();
+    for reply in messages.iter().filter(|m| m.is_reply()) {
+        let Some(post) = reply.thread_ts.clone() else {
+            continue;
+        };
+        let entry = threads
+            .entry(post)
+            .or_insert_with(|| (0, Vec::new(), reply.ts.clone()));
+        entry.0 += 1;
+        if let Some(user) = &reply.user
+            && !entry.1.contains(user)
+        {
+            entry.1.push(user.clone());
+        }
+        if reply.ts > entry.2 {
+            entry.2 = reply.ts.clone();
+        }
+    }
+    for post in messages.iter_mut().filter(|m| !m.is_reply()) {
+        if let Some((count, users, latest)) = threads.remove(&post.ts) {
+            post.thread_ts = Some(post.ts.clone());
+            post.reply_count = count;
+            post.reply_users = users;
+            post.latest_reply = Some(latest);
+            post.replies_known = true;
+        }
+    }
+}
+
 /// Translates a Teams [`types::Conversation`] into a [`Conversation`].
 pub fn translate_conversation(conv: &types::Conversation) -> Conversation {
     let name = conv.display_name();
@@ -577,9 +612,10 @@ pub fn translate_message(msg: &types::Message) -> Option<Message> {
         bot_icon: None,
         bot_id: None,
         text: plain_text,
-        thread_ts: None,
+        // A reply in a channel belongs to its post's thread.
+        thread_ts: msg.post_id().map(|post| teams_id_to_ts(&post)),
         reply_count: 0,
-        replies_known: true,
+        replies_known: msg.post_id().is_none(),
         reply_users: Vec::new(),
         latest_reply: None,
         reactions,
@@ -731,6 +767,54 @@ fn emoji_key_name(key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn channel_message(id: &str, link: &str) -> types::Message {
+        types::Message {
+            id: id.into(),
+            from: Some("8:orgid:ann".into()),
+            content: "<p>hi</p>".into(),
+            message_type: Some("RichText/Html".into()),
+            conversation_link: Some(link.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn channel_replies_belong_to_their_post_and_posts_count_them() {
+        let channel = "https://x/v1/users/ME/conversations/19:c@thread.tacv2";
+        let post = channel_message("1700000000000", channel);
+        let reply = channel_message(
+            "1700000000500",
+            &format!("{channel};messageid=1700000000000"),
+        );
+        // Live events name the post as `parentmessageid`; a post names
+        // itself.
+        let live = types::Message {
+            parent_message_id: Some(serde_json::json!(1_700_000_000_000_u64)),
+            ..channel_message("1700000000900", channel)
+        };
+        let itself = types::Message {
+            parent_message_id: Some(serde_json::json!("1700000000000")),
+            ..channel_message("1700000000000", channel)
+        };
+        assert_eq!(post.post_id(), None);
+        assert_eq!(itself.post_id(), None);
+        assert_eq!(reply.post_id().as_deref(), Some("1700000000000"));
+        assert_eq!(live.post_id().as_deref(), Some("1700000000000"));
+
+        let mut page: Vec<Message> = [post, reply, live]
+            .iter()
+            .filter_map(translate_message)
+            .collect();
+        thread_posts(&mut page);
+        let root = &page[0];
+        assert_eq!(root.thread_ts, Some(root.ts.clone()));
+        assert_eq!(root.reply_count, 2);
+        assert_eq!(root.reply_users, ["ann"]);
+        assert_eq!(root.latest_reply, Some(teams_id_to_ts("1700000000900")));
+        assert!(page[1].is_reply() && page[2].is_reply());
+        assert!(!page[1].in_channel(), "a reply stays in its thread");
+    }
 
     #[test]
     fn reactions_round_trip_through_their_teams_keys() {

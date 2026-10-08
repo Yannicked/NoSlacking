@@ -107,7 +107,7 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
             ts: ts.clone(),
         });
     }
-    if thread && !selected.in_thread && offers(Ability::Threads) {
+    if thread && !selected.in_thread && workspace.threads_in(&channel) {
         actions.push(Action::OpenThread {
             channel: channel.clone(),
             ts: message.thread_ts.clone().unwrap_or_else(|| ts.clone()),
