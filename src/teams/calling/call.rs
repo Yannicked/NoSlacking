@@ -49,8 +49,45 @@ pub enum Control {
     /// Our camera went on (or off). The media sends it by itself; a
     /// meeting must be told it is on before it forwards it (§H.8).
     Camera(bool),
+    /// How the call window shows video now, for the sizes a meeting is
+    /// asked for.
+    View(View),
     /// End the call.
     HangUp,
+}
+
+/// How the call window shows video: closed, or open with camera tiles of
+/// a size, and the screen share large or not.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct View {
+    pub open: bool,
+    /// A tile's size in pixels; 0×0 while not known.
+    pub tile: [u32; 2],
+    /// Whether the window shows the far end's screen share.
+    pub share: bool,
+}
+
+impl View {
+    /// The size to ask for a camera at.
+    pub fn camera(self) -> super::channel::VideoFormat {
+        use super::channel::VideoFormat;
+        match (self.open, self.tile) {
+            // Not shown: the least.
+            (false, _) => VideoFormat::CAMERAS[0],
+            // Shown at a size not known yet: 720p.
+            (true, [0, _] | [_, 0]) => VideoFormat::CAMERAS[3],
+            (true, [width, height]) => VideoFormat::for_tile(width, height),
+        }
+    }
+
+    /// The size to ask for a screen share at.
+    pub fn share(self) -> super::channel::VideoFormat {
+        if self.open && self.share {
+            super::channel::VideoFormat::SCREEN
+        } else {
+            super::channel::VideoFormat::SCREEN_SMALL
+        }
+    }
 }
 
 /// What a call tells as it goes; the last is always [`CallEvent::Ended`].
@@ -233,12 +270,19 @@ async fn run_meeting(
         camera_capabilities: None,
         channel: super::channel::Channel::default(),
         camera_lines: Vec::new(),
+        view: View::default(),
+        sizes: Vec::new(),
+        share_size: 0,
         watching: Vec::new(),
         speaker: None,
         watching_share: None,
         syns: 0,
         heard: 0,
         sharing: false,
+        endpoint: endpoint.clone(),
+        own_camera: None,
+        own_share: None,
+        limits: (None, None),
     });
     call.relay = relay_for(client).await;
     let ended = call
@@ -486,6 +530,11 @@ struct InMeeting {
     channel: super::channel::Channel,
     /// Our camera lines' mids, in order: the camera's, then more.
     camera_lines: Vec<String>,
+    /// How the call window shows video.
+    view: View,
+    /// The sizes last asked for on each camera line, and on the share's.
+    sizes: Vec<u32>,
+    share_size: u32,
     /// Whose camera was last asked for on each camera line, by MRI and
     /// source id.
     watching: Vec<Option<(String, i64)>>,
@@ -500,6 +549,34 @@ struct InMeeting {
     heard: u32,
     /// Whether we share our screen, as the meeting was last told.
     sharing: bool,
+    /// Our endpoint id, by which the roster lists our own streams.
+    endpoint: String,
+    /// Our camera's and our screen share's `sourceId`s, as the roster
+    /// lists them: what the meeting names in what it wants of them.
+    own_camera: Option<i64>,
+    own_share: Option<i64>,
+    /// The bitrates last asked of our camera and our share, in bit/s.
+    limits: (Option<u32>, Option<u32>),
+}
+
+impl InMeeting {
+    /// Takes in a roster: who else is in, and our own streams' ids.
+    /// Answers whether anyone shown changed.
+    fn take_roster(&mut self, roster: &RosterUpdate) -> bool {
+        if let Some((_, us)) = roster
+            .participants
+            .iter()
+            .find(|(mri, _)| mri.eq_ignore_ascii_case(&self.me))
+        {
+            if let Some(source) = us.stream_on(&self.endpoint, super::CAMERA_LABEL) {
+                self.own_camera = Some(source);
+            }
+            if let Some(source) = us.stream_on(&self.endpoint, super::SHARE_LABEL) {
+                self.own_share = Some(source);
+            }
+        }
+        self.people.take(roster, &self.me)
+    }
 }
 
 impl InMeeting {
@@ -655,7 +732,7 @@ impl Call {
         // Who is in already: the meeting pushes only what changes after.
         if let Some(meeting) = &mut self.meeting {
             for roster in [&preheated.roster, &joined.roster].into_iter().flatten() {
-                meeting.people.take(roster, &meeting.me);
+                meeting.take_roster(roster);
             }
             let people = meeting.people.list();
             log::info!(
@@ -744,6 +821,8 @@ impl Call {
                         if let Some(meeting) = &mut self.meeting {
                             meeting.channel = super::channel::Channel::default();
                             meeting.watching = vec![None; meeting.camera_lines.len()];
+                            meeting.sizes.clear();
+                            meeting.share_size = 0;
                             meeting.watching_share = None;
                             meeting.syns = 1;
                             session.send_data(meeting.channel.syn());
@@ -773,6 +852,12 @@ impl Call {
                     }
                     Some(Control::Admit(mri)) => self.admit(&mri).await,
                     Some(Control::Camera(on)) => self.camera(on).await,
+                    Some(Control::View(view)) => {
+                        if let Some(meeting) = &mut self.meeting {
+                            meeting.view = view;
+                        }
+                        self.ask_for_video(session, tell);
+                    }
                     // Asked to stop, or whoever steered the call is gone.
                     Some(Control::HangUp) | None => {
                         session.stop();
@@ -1113,6 +1198,38 @@ impl Call {
                     keep_alive.call_leg = call_leg;
                 }
             }
+            Push::ControlVideoStreaming(control) => {
+                let Some(meeting) = &mut self.meeting else {
+                    return None;
+                };
+                for stream in &control.control_info {
+                    let Some(bitrate) = stream.max_bitrate() else {
+                        continue;
+                    };
+                    let share = if Some(stream.source_id) == meeting.own_share {
+                        true
+                    } else if Some(stream.source_id) == meeting.own_camera {
+                        false
+                    } else {
+                        log::debug!("Teams meeting: limits for a stream not ours");
+                        continue;
+                    };
+                    let last = if share {
+                        &mut meeting.limits.1
+                    } else {
+                        &mut meeting.limits.0
+                    };
+                    if last.replace(bitrate) == Some(bitrate) {
+                        continue;
+                    }
+                    session.limit(share, bitrate);
+                    log::info!(
+                        "Teams meeting: our {} to send at most {} kbit/s",
+                        if share { "screen share" } else { "camera" },
+                        bitrate / 1000
+                    );
+                }
+            }
             Push::ConversationUpdate(update) => {
                 if self.in_lobby() && update.in_call() {
                     log::info!("Teams meeting: let in from the lobby");
@@ -1148,7 +1265,7 @@ impl Call {
                     update.sequence_number
                 );
                 if let Some(meeting) = &mut self.meeting
-                    && meeting.people.take(&update, &meeting.me)
+                    && meeting.take_roster(&update)
                 {
                     let people = meeting.people.list();
                     let waiting = people.iter().filter(|p| p.waiting).count();
@@ -1432,6 +1549,8 @@ impl Call {
             .collect();
         let lines = meeting.camera_lines.len();
         meeting.watching.resize(lines, None);
+        meeting.sizes.resize(lines, 0);
+        let camera_format = meeting.view.camera();
         let wanted = with_speaker(
             assign(lines, &meeting.watching, &on),
             &on,
@@ -1439,7 +1558,9 @@ impl Call {
         );
         let mut changed = false;
         for (line, want) in wanted.iter().enumerate() {
-            if meeting.watching[line] == *want {
+            // The same camera at the same size, or still none: nothing new.
+            let same_size = want.is_none() || meeting.sizes[line] == camera_format.max_fs;
+            if meeting.watching[line] == *want && same_size {
                 continue;
             }
             let Some(stream) = remote.stream_of(&meeting.camera_lines[line]) else {
@@ -1447,7 +1568,7 @@ impl Call {
                 continue;
             };
             let source = want.as_ref().map(|(_, source)| *source);
-            let Some(request) = meeting.channel.request_video(source, stream, false) else {
+            let Some(request) = meeting.channel.request_video(source, stream, camera_format) else {
                 return;
             };
             session.send_data(request);
@@ -1459,8 +1580,9 @@ impl Call {
                     "no camera"
                 }
             );
+            meeting.sizes[line] = camera_format.max_fs;
+            changed |= meeting.watching[line] != *want;
             meeting.watching[line] = want.clone();
-            changed = true;
         }
         // Someone's screen share, on our share line.
         let sharing = meeting
@@ -1470,15 +1592,18 @@ impl Call {
             .filter(|a| !a.waiting)
             .find_map(|a| Some((a.mri, a.share?)));
         let share_stream = remote.share().and_then(|l| remote.stream_of(&l.mid));
+        let share_format = meeting.view.share();
+        let resized = sharing.is_some() && meeting.share_size != share_format.max_fs;
         if let Some(stream) = share_stream
-            && meeting.watching_share.as_ref() != Some(&sharing)
+            && (meeting.watching_share.as_ref() != Some(&sharing) || resized)
             && !(meeting.watching_share.is_none() && sharing.is_none())
             && let Some(request) = meeting.channel.request_video(
                 sharing.as_ref().map(|(_, source)| *source),
                 stream,
-                true,
+                share_format,
             )
         {
+            meeting.share_size = share_format.max_fs;
             session.send_data(request);
             log::info!(
                 "Teams meeting: asked for {}",
@@ -1969,5 +2094,25 @@ mod tests {
         assert_eq!(with_speaker(shown.clone(), &on, Some("c")), shown);
         // Nor does one already shown.
         assert_eq!(with_speaker(shown.clone(), &on, Some("a")), shown);
+    }
+
+    #[test]
+    fn cameras_are_asked_for_at_the_size_they_are_shown() {
+        let closed = View::default();
+        assert_eq!(closed.camera().max_fs, 240);
+        assert_eq!(closed.share().max_fs, 920);
+        let open = View {
+            open: true,
+            tile: [640, 360],
+            share: true,
+        };
+        assert_eq!(open.camera().max_fs, 920);
+        assert_eq!(open.share().max_fs, 8160);
+        let unknown = View {
+            open: true,
+            ..View::default()
+        };
+        assert_eq!(unknown.camera().max_fs, 3600);
+        assert_eq!(unknown.share().max_fs, 920);
     }
 }

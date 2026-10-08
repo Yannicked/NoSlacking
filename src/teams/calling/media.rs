@@ -596,6 +596,12 @@ enum Command {
     Release(oneshot::Sender<Held>),
     /// Send this on the meeting's data channel.
     Data(Vec<u8>),
+    /// Keep what the camera's (or, `share`, the share's) line sends
+    /// within this many bit/s.
+    Limit {
+        share: bool,
+        bitrate: u32,
+    },
 }
 
 /// A running media session. Dropping it stops the session too, without
@@ -677,6 +683,12 @@ impl MediaSession {
     /// Asks the session to stop; [`MediaEvent::Stopped`] follows.
     pub fn stop(&self) {
         let _ = self.commands.send(Command::Stop);
+    }
+
+    /// Keeps what our camera (or, `share`, our screen share) sends within
+    /// `bitrate` bit/s, as a meeting asks.
+    pub fn limit(&self, share: bool, bitrate: u32) {
+        let _ = self.commands.send(Command::Limit { share, bitrate });
     }
 
     /// Sends `message` on the meeting's data channel, once it is open.
@@ -2117,6 +2129,16 @@ impl Session {
             Some(Command::Stop) | None => {
                 log::info!("media: stopping");
                 self.over.get_or_insert(Ok(()));
+            }
+            Some(Command::Limit { share, bitrate }) => {
+                let line = if share {
+                    &mut self.share
+                } else {
+                    &mut self.video
+                };
+                if let Some(line) = line {
+                    line.limit(bitrate);
+                }
             }
             Some(Command::Data(message)) => {
                 let written = self

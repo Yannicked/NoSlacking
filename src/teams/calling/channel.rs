@@ -31,12 +31,66 @@ const HEADER: usize = 16;
 pub const SERVER: i32 = -4;
 /// Our id until the server gives one.
 const UNNAMED: i32 = -2;
-/// What we ask for in an `sr`: H.264 up to 1080p, as the web client
-/// asks (recorded); for a screen share, 15 pictures a second.
-const VIDEO_FORMAT: &str =
-    r#"{"max-fs":8160,"max-mbps":244800,"max-fps":3000,"profile-level-id":"64001f"}"#;
-const SCREEN_FORMAT: &str =
-    r#"{"max-fs":8160,"max-mbps":135000,"max-fps":1500,"profile-level-id":"64001f"}"#;
+/// The size of video an `sr` asks for: at most `max_fs` macroblocks a
+/// picture and `max_mbps` a second, `max_fps` hundredths of a picture a
+/// second, as the web client asks (recorded).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoFormat {
+    pub max_fs: u32,
+    pub max_mbps: u32,
+    pub max_fps: u32,
+}
+
+impl VideoFormat {
+    /// A camera's sizes, smallest first: about 320×180, 640×360,
+    /// 960×540, 1280×720 and 1920×1080, at 30 a second (recorded).
+    pub const CAMERAS: [Self; 5] = [
+        Self::camera(240, 8437),
+        Self::camera(920, 33750),
+        Self::camera(2040, 67500),
+        Self::camera(3600, 108_000),
+        Self::camera(8160, 244_800),
+    ];
+    /// A screen share, full size at 15 a second (recorded).
+    pub const SCREEN: Self = Self {
+        max_fs: 8160,
+        max_mbps: 135_000,
+        max_fps: 1500,
+    };
+    /// A screen share not watched: small.
+    pub const SCREEN_SMALL: Self = Self {
+        max_fs: 920,
+        max_mbps: 33750,
+        max_fps: 1500,
+    };
+
+    const fn camera(max_fs: u32, max_mbps: u32) -> Self {
+        Self {
+            max_fs,
+            max_mbps,
+            max_fps: 3000,
+        }
+    }
+
+    /// The smallest camera size that fills a tile of `width`×`height`
+    /// pixels.
+    pub fn for_tile(width: u32, height: u32) -> Self {
+        let macroblocks = width.div_ceil(16) * height.div_ceil(16);
+        Self::CAMERAS
+            .into_iter()
+            .find(|f| f.max_fs >= macroblocks)
+            .unwrap_or(Self::CAMERAS[Self::CAMERAS.len() - 1])
+    }
+
+    fn json(self) -> serde_json::Value {
+        serde_json::json!({
+            "max-fs": self.max_fs,
+            "max-mbps": self.max_mbps,
+            "max-fps": self.max_fps,
+            "profile-level-id": "64001f",
+        })
+    }
+}
 
 /// One message of the channel: its header's parts and its messages.
 #[derive(Clone, Debug, PartialEq)]
@@ -157,13 +211,13 @@ impl Channel {
     }
 
     /// A source request: `source`'s video (a roster `sourceId`, or none)
-    /// on our receiving stream `stream`, a camera's or (`screen`) a screen
-    /// share's. `None` before the handshake is done.
+    /// on our receiving stream `stream`, at `format`. `None` before the
+    /// handshake is done.
     pub fn request_video(
         &mut self,
         source: Option<i64>,
         stream: u32,
-        screen: bool,
+        format: VideoFormat,
     ) -> Option<Vec<u8>> {
         let us = self.us?;
         self.request = if self.request == 0 {
@@ -171,8 +225,7 @@ impl Channel {
         } else {
             self.request + 2
         };
-        let format = if screen { SCREEN_FORMAT } else { VIDEO_FORMAT };
-        let format: serde_json::Value = serde_json::from_str(format).unwrap_or_default();
+        let format = format.json();
         let message = serde_json::json!({
             "type": "sr",
             "controlVideoStreaming": {
@@ -218,7 +271,10 @@ mod tests {
         assert_eq!(ours[..HEADER], syn[..HEADER]);
         assert_eq!(decode(&ours), decode(&syn));
         assert!(!channel.ready());
-        assert_eq!(channel.request_video(Some(202), 404, false), None);
+        assert_eq!(
+            channel.request_video(Some(202), 404, VideoFormat::CAMERAS[4]),
+            None
+        );
 
         // The server's ack names us 415.
         let ack = hex(concat!(
@@ -229,7 +285,9 @@ mod tests {
         assert!(channel.ready());
 
         // The first request, as recorded but for its JSON's key order.
-        let request = channel.request_video(Some(202), 404, false).expect("ready");
+        let request = channel
+            .request_video(Some(202), 404, VideoFormat::CAMERAS[4])
+            .expect("ready");
         assert_eq!(
             request[..HEADER],
             hex("100f920001000000019f01fffffffc01")[..]
@@ -245,7 +303,12 @@ mod tests {
             "64001f"
         );
         // Then none, numbered two on.
-        let none = decode(&channel.request_video(None, 404, false).expect("ready")).expect("reads");
+        let none = decode(
+            &channel
+                .request_video(None, 404, VideoFormat::CAMERAS[4])
+                .expect("ready"),
+        )
+        .expect("reads");
         assert_eq!(none.seq, 2);
         let info = &none.messages[0]["controlVideoStreaming"];
         assert_eq!(info["sequenceNumber"], 3);
@@ -298,5 +361,20 @@ mod tests {
         let ours = encode(0x0102, 0x0826, SERVER, &[serde_json::json!({})]);
         assert_eq!(ours[..6], [0x10, 0x0f, 0x92, 0x01, 0x02, 0x00]);
         assert_eq!(decode(&ours).expect("reads").seq, 0x0102);
+    }
+
+    #[test]
+    fn a_tile_gets_the_smallest_size_that_fills_it() {
+        let fs = |w, h| VideoFormat::for_tile(w, h).max_fs;
+        assert_eq!(fs(320, 180), 240);
+        assert_eq!(fs(321, 180), 920);
+        assert_eq!(fs(640, 360), 920);
+        assert_eq!(fs(960, 540), 2040);
+        assert_eq!(fs(1280, 720), 3600);
+        assert_eq!(fs(1920, 1080), 8160);
+        assert_eq!(fs(3840, 2160), 8160);
+        // The recorded pairs.
+        assert_eq!(VideoFormat::for_tile(640, 360).max_mbps, 33750);
+        assert_eq!(VideoFormat::SCREEN.max_fps, 1500);
     }
 }

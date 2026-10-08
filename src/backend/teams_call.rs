@@ -248,6 +248,20 @@ impl Caller {
         self.running = Some(running);
     }
 
+    /// What the call window shows now: in a meeting, the sizes of video
+    /// asked for follow it.
+    #[cfg(feature = "huddle-video")]
+    pub fn watch(&mut self, wish: &crate::huddle_audio::cameras::Wish) {
+        if let Some(running) = &self.running {
+            let view = crate::teams::calling::call::View {
+                open: wish.open,
+                tile: wish.tile,
+                share: wish.share.is_some(),
+            };
+            let _ = running.control.send(Control::View(view));
+        }
+    }
+
     /// Lets `user` (by the id the interface knows them by) in from the
     /// meeting's lobby.
     pub fn admit(&mut self, user: &str) {

@@ -510,6 +510,24 @@ impl RosterParticipant {
             .and_then(|s| s.get("sourceId")?.as_i64())
     }
 
+    /// The `sourceId` of the stream labelled `label` on their endpoint
+    /// `endpoint`, in the call: ours, by our endpoint id, which the
+    /// meeting names in what it wants of a stream of ours.
+    pub fn stream_on(&self, endpoint: &str, label: &str) -> Option<i64> {
+        self.endpoints
+            .iter()
+            .find(|(id, _)| id.eq_ignore_ascii_case(endpoint))?
+            .1
+            .call
+            .as_ref()?
+            .get("mediaStreams")?
+            .as_array()?
+            .iter()
+            .find(|s| s.get("label").and_then(|l| l.as_str()) == Some(label))?
+            .get("sourceId")?
+            .as_i64()
+    }
+
     /// The directions of their `main-video` streams in the call, for the
     /// log.
     pub fn camera_directions(&self) -> Vec<String> {
@@ -634,6 +652,52 @@ pub struct GroupChat {
     /// `19:meeting_…@thread.v2`.
     #[serde(deserialize_with = "nullable")]
     pub thread_id: String,
+}
+
+/// The `call/controlVideoStreaming` push: what the meeting wants of a
+/// video stream of ours while it goes out (recorded: about once a second
+/// while sharing a screen).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ControlVideoStreamingPush {
+    #[serde(deserialize_with = "nullable")]
+    pub control_video_streaming: ControlVideoStreaming,
+}
+
+/// See [`ControlVideoStreamingPush`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ControlVideoStreaming {
+    #[serde(deserialize_with = "nullable")]
+    pub sequence_number: u64,
+    #[serde(deserialize_with = "nullable")]
+    pub control_info: Vec<StreamControl>,
+}
+
+/// What the meeting wants of one stream.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StreamControl {
+    /// 0 seen.
+    #[serde(deserialize_with = "nullable")]
+    pub control: i64,
+    /// The stream's roster `sourceId`.
+    #[serde(deserialize_with = "nullable")]
+    pub source_id: i64,
+    /// `max-mbps=…;max-fps=1500;profile-level-id=42C02A;max-br=2535;…`.
+    #[serde(deserialize_with = "nullable")]
+    pub fmt_params: String,
+}
+
+impl StreamControl {
+    /// The most it may take, in bit/s (`max-br` is in kbit/s).
+    pub fn max_bitrate(&self) -> Option<u32> {
+        self.fmt_params
+            .split(';')
+            .find_map(|p| p.trim().strip_prefix("max-br="))
+            .and_then(|kbps| kbps.trim().parse::<u32>().ok())
+            .map(|kbps| kbps.saturating_mul(1000))
+    }
 }
 
 // ---------------------------------------------------------------- C.3
@@ -878,6 +942,7 @@ pub enum Push {
     CallEnd(Outcome),
     ConversationEnd(ConversationEnd),
     ConversationUpdate(ConversationUpdate),
+    ControlVideoStreaming(ControlVideoStreaming),
     /// A callback a call does not act on (`progress`,
     /// `admitParticipantSuccess`, …), by its event name.
     Other(String),
@@ -902,6 +967,9 @@ impl Push {
             "conversationUpdate" => {
                 Self::ConversationUpdate(ConversationUpdate::deserialize(body)?)
             }
+            "controlVideoStreaming" => Self::ControlVideoStreaming(
+                ControlVideoStreamingPush::deserialize(body)?.control_video_streaming,
+            ),
             "rosterUpdate" => Self::RosterUpdate(RosterUpdate::deserialize(body)?),
             "end" => Self::CallEnd(CallEndPush::deserialize(body)?.call_end),
             "conversationEnd" => Self::ConversationEnd(ConversationEnd::deserialize(body)?),
@@ -1279,5 +1347,24 @@ mod tests {
         assert_eq!(gus.camera_source(), Some(408));
         assert_eq!(gus.audio_source(), Some(407));
         assert_eq!(gus.share_source(), Some(418));
+    }
+
+    #[test]
+    fn the_meetings_limits_for_a_stream_of_ours_read() {
+        let push = Push::read(
+            "controlVideoStreaming",
+            &serde_json::json!({"controlVideoStreaming": {
+                "sequenceNumber": 2, "globalTimeStamp": "10/08/2026 12:06:46",
+                "controlInfo": [{"control": 0, "sourceId": 2293,
+                    "fmtParams": "max-mbps=135000;max-fps=1500;profile-level-id=42C02A;max-br=825;packetization-mode=1;max-fs=8160"}]
+            }, "debugContent": null}),
+        )
+        .expect("reads");
+        let Push::ControlVideoStreaming(control) = push else {
+            panic!("not a control");
+        };
+        assert_eq!(control.control_info[0].source_id, 2293);
+        assert_eq!(control.control_info[0].max_bitrate(), Some(825_000));
+        assert_eq!(StreamControl::default().max_bitrate(), None);
     }
 }

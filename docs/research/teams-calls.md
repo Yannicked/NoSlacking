@@ -1677,3 +1677,33 @@ slice.** Each keyframe arrives as NAL units 5, 7, 8 (once 5, 12, 7, 8),
 where cameras send 7, 8, 5. A decoder needs the SPS and PPS before the
 slice, so ours kept waiting for a keyframe it already had. We now put the
 parameter sets first in every keyframe, the rest after in its order.
+
+### H.11 Sizes asked for, and limits applied
+
+**Picture sizes.** The web client asks for each camera at a size to suit
+its tile, and asks again when the tile changes (recorded `max-fs` with
+`max-mbps`, 30 a second):
+
+| `max-fs` | `max-mbps` | about |
+|---|---|---|
+| 240 | 8437 | 320×180 |
+| 920 | 33750 | 640×360 |
+| 2040 | 67500 | 960×540 |
+| 3600 | 108000 | 1280×720 |
+| 8160 | 244800 | 1920×1080 |
+
+A watched screen share it asks for at 8160 and `max-mbps` 135000, 15 a
+second. We do the same from the call window's wish:
+- each camera at the smallest size that fills its tile;
+- 720p while the tile's size is not known yet;
+- the least (240) while the window is closed;
+- a share in full while it is watched, small (920) otherwise.
+
+A new request goes only when the size class changes.
+
+**Sending limits.** The `call/controlVideoStreaming` pushes name a
+stream of ours by its roster `sourceId`; we find ours under our own
+endpoint id in the roster. Their `max-br` (kbit/s) becomes the bitrate of
+that line's encoder, within its own limits (camera 1.8 Mbit/s, share
+2.5 Mbit/s). The size and frame rate limits are not applied: our encoder
+keeps its own.

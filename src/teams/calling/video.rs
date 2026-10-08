@@ -808,6 +808,22 @@ impl CallVideo {
         }
     }
 
+    /// Keeps what this line sends within `bitrate` bit/s, as a meeting
+    /// asks (its encoder's own limits still hold).
+    pub(super) fn limit(&mut self, bitrate: u32) {
+        #[cfg(feature = "huddle-camera")]
+        if let Some(camera) = &self.camera {
+            camera.control.set_bitrate(bitrate);
+            log::debug!(
+                "video: {}: sending at most {} kbit/s",
+                self.name(),
+                camera.control.bitrate() / 1000
+            );
+        }
+        #[cfg(not(feature = "huddle-camera"))]
+        let _ = bitrate;
+    }
+
     /// Makes this camera line number `line`.
     pub(super) fn set_line(&mut self, line: usize) {
         self.line = line;

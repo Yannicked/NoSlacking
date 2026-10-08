@@ -2077,6 +2077,8 @@ impl Worker {
                     self.teams_call.join_meeting(client, team, join, sink);
                 }
                 crate::people::Command::Admit { user } => self.teams_call.admit(&user),
+                #[cfg(feature = "huddle-video")]
+                crate::people::Command::WatchCall { wish } => self.teams_call.watch(&wish),
                 crate::people::Command::DeclineHuddle { room, .. } => {
                     self.teams_call.decline(&team, &room);
                 }
