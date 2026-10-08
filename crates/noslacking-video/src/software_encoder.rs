@@ -12,7 +12,6 @@ use rusty_h264_common::YuvPlanes;
 use rusty_h264_encoder::{Encoder as Rusty, EncoderConfig, Preset};
 
 use crate::backend::{Encoded, Failure};
-use crate::nal;
 
 /// A keyframe at least this often, in seconds.
 pub const IDR_EVERY_SECONDS: u32 = 4;
@@ -115,7 +114,7 @@ impl SoftwareEncoder {
             .encoder
             .encode_planes(&planes)
             .map_err(|e| Failure::broken(e.to_string()))?;
-        let keyframe = nal::types(&data).contains(&5);
+        let keyframe = noslacking_video_ipc::h264::is_keyframe(&data);
         Ok(Encoded { keyframe, data })
     }
 }
@@ -135,7 +134,7 @@ mod tests {
             let encoded = encoder.encode(&picture, n == 3).expect("encoded");
             assert_eq!(encoded.keyframe, n == 0 || n == 3, "picture {n}");
             if encoded.keyframe {
-                assert!(nal::types(&encoded.data).starts_with(&[7, 8]));
+                assert!(noslacking_video_ipc::h264::nal_types(&encoded.data).starts_with(&[7, 8]));
             }
             let back = decoder
                 .decode(&encoded.data)

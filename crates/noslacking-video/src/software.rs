@@ -129,8 +129,8 @@ mod tests {
         let mut hash = Sha256::new();
         let mut count = 0;
         let mut size = (0, 0);
-        for frame in crate::nal::access_units(stream) {
-            let keyframe = crate::nal::is_keyframe(&frame);
+        for frame in noslacking_video_ipc::h264::access_units(stream) {
+            let keyframe = noslacking_video_ipc::h264::is_keyframe(&frame);
             let decoded = decoder
                 .decode(&frame, keyframe)
                 .expect("decodes")
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn pictures_shrink_to_the_box_and_say_their_source() {
-        let frames = crate::nal::access_units(CAMERA);
+        let frames = noslacking_video_ipc::h264::access_units(CAMERA);
         let mut decoder = Software::new();
         decoder.set_output_size(160, 120);
         let decoded = decoder
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn nothing_decodes_before_a_keyframe_or_after_an_error_until_the_next() {
-        let frames = crate::nal::access_units(CAMERA);
+        let frames = noslacking_video_ipc::h264::access_units(CAMERA);
         let mut decoder = Software::new();
         // Joined mid-stream: a P frame first.
         let failure = decoder.decode(&frames[3], false).expect_err("waits");
@@ -232,7 +232,7 @@ mod tests {
     /// helper: release builds abort), and the next keyframe recovers.
     #[test]
     fn broken_frames_are_errors_and_the_next_keyframe_recovers() {
-        let frames = crate::nal::access_units(CAMERA);
+        let frames = noslacking_video_ipc::h264::access_units(CAMERA);
         let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
         let mut random = move |n: usize| {
             seed ^= seed << 13;
@@ -263,7 +263,7 @@ mod tests {
                         }
                     }
                 }
-                let keyframe = crate::nal::is_keyframe(&frame);
+                let keyframe = noslacking_video_ipc::h264::is_keyframe(&frame);
                 match decoder.decode(&frame, keyframe) {
                     Err(failure) if failure.kind == FailKind::Broken => broken += 1,
                     Ok(Some(decoded)) => assert!(decoded.check().is_ok()),

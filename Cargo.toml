@@ -164,9 +164,9 @@ sonora-simd = "0.2.0"
 # shader without unsafe in our crate. See docs/research/huddle-video.md.
 yuv = { version = "0.8.19", optional = true }
 # The messages the app and the helper exchange (decoding, and capturing
-# and encoding what we send). Plain std; the helper itself is not a
-# dependency.
-noslacking-video-ipc = { path = "crates/video-ipc", optional = true }
+# and encoding what we send), and the H.264 framing both read. Plain std
+# and small, so every build has it; the helper itself is not a dependency.
+noslacking-video-ipc = { path = "crates/video-ipc" }
 # Writes the RGBA straight into egui's pixels, for the pictures shown and
 # the camera's self-view (already in the tree through egui; no crate added).
 bytemuck = { version = "1.25", optional = true }
@@ -307,14 +307,14 @@ demo = []
 # Watching screen shares and cameras in huddles: a call window with the
 # share and the camera tiles, decoded by the noslacking-video helper
 # (which ships beside the app; without it the window says "No video").
-huddle-video = ["dep:yuv", "dep:bytemuck", "dep:noslacking-video-ipc"]
+huddle-video = ["video-helper"]
 # Sending your camera in huddles: opened only while it is on, captured
 # and encoded to H.264 by the noslacking-video helper (V4L2 on Linux,
 # nokhwa on macOS and Windows; on the GPU when it can), with a
 # self-preview in the call bar from the helper's small copy of each
 # picture: the app adds no capture or encoding dependency. No helper, no
 # camera. Independent of `huddle-video` (sending needs no decoder).
-huddle-camera = ["dep:yuv", "dep:bytemuck", "dep:noslacking-video-ipc"]
+huddle-camera = ["video-helper"]
 # Sharing your screen in huddles: a second Chime attendee (`#content`)
 # that sends only the screen, captured only while sharing and encoded
 # by the noslacking-video helper (the ScreenCast portal and PipeWire on
@@ -324,6 +324,9 @@ huddle-camera = ["dep:yuv", "dep:bytemuck", "dep:noslacking-video-ipc"]
 # sends the H.264 the helper hands it. Releases build the helper with
 # `pipewire`, so sharing works under Wayland and in the Flatpak.
 huddle-share = ["huddle-camera"]
+# Internal: what watching and sending video both need, the helper's
+# process and its pictures turned into egui's. Turned on by either.
+video-helper = ["dep:yuv", "dep:bytemuck"]
 # Microsoft Teams workspaces (src/teams/, src/backend/teams.rs). Signs
 # in as Microsoft's own Teams client, which an organisation's app
 # policies do not see; docs/research/microsoft-teams.md has the risks.

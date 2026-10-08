@@ -496,7 +496,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
 
     group(ui, palette, &t("Calls and huddles"), |ui| {
         devices(app, ui, palette);
-        #[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
+        #[cfg(feature = "video-helper")]
         hardware_video(app, ui, palette);
     });
 
@@ -560,7 +560,7 @@ fn devices(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
 }
 
 /// Settings → Huddles → Use the graphics card for video.
-#[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
+#[cfg(feature = "video-helper")]
 fn hardware_video(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     let mut hardware = app.settings.hardware_video;
     row(

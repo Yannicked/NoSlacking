@@ -21,7 +21,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use super::decode::{self, H264, Outcome, Trouble};
+#[cfg(any(test, feature = "demo"))]
+use noslacking_video_ipc::h264;
+
+use super::decode::{H264, Outcome, Trouble};
 use super::helper::Lane;
 use super::screen::Picture;
 
@@ -256,7 +259,7 @@ impl Gallery {
     }
 
     #[cfg(feature = "demo")]
-    fn tinted(&self, key: &str, yuv: &mut decode::Yuv) {
+    fn tinted(&self, key: &str, yuv: &mut noslacking_video_ipc::Planes) {
         let Some([u, v]) = lock(&self.shared.tints).get(key).copied() else {
             return;
         };
@@ -518,7 +521,7 @@ fn decode_one(
             let mut yuv = picture.yuv;
             #[cfg(feature = "demo")]
             gallery.tinted(key, &mut yuv);
-            match decode::to_image(&yuv) {
+            match super::helper::to_image(&yuv, false) {
                 Ok(image) => {
                     timings.pictures += 1;
                     timings.shown = image.size;
@@ -602,7 +605,7 @@ fn run(jobs: &Jobs, gallery: &Gallery) {
 #[cfg(feature = "demo")]
 pub fn demo_feed(gallery: Gallery, playing: Arc<Mutex<Vec<String>>>) -> std::io::Result<()> {
     let stream = include_bytes!("fixtures/camera-480x480.h264");
-    let frames = super::bitstream::access_units(stream);
+    let frames = h264::access_units(stream);
     let mut decoding = CameraDecoding::spawn(gallery)?;
     std::thread::Builder::new()
         .name("huddle-cameras-demo".into())
@@ -703,7 +706,7 @@ mod tests {
                 last = Some(picture);
             }
         }
-        decode::to_image(&last.expect("pictures").yuv).expect("converts")
+        super::super::helper::to_image(&last.expect("pictures").yuv, false).expect("converts")
     }
 
     /// Two cameras on the one thread, each with its own decoder: one
@@ -713,8 +716,7 @@ mod tests {
     /// then only the newest comes; a stopped camera's frames go nowhere.
     #[test]
     fn one_thread_decodes_each_camera_on_its_own() {
-        let frames =
-            super::super::bitstream::access_units(include_bytes!("fixtures/camera-480x480.h264"));
+        let frames = h264::access_units(include_bytes!("fixtures/camera-480x480.h264"));
         let gallery = Gallery::new(|| {});
         gallery.set_fit(160, 120);
         let mut decoding = CameraDecoding::spawn(gallery.clone()).expect("a thread");
@@ -788,8 +790,7 @@ mod tests {
     #[ignore = "a measurement, best in release"]
     #[allow(clippy::print_stdout, reason = "the measurement is for the reader")]
     fn cameras_cost() {
-        let frames =
-            super::super::bitstream::access_units(include_bytes!("fixtures/camera-480x480.h264"));
+        let frames = h264::access_units(include_bytes!("fixtures/camera-480x480.h264"));
         for cameras in [4usize, 9] {
             let gallery = Gallery::new(|| {});
             gallery.set_fit(320, 240);

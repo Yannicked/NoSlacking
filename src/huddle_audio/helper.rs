@@ -37,12 +37,47 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
+use egui::{Color32, ColorImage};
 #[cfg(feature = "huddle-video")]
 use noslacking_video_ipc::FailKind;
 use noslacking_video_ipc::{self as ipc, Codec, Reply, Request};
 
-#[cfg(feature = "huddle-video")]
-use super::decode::Yuv;
+/// A picture from the helper as egui's opaque pixels, mirrored left to
+/// right for a self-view (as a mirror shows you). H.264 from WebRTC
+/// senders is BT.601 in studio range unless its VUI says otherwise, which
+/// Chrome's screen shares do not.
+pub fn to_image(planes: &ipc::Planes, mirror: bool) -> Result<ColorImage, String> {
+    planes.check().map_err(|e| e.to_string())?;
+    let size = |n: u32| usize::try_from(n).map_err(|e| e.to_string());
+    let (width, height) = (size(planes.width)?, size(planes.height)?);
+    let image = yuv::YuvPlanarImage {
+        y_plane: &planes.y,
+        y_stride: planes.width,
+        u_plane: &planes.u,
+        u_stride: planes.width.div_ceil(2),
+        v_plane: &planes.v,
+        v_stride: planes.width.div_ceil(2),
+        width: planes.width,
+        height: planes.height,
+    };
+    // Opaque: premultiplied and straight alpha are the same, so the
+    // converter writes egui's own pixels.
+    let mut pixels = vec![Color32::BLACK; width * height];
+    yuv::yuv420_to_rgba(
+        &image,
+        bytemuck::cast_slice_mut(&mut pixels),
+        planes.width * 4,
+        yuv::YuvRange::Limited,
+        yuv::YuvStandardMatrix::Bt601,
+    )
+    .map_err(|e| e.to_string())?;
+    if mirror {
+        for row in pixels.chunks_exact_mut(width) {
+            row.reverse();
+        }
+    }
+    Ok(ColorImage::new([width, height], pixels))
+}
 
 /// How many times a crashed or stuck helper is started again before it
 /// is given up until the app restarts.
@@ -620,7 +655,7 @@ impl RemoteCapture {
             .map_err(CaptureTrouble::lost)?
         {
             Reply::Frame(frame) => {
-                let types = super::bitstream::nal_types(&frame.data);
+                let types = ipc::h264::nal_types(&frame.data);
                 let keyframe = types.contains(&5);
                 let whole = types.iter().any(|&t| t == 1 || t == 5)
                     && keyframe == frame.keyframe
@@ -757,7 +792,7 @@ pub enum HelperTrouble {
 pub struct Picture {
     /// The picture, at most as large as the size shown asks
     /// ([`RemoteDecoder::set_output_size`]).
-    pub yuv: Yuv,
+    pub yuv: ipc::Planes,
     /// The stream's own size, before any shrinking.
     pub source: [usize; 2],
     /// Whether the GPU decoded it.
@@ -837,15 +872,8 @@ impl RemoteDecoder {
                 // which is no larger than the source, itself no larger
                 // than any picture may be.
                 let size = |n: u32| usize::try_from(n).unwrap_or(0);
-                let planes = decoded.planes;
                 Ok(Outcome::Picture(Picture {
-                    yuv: Yuv {
-                        width: size(planes.width),
-                        height: size(planes.height),
-                        y: planes.y,
-                        u: planes.u,
-                        v: planes.v,
-                    },
+                    yuv: decoded.planes,
                     source: [size(decoded.source.0), size(decoded.source.1)],
                     gpu: decoded.hardware,
                 }))
@@ -1319,8 +1347,7 @@ mod tests {
             &shared(Lane::Share).expect("again").state
         ));
         assert!(!Arc::ptr_eq(&share.state, &cameras.state));
-        let frames =
-            super::super::bitstream::access_units(include_bytes!("fixtures/camera-480x480.h264"));
+        let frames = ipc::h264::access_units(include_bytes!("fixtures/camera-480x480.h264"));
         let mut decoder = cameras
             .open_decoder(Codec::H264, 480, 480, true)
             .expect("opens");

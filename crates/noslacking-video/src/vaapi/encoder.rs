@@ -529,7 +529,7 @@ impl VaapiEncoder {
                 return Err(Failure::device(why));
             }
         };
-        let types = nal::types(&data);
+        let types = noslacking_video_ipc::h264::nal_types(&data);
         if !types.iter().any(|&t| t == 1 || t == 5) {
             self.reference = None;
             return Err(Failure::device(format!(
@@ -678,7 +678,7 @@ mod tests {
                     encoder.set_bitrate(bitrate / 2).expect("set");
                 }
                 let encoded = encoder.encode(picture, n == 10).expect("encodes");
-                let types = nal::types(&encoded.data);
+                let types = noslacking_video_ipc::h264::nal_types(&encoded.data);
                 if encoded.keyframe {
                     keyframes.push(n);
                     assert!(types.starts_with(&[7, 8]), "{name} {n}: {types:?}");

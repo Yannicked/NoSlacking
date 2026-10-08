@@ -75,7 +75,7 @@ fn pictures() -> Vec<Planes> {
         }
         out
     };
-    noslacking_video::nal::access_units(CAMERA)
+    noslacking_video_ipc::h264::access_units(CAMERA)
         .iter()
         .filter_map(|frame| decoder.decode(frame).ok().flatten())
         .map(|p| Planes {

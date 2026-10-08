@@ -6,65 +6,13 @@
 //! it is one structure of exp-Golomb numbers (ITU-T H.264 §7.3.2.1.1),
 //! about a hundred lines, and a crate for it would bring its own
 //! dependencies into a build that only the probe uses. `str0m` hands over
-//! H.264 frames in Annex B (start codes before each NAL unit) and VP8
-//! frames with the RTP payload descriptor already gone.
+//! H.264 frames in Annex B (start codes before each NAL unit), which
+//! [`noslacking_video_ipc::h264`] splits, as the video helper does; and
+//! VP8 frames with the RTP payload descriptor already gone.
 
 use std::io::{Seek, SeekFrom, Write};
 
-/// The NAL units of an Annex B frame, without their start codes or the
-/// zero bytes that may pad before the next one.
-pub fn nal_units(frame: &[u8]) -> Vec<&[u8]> {
-    let mut starts = Vec::new();
-    let mut i = 0;
-    while i + 3 <= frame.len() {
-        if frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1 {
-            starts.push(i + 3);
-            i += 3;
-        } else {
-            i += 1;
-        }
-    }
-    let mut units = Vec::with_capacity(starts.len());
-    for (n, &start) in starts.iter().enumerate() {
-        let end = starts.get(n + 1).map_or(frame.len(), |next| next - 3);
-        let mut unit = &frame[start..end.max(start)];
-        while let [rest @ .., 0] = unit {
-            unit = rest;
-        }
-        if !unit.is_empty() {
-            units.push(unit);
-        }
-    }
-    units
-}
-
-/// A NAL unit's type: 5 an IDR slice, 7 an SPS, 8 a PPS, …
-pub fn nal_type(unit: &[u8]) -> Option<u8> {
-    unit.first().map(|b| b & 0x1f)
-}
-
-/// The NAL unit types of an Annex B frame, in order: what is checked of
-/// each access unit the video helper hands over before it goes out.
-pub fn nal_types(frame: &[u8]) -> Vec<u8> {
-    nal_units(frame).into_iter().filter_map(nal_type).collect()
-}
-
-/// An Annex B stream split into frames as `str0m` hands them over: each
-/// ends after its slice, the parameter sets going with the slice they
-/// precede. For streams of one slice a picture, as the fixtures and the
-/// demo's are.
-pub fn access_units(stream: &[u8]) -> Vec<Vec<u8>> {
-    let mut frames = Vec::new();
-    let mut frame = Vec::new();
-    for nal in nal_units(stream) {
-        frame.extend_from_slice(&[0, 0, 0, 1]);
-        frame.extend_from_slice(nal);
-        if matches!(nal_type(nal), Some(1 | 5)) {
-            frames.push(std::mem::take(&mut frame));
-        }
-    }
-    frames
-}
+use noslacking_video_ipc::h264::{SPS, nal_type, nal_units};
 
 /// What an H.264 sequence parameter set says about the stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,7 +126,7 @@ const HIGH_PROFILES: [u8; 12] = [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 
 /// Reads an SPS NAL unit (its header byte first). `None` if it is not
 /// one or ends early.
 pub fn parse_sps(unit: &[u8]) -> Option<Sps> {
-    if nal_type(unit)? != 7 {
+    if nal_type(unit)? != SPS {
         return None;
     }
     let mut r = Bits::new(unit.get(1..)?);
@@ -509,21 +457,6 @@ mod tests {
         assert_eq!(parse_sps(&[]), None);
         assert_eq!(parse_sps(&hex("68ce3c80")), None, "a PPS");
         assert_eq!(parse_sps(&hex("6742c0")), None, "cut short");
-    }
-
-    #[test]
-    fn annex_b_splits_into_nal_units() {
-        let frame = hex("000000016742c00c0000000168ce3c80000001658880");
-        let units = nal_units(&frame);
-        assert_eq!(
-            units.iter().filter_map(|u| nal_type(u)).collect::<Vec<_>>(),
-            [7, 8, 5]
-        );
-        assert_eq!(units[1], &hex("68ce3c80")[..]);
-        assert!(nal_units(&[0, 0]).is_empty());
-        assert_eq!(nal_types(&frame), [7, 8, 5]);
-        assert_eq!(nal_types(&hex("000001419a")), [1]);
-        assert!(nal_types(&[]).is_empty());
     }
 
     #[test]

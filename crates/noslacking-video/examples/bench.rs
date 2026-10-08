@@ -18,8 +18,8 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use noslacking_video::backend::Decoder;
-use noslacking_video::nal;
 use noslacking_video::software::Software;
+use noslacking_video_ipc::h264 as nal;
 use noslacking_video_ipc::{self as ipc, Codec, Reply, Request};
 
 const SCREEN: &[u8] = include_bytes!("../../../src/huddle_audio/fixtures/screen-1920x1080.h264");

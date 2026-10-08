@@ -16,7 +16,7 @@
 //! for a keyframe (the session asks for one) and starts again in the
 //! helper started anew.
 
-use egui::{Color32, ColorImage};
+use noslacking_video_ipc::h264;
 
 use super::bitstream;
 use super::helper::{self, Helper, HelperTrouble, Lane, RemoteDecoder};
@@ -34,46 +34,10 @@ pub enum Trouble {
     /// keyframe.
     #[error("the frame did not decode: {0}")]
     Broken(String),
-    /// The picture could not be turned into RGBA.
-    #[error("the picture could not be converted: {0}")]
-    Convert(String),
     /// The video helper is missing, of another version, or failed too
     /// often: no video until the app starts again.
     #[error("no video helper")]
     NoHelper,
-}
-
-/// One decoded picture, in I420: a full-size luma plane and two chroma
-/// planes of half its width and height (rounded up).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Yuv {
-    /// Its width in pixels.
-    pub width: usize,
-    /// Its height in pixels.
-    pub height: usize,
-    /// Luma, `width * height` bytes.
-    pub y: Vec<u8>,
-    /// Blue difference, a quarter as many.
-    pub u: Vec<u8>,
-    /// Red difference.
-    pub v: Vec<u8>,
-}
-
-impl Yuv {
-    /// The chroma planes' width and height.
-    fn chroma(&self) -> (usize, usize) {
-        (self.width.div_ceil(2), self.height.div_ceil(2))
-    }
-
-    /// Whether the planes are as long as the size says.
-    fn whole(&self) -> bool {
-        let (cw, ch) = self.chroma();
-        self.width > 0
-            && self.height > 0
-            && self.y.len() == self.width * self.height
-            && self.u.len() == cw * ch
-            && self.v.len() == cw * ch
-    }
 }
 
 /// An H.264 stream's decoder in the helper that recovers from loss: give
@@ -198,7 +162,7 @@ impl H264 {
     /// frame that carries only parameter sets. Every frame must be given,
     /// shown or not: the ones after it refer to it.
     pub fn decode(&mut self, unit: &[u8], show: bool) -> Result<Outcome, Trouble> {
-        let keyframe = is_keyframe(unit);
+        let keyframe = h264::is_keyframe(unit);
         if self.waiting {
             if !keyframe {
                 return Err(Trouble::NeedKeyframe);
@@ -241,7 +205,7 @@ impl H264 {
     /// stream.
     fn checked(&mut self, decoded: Result<Outcome, HelperTrouble>) -> Result<Outcome, Trouble> {
         match decoded {
-            Ok(Outcome::Picture(picture)) if picture.yuv.whole() => {
+            Ok(Outcome::Picture(picture)) if picture.yuv.check().is_ok() => {
                 if !picture.gpu && !self.software_only && self.gpu.unwrap_or_else(helper::gpu) {
                     // The helper moved it to software: not the GPU again
                     // at the next start either.
@@ -284,54 +248,16 @@ impl H264 {
     }
 }
 
-/// Whether a frame holds an IDR slice, where decoding can start.
-pub fn is_keyframe(unit: &[u8]) -> bool {
-    bitstream::nal_units(unit)
-        .iter()
-        .any(|nal| bitstream::nal_type(nal) == Some(5))
-}
-
-/// The picture as egui's opaque pixels. H.264 from WebRTC senders is
-/// BT.601 in studio range unless its VUI says otherwise, which Chrome's
-/// screen shares do not.
-pub fn to_image(yuv: &Yuv) -> Result<ColorImage, Trouble> {
-    if !yuv.whole() {
-        return Err(Trouble::Convert(format!(
-            "planes do not match {}x{}",
-            yuv.width, yuv.height
-        )));
-    }
-    let size =
-        |n: usize| u32::try_from(n).map_err(|_| Trouble::Convert(format!("{n} is too large")));
-    let (cw, _) = yuv.chroma();
-    let image = yuv::YuvPlanarImage {
-        y_plane: &yuv.y,
-        y_stride: size(yuv.width)?,
-        u_plane: &yuv.u,
-        u_stride: size(cw)?,
-        v_plane: &yuv.v,
-        v_stride: size(cw)?,
-        width: size(yuv.width)?,
-        height: size(yuv.height)?,
-    };
-    // Opaque: premultiplied and straight alpha are the same, so the
-    // converter writes egui's own pixels.
-    let mut pixels = vec![Color32::BLACK; yuv.width * yuv.height];
-    yuv::yuv420_to_rgba(
-        &image,
-        bytemuck::cast_slice_mut(&mut pixels),
-        size(yuv.width * 4)?,
-        yuv::YuvRange::Limited,
-        yuv::YuvStandardMatrix::Bt601,
-    )
-    .map_err(|e| Trouble::Convert(e.to_string()))?;
-    Ok(ColorImage::new([yuv.width, yuv.height], pixels))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::huddle_audio::helper::Picture;
+    use egui::Color32;
+    use noslacking_video_ipc::Planes as Yuv;
+
+    fn to_image(planes: &Yuv) -> Result<egui::ColorImage, String> {
+        helper::to_image(planes, false)
+    }
     use crate::huddle_audio::helper::pretend::{Act, Pretend, picture, welcome};
     use noslacking_video_ipc::{FailKind, Reply, Request};
     use sha2::{Digest, Sha256};
@@ -355,14 +281,17 @@ mod tests {
         let mut hash = Sha256::new();
         let mut count = 0;
         let mut size = (0, 0);
-        for frame in bitstream::access_units(stream) {
+        for frame in h264::access_units(stream) {
             let picture = shown(&mut decoder, &frame)
                 .expect("decodes")
                 .expect("a picture");
-            assert_eq!(picture.source, [picture.yuv.width, picture.yuv.height]);
+            assert_eq!(
+                picture.source,
+                [picture.yuv.width as usize, picture.yuv.height as usize]
+            );
             assert!(!picture.gpu);
             let yuv = picture.yuv;
-            size = (yuv.width, yuv.height);
+            size = (yuv.width as usize, yuv.height as usize);
             hash.update(&yuv.y);
             hash.update(&yuv.u);
             hash.update(&yuv.v);
@@ -401,7 +330,7 @@ mod tests {
     /// next frame.
     #[test]
     fn pictures_kept_back_are_fetched_as_they_would_have_been_shown() {
-        let frames = bitstream::access_units(CAMERA);
+        let frames = h264::access_units(CAMERA);
         let mut every = H264::new(Lane::Cameras);
         let mut kept = H264::new(Lane::Cameras);
         every.set_fit(240, 180);
@@ -440,7 +369,7 @@ mod tests {
             Duration::from_secs(5),
             Duration::from_millis(500),
         );
-        let frames = bitstream::access_units(CAMERA);
+        let frames = h264::access_units(CAMERA);
         let mut decoder = H264::with_helper(Some(helper), Some(true));
         assert_eq!(decoder.decode(&frames[0], false), Ok(Outcome::Kept));
         assert_eq!(decoder.decode(&frames[1], true), Ok(Outcome::Unchanged));
@@ -450,7 +379,7 @@ mod tests {
 
     #[test]
     fn nothing_decodes_before_a_keyframe_or_after_a_loss_until_the_next() {
-        let frames = bitstream::access_units(CAMERA);
+        let frames = h264::access_units(CAMERA);
         let mut decoder = H264::new(Lane::Cameras);
         // Joined mid-stream: a P frame first.
         assert_eq!(shown(&mut decoder, &frames[3]), Err(Trouble::NeedKeyframe));
@@ -464,7 +393,7 @@ mod tests {
         decoder.lost();
         assert_eq!(shown(&mut decoder, &frames[5]), Err(Trouble::NeedKeyframe));
         // The second keyframe is frame 44 (a GOP of 44).
-        assert!(is_keyframe(&frames[44]) && !is_keyframe(&frames[43]));
+        assert!(h264::is_keyframe(&frames[44]) && !h264::is_keyframe(&frames[43]));
         assert!(
             shown(&mut decoder, &frames[44])
                 .expect("recovers")
@@ -481,7 +410,7 @@ mod tests {
     /// keyframe recovers; the helper's own tests break many more.
     #[test]
     fn broken_frames_are_errors_and_the_next_keyframe_recovers() {
-        let frames = bitstream::access_units(CAMERA);
+        let frames = h264::access_units(CAMERA);
         let mut decoder = H264::new(Lane::Cameras);
         assert!(shown(&mut decoder, &frames[0]).expect("decodes").is_some());
         let mut noticed = false;
@@ -577,7 +506,7 @@ mod tests {
 
     #[test]
     fn a_crashed_helper_starts_again_at_the_next_keyframe_in_software() {
-        let frames = bitstream::access_units(CAMERA);
+        let frames = h264::access_units(CAMERA);
         // The helper's third decode crashes it.
         let (helper, launches, opens) = pretend_helper(|n| (n == 2).then_some(Act::Crash));
         let mut decoder = H264::with_helper(Some(helper), Some(true));
@@ -607,7 +536,7 @@ mod tests {
     #[test]
     fn pictures_come_at_the_size_shown() {
         let (helper, _, _) = pretend_helper(|_| None);
-        let frames = bitstream::access_units(CAMERA);
+        let frames = h264::access_units(CAMERA);
         let mut decoder = H264::with_helper(Some(helper), Some(true));
         decoder.set_fit(240, 180);
         let picture = shown(&mut decoder, &frames[0])
@@ -636,7 +565,7 @@ mod tests {
     /// next start; with the setting off, it asks for software at once.
     #[test]
     fn a_stream_moved_to_software_stays_there() {
-        let frames = bitstream::access_units(CAMERA);
+        let frames = h264::access_units(CAMERA);
         // The helper answers its first decode from software, as when the
         // GPU cannot decode the stream.
         let software = Arc::new(AtomicU32::new(0));
@@ -680,7 +609,7 @@ mod tests {
                 detail: detail.into(),
             }))
         });
-        let frames = bitstream::access_units(CAMERA);
+        let frames = h264::access_units(CAMERA);
         let mut decoder = H264::with_helper(Some(helper), None);
         assert!(matches!(
             shown(&mut decoder, &frames[0]),
@@ -696,7 +625,7 @@ mod tests {
 
     #[test]
     fn without_a_helper_there_is_no_video() {
-        let frames = bitstream::access_units(CAMERA);
+        let frames = h264::access_units(CAMERA);
         let mut decoder = H264::with_helper(None, None);
         assert!(decoder.no_helper(), "said at once");
         assert_eq!(shown(&mut decoder, &frames[3]), Err(Trouble::NeedKeyframe));
@@ -757,6 +686,6 @@ mod tests {
             y: vec![0; 3],
             ..red
         };
-        assert!(matches!(to_image(&short), Err(Trouble::Convert(_))));
+        assert!(to_image(&short).is_err());
     }
 }

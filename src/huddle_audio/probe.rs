@@ -205,7 +205,7 @@ async fn probe(
         log::warn!("probe: the proxy setting does not work ({error:?}); going without");
     }
     // The app's "Use the graphics card for video" too.
-    #[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
+    #[cfg(feature = "video-helper")]
     {
         super::helper::set_gpu(settings.hardware_video);
         log::info!(

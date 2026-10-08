@@ -3,8 +3,8 @@
 //! parses out of ours) or writes none: the SPS and PPS of a constrained
 //! baseline stream as WebRTC sends it (`42e0xx`: profile 66 with
 //! constraint_set0, 1 and 2; CAVLC; one reference; picture order type 2,
-//! so no picture order in the slice header), each picture's slice
-//! header, and a reader of the NAL unit types in an Annex B access unit.
+//! so no picture order in the slice header) and each picture's slice
+//! header. Reading NAL units is [`noslacking_video_ipc::h264`]'s.
 
 /// What the SPS says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,63 +213,10 @@ pub fn slice_header(slice: &Slice) -> (Vec<u8>, u32) {
     b.unit(if slice.idr { 0x65 } else { 0x61 })
 }
 
-/// Whether an access unit holds an IDR slice, where decoding can start.
-pub fn is_keyframe(unit: &[u8]) -> bool {
-    types(unit).contains(&5)
-}
-
-/// An Annex B stream cut into access units the way the app hands them
-/// over (as `str0m` does): each ends with its slice, parameter sets
-/// going with the slice after; each NAL unit behind a 4-byte start
-/// code. For tests and the benchmarks.
-pub fn access_units(stream: &[u8]) -> Vec<Vec<u8>> {
-    let mut starts: Vec<usize> = stream
-        .windows(3)
-        .enumerate()
-        .filter(|(_, w)| *w == [0, 0, 1])
-        .map(|(i, _)| i + 3)
-        .collect();
-    starts.push(stream.len() + 3);
-    let mut units = Vec::new();
-    let mut unit = Vec::new();
-    for pair in starts.windows(2) {
-        // The next start code's leading zeros belong to it.
-        let mut end = pair[1] - 3;
-        while end > pair[0] && stream[end - 1] == 0 {
-            end -= 1;
-        }
-        let nal = &stream[pair[0]..end];
-        unit.extend_from_slice(&[0, 0, 0, 1]);
-        unit.extend_from_slice(nal);
-        if matches!(nal.first().map(|b| b & 0x1f), Some(1 | 5)) {
-            units.push(std::mem::take(&mut unit));
-        }
-    }
-    units
-}
-
-/// The NAL unit types in an Annex B access unit, in order.
-pub fn types(unit: &[u8]) -> Vec<u8> {
-    let mut types = Vec::new();
-    let mut zeros = 0;
-    for (i, &byte) in unit.iter().enumerate() {
-        if zeros >= 2 && byte == 1 {
-            if let Some(&header) = unit.get(i + 1) {
-                types.push(header & 0x1f);
-            }
-            zeros = 0;
-        } else if byte == 0 {
-            zeros += 1;
-        } else {
-            zeros = 0;
-        }
-    }
-    types
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noslacking_video_ipc::h264::nal_types as types;
 
     #[test]
     fn exp_golomb_codes() {

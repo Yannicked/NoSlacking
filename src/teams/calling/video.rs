@@ -131,7 +131,7 @@ impl Video {
             #[cfg(all(feature = "huddle-camera", not(feature = "huddle-share")))]
             feed: None,
         };
-        #[cfg(not(any(feature = "huddle-video", feature = "huddle-camera")))]
+        #[cfg(not(feature = "video-helper"))]
         let _ = self;
         (camera, share)
     }
@@ -254,12 +254,6 @@ pub(super) enum Input {
     Closed,
 }
 
-/// Whether a frame holds an IDR slice: a keyframe.
-fn is_keyframe(unit: &[u8]) -> bool {
-    use crate::huddle_audio::bitstream::{nal_type, nal_units};
-    nal_units(unit).iter().any(|nal| nal_type(nal) == Some(5))
-}
-
 /// The far end's parameter sets, kept so every keyframe can start a
 /// decoder. A meeting's media server sends them once, or in a frame of
 /// their own when it switches layers, not with each keyframe; a decoder
@@ -273,19 +267,17 @@ struct ParameterSets {
     held: Vec<u8>,
 }
 
-/// An Annex B start code.
-const START: [u8; 4] = [0, 0, 0, 1];
-
 impl ParameterSets {
     /// The frame to decode for `unit`: with the parameter sets a keyframe
     /// lacks, and any frame of them alone before it. `None` for a frame
     /// of parameter sets alone, held until the next.
     fn complete(&mut self, unit: &[u8]) -> Option<Vec<u8>> {
-        use crate::huddle_audio::bitstream::{nal_type, nal_units, parse_sps};
+        use crate::huddle_audio::bitstream::parse_sps;
+        use noslacking_video_ipc::h264::{IDR, PPS, SPS, START, is_slice, nal_type, nal_units};
         let nals = nal_units(unit);
         for nal in &nals {
             match nal_type(nal) {
-                Some(7) => {
+                Some(SPS) => {
                     if self.sps.as_deref() != Some(*nal) {
                         if let Some(sps) = parse_sps(nal) {
                             log::info!(
@@ -299,18 +291,18 @@ impl ParameterSets {
                         self.sps = Some(nal.to_vec());
                     }
                 }
-                Some(8) => {
+                Some(PPS) => {
                     self.pps = Some(nal.to_vec());
                 }
                 _ => {}
             }
         }
-        let picture = nals.iter().any(|n| matches!(nal_type(n), Some(1 | 5)));
+        let picture = nals.iter().any(|n| is_slice(n));
         if !picture {
             self.held.extend_from_slice(unit);
             return None;
         }
-        let keyframe = nals.iter().any(|n| nal_type(n) == Some(5));
+        let keyframe = nals.iter().any(|n| nal_type(n) == Some(IDR));
         let mut out = std::mem::take(&mut self.held);
         if !keyframe {
             out.extend_from_slice(unit);
@@ -325,7 +317,10 @@ impl ParameterSets {
                 out.extend_from_slice(set);
             }
         }
-        for nal in nals.iter().filter(|n| !matches!(nal_type(n), Some(7 | 8))) {
+        for nal in nals
+            .iter()
+            .filter(|n| !matches!(nal_type(n), Some(SPS | PPS)))
+        {
             out.extend_from_slice(&START);
             out.extend_from_slice(nal);
         }
@@ -436,7 +431,7 @@ impl CallVideo {
             }
             None => (None, false),
         };
-        #[cfg(not(any(feature = "huddle-video", feature = "huddle-camera")))]
+        #[cfg(not(feature = "video-helper"))]
         let _ = ends;
         log::info!("video: {which:?} line {mid}, H.264 at {pt}, our SSRC {ssrc}");
         Self {
@@ -477,7 +472,7 @@ impl CallVideo {
 
     /// The line's ends, for the next session of the call.
     pub(super) fn into_ends(self) -> Ends {
-        #[cfg(not(any(feature = "huddle-video", feature = "huddle-camera")))]
+        #[cfg(not(feature = "video-helper"))]
         let _ = self;
         Ends {
             #[cfg(feature = "huddle-video")]
@@ -632,7 +627,7 @@ impl CallVideo {
             self.report.gaps += 1;
             self.backlog_contiguous = false;
         }
-        if is_keyframe(&data.data) {
+        if noslacking_video_ipc::h264::is_keyframe(&data.data) {
             self.report.keyframes += 1;
             if self.unanswered > 0 {
                 log::info!(
@@ -931,20 +926,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_keyframe_is_a_frame_with_an_idr_slice() {
-        // SPS, PPS and an IDR slice, as a keyframe comes.
-        let keyframe = [
-            0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xce, 0, 0, 0, 1, 0x65, 0x88,
-        ];
-        assert!(is_keyframe(&keyframe));
-        // A slice of a picture that refers to others.
-        assert!(!is_keyframe(&[0, 0, 0, 1, 0x41, 0x9a]));
-        assert!(!is_keyframe(&[]));
-    }
-
-    #[test]
     fn every_keyframe_carries_the_parameter_sets_last_seen() {
-        let nal = |bytes: &[u8]| [&START[..], bytes].concat();
+        let nal = |bytes: &[u8]| [&noslacking_video_ipc::h264::START[..], bytes].concat();
         // An SPS of a 16x16 baseline stream, a PPS, an IDR, a P slice.
         let sps = [0x67, 0x42, 0xc0, 0x0a, 0xf4, 0x00, 0x00, 0x03, 0x00, 0x01];
         let pps = [0x68, 0xce, 0x3c, 0x80];

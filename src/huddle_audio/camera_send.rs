@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use egui::{Color32, ColorImage};
+use egui::ColorImage;
 use noslacking_video_ipc as ipc;
 use tokio::sync::{mpsc, watch};
 
@@ -362,36 +362,10 @@ impl Preview {
 /// mirrored left to right. The helper made it small already; none for
 /// one wider than the preview is ever shown or broken.
 pub fn preview_image(picture: &ipc::Planes) -> Option<ColorImage> {
-    if picture.check().is_err() || picture.width > ipc::MAX_PREVIEW_SIDE {
+    if picture.width > ipc::MAX_PREVIEW_SIDE {
         return None;
     }
-    let (width, height) = (
-        usize::try_from(picture.width).ok()?,
-        usize::try_from(picture.height).ok()?,
-    );
-    let image = yuv::YuvPlanarImage {
-        y_plane: &picture.y,
-        y_stride: picture.width,
-        u_plane: &picture.u,
-        u_stride: picture.width.div_ceil(2),
-        v_plane: &picture.v,
-        v_stride: picture.width.div_ceil(2),
-        width: picture.width,
-        height: picture.height,
-    };
-    let mut pixels = vec![Color32::BLACK; width * height];
-    yuv::yuv420_to_rgba(
-        &image,
-        bytemuck::cast_slice_mut(&mut pixels),
-        picture.width * 4,
-        yuv::YuvRange::Limited,
-        yuv::YuvStandardMatrix::Bt601,
-    )
-    .ok()?;
-    for row in pixels.chunks_exact_mut(width) {
-        row.reverse();
-    }
-    Some(ColorImage::new([width, height], pixels))
+    super::helper::to_image(picture, true).ok()
 }
 
 /// What the sender did, for the log.

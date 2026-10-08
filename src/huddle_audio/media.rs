@@ -2067,7 +2067,7 @@ mod tests {
         let stream = include_bytes!("fixtures/test-pattern-320x180.h264");
         let mut units: Vec<Vec<u8>> = Vec::new();
         let mut has_slice = false;
-        for nal in super::super::bitstream::nal_units(stream) {
+        for nal in noslacking_video_ipc::h264::nal_units(stream) {
             let kind = nal[0] & 0x1f;
             let slice = matches!(kind, 1 | 5);
             if units.is_empty() || kind == 7 || (slice && has_slice) {

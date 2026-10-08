@@ -576,7 +576,7 @@ impl Devices {
         // Ours: nothing captured until asked.
         #[cfg(feature = "huddle-share")]
         let (share, share_feed) = share_task(place, share_requests, call, sink);
-        #[cfg(not(any(feature = "huddle-video", feature = "huddle-camera")))]
+        #[cfg(not(feature = "video-helper"))]
         let _ = tell;
         let video = crate::teams::calling::video::Video {
             #[cfg(feature = "huddle-video")]

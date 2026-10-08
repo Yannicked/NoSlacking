@@ -125,7 +125,7 @@ fn without_hardware_the_welcome_lists_nothing_and_software_decodes() {
     ) else {
         panic!("a decoder");
     };
-    let frames = noslacking_video::nal::access_units(include_bytes!(
+    let frames = noslacking_video_ipc::h264::access_units(include_bytes!(
         "../../../src/huddle_audio/fixtures/camera-480x480.h264"
     ));
     for (seq, frame) in (3..).zip(&frames[..3]) {
@@ -133,7 +133,7 @@ fn without_hardware_the_welcome_lists_nothing_and_software_decodes() {
             seq,
             Request::Decode {
                 id,
-                keyframe: noslacking_video::nal::is_keyframe(frame),
+                keyframe: noslacking_video_ipc::h264::is_keyframe(frame),
                 show: true,
                 data: frame.clone(),
             },
