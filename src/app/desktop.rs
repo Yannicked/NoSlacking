@@ -163,8 +163,7 @@ impl App {
         )?;
         let author = workspace.author(message);
         let place = match conversation {
-            Some(c) if !c.kind.is_dm() => format!("#{}", workspace.title(c)),
-            Some(c) => workspace.title(c),
+            Some(c) => workspace.named_place(c),
             None => author.clone(),
         };
         let (title, body) = notify::compose(kind, &place, &author, &plain);
@@ -206,7 +205,7 @@ impl App {
         let place = workspace
             .conversation(channel)
             .filter(|c| !c.kind.is_dm())
-            .map(|c| format!("#{}", workspace.title(c)));
+            .map(|c| workspace.named_place(c));
         let (title, body) =
             crate::huddles::invite_text(&workspace.user_label(from), place.as_deref());
         Some(Note {

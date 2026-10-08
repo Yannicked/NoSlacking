@@ -15,7 +15,7 @@ use std::collections::{HashMap, VecDeque};
 use crate::app::WorkspaceState;
 use crate::failure::Failure;
 use crate::links::{Link, Target};
-use crate::model::{ConversationKind, Message, Quote, Ts};
+use crate::model::{Message, Quote, Ts};
 
 /// How many links of one message are quoted, so a message that is a list
 /// of links does not become a wall of cards.
@@ -292,11 +292,7 @@ pub fn place(workspace: &WorkspaceState, quote: &Quote) -> Option<String> {
         .as_deref()
         .and_then(|id| workspace.conversation(id));
     if let Some(conversation) = known {
-        let title = workspace.title(conversation);
-        return Some(match conversation.kind {
-            ConversationKind::Channel | ConversationKind::Private => format!("#{title}"),
-            ConversationKind::Direct | ConversationKind::Group => title,
-        });
+        return Some(workspace.named_place(conversation));
     }
     let name = quote.channel_name.as_deref()?.trim_start_matches('#');
     let direct = quote
@@ -352,7 +348,7 @@ pub fn excerpt(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Attachment, Conversation, Delivery, User, Workspace};
+    use crate::model::{Attachment, Conversation, ConversationKind, Delivery, User, Workspace};
 
     fn message(text: &str) -> Message {
         Message {

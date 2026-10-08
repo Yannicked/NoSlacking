@@ -2977,3 +2977,40 @@ msgstr "Neem het gesprek hier op"
 
 msgid "{name} is calling you"
 msgstr "{name} belt je"
+
+# Microsoft Teams wording
+msgid "Leave the huddle or hang up"
+msgstr "De huddle verlaten of ophangen"
+
+msgid "Call with {name}"
+msgstr "Gesprek met {name}"
+
+msgid "Calls and huddles"
+msgstr "Gesprekken en huddles"
+
+msgid "Chat"
+msgstr "Chat"
+
+msgid "Hang up ({shortcut})"
+msgstr "Ophangen ({shortcut})"
+
+msgid "Post in {name}"
+msgstr "Plaatsen in {name}"
+
+msgid "This call takes no more video, so your camera stays off"
+msgstr "Dit gesprek neemt geen video meer aan, dus je camera blijft uit"
+
+msgid "This is the very beginning of {place}."
+msgstr "Dit is het allereerste begin van {place}."
+
+msgid "Type a message"
+msgstr "Typ een bericht"
+
+msgid "the server answered unexpectedly: {detail}"
+msgstr "de server gaf een onverwacht antwoord: {detail}"
+
+msgid "the server did not return the message"
+msgstr "de server gaf het bericht niet terug"
+
+msgid "the server is rate limiting requests; try again shortly"
+msgstr "de server beperkt het aantal verzoeken; probeer het zo opnieuw"

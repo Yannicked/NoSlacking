@@ -279,7 +279,7 @@ fn bar(
                     } else {
                         // Right to left, so they read Mute, Video, Share,
                         // Leave, as in the call window.
-                        if leave_button(ui, palette, Look::BAR) {
+                        if leave_button(ui, palette, Look::BAR, listening.is_call()) {
                             actions.push(Action::Huddle(huddles::Action::Leave));
                         }
                         // Four worded controls do not fit a narrow sidebar:
@@ -538,12 +538,22 @@ pub fn control(
     response
 }
 
-/// Leave, in red, in `look`; whether it was clicked. Its chord is
-/// [`super::keys::leave_chord`], taken by the window with the focus.
-pub fn leave_button(ui: &mut egui::Ui, palette: &Palette, look: Look) -> bool {
+/// Leave, in red, in `look` ("Hang up" for a `call`); whether it was
+/// clicked. Its chord is [`super::keys::leave_chord`], taken by the
+/// window with the focus.
+pub fn leave_button(ui: &mut egui::Ui, palette: &Palette, look: Look, call: bool) -> bool {
     let shortcut = super::shortcuts::spell("Cmd+Shift+H", cfg!(target_os = "macos"));
-    let tip = tf("Leave the huddle ({shortcut})", &[("shortcut", &shortcut)]);
-    let label = t("Leave");
+    let (tip, label) = if call {
+        (
+            tf("Hang up ({shortcut})", &[("shortcut", &shortcut)]),
+            t("Hang up"),
+        )
+    } else {
+        (
+            tf("Leave the huddle ({shortcut})", &[("shortcut", &shortcut)]),
+            t("Leave"),
+        )
+    };
     let response = if look.labelled && !look.leave_icon {
         small_button(ui, palette, &label, Some(LEAVE))
     } else {

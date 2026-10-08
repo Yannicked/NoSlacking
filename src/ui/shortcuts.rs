@@ -149,7 +149,7 @@ pub const GROUPS: &[Group] = &[
         shortcuts: &[
             line("Keyboard shortcuts", &["Cmd+Slash"]),
             line("Settings", &["Cmd+Comma"]),
-            line("Leave the huddle", &["Cmd+Shift+H"]),
+            line("Leave the huddle or hang up", &["Cmd+Shift+H"]),
             line("Mute / unmute the microphone", &["Cmd+Shift+Space"]),
             Shortcut {
                 when: When::Camera,

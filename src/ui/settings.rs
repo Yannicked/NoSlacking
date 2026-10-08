@@ -382,114 +382,119 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         }
     });
 
-    group(ui, palette, &t("Slack app"), |ui| {
-        let status = match &app.socket {
-            Socket::Connected => t("Live updates connected"),
-            Socket::Connecting => t("Connecting…"),
-            Socket::Off => t("No live connection: messages are fetched every few seconds"),
-            Socket::Disconnected(_) => t("Offline, reconnecting"),
-            Socket::Rejected(_) => t("Slack refused the app-level token"),
-        };
-        row(ui, palette, &t("Connection"), &status, |ui, _| {
-            if theme::secondary_button(ui, palette, &t("Reconnect")).clicked() {
-                app.actions.push(Action::Reconnect);
+    // A setup of Microsoft Teams workspaces only has no Slack app to
+    // speak of.
+    let slack = app.workspaces.is_empty() || app.workspaces.iter().any(|w| !w.info.is_teams());
+    if slack {
+        group(ui, palette, &t("Slack app"), |ui| {
+            let status = match &app.socket {
+                Socket::Connected => t("Live updates connected"),
+                Socket::Connecting => t("Connecting…"),
+                Socket::Off => t("No live connection: messages are fetched every few seconds"),
+                Socket::Disconnected(_) => t("Offline, reconnecting"),
+                Socket::Rejected(_) => t("Slack refused the app-level token"),
+            };
+            row(ui, palette, &t("Connection"), &status, |ui, _| {
+                if theme::secondary_button(ui, palette, &t("Reconnect")).clicked() {
+                    app.actions.push(Action::Reconnect);
+                }
+            });
+            for (label, value, secret) in [
+                (t("Client ID"), &mut app.setup.client_id, false),
+                (
+                    t("Client secret (optional)"),
+                    &mut app.setup.client_secret,
+                    true,
+                ),
+                (t("App-level token"), &mut app.setup.app_token, true),
+            ] {
+                let label = ui.label(
+                    RichText::new(label)
+                        .font(theme::semibold(13.0))
+                        .color(palette.secondary),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(value)
+                        .password(secret)
+                        .desired_width(f32::INFINITY)
+                        .margin(Margin::symmetric(8, 6)),
+                )
+                .labelled_by(label.id);
             }
-        });
-        for (label, value, secret) in [
-            (t("Client ID"), &mut app.setup.client_id, false),
-            (
-                t("Client secret (optional)"),
-                &mut app.setup.client_secret,
-                true,
-            ),
-            (t("App-level token"), &mut app.setup.app_token, true),
-        ] {
-            let label = ui.label(
-                RichText::new(label)
-                    .font(theme::semibold(13.0))
-                    .color(palette.secondary),
+            let form = AppCredentials {
+                client_id: app.setup.client_id.trim().to_owned(),
+                client_secret: app.setup.client_secret.trim().to_owned(),
+                app_token: app.setup.app_token.trim().to_owned(),
+            };
+            let changed = app.app_credentials.as_ref() != Some(&form);
+            // As on the sign-in page: an app without a client id cannot sign
+            // anyone in, so it is not worth saving. The secret may stay empty.
+            ui.add_enabled_ui(changed && form.can_sign_in(), |ui| {
+                if theme::primary_button(ui, palette, &t("Save")).clicked() {
+                    app.actions.push(Action::SaveApp);
+                }
+            });
+            ui.separator();
+            let mut redirect = app.settings.redirect;
+            row(
+                ui,
+                palette,
+                &t("Sign-in redirect"),
+                &t("Must be one of the app's redirect URLs under OAuth & Permissions."),
+                |ui, name| {
+                    egui::ComboBox::from_id_salt("redirect")
+                        .selected_text(match redirect {
+                            Redirect::Scheme => crate::auth::SCHEME_REDIRECT.to_owned(),
+                            Redirect::Loopback => {
+                                crate::auth::loopback_redirect(app.settings.loopback_port)
+                            }
+                        })
+                        .width(280.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut redirect,
+                                Redirect::Scheme,
+                                crate::auth::SCHEME_REDIRECT,
+                            );
+                            ui.selectable_value(
+                                &mut redirect,
+                                Redirect::Loopback,
+                                crate::auth::loopback_redirect(app.settings.loopback_port),
+                            );
+                        })
+                        .response
+                        .labelled_by(name);
+                },
             );
-            ui.add(
-                egui::TextEdit::singleline(value)
-                    .password(secret)
-                    .desired_width(f32::INFINITY)
-                    .margin(Margin::symmetric(8, 6)),
-            )
-            .labelled_by(label.id);
-        }
-        let form = AppCredentials {
-            client_id: app.setup.client_id.trim().to_owned(),
-            client_secret: app.setup.client_secret.trim().to_owned(),
-            app_token: app.setup.app_token.trim().to_owned(),
-        };
-        let changed = app.app_credentials.as_ref() != Some(&form);
-        // As on the sign-in page: an app without a client id cannot sign
-        // anyone in, so it is not worth saving. The secret may stay empty.
-        ui.add_enabled_ui(changed && form.can_sign_in(), |ui| {
-            if theme::primary_button(ui, palette, &t("Save")).clicked() {
-                app.actions.push(Action::SaveApp);
-            }
-        });
-        ui.separator();
-        let mut redirect = app.settings.redirect;
-        row(
-            ui,
-            palette,
-            &t("Sign-in redirect"),
-            &t("Must be one of the app's redirect URLs under OAuth & Permissions."),
-            |ui, name| {
-                egui::ComboBox::from_id_salt("redirect")
-                    .selected_text(match redirect {
-                        Redirect::Scheme => crate::auth::SCHEME_REDIRECT.to_owned(),
-                        Redirect::Loopback => {
-                            crate::auth::loopback_redirect(app.settings.loopback_port)
-                        }
-                    })
-                    .width(280.0)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut redirect,
-                            Redirect::Scheme,
-                            crate::auth::SCHEME_REDIRECT,
-                        );
-                        ui.selectable_value(
-                            &mut redirect,
-                            Redirect::Loopback,
-                            crate::auth::loopback_redirect(app.settings.loopback_port),
-                        );
-                    })
-                    .response
-                    .labelled_by(name);
-            },
-        );
-        // Under the row: next to the menu it would run beneath it.
-        ui.label(
+            // Under the row: next to the menu it would run beneath it.
+            ui.label(
             RichText::new(t("The manifest adds the loopback one; add noslacking://oauth/callback there yourself to use it."))
                 .font(theme::regular(12.5))
                 .color(palette.dim),
         );
-        if redirect != app.settings.redirect {
-            app.settings.redirect = redirect;
-            app.settings_changed();
-        }
-        if app.settings.redirect == Redirect::Loopback {
-            let mut port = app.settings.loopback_port;
-            row(ui, palette, &t("Loopback port"), "", |ui, name| {
-                ui.add(egui::DragValue::new(&mut port).range(1024..=65535))
-                    .labelled_by(name);
-            });
-            if port != app.settings.loopback_port {
-                app.settings.loopback_port = port;
+            if redirect != app.settings.redirect {
+                app.settings.redirect = redirect;
                 app.settings_changed();
             }
-        }
-    });
+            if app.settings.redirect == Redirect::Loopback {
+                let mut port = app.settings.loopback_port;
+                row(ui, palette, &t("Loopback port"), "", |ui, name| {
+                    ui.add(egui::DragValue::new(&mut port).range(1024..=65535))
+                        .labelled_by(name);
+                });
+                if port != app.settings.loopback_port {
+                    app.settings.loopback_port = port;
+                    app.settings_changed();
+                }
+            }
+        });
+    }
 
     spelling::show(app, ui, palette);
     network::show(app, ui, palette);
 
     #[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
-    group(ui, palette, &t("Huddles"), |ui| {
+    group(ui, palette, &t("Calls and huddles"), |ui| {
         let mut hardware = app.settings.hardware_video;
         row(
             ui,

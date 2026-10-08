@@ -557,7 +557,7 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
             let place = workspace
                 .conversation(&invite.channel)
                 .filter(|c| !c.kind.is_dm())
-                .map(|c| format!("#{}", workspace.title(c)));
+                .map(|c| workspace.named_place(c));
             let name = workspace.user_label(&invite.from);
             let (title, mut body) = if call {
                 crate::huddles::call_text(&name)

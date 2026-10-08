@@ -222,7 +222,7 @@ impl Failure {
             Self::CantLeaveGeneral => t("nobody can leave the general channel"),
             Self::Restricted => t("the workspace does not allow you to do that"),
             Self::WrongKind => t("that cannot be done in this kind of conversation"),
-            Self::RateLimited => t("Slack is rate limiting requests; try again shortly"),
+            Self::RateLimited => t("the server is rate limiting requests; try again shortly"),
             Self::Network(detail) => {
                 return fill(&t("the network failed: {detail}"), &[("detail", detail)]);
             }
@@ -231,11 +231,11 @@ impl Failure {
             }
             Self::Unexpected(detail) => {
                 return fill(
-                    &t("Slack answered unexpectedly: {detail}"),
+                    &t("the server answered unexpectedly: {detail}"),
                     &[("detail", detail)],
                 );
             }
-            Self::NoMessage => t("Slack did not return the message"),
+            Self::NoMessage => t("the server did not return the message"),
             Self::TooLarge => t("it is larger than Slack's 1 GB limit"),
             Self::NotAFile => t("it is not a file"),
             Self::NoDownloadsFolder => t("there is no downloads folder"),
@@ -335,7 +335,7 @@ impl Failure {
                     t("the camera could not be opened; another app may be using it")
                 }
                 HuddleTrouble::ViewOnly => {
-                    t("This huddle takes no more video, so your camera stays off")
+                    t("This call takes no more video, so your camera stays off")
                 }
                 HuddleTrouble::ShareCancelled => t("nothing was chosen to share"),
                 // Each system keeps apps from the screen its own way; say

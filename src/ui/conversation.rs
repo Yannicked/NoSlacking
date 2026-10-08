@@ -298,11 +298,17 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         return;
     };
     let title = workspace.title(conversation);
-    let placeholder = match conversation.kind {
-        ConversationKind::Channel | ConversationKind::Private => {
+    // As each service words it: Teams posts in a channel, and types in
+    // a chat.
+    let placeholder = match (conversation.kind, workspace.info.is_teams()) {
+        (ConversationKind::Channel | ConversationKind::Private, false) => {
             tf("Message #{name}", &[("name", &title)])
         }
-        _ => tf("Message {name}", &[("name", &title)]),
+        (ConversationKind::Channel | ConversationKind::Private, true) => {
+            tf("Post in {name}", &[("name", &title)])
+        }
+        (_, true) => t("Type a message").into_owned(),
+        (_, false) => tf("Message {name}", &[("name", &title)]),
     };
     egui::Panel::bottom("composer")
         .show_separator_line(false)
@@ -892,13 +898,14 @@ fn beginning(
                     title.clone(),
                     t("This is the very beginning of this group conversation.").into_owned(),
                 ),
-                _ => (
-                    format!("#{title}"),
-                    tf(
-                        "This is the very beginning of #{name}.",
-                        &[("name", &title)],
-                    ),
-                ),
+                _ => {
+                    let place = workspace.named_place(conversation);
+                    let line = tf(
+                        "This is the very beginning of {place}.",
+                        &[("place", &place)],
+                    );
+                    (place, line)
+                }
             };
             ui.label(
                 RichText::new(heading)

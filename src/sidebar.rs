@@ -450,6 +450,9 @@ pub fn title(section: &SidebarSection) -> String {
         }
         SectionKind::Starred => crate::i18n::t("Starred").into_owned(),
         SectionKind::Channels => crate::i18n::t("Channels").into_owned(),
+        SectionKind::DirectMessages if section.id == crate::model::TEAMS_CHAT_SECTION => {
+            crate::i18n::t("Chat").into_owned()
+        }
         SectionKind::DirectMessages => crate::i18n::t("Direct messages").into_owned(),
         SectionKind::Apps => crate::i18n::t("Apps").into_owned(),
     }
@@ -1049,6 +1052,19 @@ pub fn targets(sections: &[SidebarSection], from: Option<&str>) -> Vec<(String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_teams_chat_section_is_called_chat() {
+        let section = |id: &str| SidebarSection {
+            id: id.to_owned(),
+            kind: SectionKind::DirectMessages,
+            name: String::new(),
+            emoji: String::new(),
+            channel_ids: Vec::new(),
+        };
+        assert_eq!(title(&section(crate::model::TEAMS_CHAT_SECTION)), "Chat");
+        assert_eq!(title(&section("L04")), "Direct messages");
+    }
     use crate::model::{ConversationKind, Ts};
 
     fn conversation(id: &str, name: &str, kind: ConversationKind, latest: &str) -> Conversation {

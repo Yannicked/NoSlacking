@@ -460,6 +460,11 @@ pub enum SectionKind {
     Apps,
 }
 
+/// The id of a Microsoft Teams workspace's chat section: the catch-all
+/// for its 1:1, group and meeting chats, a direct-message section titled
+/// "Chat" as Teams calls it.
+pub const TEAMS_CHAT_SECTION: &str = "teams:chat";
+
 /// One section of your Slack sidebar, in your order.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SidebarSection {

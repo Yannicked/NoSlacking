@@ -623,7 +623,9 @@ pub fn frame(app: &mut App, now: Instant) {
         }
         return;
     }
-    if leave_alone(listening.alone_since, now) {
+    // A call ends when the far end hangs up, which Teams says; only a
+    // huddle is left for being alone in.
+    if !listening.is_call() && leave_alone(listening.alone_since, now) {
         leave(app);
         app.toast(t("Everyone else left the huddle"), false);
     } else if let Some(since) = listening.alone_since {

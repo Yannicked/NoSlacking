@@ -300,6 +300,18 @@ impl WorkspaceState {
         }
     }
 
+    /// A conversation named as running text names it: a Slack channel
+    /// with its `#` ("#design"), a Microsoft Teams channel as Teams writes
+    /// it, plainly ("General"), a direct message by who is in it.
+    pub fn named_place(&self, conversation: &Conversation) -> String {
+        let title = self.title(conversation);
+        if conversation.kind.is_dm() || self.info.is_teams() {
+            title
+        } else {
+            format!("#{title}")
+        }
+    }
+
     /// The label for a message's author: the name a bot posted under, the
     /// person, or the app behind the `bot_id`.
     pub fn author(&self, message: &Message) -> String {

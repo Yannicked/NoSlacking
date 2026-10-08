@@ -257,7 +257,13 @@ fn suggest(people: &People, workspace: &WorkspaceState, word: &str) -> Vec<Sugge
             .map(Suggestion::Command)
             .collect();
     }
+    // Slack's channel links and broadcasts are text in Teams: a Teams
+    // message has neither.
+    let teams = workspace.info.is_teams();
     if let Some(query) = word.strip_prefix('#') {
+        if teams {
+            return Vec::new();
+        }
         let query = query.to_lowercase();
         let mut channels: Vec<(String, &crate::model::Conversation)> = workspace
             .conversations
@@ -289,7 +295,7 @@ fn suggest(people: &People, workspace: &WorkspaceState, word: &str) -> Vec<Sugge
         let query = query.to_lowercase();
         let mut out: Vec<Suggestion> = ["here", "channel", "everyone"]
             .into_iter()
-            .filter(|name| !query.is_empty() && name.starts_with(&query))
+            .filter(|name| !teams && !query.is_empty() && name.starts_with(&query))
             .map(Suggestion::Special)
             .collect();
         let mut users: Vec<&Person> = people

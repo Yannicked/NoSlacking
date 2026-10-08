@@ -187,9 +187,12 @@ async fn boot(client: TeamsClient, workspace: Workspace, sink: Sink) {
         Err(err) => log::warn!("failed to get Teams conversations of {team}: {err:?}"),
     }
 
+    // Chat first, as the Teams app opens on it, then a section per team
+    // with its channels. A personal account has chats only.
+    let mut sections = vec![chat_section()];
     match client.get_teams().await {
         Ok(teams) => {
-            let (sections, channels): (Vec<_>, Vec<_>) = teams.iter().map(translate_team).unzip();
+            let (teams, channels): (Vec<_>, Vec<_>) = teams.iter().map(translate_team).unzip();
             let channels: Vec<_> = channels.into_iter().flatten().collect();
             if !channels.is_empty() {
                 sink.send(Event::Conversations {
@@ -198,15 +201,14 @@ async fn boot(client: TeamsClient, workspace: Workspace, sink: Sink) {
                     complete: false,
                 });
             }
-            if !sections.is_empty() {
-                sink.send(Event::Sections {
-                    team: team.clone(),
-                    sections,
-                });
-            }
+            sections.extend(teams);
         }
         Err(err) => log::warn!("failed to get the teams list of {team}: {err:?}"),
     }
+    sink.send(Event::Sections {
+        team: team.clone(),
+        sections,
+    });
 
     match client.get_me() {
         Ok(me) => sink.send(people_event(
@@ -680,6 +682,19 @@ impl Post {
             id: self.me.clone(),
             name: self.me_name.clone(),
         }
+    }
+}
+
+/// A Teams workspace's chat section: every 1:1, group and meeting chat
+/// not placed elsewhere, most recent first, with the button to start
+/// one.
+fn chat_section() -> crate::model::SidebarSection {
+    crate::model::SidebarSection {
+        id: crate::model::TEAMS_CHAT_SECTION.to_owned(),
+        kind: crate::model::SectionKind::DirectMessages,
+        name: String::new(),
+        emoji: String::new(),
+        channel_ids: Vec::new(),
     }
 }
 
