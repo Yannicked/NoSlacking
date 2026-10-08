@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use super::decode::{self, H264, Images, Outcome, Trouble};
+use super::decode::{self, H264, Outcome, Trouble};
 use super::helper::Lane;
 use super::screen::Picture;
 
@@ -464,12 +464,11 @@ impl Timings {
 /// with no frame, the picture the helper kept back.
 fn decode_one(
     key: &str,
-    camera: &mut Camera,
+    decoder: &mut H264,
     frame: Option<(&[u8], bool)>,
     gallery: &Gallery,
     timings: &mut Timings,
 ) {
-    let decoder = &mut camera.decoder;
     let started = Instant::now();
     let (width, height) = gallery.fit();
     decoder.set_fit(width, height);
@@ -490,12 +489,18 @@ fn decode_one(
             let mut yuv = picture.yuv;
             #[cfg(feature = "demo")]
             gallery.tinted(key, &mut yuv);
-            match camera.images.convert(&yuv) {
+            match decode::to_image(&yuv) {
                 Ok(image) => {
                     timings.pictures += 1;
                     timings.shown = image.size;
                     timings.working += started.elapsed();
-                    gallery.put(key, Picture { image, source });
+                    gallery.put(
+                        key,
+                        Picture {
+                            image: Arc::new(image),
+                            source,
+                        },
+                    );
                 }
                 Err(error) => {
                     timings.errors += 1;
@@ -519,15 +524,9 @@ fn decode_one(
     }
 }
 
-/// A camera's decoder, and the images its pictures become.
-struct Camera {
-    decoder: H264,
-    images: Images,
-}
-
 /// The decoder thread: a decoder per camera, the newest picture each.
 fn run(jobs: &Jobs, gallery: &Gallery) {
-    let mut decoders: BTreeMap<String, Camera> = BTreeMap::new();
+    let mut decoders: BTreeMap<String, H264> = BTreeMap::new();
     let mut timings = Timings::default();
     while let Some(job) = next(jobs) {
         match job {
@@ -535,15 +534,9 @@ fn run(jobs: &Jobs, gallery: &Gallery) {
                 gallery.clear(&key);
                 // A keyframe to start on, asked for by the session too.
                 gallery.want_keyframe(&key);
-                let decoder = H264::new(Lane::Cameras);
-                gallery.set_no_video(decoder.no_helper());
-                decoders.insert(
-                    key,
-                    Camera {
-                        decoder,
-                        images: Images::default(),
-                    },
-                );
+                let fresh = H264::new(Lane::Cameras);
+                gallery.set_no_video(fresh.no_helper());
+                decoders.insert(key, fresh);
             }
             Job::Stop(key) => {
                 decoders.remove(&key);
@@ -554,10 +547,10 @@ fn run(jobs: &Jobs, gallery: &Gallery) {
                 unit,
                 contiguous,
             } => {
-                if let Some(camera) = decoders.get_mut(&key) {
+                if let Some(decoder) = decoders.get_mut(&key) {
                     decode_one(
                         &key,
-                        camera,
+                        decoder,
                         Some((&unit, contiguous)),
                         gallery,
                         &mut timings,
@@ -566,8 +559,8 @@ fn run(jobs: &Jobs, gallery: &Gallery) {
                 }
             }
             Job::Fetch(key) => {
-                if let Some(camera) = decoders.get_mut(&key) {
-                    decode_one(&key, camera, None, gallery, &mut timings);
+                if let Some(decoder) = decoders.get_mut(&key) {
+                    decode_one(&key, decoder, None, gallery, &mut timings);
                 }
             }
         }

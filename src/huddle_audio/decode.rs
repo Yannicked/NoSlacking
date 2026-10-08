@@ -16,8 +16,6 @@
 //! for a keyframe (the session asks for one) and starts again in the
 //! helper started anew.
 
-use std::sync::Arc;
-
 use egui::{Color32, ColorImage};
 
 use super::bitstream;
@@ -302,15 +300,6 @@ pub fn is_keyframe(unit: &[u8]) -> bool {
 /// BT.601 in studio range unless its VUI says otherwise, which Chrome's
 /// screen shares do not.
 pub fn to_image(yuv: &Yuv) -> Result<ColorImage, Trouble> {
-    let mut image = ColorImage::new([0, 0], Vec::new());
-    to_image_into(yuv, &mut image)?;
-    Ok(image)
-}
-
-/// [`to_image`] into `image`, whatever it held: its pixels are only
-/// grown (or cut) to the picture's size, never cleared first, as every
-/// one is written.
-pub fn to_image_into(yuv: &Yuv, image: &mut ColorImage) -> Result<(), Trouble> {
     if !yuv.whole() {
         return Err(Trouble::Convert(format!(
             "planes do not match {}x{}",
@@ -320,7 +309,7 @@ pub fn to_image_into(yuv: &Yuv, image: &mut ColorImage) -> Result<(), Trouble> {
     let size =
         |n: usize| u32::try_from(n).map_err(|_| Trouble::Convert(format!("{n} is too large")));
     let (cw, _) = yuv.chroma();
-    let planar = yuv::YuvPlanarImage {
+    let image = yuv::YuvPlanarImage {
         y_plane: &yuv.y,
         y_stride: size(yuv.width)?,
         u_plane: &yuv.u,
@@ -332,58 +321,16 @@ pub fn to_image_into(yuv: &Yuv, image: &mut ColorImage) -> Result<(), Trouble> {
     };
     // Opaque: premultiplied and straight alpha are the same, so the
     // converter writes egui's own pixels.
-    let pixels = &mut image.pixels;
-    pixels.resize(yuv.width * yuv.height, Color32::BLACK);
-    image.size = [yuv.width, yuv.height];
-    image.source_size = egui::vec2(yuv.width as f32, yuv.height as f32);
+    let mut pixels = vec![Color32::BLACK; yuv.width * yuv.height];
     yuv::yuv420_to_rgba(
-        &planar,
-        bytemuck::cast_slice_mut(pixels),
+        &image,
+        bytemuck::cast_slice_mut(&mut pixels),
         size(yuv.width * 4)?,
         yuv::YuvRange::Limited,
         yuv::YuvStandardMatrix::Bt601,
     )
-    .map_err(|e| Trouble::Convert(e.to_string()))
-}
-
-/// How many images [`Images`] keeps: one waiting for the window, one egui
-/// has yet to upload, one being written.
-const KEEP: usize = 3;
-
-/// The RGBA images of one stream's pictures, used again once egui is
-/// done with them (the window took a newer one and the old one was
-/// uploaded): a 1080p picture's 8 MB is then neither allocated nor
-/// faulted in afresh for every frame.
-#[derive(Debug, Default)]
-pub struct Images {
-    /// The last few made; any that only this holds is free.
-    made: Vec<Arc<ColorImage>>,
-}
-
-impl Images {
-    /// `yuv` as egui's pixels, in an image nobody else holds any more if
-    /// there is one.
-    pub fn convert(&mut self, yuv: &Yuv) -> Result<Arc<ColorImage>, Trouble> {
-        let free = self
-            .made
-            .iter_mut()
-            .position(|image| Arc::get_mut(image).is_some());
-        let mut image = match free {
-            Some(n) => self.made.remove(n),
-            None => Arc::new(ColorImage::new([0, 0], Vec::new())),
-        };
-        match Arc::get_mut(&mut image) {
-            Some(pixels) => to_image_into(yuv, pixels)?,
-            // Not reached: it was free, or new.
-            None => image = Arc::new(to_image(yuv)?),
-        }
-        self.made.push(Arc::clone(&image));
-        if self.made.len() > KEEP {
-            // The oldest, still held elsewhere: let it go with its holder.
-            self.made.remove(0);
-        }
-        Ok(image)
-    }
+    .map_err(|e| Trouble::Convert(e.to_string()))?;
+    Ok(ColorImage::new([yuv.width, yuv.height], pixels))
 }
 
 #[cfg(test)]
@@ -777,55 +724,6 @@ mod tests {
         assert!(decoder.no_helper());
         assert_eq!(shown(&mut decoder, &frames[0]), Err(Trouble::NoHelper));
         assert_eq!(launches.load(Ordering::Relaxed), helper::MAX_RESTARTS + 1);
-    }
-
-    /// An image egui is done with is written over for the next picture,
-    /// of whatever size, and comes out as a fresh one would; one still
-    /// held is left alone; only a few are kept.
-    #[test]
-    fn images_are_used_again_once_nobody_holds_them() {
-        let grey = Yuv {
-            width: 4,
-            height: 2,
-            y: vec![16, 60, 120, 235, 16, 60, 120, 235],
-            u: vec![100, 150],
-            v: vec![128, 90],
-        };
-        let red = Yuv {
-            width: 2,
-            height: 2,
-            y: vec![81; 4],
-            u: vec![90],
-            v: vec![240],
-        };
-        let mut images = Images::default();
-        let first = images.convert(&grey).expect("converts");
-        assert_eq!(*first, to_image(&grey).expect("converts"));
-        let held = Arc::as_ptr(&first);
-        let second = images.convert(&red).expect("converts");
-        assert_ne!(Arc::as_ptr(&second), held, "the first is still held");
-        assert_eq!(*second, to_image(&red).expect("converts"));
-        drop(first);
-        // Free now: written over, at another size.
-        let third = images.convert(&red).expect("converts");
-        assert_eq!(Arc::as_ptr(&third), held);
-        assert_eq!(*third, to_image(&red).expect("converts"));
-        drop(third);
-        let fourth = images.convert(&grey).expect("converts");
-        assert_eq!(Arc::as_ptr(&fourth), held);
-        assert_eq!(*fourth, to_image(&grey).expect("converts"));
-        // All held: new ones, but no more than a few kept.
-        let all: Vec<Arc<ColorImage>> = (0..10)
-            .map(|_| images.convert(&grey).expect("converts"))
-            .collect();
-        assert!(all.iter().all(|image| **image == *fourth));
-        assert!(images.made.len() <= KEEP);
-        // A picture that does not convert leaves nothing behind.
-        let broken = Yuv {
-            y: vec![0; 3],
-            ..red
-        };
-        assert!(images.convert(&broken).is_err());
     }
 
     #[test]
