@@ -43,6 +43,12 @@ pub fn nal_type(unit: &[u8]) -> Option<u8> {
     unit.first().map(|b| b & 0x1f)
 }
 
+/// The NAL unit types of an Annex B frame, in order: what is checked of
+/// each access unit the video helper hands over before it goes out.
+pub fn nal_types(frame: &[u8]) -> Vec<u8> {
+    nal_units(frame).into_iter().filter_map(nal_type).collect()
+}
+
 /// An Annex B stream split into frames as `str0m` hands them over: each
 /// ends after its slice, the parameter sets going with the slice they
 /// precede. For streams of one slice a picture, as the fixtures and the
@@ -515,6 +521,9 @@ mod tests {
         );
         assert_eq!(units[1], &hex("68ce3c80")[..]);
         assert!(nal_units(&[0, 0]).is_empty());
+        assert_eq!(nal_types(&frame), [7, 8, 5]);
+        assert_eq!(nal_types(&hex("000001419a")), [1]);
+        assert!(nal_types(&[]).is_empty());
     }
 
     #[test]

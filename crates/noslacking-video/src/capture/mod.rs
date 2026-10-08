@@ -1,5 +1,5 @@
-//! Capturing the screen the user shares: what can be shared, and the
-//! frames it gives.
+//! Capturing what the user sends: the screen they share (here) and their
+//! camera ([`camera`]), what there is of each, and the frames they give.
 //!
 //! The rule, the microphone's and the camera's: nothing is captured until
 //! the app asks to share ([`Screens::start`]), and capture stops (its
@@ -20,10 +20,11 @@
 //!   (`pattern`), for the probe and the benchmarks.
 //!
 //! Each capture runs on a thread of its own, which also runs the share's
-//! encoding ([`crate::share::Pipeline`]): a dma-buf is only good while
+//! encoding ([`crate::pipeline::Pipeline`]): a dma-buf is only good while
 //! PipeWire lends it, so it must reach the GPU on the thread that has
 //! it, and a GPU's state (libva's display) stays on one thread.
 
+pub mod camera;
 pub mod convert;
 pub mod pattern;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
@@ -38,27 +39,23 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use noslacking_video_ipc::{Planes, ShareChoice, ShareProblem, Source};
+use noslacking_video_ipc::{CaptureProblem, Planes, ShareChoice, Source};
 
-use crate::share::{Ask, Pipeline, Settings, Share};
+use crate::pipeline::{Ask, Capture, Pipeline, Settings};
 
-/// Frames a second asked of a capture and sent at most: the JS SDK's
-/// default for content (`ContentShareMediaStreamBroker.defaultFrameRate`).
-pub const FPS: u32 = 15;
-
-/// Why a share did not start, or stopped: what the app is told, and more
-/// for its log.
+/// Why a capture did not start, or stopped: what the app is told, and
+/// more for its log.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trouble {
     /// What happened.
-    pub problem: ShareProblem,
+    pub problem: CaptureProblem,
     /// Why, for the log.
     pub detail: String,
 }
 
 impl Trouble {
     /// `problem`, because of `detail`.
-    pub fn new(problem: ShareProblem, detail: impl Into<String>) -> Self {
+    pub fn new(problem: CaptureProblem, detail: impl Into<String>) -> Self {
         Self {
             problem,
             detail: detail.into(),
@@ -67,7 +64,7 @@ impl Trouble {
 
     /// It failed, because of `detail`.
     pub fn failed(detail: impl Into<String>) -> Self {
-        Self::new(ShareProblem::Failed, detail)
+        Self::new(CaptureProblem::Failed, detail)
     }
 }
 
@@ -194,19 +191,27 @@ pub trait Screens {
         choice: &ShareChoice,
         settings: Settings,
         restore: &str,
-    ) -> Result<(Share, String), Trouble>;
+    ) -> Result<(Capture, String), Trouble>;
 }
 
-/// Starts a capture thread named `name`, running `body` with the share's
-/// pipeline (made on the thread) and its asks, once `body` has said
-/// through `started` whether the capture started. The share it returns
-/// stops the thread, and waits for it, when dropped.
+/// Starts a capture thread named `name`, running `body` with the
+/// capture's pipeline (made on the thread), its asks, and a sender into
+/// those asks for a reader thread's pictures (the camera's), once `body`
+/// has said through `started` whether the capture started. The capture
+/// it returns stops the thread, and waits for it, when dropped.
 pub fn spawn(
     name: &str,
     settings: Settings,
-    body: impl FnOnce(&mut Pipeline, Receiver<Ask>, &mpsc::Sender<Result<(), Trouble>>) + Send + 'static,
-) -> Result<Share, Trouble> {
+    body: impl FnOnce(
+        &mut Pipeline,
+        Receiver<Ask>,
+        mpsc::Sender<Ask>,
+        &mpsc::Sender<Result<(), Trouble>>,
+    ) + Send
+    + 'static,
+) -> Result<Capture, Trouble> {
     let (asks, inbox) = mpsc::channel();
+    let feed = asks.clone();
     let (started, result) = mpsc::channel();
     let ended = Arc::new(Mutex::new(None));
     let thread_ended = Arc::clone(&ended);
@@ -214,30 +219,31 @@ pub fn spawn(
         .name(name.into())
         .spawn(move || {
             let mut pipeline = Pipeline::new(settings);
-            body(&mut pipeline, inbox, &started);
+            body(&mut pipeline, inbox, feed, &started);
             *thread_ended.lock().unwrap_or_else(PoisonError::into_inner) = pipeline.ended();
         })
         .map_err(|e| Trouble::failed(format!("no capture thread: {e}")))?;
     let send = move |ask| asks.send(ask).is_ok();
-    let share = Share::new(Box::new(send), thread, ended);
+    let capture = Capture::new(Box::new(send), thread, ended);
     match result.recv() {
-        Ok(Ok(())) => Ok(share),
+        Ok(Ok(())) => Ok(capture),
         Ok(Err(trouble)) => Err(trouble),
         Err(_) => Err(Trouble::failed("the capture thread stopped")),
     }
 }
 
 /// A capture that is asked for each picture (the X server, `xcap`, the
-/// test screen): runs `grab` [`FPS`] times a second until the share is
-/// closed, handing each picture to `pipeline` through `put`, and the
-/// app's asks to it as they come. Five failures in a row end the share.
+/// test screen): runs `grab` as many times a second as the pipeline's
+/// profile says until the capture is closed, handing each picture to
+/// `pipeline` through `put`, and the app's asks to it as they come. Five
+/// failures in a row end the capture.
 pub fn poll<T>(
     pipeline: &mut Pipeline,
     inbox: &Receiver<Ask>,
     mut grab: impl FnMut() -> Result<T, String>,
     put: impl Fn(&mut Pipeline, &T, Instant),
 ) {
-    let every = Duration::from_secs(1) / FPS;
+    let every = Duration::from_secs(1) / pipeline.profile().fps;
     let mut due = Instant::now();
     let mut failures = 0;
     loop {
@@ -252,7 +258,7 @@ pub fn poll<T>(
                     failures += 1;
                     eprintln!("noslacking-video: share: capture: {why}");
                     if failures >= 5 {
-                        pipeline.end(Trouble::new(ShareProblem::Ended, why));
+                        pipeline.end(Trouble::new(CaptureProblem::Ended, why));
                     }
                 }
             }
@@ -279,7 +285,7 @@ pub fn poll<T>(
 /// memory, as PipeWire's shared memory gives them, and with `=dmabuf`
 /// (Linux, VA-API) as dma-bufs, as PipeWire's GPU buffers: so the
 /// benchmarks run each of the real paths.
-pub fn test_screen(settings: Settings) -> Result<Share, Trouble> {
+pub fn test_screen(settings: Settings) -> Result<Capture, Trouble> {
     let kind = std::env::var("NOSLACKING_VIDEO_TEST_FRAMES").unwrap_or_default();
     #[cfg(target_os = "linux")]
     if kind == "dmabuf" {
@@ -288,7 +294,7 @@ pub fn test_screen(settings: Settings) -> Result<Share, Trouble> {
     spawn(
         "noslacking-share-test",
         settings,
-        move |pipeline, inbox, started| {
+        move |pipeline, inbox, _feed, started| {
             let _ = started.send(Ok(()));
             let began = Instant::now();
             let mut n = 0u64;
@@ -415,7 +421,7 @@ impl Screens for System {
             #[cfg(any(target_os = "macos", windows))]
             Self::Xcap => xcap_capture::sources().map(|s| (false, s)),
             Self::None => Err(Trouble::new(
-                ShareProblem::Unavailable,
+                CaptureProblem::Unavailable,
                 "this helper cannot capture the screen here (built without PipeWire?)",
             )),
         }
@@ -426,7 +432,7 @@ impl Screens for System {
         choice: &ShareChoice,
         settings: Settings,
         restore: &str,
-    ) -> Result<(Share, String), Trouble> {
+    ) -> Result<(Capture, String), Trouble> {
         if *choice == ShareChoice::Test {
             return test_screen(settings).map(|share| (share, String::new()));
         }
@@ -440,7 +446,7 @@ impl Screens for System {
             Self::None => {
                 let _ = restore;
                 Err(Trouble::new(
-                    ShareProblem::Unavailable,
+                    CaptureProblem::Unavailable,
                     "this helper cannot capture the screen here (built without PipeWire?)",
                 ))
             }
@@ -466,10 +472,10 @@ impl Screens for Pretend {
         choice: &ShareChoice,
         settings: Settings,
         _restore: &str,
-    ) -> Result<(Share, String), Trouble> {
+    ) -> Result<(Capture, String), Trouble> {
         match choice {
             ShareChoice::Source(id) if !self.sources.iter().any(|s| &s.id == id) => Err(
-                Trouble::new(ShareProblem::Gone, format!("no source {id:?}")),
+                Trouble::new(CaptureProblem::Gone, format!("no source {id:?}")),
             ),
             // Whatever is chosen, the test screen is what it shows.
             _ => test_screen(settings).map(|share| (share, "pretend-token".into())),

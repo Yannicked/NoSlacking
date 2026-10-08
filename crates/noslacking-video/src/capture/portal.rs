@@ -35,12 +35,12 @@ use std::time::{Duration, Instant};
 
 use ashpd::desktop::PersistMode;
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
-use noslacking_video_ipc::{ShareChoice, ShareProblem};
+use noslacking_video_ipc::{CaptureProblem, ShareChoice};
 use pipewire as pw;
 use pw::spa;
 
 use super::{DmaBuf, Frame, Order, Packed, Trouble};
-use crate::share::{Ask, Pipeline, Settings, Share};
+use crate::pipeline::{Ask, Capture, Pipeline, Settings};
 
 /// `DRM_FORMAT_MOD_LINEAR`: rows one after another, as in memory.
 const MOD_LINEAR: i64 = 0;
@@ -69,7 +69,7 @@ pub fn start(
     choice: &ShareChoice,
     settings: Settings,
     restore: &str,
-) -> Result<(Share, String), Trouble> {
+) -> Result<(Capture, String), Trouble> {
     let again = matches!(choice, ShareChoice::System { again: true });
     let restore = (!again && !restore.is_empty()).then(|| restore.to_owned());
     let picked = futures_lite::future::block_on(ask(restore))?;
@@ -100,7 +100,7 @@ pub fn start(
         })
         .map_err(|e| Trouble::failed(format!("no capture thread: {e}")))?;
     let send = move |ask| asks.send(ask).is_ok();
-    let share = Share::new(Box::new(send), thread, ended);
+    let share = Capture::new(Box::new(send), thread, ended);
     match result.recv() {
         Ok(Ok(())) => Ok((share, token.unwrap_or_default())),
         Ok(Err(trouble)) => Err(trouble),
@@ -112,16 +112,16 @@ pub fn start(
 fn portal_error(error: ashpd::Error) -> Trouble {
     match error {
         ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => {
-            Trouble::new(ShareProblem::Cancelled, "the dialog was closed")
+            Trouble::new(CaptureProblem::Cancelled, "the dialog was closed")
         }
         ashpd::Error::Portal(ashpd::PortalError::Cancelled(why)) => {
-            Trouble::new(ShareProblem::Cancelled, why)
+            Trouble::new(CaptureProblem::Cancelled, why)
         }
         ashpd::Error::Portal(ashpd::PortalError::NotAllowed(why)) => {
-            Trouble::new(ShareProblem::Denied, why)
+            Trouble::new(CaptureProblem::Denied, why)
         }
         ashpd::Error::Zbus(error) => Trouble::new(
-            ShareProblem::Unavailable,
+            CaptureProblem::Unavailable,
             format!("the ScreenCast portal: {error}"),
         ),
         other => Trouble::failed(format!("the ScreenCast portal: {other}")),
@@ -141,7 +141,7 @@ async fn ask(restore: Option<String>) -> Result<Picked, Trouble> {
     );
     if types.is_empty() {
         return Err(Trouble::new(
-            ShareProblem::Unavailable,
+            CaptureProblem::Unavailable,
             "the portal offers no sources",
         ));
     }
@@ -266,7 +266,7 @@ fn enum_format(dmabuf: bool) -> Option<Vec<u8>> {
             Range,
             Fraction,
             spa::utils::Fraction {
-                num: super::FPS,
+                num: crate::pipeline::Profile::SHARE.fps,
                 denom: 1
             },
             spa::utils::Fraction { num: 0, denom: 1 },
@@ -392,7 +392,7 @@ fn stream(
             let ended = |why: String| {
                 state_pipeline
                     .borrow_mut()
-                    .end(Trouble::new(ShareProblem::Ended, why));
+                    .end(Trouble::new(CaptureProblem::Ended, why));
             };
             match new {
                 pw::stream::StreamState::Error(why) => ended(format!("PipeWire: {why}")),
@@ -721,11 +721,7 @@ mod tests {
         let share = std::thread::spawn(move || {
             // The GPU if this machine has one that encodes, so dma-bufs
             // are offered first.
-            let settings = Settings {
-                hardware: true,
-                bitrate: 1_000_000,
-                gpu: crate::choose_backend().share_gpu(),
-            };
+            let settings = Settings::share(true, 1_000_000, crate::choose_backend().capture_gpu());
             stream(fd, node, settings, inbox, &started)
         });
         result
@@ -769,9 +765,9 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(ended, Some(ShareProblem::Ended));
+        assert_eq!(ended, Some(CaptureProblem::Ended));
         let _ = asks.send(Ask::Stop);
         let trouble = share.join().expect("the share's thread");
-        assert_eq!(trouble.map(|t| t.problem), Some(ShareProblem::Ended));
+        assert_eq!(trouble.map(|t| t.problem), Some(CaptureProblem::Ended));
     }
 }

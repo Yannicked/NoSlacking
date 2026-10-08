@@ -1,22 +1,21 @@
-//! Measures encoding a camera at 640×480 and 30 pictures a second and a
-//! share at 1920×1080 and 15: in software as the app does (rusty_h264's
-//! encoder, set up as `src/huddle_audio/video_encoder.rs` sets it up), on
-//! the GPU in this process, and through the helper over its pipe as the
-//! app uses it. For each: time and CPU a picture (this process and the
-//! helper's), the rate it came out at, and its luma PSNR against what
-//! went in (decoded again by rusty_h264's decoder, outside the timing).
+//! Measures the encoders alone, a camera at 640×480 and 30 pictures a
+//! second and a share at 1920×1080 and 15: in software (rusty_h264's
+//! encoder, set up as `src/software_encoder.rs` sets it up) and on the
+//! GPU in this process. For each: time and CPU a picture, the rate it
+//! came out at, and its luma PSNR against what went in (decoded again by
+//! rusty_h264's decoder, outside the timing). The whole of a capture,
+//! from frame to access unit, is `examples/share.rs`'s and
+//! `examples/camera.rs`'s.
 //!
-//! `cargo build --release -p noslacking-video --examples --bins`, then
-//! `target/release/examples/encode all target/release/noslacking-video`
-//! (or `software`, `hardware` or `helper` alone).
+//! `cargo build --release -p noslacking-video --examples`, then
+//! `target/release/examples/encode all` (or `software` or `hardware`
+//! alone).
 
 #![allow(clippy::print_stdout, reason = "the measurements are for the reader")]
 
-use std::io::{BufReader, BufWriter};
-use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use noslacking_video_ipc::{self as ipc, Codec, Planes, Reply, Request};
+use noslacking_video_ipc::Planes;
 
 const SCREEN: &[u8] = include_bytes!("../../../src/huddle_audio/fixtures/screen-1920x1080.h264");
 const CAMERA: &[u8] = include_bytes!("../../../src/huddle_audio/fixtures/camera-480x480.h264");
@@ -200,87 +199,43 @@ fn software() {
 }
 
 fn in_process() {
-    let mut backend = noslacking_video::choose_backend();
-    println!("on the GPU in this process, {}", backend.name());
-    for case in cases() {
-        let (w, h) = (case.pictures[0].width, case.pictures[0].height);
-        let Ok(mut encoder) = backend.open_encoder(Codec::H264, w, h, case.fps, case.bitrate)
-        else {
-            println!("  {}: no encoder", case.name);
-            continue;
+    #[cfg(target_os = "linux")]
+    {
+        use noslacking_video::backend::Encoder as _;
+        use noslacking_video::vaapi::encoder::{EncodeSupport, VaapiEncoder};
+        let Ok(display) = noslacking_video::vaapi::va::Display::open() else {
+            println!("on the GPU: no VA-API display");
+            return;
         };
-        measure(&case, None, |picture, force| {
-            let encoded = encoder.encode(picture, force).expect("encodes");
-            (encoded.data, encoded.keyframe)
-        });
-    }
-}
-
-fn through_the_helper(helper: &str) {
-    let mut child = Command::new(helper)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the helper starts");
-    let pid = Some(child.id());
-    let mut input = BufWriter::new(child.stdin.take().expect("stdin"));
-    let mut output = BufReader::new(child.stdout.take().expect("stdout"));
-    let mut seq = 0;
-    let mut call = |request: Request| -> Reply {
-        seq += 1;
-        ipc::write_request(&mut input, seq, &request).expect("sent");
-        let (_, reply) = ipc::read_reply(&mut output)
-            .expect("read")
-            .expect("a reply");
-        reply
-    };
-    call(Request::Hello {
-        version: ipc::VERSION,
-    });
-    println!("through the helper");
-    for case in cases() {
-        let (w, h) = (case.pictures[0].width, case.pictures[0].height);
-        let Reply::Opened { id } = call(Request::OpenEncoder {
-            codec: Codec::H264,
-            width: w,
-            height: h,
-            fps: case.fps,
-            bitrate: case.bitrate,
-        }) else {
-            println!("  {}: no encoder", case.name);
-            continue;
+        let Some(support) = EncodeSupport::query(&display) else {
+            println!("on the GPU: the driver does not encode H.264");
+            return;
         };
-        measure(&case, pid, |picture, force| {
-            // The app hands over its own copy, as it does each picture.
-            let reply = call(Request::Encode {
-                id,
-                force_keyframe: force,
-                picture: picture.clone(),
-            });
-            let Reply::Encoded { keyframe, data } = reply else {
-                panic!("{reply:?}");
+        println!("on the GPU in this process, {}", display.vendor());
+        for case in cases() {
+            let (w, h) = (case.pictures[0].width, case.pictures[0].height);
+            let Ok(mut encoder) =
+                VaapiEncoder::new(&display, support, (w, h), case.fps, case.bitrate)
+            else {
+                println!("  {}: no encoder", case.name);
+                continue;
             };
-            (data, keyframe)
-        });
-        call(Request::Close { id });
+            measure(&case, None, |picture, force| {
+                let encoded = encoder.encode(picture, force).expect("encodes");
+                (encoded.data, encoded.keyframe)
+            });
+        }
     }
-    drop(input);
-    let _ = child.wait();
+    #[cfg(not(target_os = "linux"))]
+    println!("on the GPU: only VA-API (Linux) so far");
 }
 
 fn main() {
     let what = std::env::args().nth(1).unwrap_or_else(|| "all".into());
-    let helper = std::env::args().nth(2);
     if matches!(what.as_str(), "all" | "software") {
         software();
     }
     if matches!(what.as_str(), "all" | "hardware") {
         in_process();
-    }
-    if let Some(helper) = &helper
-        && matches!(what.as_str(), "all" | "helper")
-    {
-        through_the_helper(helper);
     }
 }

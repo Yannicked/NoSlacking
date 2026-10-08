@@ -29,6 +29,12 @@ copied. Line refs are `file:line` at those commits.
   PipeWire portals. *(Stage 1 update: the spike found rusty_h264, pure
   Rust, bit-exact and fast enough for 1080p shares; it is what Stage 1
   uses. Real Slack sends H.264 CB, so VP8 is not needed.)*
+- **All video in the helper (§6.9–6.11, done 2026-10-08):** the app
+  touches no pixels but the ones it shows. `noslacking-video` decodes
+  every stream, captures and encodes the shared screen (§6.10) and the
+  camera (§6.11: V4L2 spoken directly on Linux, nokhwa on macOS and
+  Windows), and hands back H.264 and, for the camera, a small self-view.
+  The app lost its encoder, nokhwa and libclang; no helper, no video.
 - **All decoding in a helper (§6.9, 2026-10-07):** the app decodes no
   video itself any more; `noslacking-video` does, on the GPU when it can
   and in software (rusty_h264, moved there) otherwise. Without the
@@ -315,6 +321,10 @@ others' codecs today: log INDEX's `supported_receive_codec_intersection`.
   time.
 - macOS needs `NSCameraUsageDescription` in Info.plist, next to the
   microphone key we already have.
+- *(2026-10-08, §6.11: the camera moved into the video helper, which
+  speaks V4L2 itself on Linux, about 500 lines of declarations and calls,
+  rather than through nokhwa's bindgen-made bindings; nokhwa stays for
+  macOS and Windows, in the helper. The Camera portal is still to do.)*
 
 ### 3.5 Screen capture (see Stage 4 in §5 for what was chosen)
 - **`xcap` 0.9.8** (2026-08, Apache-2.0, active) has a `VideoRecorder`.
@@ -1565,6 +1575,165 @@ gate. V4L2 and the Camera portal give dma-bufs too (PipeWire's camera
 nodes), so the import path is ready; the app's copies of the test
 pattern, `fit`/`scale` and the software encoder then go, with nokhwa
 and its libclang build.
+
+### 6.11 The camera in the helper (step 3 of "All video in the helper", 2026-10-08)
+
+The last step: the app no longer opens, converts or encodes its camera.
+The helper opens it, captures, encodes and hands back each access unit
+with a small copy of the picture for the self-view. After this the app
+touches pixels only to show them (decoded pictures, the self-view).
+
+- **Protocol 5.** `ListCameras` → `Sources{dialog: false, sources}`
+  (`SourceKind::Camera`, nothing opened to ask); `StartCamera{choice
+  (First | Device(id) | Test), hardware, bitrate, preview}` →
+  `Started{id}` or `Problem{…}`. The share's messages became any
+  capture's: `NextFrame` (was `NextShareFrame`) → `Frame(CapturedFrame)`
+  | `NoPicture` | `Problem`, `Started`, `SetBitrate` and `Close` take a
+  share's or a camera's id. `ShareProblem` became `CaptureProblem`, with
+  `Busy` (another program has the camera). `CapturedFrame` carries an
+  optional self-view (`preview`, I420, at most `MAX_PREVIEW_SIDE` = 640 a
+  side, checked against its size as it is read). `OpenEncoder`,
+  `Encode` and `Encoded` are gone: no picture goes from the app to the
+  helper any more (tags 4 and 5 stay unused).
+- **One pipeline for any capture** (`pipeline.rs`, was `share.rs`). A
+  `Profile` says what differs: the share 1080p on the GPU, 720p in
+  software, 15 a second, unchanged pictures skipped; the camera 640×480
+  both ways (its shape kept: 480×480 stays), 30 a second, nothing
+  compared (a camera's noise never repeats). The same GPU encoder
+  (`vaapi::capture::GpuCapture`: I420 written into its input surface),
+  the same software encoder, the same retuning (the GPU in place, a new
+  software encoder at most every 8 s), the same keyframes on request.
+  A capture's pictures come either from its own thread (the share's
+  PipeWire callback, a poll) or, new, from a reader thread through
+  `Ask::Picture`: a camera blocks in its driver for each frame, so it is
+  read on a thread of its own, converted to I420 there and handed to the
+  pipeline's thread, which keeps only the newest.
+- **The self-view.** The fix that made the self-view keep the camera's
+  pace (a preview of every picture before encoding) moved with it: the
+  pipeline shrinks each picture it keeps by a whole step to at most the
+  width asked (320: 640×480 becomes 320×240) as it takes it in, before
+  it reaches the encoder, and hands it out with that picture's frame; a
+  picture sent again carries none. 115 KB more a frame through the pipe
+  (3.5 MB/s), against the 460 KB I420 the app used to send to the GPU
+  encoder. The app only turns it into RGBA and mirrors it (0.02 ms).
+  Separate previews on their own cadence were not worth a second
+  request: the app asks for every camera picture anyway. A one-pass 2×
+  shrink (`shrink::halve`) took the self-view from 0.37 to 0.04 ms, and
+  speeds up a 1080p share shown at half size in software too (its
+  shrink fell from about 3 ms to 0.2 ms over the decoding).
+- **Capture back ends.** Linux: **V4L2 spoken directly**
+  (`capture/camera/v4l2.rs`, `#[allow(unsafe_code)]`, every block with
+  its SAFETY note): the dozen structures of `linux/videodev2.h` copied by
+  hand as libva's are, their sizes and the ioctl numbers checked against
+  the kernel's in a test, mmap streaming of four buffers, `poll` with a
+  timeout so stopping never waits on the driver. The format nearest
+  640×480 is chosen, raw (YUYV, NV12, I420) before MJPEG at the same
+  distance, a larger size before a smaller (a raw format at 1280×720
+  runs at 10 a second over USB 2, so MJPEG at 640×480 wins there), 30 a
+  second asked. MJPEG is decoded by zune-jpeg (already in the tree as
+  `image`'s; it fills in the Huffman tables webcams leave out). Listing
+  opens each `/dev/video*` node only to ask what it is (no light), and
+  leaves out metadata nodes and cameras in formats the helper does not
+  read (an infrared one in GREY). Why not nokhwa on Linux: its V4L2
+  bindings are bindgen's, so every helper build would need libclang,
+  for a few hundred lines of a stable kernel interface. macOS and
+  Windows: **nokhwa** (its Objective-C shim and Media Foundation's
+  bindings now the helper's), with the macOS camera permission asked
+  there; built only in CI, as xcap is. Errors become `Denied` (EACCES,
+  E_ACCESSDENIED, macOS refused), `Busy` (EBUSY), `Unavailable` or
+  `Gone` (no camera, unplugged), worded in the app ("no camera was
+  found", "…another app may be using it", the permission sentences).
+  **PipeWire's camera nodes and the Camera portal** (dma-bufs straight
+  into VA-API, and the Flatpak without `--device=all`) are left for
+  later: the portal needs its own session and node discovery, the format
+  negotiation differs from the screen's (YUY2/NV12/MJPG, no RGB), and a
+  real camera node to try it on; `uvcvideo`'s buffers are in vmalloc'd
+  memory anyway, so dma-bufs from V4L2 would not reach the GPU without a
+  copy. At 640×480 the conversion costs 0.1 ms; the dma-buf path pays at
+  1080p, which a camera does not send.
+- **The app** (`camera_send.rs`): the share's sending thread became any
+  capture's (`Encoding` with `Options`: a `Pace`, the self-view, a
+  restart). A camera's pace: 30 a second asked a frame's time after the
+  last capture, never repeated (a camera is better waited for than sent
+  again), a keyframe every 4 s, on PLI/FIR (at most every half second)
+  and after half a second without a picture. Bitrate steps as before,
+  asked of the helper at most once a second. The RTP clock lives in the
+  session's `SendControl`, so a camera turned off and on goes on from
+  where it was. `camera.rs` (nokhwa, the conversions, the test pattern),
+  `video_encoder.rs` (rusty_h264's encoder, the GPU fallback) and the
+  app's `HwEncoder` are gone; `huddle-camera` now needs only the protocol
+  crate, `yuv` and `bytemuck`. Lanes: `Sending` became `Camera`, the
+  camera's own helper (opening may wait for macOS's question).
+- **No helper, no camera:** "Could not turn on your camera: your camera
+  needs NoSlacking's video helper (noslacking-video), which is missing or
+  keeps failing" (Dutch too). **A helper that fails mid-call starts the
+  camera again** in a fresh one (the frame after it is a keyframe; the
+  session sees a few missing pictures): unlike a share, a camera has no
+  dialog to show again, and its capture holds no state worth keeping.
+  The helper's restarts are bounded as for decoding (`MAX_RESTARTS`);
+  after that the camera goes off: "Your camera stopped: your camera
+  needs NoSlacking's video helper…". A camera unplugged mid-call:
+  "Your camera stopped: the camera was unplugged or stopped working".
+- **The demo** sends the helper's test camera with its frames going
+  nowhere, for the call bar's self-view: like the real app, the demo's
+  camera needs the helper built (`cargo build`).
+
+**Measured** (this machine as §6.3, release; `examples/camera.rs`: the
+480×480 camera fixture stretched to 640×480, as §6.8, handed over as
+YUYV as a webcam gives it, 30 a second, 900 kbit/s, the first 15
+pictures left out; CPU of the processes involved; two runs each):
+
+| 640×480@30 | in → access unit | CPU a picture | at 30/s |
+| --- | --- | --- | --- |
+| before, the app's own part (YUYV → I420, self-view shrunk, RGBA, mirrored), not encoding | 0.17–0.20 ms | 0.17–0.20 ms (0.55 with main's general shrink) | 0.5–1.7 % |
+| encoder alone, back to back (as §6.8): GPU | 0.76 ms | 0.24 ms | — |
+| encoder alone, back to back (as §6.8): software | 4.39 ms | 4.39 ms | — |
+| pipeline, I420 in, paced: GPU | 1.7–1.8 ms | 0.63–0.67 ms | 2.0 % |
+| pipeline, I420 in, paced: software | 5.0–5.2 ms | 4.9–5.2 ms | 15–16 % |
+| pipeline, from YUYV with its self-view: GPU | 1.9 ms | 0.83 ms | 2.5 % |
+| pipeline, from YUYV with its self-view: software | 5.2–6.1 ms | 5.1–5.9 ms | 15–18 % |
+
+Through the helper as the app drives it (the helper's test camera as
+YUYV, ten seconds each, the app's side turning every self-view into
+RGBA):
+
+| path | pictures/s | app | helper | capture → access unit in the app |
+| --- | --- | --- | --- | --- |
+| GPU | 30.0 | 0.4 % | 3.0–3.5 % | 2.0–2.2 ms (p95 2.5–2.9) |
+| software | 30.0 | 0.4 % | 16.9–17.6 % | 5.6–5.9 ms (p95 7.6–8.8) |
+
+Against main (§6.8: the app converted, made the self-view, and encoded
+in software itself, or sent 460 KB of I420 a picture to the helper's
+GPU): **the app's part falls from about 1.5 % of a core plus the whole
+encoding (software: about 15 % more, in the app) to 0.4 %**, and none
+of it is capture or encoding. The whole is about what it was: on the
+GPU about 3.5–4 % of a core (main: the app's 0.55 ms, the pipe and the
+helper's paced encode, an estimated 1.2–1.3 ms, 3.7 %), in software
+17–18 % against main's 15 % (the conversion now runs on a reader
+thread, and the self-view is made from every kept picture). The GPU's
+encode costs more paced at 30 a second than back to back (0.65 against
+0.24 ms of CPU: the driver's threads wake for each picture), which
+§6.8's numbers did not show; main paid the same. Capture to access unit
+is the encoding time plus about 0.2 ms, as for the share. A real camera
+(this laptop's, V4L2, ignored test
+`v4l2_opens_the_first_camera_and_reads_frames`): YUYV 640×480 at 30 a
+second, the first frame 0.26 s
+after opening, then one every 33 ms, nothing unreadable.
+
+**Tested here without anyone's camera:** the protocol (every message
+both ways, cut short, a self-view too wide or lying about its size);
+the V4L2 structures and request numbers, the format choice, the error
+words; the pipeline with the camera's profile (every picture kept, the
+self-view's size, 640×480 at most, the GPU opened at 640×480 and 30 a
+second, a capture that ends); a camera's reader thread with a pretend
+device (open only while its capture is, a bad frame passing, unplugged
+ending it, refused to open); the server and the program with the test
+camera; the app's sending thread against the helper's own code on a
+thread and against pretend helpers (pacing, PLI, the self-view, a crash
+starting the camera again, a helper given up ending it); the worker's
+camera task end to end (off until on, frames and self-views, off, view
+only). **Not tested here:** nokhwa on macOS and Windows (built in CI
+only), and a camera in a real call.
 
 ## Sources
 - amazon-chime-sdk-js @ dea69d268c623ab2006169d3899981fea766fa8a (Apache-2.0), files as cited.

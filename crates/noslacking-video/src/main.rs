@@ -1,11 +1,15 @@
-//! `noslacking-video`: NoSlacking's video helper, which decodes every
-//! huddle video stream the app shows (on the GPU when it can). The app
-//! starts it and talks to it over standard input and output; see the
-//! library's documentation. `noslacking-video --probe` prints what this
-//! system's hardware can do.
+//! `noslacking-video`: NoSlacking's video helper, which does everything
+//! in a huddle that touches pixels: it decodes every video stream the
+//! app shows (on the GPU when it can), and captures and encodes the
+//! screen the user shares and their camera. The app starts it and talks
+//! to it over standard input and output; see the library's
+//! documentation. `noslacking-video --probe` prints what this system's
+//! hardware can do and the cameras there are (without opening any).
 
 use std::io::{BufReader, BufWriter};
 use std::process::ExitCode;
+
+use noslacking_video::capture::camera::Cameras as _;
 
 fn main() -> ExitCode {
     let argument = std::env::args().nth(1);
@@ -26,13 +30,19 @@ fn serve() -> ExitCode {
     let mut backend = noslacking_video::choose_backend();
     eprintln!("noslacking-video: back end {}", backend.name());
     let mut screens = noslacking_video::capture::System::new();
+    let mut cameras = noslacking_video::capture::camera::System;
     eprintln!(
-        "noslacking-video: screens are captured through {}",
-        screens.name()
+        "noslacking-video: screens are captured through {}, cameras through {}",
+        screens.name(),
+        cameras.name()
     );
     let mut input = BufReader::new(std::io::stdin().lock());
     let mut output = BufWriter::with_capacity(1 << 16, std::io::stdout().lock());
-    match noslacking_video::server::serve(&mut input, &mut output, backend.as_mut(), &mut screens) {
+    let sources = noslacking_video::server::Sources {
+        screens: &mut screens,
+        cameras: &mut cameras,
+    };
+    match noslacking_video::server::serve(&mut input, &mut output, backend.as_mut(), sources) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("noslacking-video: {error}");
@@ -47,7 +57,7 @@ fn probe() -> ExitCode {
     println!("back end: {}", backend.name());
     let capabilities = backend.capabilities();
     if capabilities.is_empty() {
-        println!("no hardware video: this helper decodes in software");
+        println!("no hardware video: this helper decodes and encodes in software");
     }
     for capability in capabilities {
         println!(
@@ -58,12 +68,23 @@ fn probe() -> ExitCode {
     println!(
         "screen sharing: through {}; dma-bufs to the GPU: {}",
         noslacking_video::capture::System::new().name(),
-        if backend.share_gpu().is_some() {
+        if backend.capture_gpu().is_some() {
             "where it imports them"
         } else {
             "no (no GPU encoder)"
         }
     );
+    let mut cameras = noslacking_video::capture::camera::System;
+    match cameras.list() {
+        Ok(list) if list.is_empty() => println!("cameras (through {}): none", cameras.name()),
+        Ok(list) => {
+            println!("cameras (through {}):", cameras.name());
+            for camera in list {
+                println!("  {} ({})", camera.name, camera.id);
+            }
+        }
+        Err(trouble) => println!("cameras (through {}): {trouble}", cameras.name()),
+    }
     ExitCode::SUCCESS
 }
 

@@ -20,8 +20,12 @@ looks for beside its own binary. `cargo build` builds both; `cargo run`
 builds the app alone, so run `cargo build` (with the same features)
 first, or the call window says there is no video.
 
-Screen sharing (the `huddle-share` feature) is captured and encoded by
-the same helper; the app itself has no capture dependency. On X11 (and
+Your camera (the `huddle-camera` feature) and screen sharing (the
+`huddle-share` feature) are captured and encoded by the same helper; the
+app itself has no capture or encoding dependency, and without the helper
+there is no camera and no sharing. The helper reaches cameras through
+V4L2 on Linux (its own few calls, nothing to install) and nokhwa on macOS
+and Windows. On X11 (and
 on macOS and Windows) the helper needs nothing more. To share under
 Wayland or in the Flatpak, build the helper with its `pipewire` feature,
 which needs PipeWire's headers and libclang (`libpipewire-0.3-dev
@@ -31,8 +35,8 @@ libclang-dev`, or `pipewire-devel clang-devel`):
 cargo build --features huddle-share,noslacking-video/pipewire
 ```
 
-The camera (`huddle-camera`) still needs libclang on Linux for its V4L2
-bindings. `--all-features` (the checks below) turns on both.
+`--all-features` (the checks below) turns on the helper's `pipewire`
+feature too. Nothing else in the build needs libclang.
 
 Sound plays through ALSA on Linux (`libasound2-dev`, or
 `alsa-lib-devel`). Huddles' DTLS is OpenSSL's: Linux links the system's
@@ -100,8 +104,11 @@ packaging/macos/bundle.sh target/release/noslacking 0.1.0 dist target/release/no
 ```
 
 The last argument, required, is the video helper (crates/noslacking-video), which
-decodes all huddle video (on the GPU when it can) and encodes the camera
-on the GPU; without it a build with huddle video shows none. Every
+decodes all huddle video (on the GPU when it can) and captures and
+encodes the camera and a shared screen; without it a build with huddle
+video shows none, and a camera or share cannot start. The helper runs
+from inside the bundle, so macOS asks for the camera (Info.plist's
+`NSCameraUsageDescription`) and Screen Recording on the app's behalf. Every
 package puts the helper beside the app's binary, where the app looks
 for it.
 

@@ -25,7 +25,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use noslacking_video::capture::{Frame, Order, Packed, convert, pattern};
-use noslacking_video::share::{Ask, Pipeline, Settings};
+use noslacking_video::pipeline::{Ask, Pipeline, Settings};
 use noslacking_video_ipc::{self as ipc, Reply, Request, ShareChoice};
 
 /// Pictures each way in this process: ten seconds at 15 a second.
@@ -94,13 +94,13 @@ fn run(name: &str, mut pipeline: Pipeline, mut frame: impl FnMut(usize, &mut Pip
 }
 
 fn settings(hardware: bool) -> Settings {
-    Settings {
+    Settings::share(
         hardware,
-        bitrate: 2_500_000,
-        gpu: hardware
-            .then(|| noslacking_video::choose_backend().share_gpu())
+        2_500_000,
+        hardware
+            .then(|| noslacking_video::choose_backend().capture_gpu())
             .flatten(),
-    }
+    )
 }
 
 fn in_process() {
@@ -148,10 +148,10 @@ fn in_process() {
     );
     #[cfg(target_os = "linux")]
     {
-        let on_cpu: noslacking_video::share::GpuOpener = std::sync::Arc::new(|| {
-            let mut gpu = noslacking_video::vaapi::share::GpuShare::open().ok()?;
+        let on_cpu: noslacking_video::pipeline::GpuOpener = std::sync::Arc::new(|| {
+            let mut gpu = noslacking_video::vaapi::capture::GpuCapture::open().ok()?;
             gpu.convert_on_gpu(false);
-            Some(Box::new(gpu) as Box<dyn noslacking_video::share::Gpu>)
+            Some(Box::new(gpu) as Box<dyn noslacking_video::pipeline::Gpu>)
         });
         let settings = Settings {
             gpu: Some(on_cpu),
@@ -254,7 +254,7 @@ fn through_the_helper(helper: &str, frames: &str, hardware: bool, rgb_on_gpu: bo
     call(Request::Hello {
         version: ipc::VERSION,
     });
-    let Reply::ShareStarted { id, .. } = call(Request::StartShare {
+    let Reply::Started { id, .. } = call(Request::StartShare {
         choice: ShareChoice::Test,
         hardware,
         bitrate: 2_500_000,
@@ -266,11 +266,11 @@ fn through_the_helper(helper: &str, frames: &str, hardware: bool, rgb_on_gpu: bo
         return;
     };
     // The first picture: the pictures are made and the encoder opened.
-    call(Request::NextShareFrame {
+    call(Request::NextFrame {
         id,
         force_keyframe: true,
         repeat: true,
-        wait_ms: ipc::MAX_SHARE_WAIT_MS,
+        wait_ms: ipc::MAX_WAIT_MS,
     });
     let (mut times, mut got, mut on_gpu) = (Vec::new(), 0usize, 0usize);
     let (app, helper_cpu) = (
@@ -283,13 +283,13 @@ fn through_the_helper(helper: &str, frames: &str, hardware: bool, rgb_on_gpu: bo
     let mut due = Instant::now();
     while started.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(due.saturating_duration_since(Instant::now()));
-        let reply = call(Request::NextShareFrame {
+        let reply = call(Request::NextFrame {
             id,
             force_keyframe: false,
             repeat: false,
             wait_ms: 50,
         });
-        if let Reply::ShareFrame(frame) = reply {
+        if let Reply::Frame(frame) = reply {
             // From when it was captured, as the app's gate.
             let captured = Instant::now() - Duration::from_micros(u64::from(frame.age_us));
             due = captured + FRAME - Duration::from_millis(5);

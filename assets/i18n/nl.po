@@ -2776,6 +2776,9 @@ msgstr "Camera aan- / uitzetten"
 msgid "Could not turn on your camera: {error}"
 msgstr "Kon je camera niet aanzetten: {error}"
 
+msgid "Your camera stopped: {error}"
+msgstr "Je camera is gestopt: {error}"
+
 msgid "no camera was found"
 msgstr "er is geen camera gevonden"
 
@@ -2790,6 +2793,12 @@ msgstr "de camera is niet toegestaan; controleer of je het videoapparaat mag geb
 
 msgid "the camera could not be opened; another app may be using it"
 msgstr "de camera kon niet worden geopend; misschien gebruikt een andere app hem"
+
+msgid "the camera was unplugged or stopped working"
+msgstr "de camera is losgekoppeld of werkt niet meer"
+
+msgid "your camera needs NoSlacking's video helper (noslacking-video), which is missing or keeps failing"
+msgstr "voor je camera is de videohulp van NoSlacking (noslacking-video) nodig, en die ontbreekt of loopt steeds vast"
 
 msgid "This huddle takes no more video, so your camera stays off"
 msgstr "Deze huddle neemt geen video meer aan, dus je camera blijft uit"

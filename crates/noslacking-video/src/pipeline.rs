@@ -1,19 +1,27 @@
-//! A screen share, from captured frames to the H.264 the app sends.
+//! A capture (a screen share or the camera), from captured frames to the
+//! H.264 the app sends.
 //!
 //! The capture ([`crate::capture`]) runs on a thread of its own and hands
-//! each frame to the share's [`Pipeline`] on that thread. The pipeline
-//! keeps at most 25 pictures a second (the app asks for at most
-//! [`capture::FPS`]), skips pictures that
-//! did not change (a screen is mostly still), and encodes when the app
-//! asks for the next frame ([`Ask::Next`]): on the GPU when the app wants
-//! it and it can ([`Gpu`]; a dma-buf from PipeWire goes there without
-//! the processor touching a pixel), else in software at most 1280×720
-//! ([`crate::software_encoder`]). Pacing, keyframe requests and the
-//! bitrate are the app's: it asks for a picture a frame's time apart, a
-//! keyframe when a receiver wants one, the last picture again for a still
-//! screen, and a new rate as the bandwidth estimate moves.
+//! each frame to the capture's [`Pipeline`] on that thread, or has a
+//! reader thread of its own put pictures in through [`Ask::Picture`] (the
+//! camera). The pipeline keeps at most one picture every
+//! [`Profile::min_gap`], skips pictures that did not change where that is
+//! worth checking (a screen is mostly still; a camera never is), and
+//! encodes when the app asks for the next frame ([`Ask::Next`]): on the
+//! GPU when the app wants it and it can ([`Gpu`]; a dma-buf from PipeWire
+//! goes there without the processor touching a pixel), else in software
+//! ([`crate::software_encoder`]), each at most as large as the
+//! [`Profile`] says. Pacing, keyframe requests and the bitrate are the
+//! app's: it asks for a picture a frame's time apart, a keyframe when a
+//! receiver wants one, the last picture again for a still screen, and a
+//! new rate as the bandwidth estimate moves.
 //!
-//! The server's side is [`Share`]: it passes each request to the capture
+//! A camera's pipeline also keeps a small copy of each picture it keeps,
+//! made before encoding ([`Settings::preview`]), and hands it out with
+//! that picture's frame: the app's self-view, at the camera's pace, with
+//! no full-size picture crossing the pipe.
+//!
+//! The server's side is [`Capture`]: it passes each request to the capture
 //! thread and waits for the answer.
 
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -21,54 +29,129 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use noslacking_video_ipc::{Planes, ShareFrame, ShareProblem};
+use noslacking_video_ipc::{CaptureProblem, CapturedFrame, Planes};
 
 use crate::backend::{Encoded, Failure};
-use crate::capture::{self, Frame, Order, Packed, Trouble, convert};
-use crate::software_encoder::{self, SoftwareEncoder};
+use crate::capture::{Frame, Order, Packed, Trouble, convert};
+use crate::shrink;
+use crate::software_encoder::SoftwareEncoder;
 
-/// The largest picture a share sends: 1080p, as Slack's own shares do.
-pub const MAX_SIZE: (u32, u32) = (1920, 1080);
-/// The bit rates a share is kept between, in bit/s.
-pub const BITRATES: (u32, u32) = (50_000, 20_000_000);
 /// A new software encoder for a new bit rate at most this often: making
 /// one costs an IDR.
 const RETUNE_EVERY: Duration = Duration::from_secs(8);
-/// A frame kept at most this often: a compositor sending 60 a second is
-/// not copied 60 times. Well under a frame's time at [`capture::FPS`],
-/// since frames come unevenly (a polled capture waits while its thread
-/// encodes) and the app paces what is sent.
-const MIN_GAP: Duration = Duration::from_millis(40);
 /// How often the numbers go to the log.
 const REPORT_EVERY: Duration = Duration::from_secs(10);
+
+/// What a kind of capture sends, and how its pictures are treated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Profile {
+    /// What it is, for the log.
+    pub what: &'static str,
+    /// Pictures a second sent at most (and asked of the source).
+    pub fps: u32,
+    /// The largest picture encoded on the GPU.
+    pub max_size: (u32, u32),
+    /// The largest picture encoded in software.
+    pub software_max: (u32, u32),
+    /// A picture kept at most this often: a compositor sending 60 a
+    /// second is not copied 60 times. Well under a frame's time, since
+    /// frames come unevenly (a polled capture waits while its thread
+    /// encodes) and the app paces what is sent.
+    pub min_gap: Duration,
+    /// Whether a picture the same as the last is dropped (a still
+    /// screen); comparing a camera's noisy pictures would never find one.
+    pub skip_unchanged: bool,
+    /// The bit rates it is kept between, in bit/s.
+    pub bitrates: (u32, u32),
+}
+
+impl Profile {
+    /// A screen share: 1080p at 15 a second on the GPU, as Slack's own
+    /// shares are (the JS SDK's content default), 720p in software, where
+    /// 1080p takes 25–31 ms a picture.
+    pub const SHARE: Self = Self {
+        what: "share",
+        fps: 15,
+        max_size: (1920, 1080),
+        software_max: crate::software_encoder::MAX_SIZE,
+        min_gap: Duration::from_millis(40),
+        skip_unchanged: true,
+        bitrates: (50_000, 20_000_000),
+    };
+
+    /// A camera: 640×480 at most (480×480 to 640×480 is what Slack's own
+    /// clients were seen sending), 30 a second, on the GPU or in software
+    /// alike (about 4 ms a picture there).
+    pub const CAMERA: Self = Self {
+        what: "camera",
+        fps: 30,
+        max_size: (640, 480),
+        software_max: (640, 480),
+        min_gap: Duration::from_millis(20),
+        skip_unchanged: false,
+        bitrates: (50_000, 4_000_000),
+    };
+}
 
 /// What makes a [`Gpu`] on the capture thread; none if there is none.
 pub type GpuOpener = Arc<dyn Fn() -> Option<Box<dyn Gpu>> + Send + Sync>;
 
-/// How a share is set up.
+/// How a capture is set up.
 #[derive(Clone)]
 pub struct Settings {
+    /// What it sends.
+    pub profile: Profile,
     /// Encode on the GPU where it can.
     pub hardware: bool,
     /// The bit rate to start at.
     pub bitrate: u32,
     /// The GPU, if the back end has one that encodes.
     pub gpu: Option<GpuOpener>,
+    /// The self-view's widest, in pixels: each kept picture is also
+    /// shrunk by a whole step to at most this wide and handed out with
+    /// its frame. 0 for none (a share).
+    pub preview: u32,
+}
+
+impl Settings {
+    /// A share's, as the app asks for it.
+    pub fn share(hardware: bool, bitrate: u32, gpu: Option<GpuOpener>) -> Self {
+        Self {
+            profile: Profile::SHARE,
+            hardware,
+            bitrate,
+            gpu,
+            preview: 0,
+        }
+    }
+
+    /// A camera's, as the app asks for it.
+    pub fn camera(hardware: bool, bitrate: u32, gpu: Option<GpuOpener>, preview: u32) -> Self {
+        Self {
+            profile: Profile::CAMERA,
+            hardware,
+            bitrate,
+            gpu,
+            preview,
+        }
+    }
 }
 
 impl std::fmt::Debug for Settings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Settings")
+            .field("profile", &self.profile.what)
             .field("hardware", &self.hardware)
             .field("bitrate", &self.bitrate)
             .field("gpu", &self.gpu.is_some())
+            .field("preview", &self.preview)
             .finish()
     }
 }
 
-/// A GPU's share encoder: takes frames in (scaling and converting them
-/// on the GPU) and encodes the last one. Made, and used, on the capture
-/// thread.
+/// A GPU's encoder for a capture: takes frames in (scaling and
+/// converting them on the GPU) and encodes the last one. Made, and used,
+/// on the capture thread.
 pub trait Gpu {
     /// Its name, for the log.
     fn name(&self) -> String;
@@ -88,12 +171,13 @@ pub trait Gpu {
     fn set_bitrate(&mut self, bitrate: u32) -> Result<(), Failure>;
 }
 
-/// What the app's request for a share's next frame comes to.
-pub type Answer = Result<Option<ShareFrame>, Trouble>;
+/// What the app's request for a capture's next frame comes to.
+pub type Answer = Result<Option<CapturedFrame>, Trouble>;
 
-/// What the server asks of the capture thread.
+/// What the capture thread is handed: the server's asks, and from a
+/// reader thread (the camera's) its pictures.
 pub enum Ask {
-    /// The next picture, encoded (see `Request::NextShareFrame`).
+    /// The next picture, encoded (see `Request::NextFrame`).
     Next {
         /// Make it a keyframe.
         force_keyframe: bool,
@@ -106,27 +190,36 @@ pub enum Ask {
     },
     /// A new bit rate.
     Bitrate(u32),
-    /// The share is closed: stop capturing.
+    /// A captured picture, taken at `at`.
+    Picture {
+        /// The picture.
+        picture: Planes,
+        /// When it was taken.
+        at: Instant,
+    },
+    /// The source ended (a camera unplugged, failing again and again).
+    Ended(Trouble),
+    /// The capture is closed: stop capturing.
     Stop,
 }
 
-/// A running share, as the server holds it: closing it (dropping it)
+/// A running capture, as the server holds it: closing it (dropping it)
 /// stops the capture and waits for its thread.
-pub struct Share {
+pub struct Capture {
     send: Box<dyn Fn(Ask) -> bool + Send>,
     thread: Option<JoinHandle<()>>,
     ended: Arc<Mutex<Option<Trouble>>>,
 }
 
-impl std::fmt::Debug for Share {
+impl std::fmt::Debug for Capture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Share").finish_non_exhaustive()
+        f.debug_struct("Capture").finish_non_exhaustive()
     }
 }
 
-impl Share {
-    /// A share whose capture thread `thread` takes asks through `send`
-    /// and leaves why it ended in `ended`.
+impl Capture {
+    /// A capture whose thread `thread` takes asks through `send` and
+    /// leaves why it ended in `ended`.
     pub fn new(
         send: Box<dyn Fn(Ask) -> bool + Send>,
         thread: JoinHandle<()>,
@@ -145,10 +238,10 @@ impl Share {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-            .unwrap_or_else(|| Trouble::new(ShareProblem::Ended, "the capture stopped"))
+            .unwrap_or_else(|| Trouble::new(CaptureProblem::Ended, "the capture stopped"))
     }
 
-    /// The next frame (see `Request::NextShareFrame`).
+    /// The next frame (see `Request::NextFrame`).
     pub fn next(&self, force_keyframe: bool, repeat: bool, wait: Duration) -> Answer {
         let (reply, answer) = mpsc::channel();
         let ask = Ask::Next {
@@ -161,7 +254,7 @@ impl Share {
             return Err(self.gone());
         }
         // An encode takes milliseconds; a capture thread that keeps the
-        // answer this long is stuck, and the share with it.
+        // answer this long is stuck, and the capture with it.
         match answer.recv_timeout(wait + Duration::from_millis(800)) {
             Ok(answer) => answer,
             Err(RecvTimeoutError::Timeout) => {
@@ -177,7 +270,7 @@ impl Share {
     }
 }
 
-impl Drop for Share {
+impl Drop for Capture {
     fn drop(&mut self) {
         (self.send)(Ask::Stop);
         if let Some(thread) = self.thread.take() {
@@ -251,6 +344,17 @@ impl Held {
     }
 }
 
+/// `frame`'s self-view, at most `width` wide: none for a dma-buf, which
+/// the processor does not read.
+fn preview_of(frame: &Frame<'_>, width: u32) -> Option<Planes> {
+    match frame {
+        Frame::I420(planes) => Some(shrink::preview(planes, width)),
+        Frame::Packed(packed) => Some(shrink::preview(&convert::to_i420(packed)?, width)),
+        #[cfg(target_os = "linux")]
+        Frame::DmaBuf(_) => None,
+    }
+}
+
 /// An ask for the next frame waiting for one.
 struct Pending {
     force_keyframe: bool,
@@ -274,8 +378,9 @@ struct Counts {
     encode: Duration,
 }
 
-/// A share's frames from capture to H.264, on the capture thread.
+/// A capture's frames from capture to H.264, on the capture thread.
 pub struct Pipeline {
+    profile: Profile,
     hardware: bool,
     bitrate: u32,
     gpu: Option<Box<dyn Gpu>>,
@@ -292,6 +397,10 @@ pub struct Pipeline {
     held: Option<Held>,
     /// When the picture not sent yet was captured.
     fresh: Option<Instant>,
+    /// The self-view's widest; 0 for none.
+    preview_width: u32,
+    /// The self-view of the picture not sent yet.
+    preview: Option<Planes>,
     last_kept: Option<Instant>,
     pending: Option<Pending>,
     ended: Option<Trouble>,
@@ -305,6 +414,7 @@ pub struct Pipeline {
 impl std::fmt::Debug for Pipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Pipeline")
+            .field("profile", &self.profile.what)
             .field("gpu", &self.gpu.is_some())
             .field("counts", &self.counts)
             .finish_non_exhaustive()
@@ -315,17 +425,23 @@ impl Pipeline {
     /// A pipeline set up as `settings` say: the GPU opened now (on this,
     /// the capture thread) if it is wanted and there.
     pub fn new(settings: Settings) -> Self {
+        let profile = settings.profile;
         let gpu = if settings.hardware {
             settings.gpu.as_ref().and_then(|open| open())
         } else {
             None
         };
         match &gpu {
-            Some(gpu) => eprintln!("noslacking-video: share: encoding on {}", gpu.name()),
+            Some(gpu) => eprintln!(
+                "noslacking-video: {}: encoding on {}",
+                profile.what,
+                gpu.name()
+            ),
             None => eprintln!(
-                "noslacking-video: share: encoding in software, at most {}x{}{}",
-                software_encoder::MAX_SIZE.0,
-                software_encoder::MAX_SIZE.1,
+                "noslacking-video: {}: encoding in software, at most {}x{}{}",
+                profile.what,
+                profile.software_max.0,
+                profile.software_max.1,
                 if settings.hardware {
                     " (no GPU encoder)"
                 } else {
@@ -334,8 +450,11 @@ impl Pipeline {
             ),
         }
         Self {
+            profile,
             hardware: settings.hardware,
-            bitrate: settings.bitrate.clamp(BITRATES.0, BITRATES.1),
+            bitrate: settings
+                .bitrate
+                .clamp(profile.bitrates.0, profile.bitrates.1),
             gpu,
             gpu_shape: None,
             gpu_loaded: false,
@@ -344,6 +463,8 @@ impl Pipeline {
             software_picture: None,
             held: None,
             fresh: None,
+            preview_width: settings.preview.min(noslacking_video_ipc::MAX_PREVIEW_SIDE),
+            preview: None,
             last_kept: None,
             pending: None,
             ended: None,
@@ -351,6 +472,11 @@ impl Pipeline {
             counts: Counts::default(),
             next_report: Instant::now() + REPORT_EVERY,
         }
+    }
+
+    /// What it sends.
+    pub fn profile(&self) -> Profile {
+        self.profile
     }
 
     /// Whether the capture may hand over dma-bufs.
@@ -364,7 +490,7 @@ impl Pipeline {
         self.wants_memory
     }
 
-    /// Why the share ended, if it did.
+    /// Why the capture ended, if it did.
     pub fn ended(&self) -> Option<Trouble> {
         self.ended.clone()
     }
@@ -382,8 +508,8 @@ impl Pipeline {
     /// The GPU failed: software from here on.
     fn drop_gpu(&mut self, failure: &Failure) {
         eprintln!(
-            "noslacking-video: share: the GPU failed ({:?}: {}): software from here on",
-            failure.kind, failure.detail
+            "noslacking-video: {}: the GPU failed ({:?}: {}): software from here on",
+            self.profile.what, failure.kind, failure.detail
         );
         self.gpu = None;
         self.gpu_shape = None;
@@ -398,23 +524,11 @@ impl Pipeline {
 
     /// A captured frame, taken at `at`.
     pub fn put(&mut self, frame: &Frame<'_>, at: Instant) {
-        if self.ended.is_some() {
+        let Some(only_on_gpu) = self.take_in(frame) else {
             return;
-        }
-        let now = Instant::now();
-        if self.last_kept.is_some_and(|last| now < last + MIN_GAP) {
-            self.counts.skipped += 1;
-            return;
-        }
+        };
         let held = match frame {
-            Frame::Packed(packed) if !packed.whole() => {
-                self.counts.unusable += 1;
-                return;
-            }
-            _ if self.held.as_ref().is_some_and(|held| held.same(frame)) => {
-                self.counts.unchanged += 1;
-                return;
-            }
+            _ if only_on_gpu => Held::Gpu,
             Frame::Packed(packed) => Held::Packed {
                 width: packed.width,
                 height: packed.height,
@@ -426,22 +540,75 @@ impl Pipeline {
             #[cfg(target_os = "linux")]
             Frame::DmaBuf(_) => Held::Gpu,
         };
+        self.keep(held, at);
+    }
+
+    /// A captured picture of its own, taken at `at`: kept without a copy.
+    pub fn put_picture(&mut self, picture: Planes, at: Instant) {
+        if self.take_in(&Frame::I420(&picture)).is_some() {
+            self.keep(Held::I420(picture), at);
+        }
+    }
+
+    /// Whether `frame` is kept: none if it is not (too soon, unchanged,
+    /// unusable, a dma-buf the GPU would not take), else whether it is
+    /// only on the GPU. A kept frame is on the GPU already, if it is used,
+    /// and its self-view made.
+    fn take_in(&mut self, frame: &Frame<'_>) -> Option<bool> {
+        if self.ended.is_some() {
+            return None;
+        }
+        let now = Instant::now();
+        if self
+            .last_kept
+            .is_some_and(|last| now < last + self.profile.min_gap)
+        {
+            self.counts.skipped += 1;
+            return None;
+        }
+        if let Frame::Packed(packed) = frame
+            && !packed.whole()
+        {
+            self.counts.unusable += 1;
+            return None;
+        }
+        if self.profile.skip_unchanged && self.held.as_ref().is_some_and(|held| held.same(frame)) {
+            self.counts.unchanged += 1;
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        let dmabuf = matches!(frame, Frame::DmaBuf(_));
+        #[cfg(not(target_os = "linux"))]
+        let dmabuf = false;
         let started = Instant::now();
         let loaded = self.load_on_gpu(frame);
         self.counts.load += started.elapsed();
-        if matches!(held, Held::Gpu) && !loaded {
+        if dmabuf && !loaded {
             // A dma-buf the GPU did not take is lost: frames in memory
             // from now on.
             if !self.wants_memory {
-                eprintln!("noslacking-video: share: dma-bufs cannot be used: asking for memory");
+                eprintln!(
+                    "noslacking-video: {}: dma-bufs cannot be used: asking for memory",
+                    self.profile.what
+                );
             }
             self.wants_memory = true;
-            return;
+            return None;
         }
+        // Before encoding, so the self-view keeps the camera's pace.
+        if self.preview_width > 0 {
+            self.preview = preview_of(frame, self.preview_width);
+        }
+        Some(dmabuf)
+    }
+
+    /// Keeps `held`, taken at `at`, as the picture to send next, and
+    /// answers an ask waiting for it.
+    fn keep(&mut self, held: Held, at: Instant) {
         self.held = Some(held);
         self.software_picture = None;
         self.fresh = Some(at);
-        self.last_kept = Some(now);
+        self.last_kept = Some(Instant::now());
         self.counts.kept += 1;
         if let Some(pending) = self.pending.take() {
             match self.answer(pending.force_keyframe, pending.repeat) {
@@ -462,18 +629,19 @@ impl Pipeline {
         let source = frame.size();
         if self.gpu_shape.is_none_or(|(was, _)| was != source) {
             let max = gpu.max_size();
-            let limit = (max.0.min(MAX_SIZE.0), max.1.min(MAX_SIZE.1));
+            let wanted = self.profile.max_size;
+            let limit = (max.0.min(wanted.0), max.1.min(wanted.1));
             let Some(size) = convert::fit(source.0, source.1, limit) else {
                 self.counts.unusable += 1;
                 return false;
             };
-            if let Err(failure) = gpu.open(size, capture::FPS, self.bitrate) {
+            if let Err(failure) = gpu.open(size, self.profile.fps, self.bitrate) {
                 self.drop_gpu(&failure);
                 return false;
             }
             eprintln!(
-                "noslacking-video: share: {}x{} captured, {}x{} encoded on the GPU",
-                source.0, source.1, size.0, size.1
+                "noslacking-video: {}: {}x{} captured, {}x{} encoded on the GPU",
+                self.profile.what, source.0, source.1, size.0, size.1
             );
             self.gpu_shape = Some((source, size));
         }
@@ -487,8 +655,8 @@ impl Pipeline {
                 // The GPU still encodes; it only would not take this
                 // kind of buffer.
                 eprintln!(
-                    "noslacking-video: share: a dma-buf did not import ({})",
-                    failure.detail
+                    "noslacking-video: {}: a dma-buf did not import ({})",
+                    self.profile.what, failure.detail
                 );
                 false
             }
@@ -501,7 +669,7 @@ impl Pipeline {
 
     /// An answer to an ask for the next frame now, if there is one: a
     /// new picture encoded, the last one again if `repeat` or
-    /// `force_keyframe`, or why the share ended. None means wait.
+    /// `force_keyframe`, or why the capture ended. None means wait.
     fn answer(&mut self, force_keyframe: bool, repeat: bool) -> Option<Answer> {
         if let Some(trouble) = &self.ended {
             return Some(Err(trouble.clone()));
@@ -515,8 +683,14 @@ impl Pipeline {
         } else {
             return None;
         };
+        // A picture sent again has had its self-view already.
+        let preview = if captured.is_some() {
+            self.preview.take()
+        } else {
+            None
+        };
         Some(Ok(self.encode(force_keyframe).map(
-            |(encoded, size, hardware)| ShareFrame {
+            |(encoded, size, hardware)| CapturedFrame {
                 keyframe: encoded.keyframe,
                 hardware,
                 width: size.0,
@@ -526,6 +700,7 @@ impl Pipeline {
                     u32::try_from(at.elapsed().as_micros()).unwrap_or(u32::MAX)
                 }),
                 data: encoded.data,
+                preview,
             },
         )))
     }
@@ -552,10 +727,8 @@ impl Pipeline {
             }
         }
         if self.software_picture.is_none() {
-            self.software_picture = self
-                .held
-                .as_ref()
-                .and_then(|held| held.for_software(software_encoder::MAX_SIZE));
+            let max = self.profile.software_max;
+            self.software_picture = self.held.as_ref().and_then(|held| held.for_software(max));
         }
         let picture = self.software_picture.as_ref()?;
         let size = (picture.width, picture.height);
@@ -566,13 +739,16 @@ impl Pipeline {
                     && self.software_made.is_none_or(|at| now >= at + RETUNE_EVERY))
         });
         if stale {
-            match SoftwareEncoder::new(size, capture::FPS, self.bitrate) {
+            match SoftwareEncoder::new(size, self.profile.fps, self.bitrate) {
                 Ok(encoder) => {
                     self.software = Some(encoder);
                     self.software_made = Some(now);
                 }
                 Err(failure) => {
-                    eprintln!("noslacking-video: share: {}", failure.detail);
+                    eprintln!(
+                        "noslacking-video: {}: {}",
+                        self.profile.what, failure.detail
+                    );
                     return None;
                 }
             }
@@ -586,7 +762,10 @@ impl Pipeline {
                 Some((encoded, size, false))
             }
             Err(failure) => {
-                eprintln!("noslacking-video: share: {}", failure.detail);
+                eprintln!(
+                    "noslacking-video: {}: {}",
+                    self.profile.what, failure.detail
+                );
                 // The reference chain may be broken: start over.
                 self.software = None;
                 None
@@ -604,14 +783,15 @@ impl Pipeline {
         let c = &self.counts;
         let encoded = (c.encoded_gpu + c.encoded_software).max(1);
         eprintln!(
-            "noslacking-video: share: {} kept ({:.2} ms in), {} unchanged, {} over {} fps, {} \
+            "noslacking-video: {}: {} kept ({:.2} ms in), {} unchanged, {} over {} fps, {} \
              unusable; {} on the GPU, {} in software ({:.2} ms a picture), {} again, {} GPU \
              failures",
+            self.profile.what,
             c.kept,
             c.load.as_secs_f64() * 1000.0 / c.kept.max(1) as f64,
             c.unchanged,
             c.skipped,
-            capture::FPS,
+            self.profile.fps,
             c.unusable,
             c.encoded_gpu,
             c.encoded_software,
@@ -621,7 +801,7 @@ impl Pipeline {
         );
     }
 
-    /// The server's ask.
+    /// The server's ask, or a reader thread's picture.
     pub fn ask(&mut self, ask: Ask) {
         match ask {
             Ask::Next {
@@ -649,13 +829,15 @@ impl Pipeline {
                 }
             }
             Ask::Bitrate(bitrate) => {
-                self.bitrate = bitrate.clamp(BITRATES.0, BITRATES.1);
+                self.bitrate = bitrate.clamp(self.profile.bitrates.0, self.profile.bitrates.1);
                 if let Some(gpu) = self.gpu.as_mut()
                     && let Err(failure) = gpu.set_bitrate(self.bitrate)
                 {
                     self.drop_gpu(&failure);
                 }
             }
+            Ask::Picture { picture, at } => self.put_picture(picture, at),
+            Ask::Ended(trouble) => self.end(trouble),
             // The capture's loop stops on it.
             Ask::Stop => {}
         }
@@ -676,14 +858,17 @@ impl Pipeline {
         if self.ended.is_some() {
             return;
         }
-        eprintln!("noslacking-video: share: the capture ended: {trouble}");
+        eprintln!(
+            "noslacking-video: {}: the capture ended: {trouble}",
+            self.profile.what
+        );
         if let Some(pending) = self.pending.take() {
             let _ = pending.reply.send(Err(trouble.clone()));
         }
         self.ended = Some(trouble);
     }
 
-    /// Whether the GPU was wanted for this share.
+    /// Whether the GPU was wanted for this capture.
     pub fn hardware(&self) -> bool {
         self.hardware
     }
@@ -696,11 +881,7 @@ mod tests {
     use crate::nal;
 
     fn settings(gpu: Option<GpuOpener>) -> Settings {
-        Settings {
-            hardware: gpu.is_some(),
-            bitrate: 1_000_000,
-            gpu,
-        }
+        Settings::share(gpu.is_some(), 1_000_000, gpu)
     }
 
     fn next(pipeline: &mut Pipeline, force_keyframe: bool, repeat: bool) -> Answer {
@@ -730,7 +911,7 @@ mod tests {
 
     /// Waits out the frame gap, so the next frame is kept.
     fn later() {
-        std::thread::sleep(MIN_GAP + Duration::from_millis(2));
+        std::thread::sleep(Profile::SHARE.min_gap + Duration::from_millis(2));
     }
 
     #[test]
@@ -830,10 +1011,10 @@ mod tests {
             wait: Duration::from_millis(100),
             reply,
         });
-        pipeline.end(Trouble::new(ShareProblem::Ended, "closed"));
+        pipeline.end(Trouble::new(CaptureProblem::Ended, "closed"));
         assert_eq!(
             answer.recv().expect("answered").map_err(|t| t.problem),
-            Err(ShareProblem::Ended)
+            Err(CaptureProblem::Ended)
         );
         assert!(next(&mut pipeline, true, true).is_err());
     }
@@ -962,13 +1143,104 @@ mod tests {
             *count.lock().expect("a lock") += 1;
             Some(Box::new(FakeGpu::default()) as Box<dyn Gpu>)
         });
-        let pipeline = Pipeline::new(Settings {
-            hardware: false,
-            bitrate: 1,
-            gpu: Some(opener),
-        });
+        let pipeline = Pipeline::new(Settings::share(false, 1, Some(opener)));
         assert!(!pipeline.on_gpu());
         assert_eq!(*opened.lock().expect("a lock"), 0);
+    }
+
+    /// A camera's pictures, put in as the camera's reader thread hands
+    /// them over: every one kept (none compared), 640×480 at most, a
+    /// self-view with each new picture and none with one sent again.
+    #[test]
+    fn a_camera_keeps_every_picture_and_hands_out_its_self_view() {
+        let mut pipeline = Pipeline::new(Settings::camera(false, 600_000, None, 320));
+        let still = pattern(640, 480, 0, Duration::ZERO);
+        pipeline.ask(Ask::Picture {
+            picture: still.clone(),
+            at: Instant::now(),
+        });
+        let first = next(&mut pipeline, false, false)
+            .expect("fine")
+            .expect("a frame");
+        assert!(first.keyframe && !first.hardware);
+        assert_eq!((first.width, first.height), (640, 480));
+        let preview = first.preview.expect("a self-view");
+        assert_eq!((preview.width, preview.height), (320, 240));
+        assert!(preview.check().is_ok());
+        // The same picture again is new for a camera.
+        std::thread::sleep(Profile::CAMERA.min_gap + Duration::from_millis(2));
+        pipeline.put_picture(still, Instant::now());
+        let again = next(&mut pipeline, false, false)
+            .expect("fine")
+            .expect("a frame");
+        assert!(!again.keyframe && again.preview.is_some());
+        // Asked to repeat with nothing new: the picture again, without a
+        // self-view.
+        let repeated = next(&mut pipeline, true, true)
+            .expect("fine")
+            .expect("a frame");
+        assert!(repeated.keyframe && repeated.preview.is_none());
+        assert_eq!(repeated.age_us, 0);
+        // A larger camera is sent at 640×480 at most, its shape kept.
+        std::thread::sleep(Profile::CAMERA.min_gap + Duration::from_millis(2));
+        pipeline.put_picture(pattern(1280, 720, 1, Duration::ZERO), Instant::now());
+        let wide = next(&mut pipeline, false, false)
+            .expect("fine")
+            .expect("a frame");
+        assert_eq!((wide.width, wide.height), (640, 360));
+        let preview = wide.preview.expect("a self-view");
+        assert_eq!((preview.width, preview.height), (320, 180));
+        // A camera that stops says so to the next ask.
+        pipeline.ask(Ask::Ended(Trouble::new(CaptureProblem::Ended, "unplugged")));
+        assert_eq!(
+            next(&mut pipeline, false, false).map_err(|t| t.problem),
+            Err(CaptureProblem::Ended)
+        );
+    }
+
+    /// Without a self-view asked for, and for a share, there is none.
+    #[test]
+    fn a_share_has_no_self_view() {
+        let mut pipeline = Pipeline::new(settings(None));
+        pipeline.put_picture(pattern(320, 180, 0, Duration::ZERO), Instant::now());
+        let frame = next(&mut pipeline, false, false)
+            .expect("fine")
+            .expect("a frame");
+        assert!(frame.preview.is_none());
+        let mut camera = Pipeline::new(Settings::camera(false, 600_000, None, 0));
+        camera.put_picture(pattern(320, 240, 0, Duration::ZERO), Instant::now());
+        let frame = next(&mut camera, false, false)
+            .expect("fine")
+            .expect("a frame");
+        assert!(frame.preview.is_none());
+    }
+
+    /// The camera's GPU is opened for 640×480 at 30 a second.
+    #[test]
+    fn a_camera_on_the_gpu_is_opened_at_its_size_and_rate() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&log);
+        let mut pipeline = Pipeline::new(Settings::camera(
+            true,
+            600_000,
+            Some(fake(move || FakeGpu {
+                log: Arc::clone(&seen),
+                ..FakeGpu::default()
+            })),
+            160,
+        ));
+        pipeline.put_picture(pattern(1280, 960, 0, Duration::ZERO), Instant::now());
+        let frame = next(&mut pipeline, false, false)
+            .expect("fine")
+            .expect("a frame");
+        assert!(frame.hardware && frame.keyframe);
+        assert_eq!((frame.width, frame.height), (640, 480));
+        let preview = frame.preview.expect("a self-view, made before the GPU");
+        assert_eq!((preview.width, preview.height), (160, 120));
+        assert_eq!(
+            *log.lock().expect("a lock"),
+            ["open 640x480 30 600000", "load 1280x960"]
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -977,7 +1249,7 @@ mod tests {
         use std::os::fd::AsFd;
         let file = std::fs::File::open("/dev/null").expect("/dev/null");
         let dmabuf = || {
-            Frame::DmaBuf(capture::DmaBuf {
+            Frame::DmaBuf(crate::capture::DmaBuf {
                 fd: file.as_fd(),
                 width: 1920,
                 height: 1080,

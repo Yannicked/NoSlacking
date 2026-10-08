@@ -14,6 +14,9 @@ finish-args:
   - --socket=fallback-x11
   - --share=ipc
   - --device=dri
+  # No camera: the video helper opens cameras through V4L2, which here
+  # would take --device=all. Builds with `huddle-camera` wait for the
+  # helper to use the Camera portal and PipeWire instead (TODO.md).
   # Slack itself.
   - --share=network
   # Voice clips and sound files played in the app (through the runtime's

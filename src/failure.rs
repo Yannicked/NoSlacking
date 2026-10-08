@@ -334,6 +334,10 @@ impl Failure {
                 HuddleTrouble::Camera => {
                     t("the camera could not be opened; another app may be using it")
                 }
+                HuddleTrouble::CameraGone => t("the camera was unplugged or stopped working"),
+                HuddleTrouble::CameraNeedsHelper => t(
+                    "your camera needs NoSlacking's video helper (noslacking-video), which is missing or keeps failing",
+                ),
                 HuddleTrouble::ViewOnly => {
                     t("This call takes no more video, so your camera stays off")
                 }
@@ -357,7 +361,7 @@ impl Failure {
                 HuddleTrouble::NoVideoHelper => t(
                     "screen sharing needs NoSlacking's video helper (noslacking-video), which is missing or keeps failing",
                 ),
-                HuddleTrouble::ShareHelperLost => t("NoSlacking's video helper stopped"),
+                HuddleTrouble::VideoHelperLost => t("NoSlacking's video helper stopped"),
             },
             Self::Slack(code) => return code.replace('_', " "),
             Self::Other(text) => return text.clone(),
@@ -393,6 +397,11 @@ pub enum HuddleTrouble {
     CameraDenied,
     /// The camera would not open (in use, or no usable format).
     Camera,
+    /// The camera stopped while on: unplugged, or its driver failed.
+    CameraGone,
+    /// The video helper, which opens, captures and encodes the camera,
+    /// is not installed or was given up on.
+    CameraNeedsHelper,
     /// The huddle takes no video from us (Chime's "view only").
     ViewOnly,
     /// The screen-sharing dialog was closed without choosing.
@@ -416,8 +425,9 @@ pub enum HuddleTrouble {
     /// The video helper, which captures and encodes a shared screen, is
     /// not installed or was given up on.
     NoVideoHelper,
-    /// The video helper failed (crashed, hung) while sharing.
-    ShareHelperLost,
+    /// The video helper failed (crashed, hung) while sharing, or while
+    /// the camera was on and it could not be started again.
+    VideoHelperLost,
 }
 
 /// Why the system keyring did not do what was asked. The worker hands this
@@ -673,6 +683,8 @@ mod tests {
             Failure::Huddle(HuddleTrouble::NoCamera),
             Failure::Huddle(HuddleTrouble::CameraDenied),
             Failure::Huddle(HuddleTrouble::Camera),
+            Failure::Huddle(HuddleTrouble::CameraGone),
+            Failure::Huddle(HuddleTrouble::CameraNeedsHelper),
             Failure::Huddle(HuddleTrouble::ViewOnly),
             Failure::Huddle(HuddleTrouble::ShareCancelled),
             Failure::Huddle(HuddleTrouble::ShareDenied),
@@ -683,7 +695,7 @@ mod tests {
             Failure::Huddle(HuddleTrouble::ShareRefused),
             Failure::Huddle(HuddleTrouble::ShareLost),
             Failure::Huddle(HuddleTrouble::NoVideoHelper),
-            Failure::Huddle(HuddleTrouble::ShareHelperLost),
+            Failure::Huddle(HuddleTrouble::VideoHelperLost),
             Failure::Slack("some_new_code".into()),
             Failure::Other("disk full".into()),
         ]

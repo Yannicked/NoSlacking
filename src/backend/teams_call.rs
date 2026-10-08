@@ -488,7 +488,6 @@ fn camera_task(
         wanted,
         on,
         super::listen::CameraWiring {
-            latest: crate::huddle_audio::camera::Latest::default(),
             frames,
             control: control.clone(),
             preview,

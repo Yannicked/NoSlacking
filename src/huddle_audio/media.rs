@@ -2774,17 +2774,35 @@ mod tests {
         };
         #[cfg(not(feature = "huddle-video"))]
         let viewer = None;
-        // Our camera: the test picture, on from the start.
+        // Our camera: the video helper's test camera (the helper's own
+        // code on a thread), on from the start.
         #[cfg(feature = "huddle-camera")]
         let (camera, _camera_threads) = {
-            use super::super::camera::{Camera as _, Latest, TestPattern};
-            use super::super::camera_send::{CameraUplink, Encoding, QUEUE, SendControl};
-            let latest = Latest::default();
+            use super::super::camera_send::{
+                CameraUplink, Encoding, Ending, Options, Pace, QUEUE, START_BITRATE, SendControl,
+            };
+            use super::super::helper::{self, Lane};
+            let remote = helper::shared(Lane::Camera)
+                .expect("in tests, always")
+                .start_camera(
+                    noslacking_video_ipc::CameraChoice::Test,
+                    false,
+                    START_BITRATE,
+                    0,
+                )
+                .expect("the test camera");
             let (frames, frames_in) = tokio::sync::mpsc::channel(QUEUE);
             let control = SendControl::default();
-            let encoding =
-                Encoding::spawn(latest.clone(), frames, control.clone(), None).expect("encoding");
-            let pattern = TestPattern::new(latest).open().expect("the test picture");
+            let (ended, _) = tokio::sync::watch::channel(None);
+            let options = Options {
+                what: "camera",
+                pace: Pace::CAMERA,
+                preview: None,
+                restart: None,
+                ending: Box::new(|_| Ending::Ended),
+            };
+            let encoding = Encoding::spawn(remote, Some(frames), control.clone(), ended, options)
+                .expect("a sending thread");
             let (on, on_rx) = tokio::sync::watch::channel(true);
             let (refused, refusals) = tokio::sync::mpsc::channel(1);
             (
@@ -2795,7 +2813,7 @@ mod tests {
                     refused,
                     descriptor: super::super::camera_send::DESCRIPTOR,
                 }),
-                (encoding, pattern, on, refusals),
+                (encoding, on, refusals),
             )
         };
         let (report, result) = listen(
@@ -3243,9 +3261,9 @@ mod tests {
         .content();
         // The helper's test screen, encoded as a share is (the helper's
         // own code on a thread, no GPU in a test).
-        use super::super::camera_send::{QUEUE, SendControl};
+        use super::super::camera_send::{Limits, QUEUE, SendControl};
         use super::super::helper::{self, Lane};
-        use super::super::share_send::{self, Encoding};
+        use super::super::share_send;
         let (share, _) = tokio::task::spawn_blocking(|| {
             helper::shared(Lane::Screen)
                 .expect("in tests, always")
@@ -3260,10 +3278,10 @@ mod tests {
         .expect("a thread")
         .expect("the test screen");
         let (encoded, encoded_in) = tokio::sync::mpsc::channel(QUEUE);
-        let control = SendControl::new(super::super::video_encoder::Limits::SHARE);
+        let control = SendControl::new(Limits::SHARE);
         let (ending, _ended) = tokio::sync::watch::channel(None);
         let encoding =
-            Encoding::spawn(share, encoded, control.clone(), ending).expect("an encoder");
+            share_send::spawn(share, encoded, control.clone(), ending).expect("an encoder");
         let (_on, on) = tokio::sync::watch::channel(true);
         let (refused, _refusals) = tokio::sync::mpsc::channel(1);
         let uplink = share_send::uplink(encoded_in, on, control, refused);

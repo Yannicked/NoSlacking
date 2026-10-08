@@ -7,14 +7,14 @@
 //! gives of a window is whatever is on top. The portal, where there is
 //! one, offers windows too.
 
-use noslacking_video_ipc::{ShareChoice, ShareProblem, Source, SourceKind};
+use noslacking_video_ipc::{CaptureProblem, ShareChoice, Source, SourceKind};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
 use x11rb::rust_connection::RustConnection;
 
 use super::{Frame, Order, Packed, Trouble};
-use crate::share::{Settings, Share};
+use crate::pipeline::{Capture, Settings};
 
 /// A screen of the X server: where it is on the root window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,24 +55,26 @@ pub fn sources() -> Result<Vec<Source>, Trouble> {
     Ok(sources)
 }
 
-/// Captures the screen `choice` names at [`super::FPS`].
-pub fn start(choice: &ShareChoice, settings: Settings) -> Result<Share, Trouble> {
+/// Captures the screen `choice` names at the share's rate (`Profile::SHARE`).
+pub fn start(choice: &ShareChoice, settings: Settings) -> Result<Capture, Trouble> {
     let id = match choice {
         ShareChoice::Source(id) => id.clone(),
         // No dialog of the system's here: the first screen.
         _ => sources()?
             .first()
             .map(|s| s.id.clone())
-            .ok_or_else(|| Trouble::new(ShareProblem::Gone, "no screen"))?,
+            .ok_or_else(|| Trouble::new(CaptureProblem::Gone, "no screen"))?,
     };
     super::spawn(
         "noslacking-share-x11",
         settings,
-        move |pipeline, inbox, started| {
+        move |pipeline, inbox, _feed, started| {
             let opened = connect().and_then(|(conn, screen)| {
                 let root = &conn.setup().roots[screen];
-                let area = area_of(&id, root.width_in_pixels, root.height_in_pixels)
-                    .ok_or_else(|| Trouble::new(ShareProblem::Gone, format!("no screen {id:?}")))?;
+                let area =
+                    area_of(&id, root.width_in_pixels, root.height_in_pixels).ok_or_else(|| {
+                        Trouble::new(CaptureProblem::Gone, format!("no screen {id:?}"))
+                    })?;
                 let window = root.root;
                 Ok((conn, window, area))
             });
@@ -112,7 +114,7 @@ pub fn start(choice: &ShareChoice, settings: Settings) -> Result<Share, Trouble>
 /// A connection to the X server and its default screen.
 fn connect() -> Result<(RustConnection, usize), Trouble> {
     RustConnection::connect(None)
-        .map_err(|e| Trouble::new(ShareProblem::Unavailable, format!("no X server: {e}")))
+        .map_err(|e| Trouble::new(CaptureProblem::Unavailable, format!("no X server: {e}")))
 }
 
 /// The RandR monitors of `screen`, by name; the whole root if RandR has
@@ -223,11 +225,7 @@ mod tests {
         assert!(sources.iter().all(|s| s.kind == SourceKind::Screen));
         let share = start(
             &ShareChoice::Source(sources[0].id.clone()),
-            Settings {
-                hardware: false,
-                bitrate: 1_000_000,
-                gpu: None,
-            },
+            Settings::share(false, 1_000_000, None),
         )
         .expect("started");
         let frame = share

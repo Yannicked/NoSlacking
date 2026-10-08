@@ -1,30 +1,33 @@
 //! `noslacking-video`, the video helper process (crates/noslacking-video):
-//! every video stream we watch (the `huddle-video` feature) is decoded
-//! there, on the GPU or in software; our camera is encoded there on the
-//! GPU when it can (the `huddle-camera` feature); and the screen we share
-//! is captured and encoded there, so only its H.264 crosses the pipe
-//! (the `huddle-share` feature, [`Helper::start_share`]).
+//! everything that touches pixels. Every video stream we watch (the
+//! `huddle-video` feature) is decoded there, on the GPU or in software;
+//! our camera is opened, captured and encoded there (the `huddle-camera`
+//! feature, [`Helper::start_camera`]), each frame coming back with a
+//! small picture for the self-view; and the screen we share is captured
+//! and encoded there (the `huddle-share` feature, [`Helper::start_share`]).
+//! The app only shows pictures and sends H.264.
 //!
-//! Decoders read strangers' streams, and the GPU's video APIs are C
-//! libraries and drivers that take `unsafe` code this crate forbids; a
-//! malformed stream may crash or hang either, and a panic aborts a
-//! release build. So they run in the helper, which this module starts
-//! the first time a stream needs it and talks to over its standard input
-//! and output (`noslacking-video-ipc`'s messages). The helper is found
-//! next to this program, else on `PATH`. Without it there is no video
-//! to watch (the call window says so, and the call goes on) and no
-//! screen to share. Encoding the camera falls back to software in the
-//! app (`video_encoder`).
+//! Decoders read strangers' streams, the GPU's video APIs are C
+//! libraries and drivers, and cameras and screens are reached through
+//! the system's C interfaces (V4L2, PipeWire, AVFoundation, Media
+//! Foundation): all take `unsafe` code this crate forbids or native
+//! build dependencies, and a malformed stream or a driver may crash or
+//! hang, and a panic aborts a release build. So they run in the helper,
+//! which this module starts the first time something needs it and talks
+//! to over its standard input and output (`noslacking-video-ipc`'s
+//! messages). The helper is found next to this program, else on `PATH`.
+//! Without it there is no video to watch (the call window says so, and
+//! the call goes on), no camera and no screen to share.
 //!
 //! Each [`Lane`] has a helper of its own, so the share's decoding, the
-//! cameras' and our own encoding never wait for each other's replies.
-//! A reply that does not come within a timeout counts as a crash; after
-//! a crash the helper is killed and started again on the next stream, at
+//! cameras' and what we send never wait for each other's replies. A
+//! reply that does not come within a timeout counts as a crash; after a
+//! crash the helper is killed and started again on the next stream, at
 //! most [`MAX_RESTARTS`] times, and then never again until the app
 //! restarts. A stream that lost it asks for a keyframe and starts again
-//! in the new helper; our camera goes on in software with a keyframe.
-//! Nothing from the helper is trusted: replies are checked field by
-//! field, a picture's planes against its size, before use.
+//! in the new helper; our camera starts again in it with a keyframe; a
+//! share ends. Nothing from the helper is trusted: replies are checked
+//! field by field, a picture's planes against its size, before use.
 
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
@@ -34,7 +37,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use noslacking_video_ipc::{self as ipc, Capability, Codec, Direction, FailKind, Reply, Request};
+#[cfg(feature = "huddle-video")]
+use noslacking_video_ipc::FailKind;
+use noslacking_video_ipc::{self as ipc, Codec, Reply, Request};
 
 #[cfg(feature = "huddle-video")]
 use super::decode::Yuv;
@@ -56,15 +61,15 @@ const HELPER: &str = "noslacking-video";
 /// that want it turn it on for themselves.
 static GPU: AtomicBool = AtomicBool::new(false);
 
-/// Lets streams (and our camera) that start from now on use the GPU, or
-/// not: the helper then decodes in software, and the camera encodes in
-/// software in the app.
+/// Lets streams (and our camera and share) that start from now on use
+/// the GPU, or not: the helper then decodes and encodes them in
+/// software.
 pub fn set_gpu(gpu: bool) {
     GPU.store(gpu, Ordering::Relaxed);
 }
 
-/// Whether streams starting now may decode, and our camera encode, on
-/// the GPU.
+/// Whether streams starting now may decode, and our camera and share
+/// encode, on the GPU.
 pub fn gpu() -> bool {
     GPU.load(Ordering::Relaxed)
 }
@@ -167,8 +172,10 @@ pub enum Lane {
     Share,
     /// Decoding the camera tiles.
     Cameras,
-    /// Encoding our camera on the GPU.
-    Sending,
+    /// Capturing and encoding our camera: its own process, as opening it
+    /// may keep a request waiting for the user (macOS asks the first
+    /// time), and a camera driver that fails costs nothing else.
+    Camera,
     /// Capturing and encoding the screen we share: its own process, as
     /// the system's dialog may keep a request waiting for the user.
     Screen,
@@ -186,7 +193,7 @@ pub fn shared(lane: Lane) -> Option<Helper> {
     let index = match lane {
         Lane::Share => 0,
         Lane::Cameras => 1,
-        Lane::Sending => 2,
+        Lane::Camera => 2,
         Lane::Screen => 3,
     };
     helpers.as_ref().map(|helpers| helpers[index].clone())
@@ -217,7 +224,6 @@ struct State {
     given_up: bool,
     /// Moves on with every restart: decoders opened before it are gone.
     generation: u64,
-    capabilities: Vec<Capability>,
 }
 
 /// Runs the installed program; none if it is not there.
@@ -225,7 +231,7 @@ struct State {
 fn launcher() -> Option<Arc<dyn Launcher>> {
     match find_helper() {
         Some(path) => {
-            log::info!("video: decoding through {}", path.display());
+            log::info!("video: the helper is {}", path.display());
             Some(Arc::new(ProcessLauncher::new(path)))
         }
         None => {
@@ -272,7 +278,6 @@ impl Helper {
                 failures: 0,
                 given_up: false,
                 generation: 0,
-                capabilities: Vec::new(),
             })),
             launcher,
             hello_timeout: hello,
@@ -287,20 +292,6 @@ impl Helper {
     /// Whether the helper has been given up on for good.
     pub fn given_up(&self) -> bool {
         self.state().given_up
-    }
-
-    /// Whether the helper encodes `codec` (for H.264, constrained
-    /// baseline) on the GPU at `width`×`height`, starting it if it is not
-    /// running.
-    pub fn encodes(&self, codec: Codec, width: u32, height: u32) -> bool {
-        let mut state = self.state();
-        if self.ensure_started(&mut state).is_err() {
-            return false;
-        }
-        state
-            .capabilities
-            .iter()
-            .any(|c| c.covers(codec, Direction::Encode, width, height))
     }
 
     /// Starts the helper if it is not running and says hello.
@@ -331,10 +322,22 @@ impl Helper {
                 capabilities,
             }) if version == ipc::VERSION => {
                 log::info!(
-                    "video: helper back end {backend}; {} GPU capabilities",
-                    capabilities.len()
+                    "video: helper back end {backend}; GPU: {}",
+                    if capabilities.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        capabilities
+                            .iter()
+                            .map(|c| {
+                                format!(
+                                    "{:?} {:?} up to {}x{}",
+                                    c.codec, c.direction, c.max_width, c.max_height
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
                 );
-                state.capabilities = capabilities;
                 Ok(())
             }
             Ok(Reply::Welcome { version, .. }) => {
@@ -436,53 +439,34 @@ impl Helper {
         }
     }
 
-    /// Opens an encoder of `codec` (constrained baseline H.264) for
-    /// `width`×`height` pictures at `fps` and `bitrate` bit/s.
-    pub fn open_encoder(
-        &self,
-        codec: Codec,
-        width: u32,
-        height: u32,
-        fps: u32,
-        bitrate: u32,
-    ) -> Result<HwEncoder, Lost> {
-        let mut state = self.state();
-        self.ensure_started(&mut state)?;
-        let request = Request::OpenEncoder {
-            codec,
-            width,
-            height,
-            fps,
-            bitrate,
-        };
-        let generation = state.generation;
-        match self.exchange(&mut state, request, self.call_timeout)? {
-            Reply::Opened { id } => Ok(HwEncoder {
-                helper: self.clone(),
-                id,
-                generation,
-                size: (width, height),
-            }),
-            Reply::Failed { kind, detail } => Err(Lost(format!("{kind:?}: {detail}"))),
-            other => Err(self.fail(&mut state, &format!("an answer to open: {other:?}"))),
-        }
-    }
-
     /// What can be shared: `(dialog, sources)`, `dialog` when the system
     /// shows its own when the share starts. Starts the helper if it is
     /// not running.
     #[cfg(feature = "huddle-share")]
-    pub fn sources(&self) -> Result<(bool, Vec<ipc::Source>), ShareTrouble> {
+    pub fn sources(&self) -> Result<(bool, Vec<ipc::Source>), CaptureTrouble> {
+        self.list(Request::ListSources)
+    }
+
+    /// The cameras there are (none is opened to ask). Starts the helper
+    /// if it is not running.
+    #[cfg(feature = "huddle-camera")]
+    pub fn cameras(&self) -> Result<Vec<ipc::Source>, CaptureTrouble> {
+        self.list(Request::ListCameras).map(|(_, cameras)| cameras)
+    }
+
+    /// Asks for a list of sources: what can be shared, or the cameras.
+    #[cfg(feature = "huddle-camera")]
+    fn list(&self, request: Request) -> Result<(bool, Vec<ipc::Source>), CaptureTrouble> {
         let mut state = self.state();
         self.ensure_started(&mut state)
-            .map_err(ShareTrouble::lost)?;
+            .map_err(CaptureTrouble::lost)?;
         match self
-            .exchange(&mut state, Request::ListSources, SOURCES_TIMEOUT)
-            .map_err(ShareTrouble::lost)?
+            .exchange(&mut state, request, SOURCES_TIMEOUT)
+            .map_err(CaptureTrouble::lost)?
         {
             Reply::Sources { dialog, sources } => Ok((dialog, sources)),
-            Reply::ShareProblem { problem, detail } => Err(ShareTrouble::Problem(problem, detail)),
-            other => Err(ShareTrouble::lost(
+            Reply::Problem { problem, detail } => Err(CaptureTrouble::Problem(problem, detail)),
+            other => Err(CaptureTrouble::lost(
                 self.fail(&mut state, &format!("an answer to the sources: {other:?}")),
             )),
         }
@@ -499,105 +483,144 @@ impl Helper {
         gpu: bool,
         bitrate: u32,
         restore: &str,
-    ) -> Result<(RemoteShare, String), ShareTrouble> {
-        let mut state = self.state();
-        self.ensure_started(&mut state)
-            .map_err(ShareTrouble::lost)?;
+    ) -> Result<(RemoteCapture, String), CaptureTrouble> {
         let request = Request::StartShare {
             choice,
             hardware: gpu,
             bitrate,
             restore: restore.to_owned(),
         };
+        self.start(request, SHARE_START_TIMEOUT)
+    }
+
+    /// Opens the camera `choice` names and starts encoding it (on the GPU
+    /// if `gpu` and it can) at `bitrate` bit/s to begin with, each new
+    /// picture's frame carrying a self-view at most `preview` pixels
+    /// wide. Waits while the system asks the user for the camera.
+    #[cfg(feature = "huddle-camera")]
+    pub fn start_camera(
+        &self,
+        choice: ipc::CameraChoice,
+        gpu: bool,
+        bitrate: u32,
+        preview: u32,
+    ) -> Result<RemoteCapture, CaptureTrouble> {
+        let request = Request::StartCamera {
+            choice,
+            hardware: gpu,
+            bitrate,
+            preview: preview.min(ipc::MAX_PREVIEW_SIDE),
+        };
+        self.start(request, CAMERA_START_TIMEOUT)
+            .map(|(camera, _)| camera)
+    }
+
+    /// Starts a capture with `request`, waiting up to `timeout` for it.
+    #[cfg(feature = "huddle-camera")]
+    fn start(
+        &self,
+        request: Request,
+        timeout: Duration,
+    ) -> Result<(RemoteCapture, String), CaptureTrouble> {
+        let mut state = self.state();
+        self.ensure_started(&mut state)
+            .map_err(CaptureTrouble::lost)?;
         let generation = state.generation;
         match self
-            .exchange(&mut state, request, SHARE_START_TIMEOUT)
-            .map_err(ShareTrouble::lost)?
+            .exchange(&mut state, request, timeout)
+            .map_err(CaptureTrouble::lost)?
         {
-            Reply::ShareStarted { id, restore } => Ok((
-                RemoteShare {
+            Reply::Started { id, restore } => Ok((
+                RemoteCapture {
                     helper: self.clone(),
                     id,
                     generation,
                 },
                 restore,
             )),
-            Reply::ShareProblem { problem, detail } => Err(ShareTrouble::Problem(problem, detail)),
+            Reply::Problem { problem, detail } => Err(CaptureTrouble::Problem(problem, detail)),
             // Too many open: the helper is fine.
-            Reply::Failed { kind, detail } => Err(ShareTrouble::Problem(
-                ipc::ShareProblem::Failed,
+            Reply::Failed { kind, detail } => Err(CaptureTrouble::Problem(
+                ipc::CaptureProblem::Failed,
                 format!("{kind:?}: {detail}"),
             )),
-            other => Err(ShareTrouble::lost(
-                self.fail(&mut state, &format!("an answer to the share: {other:?}")),
+            other => Err(CaptureTrouble::lost(
+                self.fail(&mut state, &format!("an answer to the start: {other:?}")),
             )),
         }
     }
 }
 
-/// How long the helper may take to list what can be shared: windows and
-/// screens are asked of the system, which can take a moment.
-#[cfg(feature = "huddle-share")]
+/// How long the helper may take to list what can be shared or the
+/// cameras: windows, screens and devices are asked of the system, which
+/// can take a moment.
+#[cfg(feature = "huddle-camera")]
 const SOURCES_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long starting a share may take: the system's dialog waits for
 /// the user. Past this the helper is taken for stuck, and stopping it
 /// closes the dialog.
 #[cfg(feature = "huddle-share")]
 const SHARE_START_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long opening the camera may take: macOS asks the user the first
+/// time, and the helper waits a minute for the answer.
+#[cfg(feature = "huddle-camera")]
+const CAMERA_START_TIMEOUT: Duration = Duration::from_secs(75);
 
-/// Why a share did not start, or stopped.
-#[cfg(feature = "huddle-share")]
+/// Why a capture (a share or the camera) did not start, or stopped.
+#[cfg(feature = "huddle-camera")]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ShareTrouble {
-    /// What the helper said: cancelled, not allowed, gone, ended…
-    Problem(ipc::ShareProblem, String),
+pub enum CaptureTrouble {
+    /// What the helper said: cancelled, not allowed, busy, gone, ended…
+    Problem(ipc::CaptureProblem, String),
     /// The helper is not there, failed or stopped answering.
     Lost(String),
 }
 
-#[cfg(feature = "huddle-share")]
-impl ShareTrouble {
+#[cfg(feature = "huddle-camera")]
+impl CaptureTrouble {
     fn lost(lost: Lost) -> Self {
         Self::Lost(lost.0)
     }
 }
 
-/// Our screen share, captured and encoded in the helper. Stopped (its
-/// capture with it) when dropped.
-#[cfg(feature = "huddle-share")]
+/// What we send, captured and encoded in the helper: our screen share or
+/// our camera. Stopped (its capture with it, a camera closed) when
+/// dropped.
+#[cfg(feature = "huddle-camera")]
 #[derive(Debug)]
-pub struct RemoteShare {
+pub struct RemoteCapture {
     helper: Helper,
     id: u32,
     generation: u64,
 }
 
-#[cfg(feature = "huddle-share")]
-impl RemoteShare {
-    /// The next picture, encoded (see `Request::NextShareFrame`): none
-    /// when nothing new came within `wait`. Its NAL units are checked:
-    /// a slice, and an IDR with its parameter sets when one was asked.
+#[cfg(feature = "huddle-camera")]
+impl RemoteCapture {
+    /// The next picture, encoded (see `Request::NextFrame`): none when
+    /// nothing new came within `wait`. Its NAL units are checked: a
+    /// slice, and an IDR with its parameter sets when one was asked; its
+    /// self-view, if any, was checked against its size as it was read.
     pub fn next(
         &mut self,
         force_keyframe: bool,
         repeat: bool,
         wait: Duration,
-    ) -> Result<Option<ipc::ShareFrame>, ShareTrouble> {
-        let request = Request::NextShareFrame {
+    ) -> Result<Option<ipc::CapturedFrame>, CaptureTrouble> {
+        let request = Request::NextFrame {
             id: self.id,
             force_keyframe,
             repeat,
             wait_ms: u32::try_from(wait.as_millis())
                 .unwrap_or(u32::MAX)
-                .min(ipc::MAX_SHARE_WAIT_MS),
+                .min(ipc::MAX_WAIT_MS),
         };
         match self
             .helper
             .call(self.generation, request)
-            .map_err(ShareTrouble::lost)?
+            .map_err(CaptureTrouble::lost)?
         {
-            Reply::ShareFrame(frame) => {
-                let types = super::video_encoder::nal_types(&frame.data);
+            Reply::Frame(frame) => {
+                let types = super::bitstream::nal_types(&frame.data);
                 let keyframe = types.contains(&5);
                 let whole = types.iter().any(|&t| t == 1 || t == 5)
                     && keyframe == frame.keyframe
@@ -606,21 +629,21 @@ impl RemoteShare {
                 if whole {
                     Ok(Some(frame))
                 } else {
-                    Err(ShareTrouble::Lost(format!(
+                    Err(CaptureTrouble::Lost(format!(
                         "the helper's frame is not what was asked (NAL units {types:?})"
                     )))
                 }
             }
             Reply::NoPicture => Ok(None),
-            Reply::ShareProblem { problem, detail } => Err(ShareTrouble::Problem(problem, detail)),
-            other => Err(ShareTrouble::Lost(format!(
+            Reply::Problem { problem, detail } => Err(CaptureTrouble::Problem(problem, detail)),
+            other => Err(CaptureTrouble::Lost(format!(
                 "an answer to the next frame: {other:?}"
             ))),
         }
     }
 
     /// Aims at `bitrate` bit/s from the next picture on.
-    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<(), ShareTrouble> {
+    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<(), CaptureTrouble> {
         let request = Request::SetBitrate {
             id: self.id,
             bitrate,
@@ -628,18 +651,18 @@ impl RemoteShare {
         match self
             .helper
             .call(self.generation, request)
-            .map_err(ShareTrouble::lost)?
+            .map_err(CaptureTrouble::lost)?
         {
             Reply::Done => Ok(()),
-            other => Err(ShareTrouble::Lost(format!(
+            other => Err(CaptureTrouble::Lost(format!(
                 "an answer to the bit rate: {other:?}"
             ))),
         }
     }
 }
 
-#[cfg(feature = "huddle-share")]
-impl Drop for RemoteShare {
+#[cfg(feature = "huddle-camera")]
+impl Drop for RemoteCapture {
     fn drop(&mut self) {
         // The helper stops the capture; one that restarted has stopped
         // it already.
@@ -663,7 +686,6 @@ fn start(link: Link) -> Live {
         .name("video-helper-in".into())
         .spawn(move || {
             let mut input = BufWriter::new(input);
-            // A picture to encode goes from its planes into the pipe.
             for (seq, request) in queued {
                 if ipc::write_request(&mut input, seq, &request).is_err() {
                     break;
@@ -694,17 +716,17 @@ fn start(link: Link) -> Live {
     }
 }
 
-/// Why the helper gave no picture, or no encoded frame.
+/// Why the helper gave no decoded picture.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HelperTrouble {
     /// Wait for a keyframe (a loss, or joined mid-stream).
     NeedKeyframe,
     /// The frame did not decode; the next keyframe starts over.
     Broken(String),
-    /// The helper cannot do this: for our camera, software in the app.
+    /// The helper cannot decode this stream.
     Unsupported(String),
-    /// The helper failed or went away: a stream starts again in the next
-    /// helper at a keyframe; our camera goes on in software.
+    /// The helper failed or went away: the stream starts again in the
+    /// next helper at a keyframe.
     Lost(String),
 }
 
@@ -804,90 +826,6 @@ impl Drop for RemoteDecoder {
     }
 }
 
-/// One encoder in the helper: constrained baseline H.264, one access unit
-/// out for each picture in. Closed when dropped.
-#[derive(Debug)]
-pub struct HwEncoder {
-    helper: Helper,
-    id: u32,
-    generation: u64,
-    /// The pictures' size, which the helper's reply must not change.
-    size: (u32, u32),
-}
-
-/// What a GPU-encoded picture came back as.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HwEncoded {
-    /// The access unit, Annex B.
-    pub data: Vec<u8>,
-    /// Whether the helper says it is an IDR (the caller checks).
-    pub keyframe: bool,
-}
-
-impl HwEncoder {
-    /// The size it encodes.
-    pub fn size(&self) -> (u32, u32) {
-        self.size
-    }
-
-    /// Encodes one picture, an IDR if `force_keyframe`. Any failure means
-    /// the stream goes on in software.
-    pub fn encode(
-        &mut self,
-        picture: ipc::Planes,
-        force_keyframe: bool,
-    ) -> Result<HwEncoded, HelperTrouble> {
-        if (picture.width, picture.height) != self.size {
-            return Err(HelperTrouble::Unsupported("another size".into()));
-        }
-        let request = Request::Encode {
-            id: self.id,
-            force_keyframe,
-            picture,
-        };
-        match self.helper.call(self.generation, request) {
-            Ok(Reply::Encoded { keyframe, data }) if !data.is_empty() => {
-                Ok(HwEncoded { data, keyframe })
-            }
-            Ok(Reply::Failed { kind, detail }) => Err(match kind {
-                FailKind::Device | FailKind::Protocol | FailKind::UnknownId => {
-                    HelperTrouble::Lost(format!("{kind:?}: {detail}"))
-                }
-                _ => HelperTrouble::Unsupported(format!("{kind:?}: {detail}")),
-            }),
-            Ok(other) => Err(HelperTrouble::Lost(format!(
-                "an answer to encode: {other:?}"
-            ))),
-            Err(Lost(why)) => Err(HelperTrouble::Lost(why)),
-        }
-    }
-
-    /// Aims at `bitrate` bit/s from the next picture on, with no
-    /// keyframe.
-    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<(), HelperTrouble> {
-        let request = Request::SetBitrate {
-            id: self.id,
-            bitrate,
-        };
-        match self.helper.call(self.generation, request) {
-            Ok(Reply::Done) => Ok(()),
-            Ok(other) => Err(HelperTrouble::Lost(format!(
-                "an answer to the bit rate: {other:?}"
-            ))),
-            Err(Lost(why)) => Err(HelperTrouble::Lost(why)),
-        }
-    }
-}
-
-impl Drop for HwEncoder {
-    fn drop(&mut self) {
-        // Best effort, as for a decoder.
-        let _ = self
-            .helper
-            .call(self.generation, Request::Close { id: self.id });
-    }
-}
-
 /// The helper as a test sees it: what it does with each request; or the
 /// helper's own code, on a thread.
 #[cfg(test)]
@@ -896,8 +834,8 @@ pub(crate) mod pretend {
     use super::*;
 
     /// Runs the helper's own server, as the program would, on a thread
-    /// and over pipes: with no GPU back end, so it decodes in software
-    /// and encodes nothing.
+    /// and over pipes: with no GPU back end, so it decodes and encodes in
+    /// software, and only the test screen and test camera to capture.
     pub struct InThread;
 
     impl Launcher for InThread {
@@ -915,11 +853,23 @@ pub(crate) mod pretend {
                     let mut screens = noslacking_video::capture::Pretend {
                         sources: pretend::sources(),
                     };
+                    // And a pretend camera: the test camera too.
+                    let mut cameras = noslacking_video::capture::camera::Pretend {
+                        cameras: vec![ipc::Source {
+                            id: "pretend:camera".into(),
+                            name: "A pretend camera".into(),
+                            kind: ipc::SourceKind::Camera,
+                        }],
+                        refuse: None,
+                    };
                     let _ = noslacking_video::server::serve(
                         &mut input,
                         &mut output,
                         &mut backend,
-                        &mut screens,
+                        noslacking_video::server::Sources {
+                            screens: &mut screens,
+                            cameras: &mut cameras,
+                        },
                     );
                 })?;
             Ok(Link {
@@ -981,9 +931,9 @@ pub(crate) mod pretend {
         Reply::Welcome {
             version: ipc::VERSION,
             backend: "pretend".into(),
-            capabilities: [Direction::Decode, Direction::Encode]
+            capabilities: [ipc::Direction::Decode, ipc::Direction::Encode]
                 .into_iter()
-                .map(|direction| Capability {
+                .map(|direction| ipc::Capability {
                     codec: Codec::H264,
                     direction,
                     max_width: 1920,
@@ -1139,7 +1089,6 @@ mod tests {
         }
         assert!(helper.given_up());
         assert!(helper.open_decoder(Codec::H264, 64, 48, true).is_err());
-        assert!(!helper.encodes(Codec::H264, 64, 48));
         assert_eq!(
             launches.load(Ordering::Relaxed),
             MAX_RESTARTS + 1,
@@ -1254,7 +1203,6 @@ mod tests {
         }
         let helper = Helper::new(Arc::new(Missing));
         assert!(helper.open_decoder(Codec::H264, 64, 48, true).is_err());
-        assert!(!helper.encodes(Codec::H264, 64, 48));
         assert!(helper.given_up());
     }
 
