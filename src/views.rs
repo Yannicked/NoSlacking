@@ -571,7 +571,7 @@ pub struct TeamViews {
     pub reminders: Fetch<Vec<Reminder>>,
     /// The messages known to be saved, by conversation and timestamp, for
     /// the message toolbar's "Save for later" or "Remove from Later".
-    pub saved_keys: HashSet<(String, Ts)>,
+    pub saved_keys: std::sync::Arc<HashSet<(String, Ts)>>,
     pub scheduled: Fetch<Vec<schedule::Scheduled>>,
 }
 
@@ -1211,10 +1211,11 @@ fn scheduled(
 /// joins the list when it is next read).
 pub fn saved(views: &mut TeamViews, channel: &str, ts: &Ts, save: bool, message: Option<Message>) {
     let key = (channel.to_owned(), ts.clone());
+    let keys = std::sync::Arc::make_mut(&mut views.saved_keys);
     if save {
-        views.saved_keys.insert(key);
+        keys.insert(key);
     } else {
-        views.saved_keys.remove(&key);
+        keys.remove(&key);
     }
     let Some(list) = views.saved.value.as_mut() else {
         return;
@@ -1399,10 +1400,11 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
             let views = app.views.team_mut(team);
             if let Ok(list) = &result {
                 views.starred = starred;
-                views.saved_keys = list
-                    .iter()
-                    .map(|s| (s.channel.clone(), s.message.ts.clone()))
-                    .collect();
+                views.saved_keys = std::sync::Arc::new(
+                    list.iter()
+                        .map(|s| (s.channel.clone(), s.message.ts.clone()))
+                        .collect(),
+                );
             }
             views.saved.arrived(result);
         }
