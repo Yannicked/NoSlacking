@@ -183,7 +183,7 @@ fn retry_delay(failure: &Failure, failures: u32) -> Option<Duration> {
     match failure {
         Failure::Fetch(_) => {
             let doublings = failures.saturating_sub(1).min(16);
-            Some(FIRST.saturating_mul(1 << doublings).min(LONGEST))
+            Some(crate::retry::backoff(FIRST, LONGEST, doublings))
         }
         Failure::Refused(_) => None,
         // Retried when the client arrives, not on a timer.

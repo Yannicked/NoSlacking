@@ -49,6 +49,7 @@ pub mod people;
 pub mod percent;
 pub mod quotes;
 pub mod redact;
+pub mod retry;
 pub mod revision;
 pub mod scopes;
 pub mod search;
