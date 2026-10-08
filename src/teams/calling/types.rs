@@ -488,6 +488,18 @@ impl RosterParticipant {
         self.state == "active"
     }
 
+    /// The directions of their `main-video` streams in the call, for the
+    /// log.
+    pub fn camera_directions(&self) -> Vec<String> {
+        self.endpoints
+            .values()
+            .filter_map(|e| e.call.as_ref()?.get("mediaStreams")?.as_array())
+            .flatten()
+            .filter(|s| s.get("label").and_then(|l| l.as_str()) == Some("main-video"))
+            .filter_map(|s| Some(s.get("direction")?.as_str()?.to_owned()))
+            .collect()
+    }
+
     /// Their sound's source id: the `sourceId` of the `main-audio` stream
     /// of a device in the call, which the meeting names who speaks by.
     pub fn audio_source(&self) -> Option<i64> {
@@ -501,7 +513,8 @@ impl RosterParticipant {
 
     /// Their camera's source id, while it is on: the `sourceId` of a
     /// `main-video` stream sending from a device in the call (recorded:
-    /// it turns `sendrecv` when the camera goes on).
+    /// it turns `sendrecv` when the camera goes on; one already on when we
+    /// join may say `sendonly`).
     pub fn camera_source(&self) -> Option<i64> {
         self.endpoints
             .values()
@@ -510,7 +523,10 @@ impl RosterParticipant {
             .find(|s| {
                 s.get("type").and_then(|t| t.as_str()) == Some("video")
                     && s.get("label").and_then(|l| l.as_str()) == Some("main-video")
-                    && s.get("direction").and_then(|d| d.as_str()) == Some("sendrecv")
+                    && matches!(
+                        s.get("direction").and_then(|d| d.as_str()),
+                        Some("sendrecv" | "sendonly")
+                    )
             })
             .and_then(|s| s.get("sourceId")?.as_i64())
     }
@@ -1170,6 +1186,7 @@ mod tests {
         assert!(who("8:live:organizer").is_muted());
         // The organizer's camera is off: its video stream receives only.
         assert_eq!(who("8:live:organizer").camera_source(), None);
+        assert!(who("8:live:organizer").camera_directions().is_empty());
         assert_eq!(who("8:live:waiting").camera_source(), None);
         assert_eq!(who("8:live:organizer").audio_source(), Some(201));
         // One waiting has no sound in the call yet.

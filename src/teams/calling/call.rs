@@ -1104,6 +1104,14 @@ impl Call {
                 });
             }
             Push::RosterUpdate(update) if self.meeting.is_some() => {
+                let directions: Vec<String> = update
+                    .participants
+                    .values()
+                    .flat_map(super::types::RosterParticipant::camera_directions)
+                    .collect();
+                if !directions.is_empty() {
+                    log::info!("Teams meeting: camera streams in the roster: {directions:?}");
+                }
                 if let Some(meeting) = &mut self.meeting
                     && meeting.people.take(&update, &meeting.me)
                 {
