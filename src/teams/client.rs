@@ -27,8 +27,13 @@ pub struct Author {
 }
 
 /// A message as the Teams web client sends it, less what each call adds.
-fn message_body(chat_id: &str, html_content: &str, me: &Author) -> serde_json::Value {
+fn message_body(
+    chat_id: &str,
+    content: &crate::teams::html::Outgoing,
+    me: &Author,
+) -> serde_json::Value {
     let mri = user_mri(&me.id);
+    let html_content = content.html.as_str();
     serde_json::json!({
         "type": "Message",
         "conversationid": chat_id,
@@ -45,7 +50,7 @@ fn message_body(chat_id: &str, html_content: &str, me: &Author) -> serde_json::V
             "title": "",
             "cards": "[]",
             "links": "[]",
-            "mentions": "[]",
+            "mentions": content.mentions_json(),
             "files": "[]",
             "formatVariant": "TEAMS"
         }
@@ -762,13 +767,13 @@ impl TeamsClient {
     pub async fn send_message(
         &self,
         chat_id: &str,
-        html_content: &str,
+        content: &crate::teams::html::Outgoing,
         client_message_id: Option<&str>,
         me: &Author,
     ) -> Result<Option<String>, Failure> {
         let url = format!("{}/messages", self.conversation_url(chat_id));
 
-        let mut body = message_body(chat_id, html_content, me);
+        let mut body = message_body(chat_id, content, me);
         if let Some(id) = client_message_id {
             body["clientmessageid"] = numeric_message_id(id).into();
         }
@@ -795,11 +800,11 @@ impl TeamsClient {
         &self,
         chat_id: &str,
         message_id: &str,
-        html_content: &str,
+        content: &crate::teams::html::Outgoing,
         me: &Author,
     ) -> Result<(), Failure> {
         let url = format!("{}/messages/{}", self.conversation_url(chat_id), message_id);
-        let mut body = message_body(chat_id, html_content, me);
+        let mut body = message_body(chat_id, content, me);
         body["id"] = message_id.into();
         body["properties"]["edittime"] = now_millis().into();
         let resp = self
@@ -1988,12 +1993,15 @@ mod tests {
             id: "live:.cid.4a5b".into(),
             name: Some("Yan".into()),
         };
-        let body = message_body("19:x@thread.v2", "<p>hi</p>", &me);
+        let hi = crate::teams::html::wire_to_teams("hi");
+        let body = message_body("19:x@thread.v2", &hi, &me);
         assert_eq!(body["from"], "8:live:.cid.4a5b");
         assert_eq!(body["imdisplayname"], "Yan");
         assert_eq!(body["messagetype"], "RichText/Html");
         assert_eq!(body["properties"]["formatVariant"], "TEAMS");
-        let nameless = message_body("19:x@thread.v2", "<p>hi</p>", &Author::default());
+        assert_eq!(body["content"], "<p>hi</p>");
+        assert_eq!(body["properties"]["mentions"], "[]");
+        let nameless = message_body("19:x@thread.v2", &hi, &Author::default());
         assert_eq!(nameless["imdisplayname"], "");
     }
 

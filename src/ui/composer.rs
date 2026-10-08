@@ -537,9 +537,13 @@ pub fn show(
         draft.text = text;
         match &suggestion {
             Suggestion::User { id, label, .. } => {
-                draft
-                    .mentions
-                    .push((format!("@{label}"), format!("<@{id}>")));
+                // Teams shows a mention by the name it is sent with.
+                let wire = if composer.workspace.info.is_teams() {
+                    format!("<@{id}|{}>", crate::mrkdwn::escape(label))
+                } else {
+                    format!("<@{id}>")
+                };
+                draft.mentions.push((format!("@{label}"), wire));
             }
             // The label form draws as the handle even where the group is
             // unknown, and is what Slack itself sends.

@@ -243,6 +243,32 @@ pub struct MessageProperties {
     pub edit_time: Option<serde_json::Value>,
     #[serde(default, rename = "isdelete")]
     pub is_deleted: Option<serde_json::Value>,
+    /// Whom the message's mentions mean: a list in history, JSON text in
+    /// what is sent and in live events.
+    #[serde(default, deserialize_with = "list_or_text")]
+    pub mentions: Option<Vec<Mention>>,
+}
+
+/// One mention of a message: its number in the HTML and whom it means.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mention {
+    /// A number in the JSON, a string in some writers.
+    #[serde(default)]
+    pub itemid: serde_json::Value,
+    #[serde(default)]
+    pub mri: String,
+    #[serde(default, rename = "displayName")]
+    pub display_name: Option<String>,
+}
+
+impl Mention {
+    /// Its number as the HTML writes it.
+    pub fn item(&self) -> String {
+        match &self.itemid {
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        }
+    }
 }
 
 impl MessageProperties {

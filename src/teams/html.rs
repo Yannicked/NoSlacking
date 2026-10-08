@@ -34,6 +34,160 @@ pub fn unescape_html(html: &str) -> String {
         .replace("&nbsp;", " ")
 }
 
+/// What a sent message carries: its HTML, and the people it mentions,
+/// each numbered as its `<span itemid>` in the HTML.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Outgoing {
+    pub html: String,
+    pub mentions: Vec<SentMention>,
+}
+
+/// One person a sent message mentions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SentMention {
+    /// Its number, as the span's `itemid`.
+    pub item: usize,
+    /// Their MRI.
+    pub mri: String,
+    /// The name the mention shows.
+    pub name: String,
+}
+
+impl Outgoing {
+    /// The message's `properties.mentions`: a JSON array as text, as the
+    /// web client writes it (recorded on a received message).
+    pub fn mentions_json(&self) -> String {
+        let list: Vec<serde_json::Value> = self
+            .mentions
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "@type": "http://schema.skype.com/Mention",
+                    "itemid": m.item,
+                    "mri": m.mri,
+                    "mentionType": "person",
+                    "displayName": m.name,
+                })
+            })
+            .collect();
+        serde_json::Value::Array(list).to_string()
+    }
+}
+
+/// Turns what the interface sends (Slack's markup: `&amp;`-escaped text,
+/// `<@id|name>` mentions, `<url|label>` links, `<!here>`) into a Teams
+/// message: each line a paragraph, a mention a
+/// `<span itemtype="http://schema.skype.com/Mention">` with its entry in
+/// [`Outgoing::mentions`], a link an `<a>`. Teams has no channel links
+/// or broadcasts: those keep only their words.
+pub fn wire_to_teams(wire: &str) -> Outgoing {
+    let mut mentions: Vec<SentMention> = Vec::new();
+    let mut paragraphs = Vec::new();
+    for line in wire.split('\n') {
+        let mut out = String::new();
+        let mut rest = line;
+        while let Some(open) = rest.find('<') {
+            out.push_str(&escape_html(&crate::mrkdwn::unescape(&rest[..open])));
+            let Some(close) = rest[open..].find('>') else {
+                out.push_str(&escape_html(&crate::mrkdwn::unescape(&rest[open..])));
+                rest = "";
+                break;
+            };
+            let token = &rest[open + 1..open + close];
+            rest = &rest[open + close + 1..];
+            let (target, label) = match token.split_once('|') {
+                Some((target, label)) => (target, Some(crate::mrkdwn::unescape(label))),
+                None => (token, None),
+            };
+            if let Some(id) = target.strip_prefix('@') {
+                let name = label.unwrap_or_else(|| id.to_owned());
+                let name = name.strip_prefix('@').unwrap_or(&name).to_owned();
+                let item = mentions.len();
+                out.push_str(&format!(
+                    "<span itemtype=\"http://schema.skype.com/Mention\" itemscope=\"\" itemid=\"{item}\">{}</span>",
+                    escape_html(&name)
+                ));
+                mentions.push(SentMention {
+                    item,
+                    mri: crate::teams::client::user_mri(id),
+                    name,
+                });
+            } else if let Some(command) = target.strip_prefix('!') {
+                // `@here` and the like: words in Teams.
+                let words = label.unwrap_or_else(|| format!("@{command}"));
+                out.push_str(&escape_html(&words));
+            } else if let Some(channel) = target.strip_prefix('#') {
+                let name = label.unwrap_or_else(|| channel.to_owned());
+                out.push_str(&escape_html(&format!("#{name}")));
+            } else {
+                let url = crate::mrkdwn::unescape(target);
+                let text = label.unwrap_or_else(|| url.clone());
+                out.push_str(&format!(
+                    "<a href=\"{}\">{}</a>",
+                    escape_html(&url),
+                    escape_html(&text)
+                ));
+            }
+        }
+        out.push_str(&escape_html(&crate::mrkdwn::unescape(rest)));
+        paragraphs.push(if out.is_empty() {
+            "<p>&nbsp;</p>".to_owned()
+        } else {
+            format!("<p>{out}</p>")
+        });
+    }
+    Outgoing {
+        html: paragraphs.concat(),
+        mentions,
+    }
+}
+
+/// Puts people into a parsed message's mentions: Teams numbers each one
+/// (`itemid`, `<at id>`) and says whom it means in the message's
+/// `properties.mentions`, here `people` (number, user id). The web client
+/// gives each word of a name its own mention; those side by side, apart
+/// only by spaces, become one.
+pub fn resolve_mentions(blocks: Vec<Block>, people: &[(String, String)]) -> Vec<Block> {
+    let resolve = |inlines: Vec<Inline>| -> Vec<Inline> {
+        let mut out: Vec<Inline> = Vec::with_capacity(inlines.len());
+        for inline in inlines {
+            let Inline::User { id, label } = inline else {
+                out.push(inline);
+                continue;
+            };
+            let id = people
+                .iter()
+                .find(|(item, _)| *item == id)
+                .map_or(id, |(_, user)| user.clone());
+            // The same person just before, with only spaces between.
+            let spaces = matches!(out.last(), Some(Inline::Text(t, _)) if t.trim().is_empty());
+            let before = out.len() - usize::from(spaces);
+            if let Some(Inline::User {
+                id: previous,
+                label: Some(name),
+            }) = before.checked_sub(1).and_then(|at| out.get_mut(at))
+                && *previous == id
+                && let Some(more) = &label
+            {
+                name.push(' ');
+                name.push_str(more);
+                out.truncate(before);
+                continue;
+            }
+            out.push(Inline::User { id, label });
+        }
+        out
+    };
+    blocks
+        .into_iter()
+        .map(|block| match block {
+            Block::Paragraph(inlines) => Block::Paragraph(resolve(inlines)),
+            Block::Quote(inlines) => Block::Quote(resolve(inlines)),
+            other @ Block::Preformatted(_) => other,
+        })
+        .collect()
+}
+
 /// Converts a plain message or typed text into a Teams HTML payload.
 pub fn text_to_teams_html(text: &str) -> String {
     let escaped = escape_html(text);
@@ -107,6 +261,11 @@ pub fn html_to_blocks(html: &str) -> Vec<Block> {
     let mut in_mention = false;
     let mut mention_id = String::new();
     let mut mention_text = String::new();
+    // Spans open, and how deep the mention's own span is: a mention is a
+    // `<span itemtype="http://schema.skype.com/Mention">`, other spans
+    // only style.
+    let mut spans = 0usize;
+    let mut mention_span: Option<usize> = None;
 
     let mut i = 0;
     let chars: Vec<char> = html.chars().collect();
@@ -210,6 +369,29 @@ pub fn html_to_blocks(html: &str) -> Vec<Block> {
                             });
                         }
                         link_text.clear();
+                    }
+                    "span" => {
+                        spans += 1;
+                        if mention_span.is_none() && lower.contains("schema.skype.com/mention") {
+                            mention_span = Some(spans);
+                            in_mention = true;
+                            mention_text.clear();
+                            mention_id = extract_attribute(&tag, "itemid").unwrap_or_default();
+                        }
+                    }
+                    "/span" => {
+                        if mention_span == Some(spans) {
+                            mention_span = None;
+                            in_mention = false;
+                            let label = (!mention_text.is_empty())
+                                .then(|| unescape_html(mention_text.trim_start_matches('@')));
+                            current_inlines.push(Inline::User {
+                                id: std::mem::take(&mut mention_id),
+                                label,
+                            });
+                            mention_text.clear();
+                        }
+                        spans = spans.saturating_sub(1);
                     }
                     "at" => {
                         in_mention = true;
@@ -390,6 +572,62 @@ mod tests {
             }
             _ => panic!("expected paragraph"),
         }
+    }
+
+    #[test]
+    fn the_interfaces_markup_goes_out_as_teams_html() {
+        let sent = wire_to_teams(
+            "hi &amp; <@live:ana|Ana de Wit>, see <https://x.y/?a=1&amp;b=2|the site>\n@here <!here>",
+        );
+        assert_eq!(
+            sent.html,
+            "<p>hi &amp; <span itemtype=\"http://schema.skype.com/Mention\" itemscope=\"\" \
+             itemid=\"0\">Ana de Wit</span>, see <a href=\"https://x.y/?a=1&amp;b=2\">the \
+             site</a></p><p>@here @here</p>"
+        );
+        assert_eq!(
+            sent.mentions,
+            [SentMention {
+                item: 0,
+                mri: "8:live:ana".into(),
+                name: "Ana de Wit".into()
+            }]
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&sent.mentions_json()).expect("the mentions are JSON");
+        assert_eq!(json[0]["mri"], "8:live:ana");
+        assert_eq!(json[0]["itemid"], 0);
+        assert_eq!(json[0]["mentionType"], "person");
+        assert_eq!(wire_to_teams("plain").mentions_json(), "[]");
+    }
+
+    #[test]
+    fn a_name_mentioned_word_by_word_is_one_mention() {
+        // As the web client writes it (recorded): one span per word.
+        let html = "<p><span itemtype=\"http://schema.skype.com/Mention\" itemscope=\"\" \
+                    itemid=\"0\">Ana</span>&nbsp;<span itemtype=\"http://schema.skype.com/Mention\" \
+                    itemscope=\"\" itemid=\"1\">de Wit</span>&nbsp;hello</p>";
+        let people = [
+            ("0".to_owned(), "live:ana".to_owned()),
+            ("1".to_owned(), "live:ana".to_owned()),
+        ];
+        let blocks = resolve_mentions(html_to_blocks(html), &people);
+        let Some(Block::Paragraph(inlines)) = blocks.first() else {
+            panic!("a paragraph: {blocks:?}");
+        };
+        assert_eq!(
+            inlines.first(),
+            Some(&Inline::User {
+                id: "live:ana".into(),
+                label: Some("Ana de Wit".into())
+            })
+        );
+        assert!(
+            !inlines[1..]
+                .iter()
+                .any(|i| matches!(i, Inline::User { .. })),
+            "{inlines:?}"
+        );
     }
 
     #[test]

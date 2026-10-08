@@ -763,16 +763,16 @@ const PERSONAL_FALLBACK: &str = "Teams (personal)";
 
 /// Posts a message; the answer settles the interface's optimistic copy.
 pub async fn send(client: TeamsClient, post: Post, sink: Sink) {
-    let html = crate::teams::html::text_to_teams_html(&post.text);
+    let content = crate::teams::html::wire_to_teams(&post.text);
     let result = client
         .send_message(
             &post.channel,
-            &html,
+            &content,
             post.client_msg_id.as_deref(),
             &post.author(),
         )
         .await
-        .and_then(|id| posted(id, &post, html));
+        .and_then(|id| posted(id, &post, content));
     sink.send(Event::Sent {
         team: post.team,
         channel: post.channel,
@@ -784,13 +784,32 @@ pub async fn send(client: TeamsClient, post: Post, sink: Sink) {
 /// The message as posted: Teams answers with its id only, so the message
 /// is read back through the same translation as any other, which keeps
 /// it whole as the model grows.
-fn posted(id: Option<String>, post: &Post, html: String) -> Result<crate::model::Message, Failure> {
+fn posted(
+    id: Option<String>,
+    post: &Post,
+    content: crate::teams::html::Outgoing,
+) -> Result<crate::model::Message, Failure> {
     let id = id.unwrap_or_else(|| ts_to_teams_id(&now()));
     translate_message(&crate::teams::types::Message {
         id,
         from: Some(crate::teams::client::user_mri(&post.me)),
-        content: html,
+        content: content.html,
         message_type: Some("RichText/Html".into()),
+        // Its mentions, so the copy shows them as the sent one will.
+        properties: Some(crate::teams::types::MessageProperties {
+            mentions: Some(
+                content
+                    .mentions
+                    .into_iter()
+                    .map(|m| crate::teams::types::Mention {
+                        itemid: m.item.into(),
+                        mri: m.mri,
+                        display_name: Some(m.name),
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        }),
         client_message_id: post.client_msg_id.clone(),
         ..Default::default()
     })
@@ -819,9 +838,9 @@ pub async fn change(
     let result = match &change {
         Change::Delete { ts, .. } => client.delete_message(&channel, &ts_to_teams_id(ts)).await,
         Change::Edit { ts, text, .. } => {
-            let html = crate::teams::html::text_to_teams_html(text);
+            let content = crate::teams::html::wire_to_teams(text);
             client
-                .edit_message(&channel, &ts_to_teams_id(ts), &html, &me)
+                .edit_message(&channel, &ts_to_teams_id(ts), &content, &me)
                 .await
         }
         Change::React { ts, name, added } => {
@@ -1170,7 +1189,7 @@ mod tests {
         let message = posted(
             Some("1700000000123".into()),
             &post(Some("c-1")),
-            "<p>hello</p>".into(),
+            crate::teams::html::wire_to_teams("hello"),
         )
         .expect("a message");
         assert_eq!(message.ts, teams_id_to_ts("1700000000123"));
@@ -1180,8 +1199,22 @@ mod tests {
     }
 
     #[test]
+    fn a_posted_mention_shows_the_person_at_once() {
+        let message = posted(
+            Some("1".into()),
+            &post(None),
+            crate::teams::html::wire_to_teams("hi <@live:ana|Ana>"),
+        )
+        .expect("a message");
+        let shown = format!("{:?}", message.blocks);
+        assert!(shown.contains("live:ana"), "{shown}");
+        assert!(shown.contains("Ana"), "{shown}");
+    }
+
+    #[test]
     fn a_post_without_an_id_gets_a_time_of_its_own() {
-        let message = posted(None, &post(None), "<p>hi</p>".into()).expect("a message");
+        let message =
+            posted(None, &post(None), crate::teams::html::wire_to_teams("hi")).expect("a message");
         assert_ne!(message.ts, Ts::new(""));
         assert_eq!(message.user.as_deref(), Some("me"));
     }
@@ -1313,7 +1346,12 @@ mod tests {
     fn a_personal_post_is_from_a_live_mri() {
         let mut post = post(None);
         post.me = "live:.cid.4a5b".into();
-        let message = posted(Some("1".into()), &post, "<p>hi</p>".into()).expect("a message");
+        let message = posted(
+            Some("1".into()),
+            &post,
+            crate::teams::html::wire_to_teams("hi"),
+        )
+        .expect("a message");
         assert_eq!(message.user.as_deref(), Some("live:.cid.4a5b"));
     }
 

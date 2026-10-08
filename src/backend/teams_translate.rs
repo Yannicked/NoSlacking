@@ -161,7 +161,18 @@ pub fn translate_teams_content(
 
     // 4. Regular chat message
     let plain_text = strip_tags(&msg.content);
-    let blocks = html_to_blocks(&msg.content);
+    let mut blocks = html_to_blocks(&msg.content);
+    let people: Vec<(String, String)> = msg
+        .properties
+        .as_ref()
+        .and_then(|p| p.mentions.as_ref())
+        .into_iter()
+        .flatten()
+        .filter_map(|m| Some((m.item(), clean_teams_user_id(&m.mri)?)))
+        .collect();
+    if !people.is_empty() {
+        blocks = crate::teams::html::resolve_mentions(blocks, &people);
+    }
     let mut kit_blocks = Vec::new();
     if !blocks.is_empty() {
         kit_blocks.push(KitBlock::RichText(Arc::from(blocks)));
