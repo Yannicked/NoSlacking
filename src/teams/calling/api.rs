@@ -1508,8 +1508,16 @@ mod tests {
         assert_eq!(on["descriptions"][1]["direction"], "recvonly");
         // An SDP's own lines: the meeting's media server's renumbered ones.
         let read = descriptions_for(include_str!("fixtures/meeting_retarget.sdp"), false, 3);
-        assert_eq!(read["descriptions"][0]["mid"], "2");
-        assert_eq!(read["descriptions"][1]["mid"], "3");
+        let mids: Vec<&str> = read["descriptions"]
+            .as_array()
+            .expect("a list")
+            .iter()
+            .filter_map(|d| d["mid"].as_str())
+            .collect();
+        // The camera's, its other camera lines, then the share's.
+        assert_eq!(mids.first(), Some(&"2"));
+        assert_eq!(mids.get(1), Some(&"5"));
+        assert_eq!(mids.last(), Some(&"3"));
         // An audio-only SDP has none.
         let none = descriptions_for("v=0\r\nm=audio 9 RTP/SAVP 111\r\na=mid:0\r\n", false, 1);
         assert_eq!(none["descriptions"], serde_json::json!([]));
