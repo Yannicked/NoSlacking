@@ -29,6 +29,14 @@ copied. Line refs are `file:line` at those commits.
   PipeWire portals. *(Stage 1 update: the spike found rusty_h264, pure
   Rust, bit-exact and fast enough for 1080p shares; it is what Stage 1
   uses. Real Slack sends H.264 CB, so VP8 is not needed.)*
+- **The decoded picture's way to the screen (§6.12, 2026-10-08):** the
+  app's own part of a picture is about 1 ms of CPU at full-size 1080p
+  (reading the pipe, converting to RGBA) and a tenth of that shown
+  smaller; the frame each picture causes costs more. Protocol 6 sends
+  only pictures the window will show (it has drawn the last one and can
+  be seen) and none that did not change: a hidden window costs about
+  0.05 ms of CPU a frame on the GPU instead of 2. RGBA from the helper
+  and shared memory measured and not worth it; the pipe stays.
 - **All video in the helper (§6.9–6.11, done 2026-10-08):** the app
   touches no pixels but the ones it shows. `noslacking-video` decodes
   every stream, captures and encodes the shared screen (§6.10) and the
@@ -1752,6 +1760,184 @@ while it is on closes the capture and starts the new one, which begins
 with a keyframe. Not done: `/dev/v4l/by-id/` links (USB serials) would
 tell twins apart across replugging too; the helper could list those as
 ids.
+
+### 6.12 The decoded picture's way to the screen (2026-10-08, `feat/picture-path`)
+
+After §6.11 the only heavy traffic left is decoded I420 pictures, helper
+→ app; the app turns them into RGBA (`decode::to_image`, the `yuv`
+crate) on its decoder threads and egui uploads the RGBA texture on the
+main thread. This section measures each step, then does what the
+numbers pay for.
+
+**How it was measured.** This machine as §6.3 (release), **but busy
+with other work throughout**, so: CPU time (per process, per thread from
+/proc) rather than wall time where it matters, each case run three times
+with the builds interleaved, medians given (the spread is in brackets
+where it matters). The Ryzen AI 7 350 mixes Zen 5 (5.1 GHz) and Zen 5c
+(3.5 GHz) cores, so a thread's time depends on where the scheduler puts
+it: the main thread's share in the demo was bimodal (16 % or 20 % of a
+core for the same binary) until runs were interleaved and compared in
+the same scene. Two tools:
+
+- `examples/picture_path.rs` (the app's own code against the real
+  helper process): the round trip `H264::decode` makes, with the app's
+  and the helper's CPU a frame; the same frames decoded but not shown
+  (protocol 6, below); the pipe alone at the picture's size (`cat`, the
+  app's reader); `to_image`; egui's texture bookkeeping without GL.
+- The demo's call window under Xvfb (`--demo-view call-window
+  --demo-size 1500x950`: the 1080p share at 12 fps shown at full size in
+  software, or about 1200 wide on the GPU; four 480×480 cameras at 22
+  fps in 480 (software) or 256 (GPU) tiles), 30 s after 8 s of warm-up,
+  CPU per thread; `NOSLACKING_DEMO_FRAME_TIMES=1` logs eframe's frame
+  times with and without new pictures. Painting is llvmpipe (two
+  threads), not a GPU: its upload and draw costs are not a GPU's.
+
+**Where the time goes (before, per picture).** Bench medians; "app" is
+all of the app's threads, the helper is its whole process:
+
+| per picture | 1080p full size | 1080p shown 960 wide | 480×480 camera | camera in a 240 tile |
+| --- | --- | --- | --- | --- |
+| round trip, GPU (wall) | 3.4 ms | 1.7 ms | 0.76 ms | 0.65 ms |
+| app CPU, GPU (reading the pipe, checks, threads) | 0.56 ms | 0.14 ms | 0.06 ms | 0.02 ms |
+| helper CPU, GPU | 1.53 ms | 0.44 ms | 0.21 ms | 0.15 ms |
+| app CPU, software | 0.61 ms | 0.19 ms | 0.06 ms | 0.00–0.02 ms |
+| helper CPU, software | 2.42 ms | 2.31 ms | 0.36 ms | 0.35 ms |
+| pipe alone (wall / the reader's CPU) | 0.47 / 0.24 ms | 0.12 / 0.05 ms | 0.05 / 0.02 ms | 0.01 / 0.01 ms |
+| I420 → RGBA in the app | 0.43 ms (0.41–0.46) | 0.10 ms | 0.04 ms | 0.01 ms |
+| of it, allocating the RGBA buffer | 0.08 ms | 0.02 ms | 0.01 ms | 0.00 ms |
+| egui's texture bookkeeping | 0.0001 ms | same | same | same |
+
+In the demo (per 30 s, median of three, before): the main thread 3.1 s
+in software (10 % of a core) and 2.9 s on the GPU, the share's decoder
+thread 0.32 s (software) / 0.10 s (GPU), the cameras' 0.28 / 0.11 s,
+the pipe reader (`video-helper-out`) 0.47 / 0.18 s, the helpers 3.0 /
+1.4 s. Converting a 1080p picture took 0.9–1.0 ms there (the demo's log),
+twice the bench's: the threads compete with llvmpipe and the helpers.
+Frames that uploaded new pictures (1.6 Mpixel on average) took about
+0.5 ms longer than frames that did not (2.9 against 2.4 ms) under
+llvmpipe; a GPU driver's upload is not measured here.
+
+So the app's own part of a picture is small: about 1 ms of CPU for a
+full-size 1080p picture (reading 0.24–0.3 ms, converting 0.4–1.0 ms),
+a tenth of that for anything shown smaller. **What costs the app most is
+not the picture but the frame it causes:** every new picture wakes the
+window for a whole repaint, and with four cameras at 22 fps and a share
+at 12 the window draws about 36 frames a second (llvmpipe, which paints
+slowly) to 60 (a GPU), each 2.5–3 ms of main-thread time here, whether a
+picture changed one tile or the whole window. That is 10 % of a core
+before any pixel is converted (see "Open" below).
+
+**Protocol 6: only pictures someone will see.** Every frame must still
+be decoded (the next ones refer to it), but a picture is now shrunk,
+read back from the GPU and sent only if the window will show it:
+
+- `Decode` gains `show`. Off, the helper decodes the frame but keeps the
+  picture as decoded (the VA surface, untouched until the next frame; in
+  software, rusty_h264's own planes, moved) and answers `Kept`. A new
+  `Fetch{id}` reads back, shrinks (to the output size as it is *then*)
+  and sends that newest picture, or `NoPicture` if the next frame came
+  first or it was sent. Never a queue: one picture at most waits, the
+  newest. The helper's `Decoder` trait split in two (`decode_frame`,
+  `picture`) for it; a GPU readback failing in `picture` hands over to
+  software at the next keyframe as before.
+- A picture exactly the last one sent (size, source, every byte;
+  `memcmp` against the planes the helper keeps from the last send, moved,
+  not copied) is answered `Unchanged`: a still screen resent once a
+  second, or an all-skip frame, no longer crosses the pipe, converts or
+  uploads. Pictures from cameras never repeat; a still share does.
+- **When is a picture wanted?** The app asks for it (`show` on) when the
+  window has taken the last one (backpressure: the slot in `Screen` or
+  `Gallery` is empty) and can be seen (`ViewportInfo::visible()`:
+  minimised or occluded, as far as winit says; on X11 without a window
+  manager and on Wayland that is often unknown, which counts as seen).
+  Otherwise the picture is kept. When the window takes a picture, or can
+  be seen again, the decoder thread fetches the kept one at once (a
+  `Fetch` job; whoever clears the "kept" flag first asks, so one fetch,
+  never two). The window keeping up, as it does when shown, nothing
+  changes; a window that stops drawing (minimised, the app hidden, a
+  frame stalled) makes the helper stop reading back and sending, and the
+  first picture after it is the newest, one fetch later. Tiles that are
+  not shown at all already had no decoder (`Camera::tile`).
+
+| per frame, bench medians | shown | decoded, not shown | saved |
+| --- | --- | --- | --- |
+| 1080p full size, GPU: app + helper CPU | 0.56 + 1.53 ms | 0.00 + 0.06 ms | **2.0 ms** |
+| 1080p shown 960 wide, GPU | 0.14 + 0.44 ms | 0.00 + 0.03–0.06 ms | 0.55 ms |
+| camera in a 240 tile, GPU | 0.02 + 0.15 ms | 0.02 + 0.03 ms | 0.12 ms |
+| 1080p full size, software | 0.61 + 2.42 ms | 0.03 + 1.61 ms | 1.4 ms |
+| 1080p shown 960 wide, software | 0.19 + 2.31 ms | 0.06 + 1.72 ms | 0.7 ms |
+| camera in a 240 tile, software | 0.00 + 0.35 ms | 0.03 + 0.30 ms | 0.05 ms |
+
+So a hidden call window costs, on the GPU, almost nothing per frame
+(the decode is the GPU's), and in software only the decoding itself.
+With the window shown (the demo, interleaved runs) every thread's time
+is as before, within the noise: as expected, the window keeps up, so
+nearly every picture is wanted (one was kept in about 40 s of runs).
+Tested offline: the messages both ways; the server keeping only the
+newest, fetching once, `Unchanged`, a size changed between keep and
+fetch; the GPU's pictures taken now and then equal to taking every one
+(ignored test, run here); fetched pictures equal to shown ones through
+the helper's own code; the decoder threads holding pictures back until
+the window takes the last one or can be seen again.
+
+**Fewer copies in the app: tried, mostly not worth it.**
+
+- *Reading planes into the last picture's vectors* (no allocation, no
+  zeroing; tried, not committed): the reader's CPU for a 1080p picture
+  went 0.31 → 0.31 ms in one run and 0.31 → 0.21 in another: the
+  kernel's copy is the cost, not the allocation. Dropped.
+- *Converting into RGBA images egui was done with* (a pool per stream,
+  `Arc::get_mut` telling which egui no longer holds): converting fell
+  from 0.9–1.0 to 0.6–0.7 ms a 1080p picture in the demo, the decoder
+  threads saving 0.1 s per 30 s, but the main thread took 0.5–0.9 s more
+  per 30 s (+2–3 % of a core) in five of six interleaved runs, a build
+  without it (only protocol 6) not. Why is not known (llvmpipe's upload
+  reading memory another core just wrote, perhaps); a GPU driver may
+  differ. Reverted: a net loss where it could be measured.
+- *Uploading in place* (`TextureHandle::set_partial`, so glow uses
+  `glTexSubImage2D` instead of re-making the texture with
+  `glTexImage2D`): no difference beyond the noise under llvmpipe (one
+  build, switched by an environment variable, interleaved). Not kept: on
+  a GPU, writing over a texture still being drawn from can stall where
+  re-making it does not, and nothing here shows a gain.
+- Converting straight into the texture's memory would need a mapped GL
+  buffer: `unsafe` GL in the app, ruled out.
+
+**RGBA from the helper (step 4): not done.** It would pay only if
+converting cost more than moving 2.7 times the bytes. It does not: a
+1080p picture converts in 0.43 ms in the app, and the pipe's cost grows
+with its bytes (0.24 ms of the reader's CPU, and as much the writer's,
+for 3.1 MB; scaled, about 0.65 ms each for 8.3 MB). In software the helper would
+pay the same conversion and the pipe more; on the GPU, video processing
+can write RGBA, but reading back 8.3 MB instead of 3.1 MB from
+write-combined memory (`vaDeriveImage` took 1.35 ms for 3.1 MB, §6.3)
+costs more than the app's conversion. Below full size all of it is a
+tenth as much.
+
+**Shared memory (step 5): not done; "keep the pipe" stands.** The pipe
+costs, for a full-size 1080p picture, about 0.25 ms of CPU on each side
+(at 12–15 fps, 0.3–0.4 % of a core each); smaller pictures, which is
+nearly all of them (shares shown smaller, every tile), cost a fifth to a
+twentieth of that. A memfd the helper writes and the app reads with safe
+positional reads still copies once into the app (only mapping avoids
+that, which is `unsafe` in the app), so it would save one copy of two, a
+few tenths of a millisecond at full size and nothing measurable below.
+Not worth a second transport, a platform split and the fd handling;
+§6.2's decision holds.
+
+**Open.**
+
+- **Repaint pacing.** The largest app-side cost is a whole frame per
+  picture (above). Pacing the call window's video repaints (say to 30 a
+  second, or to the fastest stream's rate) would merge several cameras'
+  pictures into one frame, at up to a frame's delay (33 ms at 30 Hz).
+  A latency and smoothness trade for the user to decide; not done.
+- **Unseen streams are still received and decoded.** A hidden window
+  could also ask Chime for fewer or smaller layers (SUBSCRIBE), saving
+  the network and the decode.
+- Upload and draw costs on a real GPU (radeonsi, Intel) were not
+  measured here: Xvfb gives llvmpipe. The image pool and `set_partial`
+  might behave differently there.
 
 ## Sources
 - amazon-chime-sdk-js @ dea69d268c623ab2006169d3899981fea766fa8a (Apache-2.0), files as cited.
