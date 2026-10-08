@@ -524,7 +524,7 @@ impl Pipeline {
 
     /// A captured frame, taken at `at`.
     pub fn put(&mut self, frame: &Frame<'_>, at: Instant) {
-        let Some(only_on_gpu) = self.take_in(frame) else {
+        let Some(only_on_gpu) = self.take_in(frame, at) else {
             return;
         };
         let held = match frame {
@@ -545,23 +545,24 @@ impl Pipeline {
 
     /// A captured picture of its own, taken at `at`: kept without a copy.
     pub fn put_picture(&mut self, picture: Planes, at: Instant) {
-        if self.take_in(&Frame::I420(&picture)).is_some() {
+        if self.take_in(&Frame::I420(&picture), at).is_some() {
             self.keep(Held::I420(picture), at);
         }
     }
 
-    /// Whether `frame` is kept: none if it is not (too soon, unchanged,
-    /// unusable, a dma-buf the GPU would not take), else whether it is
-    /// only on the GPU. A kept frame is on the GPU already, if it is used,
-    /// and its self-view made.
-    fn take_in(&mut self, frame: &Frame<'_>) -> Option<bool> {
+    /// Whether `frame`, taken at `at`, is kept: none if it is not (too
+    /// soon, unchanged, unusable, a dma-buf the GPU would not take), else
+    /// whether it is only on the GPU. A kept frame is on the GPU already,
+    /// if it is used, and its self-view made. Paced by when frames were
+    /// taken, not when they arrive here, so a late one does not crowd out
+    /// the next.
+    fn take_in(&mut self, frame: &Frame<'_>, at: Instant) -> Option<bool> {
         if self.ended.is_some() {
             return None;
         }
-        let now = Instant::now();
         if self
             .last_kept
-            .is_some_and(|last| now < last + self.profile.min_gap)
+            .is_some_and(|last| at < last + self.profile.min_gap)
         {
             self.counts.skipped += 1;
             return None;
@@ -608,7 +609,7 @@ impl Pipeline {
         self.held = Some(held);
         self.software_picture = None;
         self.fresh = Some(at);
-        self.last_kept = Some(Instant::now());
+        self.last_kept = Some(at);
         self.counts.kept += 1;
         if let Some(pending) = self.pending.take() {
             match self.answer(pending.force_keyframe, pending.repeat) {
@@ -953,21 +954,16 @@ mod tests {
     #[test]
     fn at_most_twenty_five_pictures_a_second_are_kept() {
         let mut pipeline = Pipeline::new(settings(None));
+        // 400 ms of a camera giving a picture every 5 ms, timed by when
+        // each was taken, not by the clock: one kept every 40 ms.
         let start = Instant::now();
-        let mut n = 0;
-        while start.elapsed() < Duration::from_millis(400) {
+        for n in 0..80 {
             let picture = pattern(64, 48, n, Duration::ZERO);
-            pipeline.put(&Frame::I420(&picture), Instant::now());
-            n += 1;
-            std::thread::sleep(Duration::from_millis(5));
+            let at = start + Duration::from_millis(5 * n);
+            pipeline.put(&Frame::I420(&picture), at);
         }
-        // 400 ms, one kept every 40 ms or a little more: about ten.
-        assert!(
-            (7..=11).contains(&pipeline.counts.kept),
-            "{:?}",
-            pipeline.counts
-        );
-        assert!(pipeline.counts.skipped > 20);
+        assert_eq!(pipeline.counts.kept, 10, "{:?}", pipeline.counts);
+        assert_eq!(pipeline.counts.skipped, 70, "{:?}", pipeline.counts);
     }
 
     #[test]

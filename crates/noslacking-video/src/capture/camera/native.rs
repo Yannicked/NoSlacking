@@ -9,7 +9,7 @@
 //! user the first time (the app bundle's `NSCameraUsageDescription`
 //! words the question; the helper runs inside the bundle).
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use noslacking_video_ipc::{CaptureProblem, Planes, Source, SourceKind};
 
@@ -76,7 +76,7 @@ fn allowed() -> Result<(), Trouble> {
         let _ = said.send(granted);
     });
     // The user may take a while to answer the system's question.
-    match answer.recv_timeout(Duration::from_secs(60)) {
+    match answer.recv_timeout(std::time::Duration::from_secs(60)) {
         Ok(true) => Ok(()),
         Ok(false) | Err(_) => Err(Trouble::new(
             CaptureProblem::Denied,
