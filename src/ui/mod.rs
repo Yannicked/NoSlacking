@@ -19,6 +19,7 @@ mod huddle_camera;
 mod huddle_mic;
 #[cfg(feature = "huddle-share")]
 mod huddle_share;
+mod jump;
 mod keys;
 mod lightbox;
 mod login;
