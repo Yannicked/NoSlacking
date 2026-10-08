@@ -75,71 +75,105 @@ impl Outgoing {
 }
 
 /// Turns what the interface sends (Slack's markup: `&amp;`-escaped text,
-/// `<@id|name>` mentions, `<url|label>` links, `<!here>`) into a Teams
-/// message: each line a paragraph, a mention a
+/// `*bold*`, `_italic_`, `~strike~`, `` `code` ``, code blocks, `>`
+/// quotes, `<@id|name>` mentions, `<url|label>` links, `<!here>`) into a
+/// Teams message, as the Teams composer writes one: each line a
+/// paragraph, styles as `<b>`, `<i>`, `<s>`, `<code>`, a code block as
+/// `<pre>`, a quote as `<blockquote>`, a mention as a
 /// `<span itemtype="http://schema.skype.com/Mention">` with its entry in
-/// [`Outgoing::mentions`], a link an `<a>`. Teams has no channel links
-/// or broadcasts: those keep only their words.
+/// [`Outgoing::mentions`], a link as `<a>`, an emoji as itself. Teams has
+/// no channel links or broadcasts: those keep only their words.
 pub fn wire_to_teams(wire: &str) -> Outgoing {
     let mut mentions: Vec<SentMention> = Vec::new();
-    let mut paragraphs = Vec::new();
-    for line in wire.split('\n') {
-        let mut out = String::new();
-        let mut rest = line;
-        while let Some(open) = rest.find('<') {
-            out.push_str(&escape_html(&crate::mrkdwn::unescape(&rest[..open])));
-            let Some(close) = rest[open..].find('>') else {
-                out.push_str(&escape_html(&crate::mrkdwn::unescape(&rest[open..])));
-                rest = "";
-                break;
-            };
-            let token = &rest[open + 1..open + close];
-            rest = &rest[open + close + 1..];
-            let (target, label) = match token.split_once('|') {
-                Some((target, label)) => (target, Some(crate::mrkdwn::unescape(label))),
-                None => (token, None),
-            };
-            if let Some(id) = target.strip_prefix('@') {
-                let name = label.unwrap_or_else(|| id.to_owned());
-                let name = name.strip_prefix('@').unwrap_or(&name).to_owned();
-                let item = mentions.len();
-                out.push_str(&format!(
-                    "<span itemtype=\"http://schema.skype.com/Mention\" itemscope=\"\" itemid=\"{item}\">{}</span>",
-                    escape_html(&name)
-                ));
-                mentions.push(SentMention {
-                    item,
-                    mri: crate::teams::client::user_mri(id),
-                    name,
-                });
-            } else if let Some(command) = target.strip_prefix('!') {
-                // `@here` and the like: words in Teams.
-                let words = label.unwrap_or_else(|| format!("@{command}"));
-                out.push_str(&escape_html(&words));
-            } else if let Some(channel) = target.strip_prefix('#') {
-                let name = label.unwrap_or_else(|| channel.to_owned());
-                out.push_str(&escape_html(&format!("#{name}")));
-            } else {
-                let url = crate::mrkdwn::unescape(target);
-                let text = label.unwrap_or_else(|| url.clone());
-                out.push_str(&format!(
-                    "<a href=\"{}\">{}</a>",
-                    escape_html(&url),
-                    escape_html(&text)
-                ));
+    let mut html = String::new();
+    for block in crate::mrkdwn::parse(wire) {
+        match block {
+            Block::Paragraph(inlines) => html.push_str(&lines_html(&inlines, &mut mentions)),
+            Block::Quote(inlines) => {
+                html.push_str("<blockquote>");
+                html.push_str(&lines_html(&inlines, &mut mentions));
+                html.push_str("</blockquote>");
+            }
+            Block::Preformatted(code) => {
+                html.push_str("<pre>");
+                html.push_str(&escape_html(&code));
+                html.push_str("</pre>");
             }
         }
-        out.push_str(&escape_html(&crate::mrkdwn::unescape(rest)));
-        paragraphs.push(if out.is_empty() {
-            "<p>&nbsp;</p>".to_owned()
+    }
+    if html.is_empty() {
+        html.push_str("<p>&nbsp;</p>");
+    }
+    Outgoing { html, mentions }
+}
+
+/// A run of inlines as paragraphs, one per line; an empty line keeps its
+/// place.
+fn lines_html(inlines: &[Inline], mentions: &mut Vec<SentMention>) -> String {
+    let mut out = String::new();
+    for line in inlines.split(|i| *i == Inline::Newline) {
+        let text: String = line.iter().map(|i| inline_html(i, mentions)).collect();
+        if text.is_empty() {
+            out.push_str("<p>&nbsp;</p>");
         } else {
-            format!("<p>{out}</p>")
-        });
+            out.push_str(&format!("<p>{text}</p>"));
+        }
     }
-    Outgoing {
-        html: paragraphs.concat(),
-        mentions,
+    out
+}
+
+/// One inline as Teams HTML.
+fn inline_html(inline: &Inline, mentions: &mut Vec<SentMention>) -> String {
+    match inline {
+        Inline::Text(text, style) => styled(&escape_html(text), *style),
+        Inline::Code(code) => format!("<code>{}</code>", escape_html(code)),
+        Inline::Link { url, label, style } => {
+            let text = label.as_deref().unwrap_or(url);
+            styled(
+                &format!("<a href=\"{}\">{}</a>", escape_html(url), escape_html(text)),
+                *style,
+            )
+        }
+        Inline::User { id, label } => {
+            let name = label.as_deref().unwrap_or(id);
+            let name = name.strip_prefix('@').unwrap_or(name).to_owned();
+            let item = mentions.len();
+            let span = format!(
+                "<span itemtype=\"http://schema.skype.com/Mention\" itemscope=\"\" itemid=\"{item}\">{}</span>",
+                escape_html(&name)
+            );
+            mentions.push(SentMention {
+                item,
+                mri: crate::teams::client::user_mri(id),
+                name,
+            });
+            span
+        }
+        Inline::Channel { id, label } => {
+            escape_html(&format!("#{}", label.as_deref().unwrap_or(id)))
+        }
+        Inline::Broadcast(name) => escape_html(&format!("@{name}")),
+        Inline::Group { id, label } => escape_html(label.as_deref().unwrap_or(id)),
+        Inline::Emoji(name) => {
+            crate::emoji::unicode(name, None).unwrap_or_else(|| format!(":{name}:"))
+        }
+        Inline::Newline => String::new(),
     }
+}
+
+/// `html` in `style`'s tags.
+fn styled(html: &str, style: Style) -> String {
+    let mut out = html.to_owned();
+    if style.strike {
+        out = format!("<s>{out}</s>");
+    }
+    if style.italic {
+        out = format!("<i>{out}</i>");
+    }
+    if style.bold {
+        out = format!("<b>{out}</b>");
+    }
+    out
 }
 
 /// Puts people into a parsed message's mentions: Teams numbers each one
@@ -599,6 +633,24 @@ mod tests {
         assert_eq!(json[0]["itemid"], 0);
         assert_eq!(json[0]["mentionType"], "person");
         assert_eq!(wire_to_teams("plain").mentions_json(), "[]");
+    }
+
+    #[test]
+    fn styles_quotes_and_code_go_out_as_teams_formatting() {
+        let sent =
+            wire_to_teams("*bold* _it_ ~gone~ `x &lt; y` :wave:\n&gt; quoted\n```let a = 1;```");
+        assert!(sent.html.contains("<b>bold</b>"), "{}", sent.html);
+        assert!(sent.html.contains("<i>it</i>"), "{}", sent.html);
+        assert!(sent.html.contains("<s>gone</s>"), "{}", sent.html);
+        assert!(sent.html.contains("<code>x &lt; y</code>"), "{}", sent.html);
+        assert!(sent.html.contains('👋'), "{}", sent.html);
+        assert!(
+            sent.html.contains("<blockquote><p>quoted</p></blockquote>"),
+            "{}",
+            sent.html
+        );
+        assert!(sent.html.contains("<pre>let a = 1;</pre>"), "{}", sent.html);
+        assert_eq!(wire_to_teams("").html, "<p>&nbsp;</p>");
     }
 
     #[test]
