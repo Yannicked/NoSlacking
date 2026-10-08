@@ -1273,6 +1273,12 @@ impl Message {
         })
     }
 
+    /// The thread this message starts or is in: its parent's timestamp,
+    /// or its own for a message with no thread yet.
+    pub fn thread_root(&self) -> &Ts {
+        self.thread_ts.as_ref().unwrap_or(&self.ts)
+    }
+
     /// Whether this is a reply inside a thread (not the parent).
     pub fn is_reply(&self) -> bool {
         self.thread_ts
@@ -1565,15 +1571,13 @@ pub enum Action {
     PickEmoji {
         draft: String,
     },
+    /// Opens your message for editing in place.
     StartEdit {
         channel: String,
         ts: Ts,
-    },
-    /// Like `StartEdit`, in the thread panel: a thread's parent shows in
-    /// both panels, and only one of them gets the edit field.
-    StartEditInThread {
-        channel: String,
-        ts: Ts,
+        /// In the thread panel: a thread's parent shows in both panels,
+        /// and only one of them gets the edit field.
+        in_thread: bool,
     },
     CancelEdit,
     /// Edits your newest message in the open conversation.

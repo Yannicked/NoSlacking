@@ -1250,13 +1250,20 @@ impl App {
             Action::Edit { channel, ts, text } => self.edit(channel, ts, text),
             Action::Delete { channel, ts } => self.delete(channel, ts),
             Action::React { channel, ts, name } => self.react(&channel, &ts, &name),
-            Action::StartEdit { channel, ts } => self.start_edit(channel, ts, false),
-            Action::StartEditInThread { channel, ts } => self.start_edit(channel, ts, true),
+            Action::StartEdit {
+                channel,
+                ts,
+                in_thread,
+            } => self.start_edit(channel, ts, in_thread),
             Action::CancelEdit => self.editing = None,
             Action::EditLast => {
                 if let Some((channel, ts)) = self.active_workspace().and_then(|w| w.last_editable())
                 {
-                    self.actions.push(Action::StartEdit { channel, ts });
+                    self.actions.push(Action::StartEdit {
+                        channel,
+                        ts,
+                        in_thread: false,
+                    });
                 }
             }
             Action::Upload {

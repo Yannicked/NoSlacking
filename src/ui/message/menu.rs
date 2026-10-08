@@ -3,7 +3,7 @@
 
 use egui::{Align, CornerRadius, Layout, Margin, Sense, Stroke, UiBuilder, Vec2};
 
-use super::{Row, more_id, plain_text, row_id};
+use super::{Row, Subject, Verb, more_id, row_id};
 use crate::i18n::{t, tf};
 use crate::model::{Ability, Action, Message};
 use crate::theme::{self, Icon};
@@ -21,10 +21,11 @@ pub(super) fn toolbar(
     actions: &mut Vec<Action>,
 ) {
     let palette = row.palette;
-    let offers = |ability| row.workspace.info.offers(ability);
-    let reacts = offers(Ability::Reactions);
-    let reply = !row.in_thread && row.workspace.threads_in(row.channel);
-    let edit = me && offers(Ability::Edit);
+    let subject = row.subject(message);
+    let has = |verb: Verb| verb.available(&subject);
+    let reacts = has(Verb::React);
+    let reply = has(Verb::Reply);
+    let edit = has(Verb::Edit);
     let quick: std::sync::Arc<Vec<String>> = if reacts {
         ui.data(|d| d.get_temp(crate::ui::quick_reactions_id()))
             .unwrap_or_default()
@@ -99,61 +100,21 @@ pub(super) fn toolbar(
                 });
             }
         }
-        if reacts
-            && theme::icon_button(ui, palette, Icon::SmilePlus, 16.0, &t("Add reaction (R)"))
-                .clicked()
-        {
-            actions.push(Action::PickReaction {
-                channel: row.channel.to_owned(),
-                ts: message.ts.clone(),
-            });
-        }
-        if reply
-            && theme::icon_button(
-                ui,
-                palette,
-                Icon::MessageCircle,
-                16.0,
-                &t("Reply in thread (T)"),
-            )
-            .clicked()
-        {
-            actions.push(Action::OpenThread {
-                channel: row.channel.to_owned(),
-                ts: message
-                    .thread_ts
-                    .clone()
-                    .unwrap_or_else(|| message.ts.clone()),
-            });
-        }
-        if theme::icon_button(ui, palette, Icon::Copy, 16.0, &t("Copy text (C)")).clicked() {
-            actions.push(Action::Copy(plain_text(row.workspace, message)));
+        let offer = |ui: &mut egui::Ui, verb: Verb, actions: &mut Vec<Action>| {
+            let Some(icon) = verb.icon() else { return };
+            if has(verb) && theme::icon_button(ui, palette, icon, 16.0, &verb.tooltip()).clicked() {
+                actions.push(verb.action(&subject));
+            }
+        };
+        for verb in [Verb::React, Verb::Reply, Verb::Copy] {
+            offer(ui, verb, actions);
         }
         let more = theme::icon_button(ui, palette, Icon::Ellipsis, 16.0, &t("More actions"));
         egui::Popup::menu(&more)
             .id(more_id(row.channel, &message.ts, row.in_thread))
             .show(|ui| more_menu(ui, row, message, actions));
-        if me {
-            if edit
-                && theme::icon_button(ui, palette, Icon::Pencil, 16.0, &t("Edit message (E)"))
-                    .clicked()
-            {
-                let channel = row.channel.to_owned();
-                let ts = message.ts.clone();
-                actions.push(if row.in_thread {
-                    Action::StartEditInThread { channel, ts }
-                } else {
-                    Action::StartEdit { channel, ts }
-                });
-            }
-            if theme::icon_button(ui, palette, Icon::Trash, 16.0, &t("Delete message (Del)"))
-                .clicked()
-            {
-                actions.push(Action::AskDelete {
-                    channel: row.channel.to_owned(),
-                    ts: message.ts.clone(),
-                });
-            }
+        for verb in [Verb::Edit, Verb::Delete] {
+            offer(ui, verb, actions);
         }
     });
 }
@@ -274,52 +235,25 @@ pub(super) fn context_menu(
             }
             None => {}
         }
-        if offers(Ability::Reactions) && ui.button(t("Add reaction")).clicked() {
-            actions.push(Action::PickReaction {
-                channel: row.channel.to_owned(),
-                ts: message.ts.clone(),
-            });
-            ui.close();
-        }
-        if !row.in_thread
-            && row.workspace.threads_in(row.channel)
-            && ui.button(t("Reply in thread")).clicked()
-        {
-            actions.push(Action::OpenThread {
-                channel: row.channel.to_owned(),
-                ts: message
-                    .thread_ts
-                    .clone()
-                    .unwrap_or_else(|| message.ts.clone()),
-            });
-            ui.close();
-        }
-        if ui.button(t("Copy text")).clicked() {
-            actions.push(Action::Copy(plain_text(row.workspace, message)));
-            ui.close();
+        let subject = row.subject(message);
+        for verb in [Verb::React, Verb::Reply, Verb::Copy] {
+            menu_item(ui, verb, &subject, actions);
         }
         more_menu(ui, row, message, actions);
         if me {
             ui.separator();
-            if offers(Ability::Edit) && ui.button(t("Edit message")).clicked() {
-                let channel = row.channel.to_owned();
-                let ts = message.ts.clone();
-                actions.push(if row.in_thread {
-                    Action::StartEditInThread { channel, ts }
-                } else {
-                    Action::StartEdit { channel, ts }
-                });
-                ui.close();
-            }
-            if ui.button(t("Delete message")).clicked() {
-                actions.push(Action::AskDelete {
-                    channel: row.channel.to_owned(),
-                    ts: message.ts.clone(),
-                });
-                ui.close();
-            }
+            menu_item(ui, Verb::Edit, &subject, actions);
+            menu_item(ui, Verb::Delete, &subject, actions);
         }
     });
+}
+
+/// A menu line doing `verb` to `subject`, if it can be done.
+fn menu_item(ui: &mut egui::Ui, verb: Verb, subject: &Subject<'_>, actions: &mut Vec<Action>) {
+    if verb.available(subject) && ui.button(verb.label()).clicked() {
+        actions.push(verb.action(subject));
+        ui.close();
+    }
 }
 
 /// What a message's "More" menu offers: what is used less often than the
@@ -344,16 +278,8 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
     if !message.ts.is_local() && offers(Ability::Reminders) {
         remind_menu(ui, row, message, actions);
     }
-    // Slack keeps a thread's read state apart from the conversation's
-    // (`subscriptions.thread.mark`, for its own apps only), so this is for
-    // the conversation's own list.
-    if !row.in_thread && offers(Ability::MarkUnread) && ui.button(t("Mark unread")).clicked() {
-        actions.push(Action::MarkUnread {
-            channel: row.channel.to_owned(),
-            ts: message.ts.clone(),
-        });
-        ui.close();
-    }
+    let subject = row.subject(message);
+    menu_item(ui, Verb::MarkUnread, &subject, actions);
     if offers(Ability::Links) && ui.button(t("Copy link")).clicked() {
         actions.push(Action::CopyLink {
             channel: row.channel.to_owned(),
@@ -372,16 +298,7 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
         });
         ui.close();
     }
-    // A message still on its way has no link to share yet.
-    if !message.ts.is_local() && offers(Ability::Share) && ui.button(t("Share message…")).clicked()
-    {
-        actions.push(Action::Share {
-            channel: row.channel.to_owned(),
-            ts: message.ts.clone(),
-            thread: message.thread_ts.clone(),
-        });
-        ui.close();
-    }
+    menu_item(ui, Verb::Share, &subject, actions);
     let pin = if message.pinned {
         t("Unpin from the conversation")
     } else {

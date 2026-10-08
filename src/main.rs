@@ -635,6 +635,7 @@ impl DemoSetup {
             app.actions.push(Action::StartEdit {
                 channel: "C02".into(),
                 ts: ts.clone(),
+                in_thread: false,
             });
             self.edit = None;
         }
