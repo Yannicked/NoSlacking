@@ -231,7 +231,7 @@ struct State {
 fn launcher() -> Option<Arc<dyn Launcher>> {
     match find_helper() {
         Some(path) => {
-            log::info!("video: decoding through {}", path.display());
+            log::info!("video: the helper is {}", path.display());
             Some(Arc::new(ProcessLauncher::new(path)))
         }
         None => {
