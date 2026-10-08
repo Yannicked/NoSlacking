@@ -8,10 +8,10 @@
 use egui::{CornerRadius, Margin, RichText, Stroke};
 
 use crate::app::App;
-use crate::backend::SignIn;
 use crate::credentials::AppCredentials;
 use crate::i18n::{t, tf};
 use crate::model::Action;
+use crate::model::SignIn;
 use crate::scopes::Feature;
 use crate::theme::{self, Palette};
 

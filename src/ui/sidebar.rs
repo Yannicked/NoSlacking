@@ -277,13 +277,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                         .truncate(),
                                     );
                                     let (color, tip) = match socket {
-                                        crate::backend::Socket::Connected => {
+                                        crate::model::Socket::Connected => {
                                             (palette.accent, t("Live"))
                                         }
-                                        crate::backend::Socket::Off => {
+                                        crate::model::Socket::Off => {
                                             (palette.dim, t("Live updates off"))
                                         }
-                                        crate::backend::Socket::Connecting => {
+                                        crate::model::Socket::Connecting => {
                                             (palette.warning, t("Connecting…"))
                                         }
                                         _ => (palette.danger, t("Offline")),

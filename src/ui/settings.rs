@@ -4,11 +4,11 @@
 use egui::{CornerRadius, Margin, RichText, Stroke};
 
 use crate::app::App;
-use crate::backend::Socket;
 use crate::credentials::AppCredentials;
 use crate::devices::Kind;
 use crate::i18n::{Locale, t, tf};
 use crate::model::Action;
+use crate::model::Socket;
 use crate::scopes::Feature;
 use crate::settings::{Appearance, Density, Redirect};
 use crate::theme::{self, Palette};

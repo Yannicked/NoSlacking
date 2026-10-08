@@ -6,6 +6,13 @@
 use std::cmp::Ordering;
 use std::path::PathBuf;
 
+/// The worker's connection and sign-in states, which views show as they
+/// are.
+pub use crate::backend::{SignIn, Socket};
+/// Whether a URL is a Slack file, which loads with the workspace's
+/// sign-in.
+pub use crate::slack::client::is_slack_file_url;
+
 /// A Slack message timestamp: `"1700000000.123456"`. Unique per conversation
 /// and ordered by time. Optimistic messages carry `local-<n>` until Slack
 /// answers, and sort after every real one.

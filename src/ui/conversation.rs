@@ -7,8 +7,8 @@ use super::composer::{self, Composer};
 use super::message::{self, Lead, Row};
 use super::rows;
 use crate::app::App;
-use crate::backend::Socket;
 use crate::i18n::{t, tf};
+use crate::model::Socket;
 use crate::model::{Ability, Action, ConversationKind, Ts};
 use crate::theme::{self, Icon};
 
