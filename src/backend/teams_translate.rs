@@ -32,16 +32,13 @@ pub fn teams_id_to_ts(id: &str) -> Ts {
 
 /// Converts a [`Ts`] back into a Teams millisecond epoch ID string.
 pub fn ts_to_teams_id(ts: &Ts) -> String {
-    if let Some((secs_str, frac_str)) = ts.as_str().split_once('.')
-        && let Ok(secs) = secs_str.parse::<u64>()
+    if ts.as_str().contains('.')
+        && let Some((secs, micros)) = ts.parts()
     {
-        let micros = frac_str
-            .bytes()
-            .chain(std::iter::repeat(b'0'))
-            .take(6)
-            .fold(0u64, |m, d| m * 10 + u64::from(d.saturating_sub(b'0')));
-        let millis = secs * 1000 + micros / 1000;
-        return millis.to_string();
+        return secs
+            .saturating_mul(1000)
+            .saturating_add(micros / 1000)
+            .to_string();
     }
     ts.as_str().to_string()
 }

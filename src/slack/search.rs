@@ -103,12 +103,8 @@ pub struct FilesAnswer {
 /// results say nothing else about threads.
 fn thread_of(permalink: Option<&str>) -> Option<Ts> {
     let query = permalink?.split_once('?')?.1;
-    let value = query
-        .split('&')
-        .find_map(|pair| pair.strip_prefix("thread_ts="))?;
-    let (secs, micros) = value.split_once('.')?;
-    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    (digits(secs) && digits(micros)).then(|| Ts::new(value))
+    let query = query.split('#').next().unwrap_or_default();
+    Ts::parse(&crate::percent::query_param(query, "thread_ts")?)
 }
 
 impl MessagesAnswer {
@@ -286,6 +282,11 @@ mod tests {
         assert_eq!(
             thread_of(Some("https://a/p1?thread_ts=1.2&cid=C")),
             Some(Ts::new("1.2"))
+        );
+        assert_eq!(
+            thread_of(Some("https://a/p1?thread_ts=1%2E2#reply")),
+            Some(Ts::new("1.2")),
+            "decoded like a link, fragment left out"
         );
         assert_eq!(thread_of(Some("https://a/p1?thread_ts=x.y")), None);
         assert_eq!(thread_of(Some("https://a/p1")), None);
