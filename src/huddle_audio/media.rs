@@ -137,15 +137,9 @@ pub struct Uplink {
 /// from `local`): Opus, and VP8 (unless `h264_only`) and H.264 for the
 /// video m-lines. Chime answers what is offered and tells the senders
 /// the codecs every receiver takes, so leaving VP8 out asks them for
-/// H.264.
-#[cfg(test)]
-fn new_peer(relayed: SocketAddr, local: SocketAddr, h264_only: bool) -> Result<Rtc, String> {
-    new_peer_with(relayed, local, h264_only, false)
-}
-
-/// [`new_peer`], with `str0m`'s send-side bandwidth estimation when we
-/// may send video (`bwe`): it sets the camera's bitrate.
-fn new_peer_with(
+/// H.264. With `bwe`, `str0m`'s send-side bandwidth estimation, when we
+/// may send video: it sets the camera's bitrate.
+fn new_peer(
     relayed: SocketAddr,
     local: SocketAddr,
     h264_only: bool,
@@ -430,7 +424,7 @@ impl Session<'_> {
             return;
         }
         let h264_only = self.video.as_ref().is_some_and(Watch::h264_only);
-        match new_peer_with(relayed, local, h264_only, self.camera.is_some()) {
+        match new_peer(relayed, local, h264_only, self.camera.is_some()) {
             Ok(rtc) => self.driver = Some(Driver::new(rtc)),
             Err(why) => {
                 self.over.get_or_insert(Err(failure(Stage::Relay, why)));
@@ -1524,7 +1518,7 @@ mod tests {
     fn our_offer_and_its_answer_go_both_ways() {
         let relayed: SocketAddr = "203.0.113.5:50000".parse().expect("an address");
         let local: SocketAddr = "192.168.1.2:40000".parse().expect("an address");
-        let mut ours = new_peer(relayed, local, false).expect("a peer");
+        let mut ours = new_peer(relayed, local, false, false).expect("a peer");
         let offer = make_offer(&mut ours).expect("an offer");
         assert!(offer.sdp.contains("o=mozilla-chrome "));
         assert!(offer.sdp.contains("a=mid:0\r\n") && offer.sdp.contains("a=mid:1\r\n"));
@@ -1560,11 +1554,11 @@ mod tests {
     fn an_h264_only_offer_has_no_vp8() {
         let relayed: SocketAddr = "203.0.113.5:50000".parse().expect("an address");
         let local: SocketAddr = "192.168.1.2:40000".parse().expect("an address");
-        let both = make_offer(&mut new_peer(relayed, local, false).expect("a peer"))
+        let both = make_offer(&mut new_peer(relayed, local, false, false).expect("a peer"))
             .expect("an offer")
             .sdp;
         assert!(both.contains("VP8/90000") && both.contains("H264/90000"));
-        let h264 = make_offer(&mut new_peer(relayed, local, true).expect("a peer"))
+        let h264 = make_offer(&mut new_peer(relayed, local, true, false).expect("a peer"))
             .expect("an offer")
             .sdp;
         assert!(!h264.contains("VP8"), "{h264}");
@@ -1587,7 +1581,7 @@ mod tests {
     fn the_camera_turns_the_send_line_on_and_off() {
         let relayed: SocketAddr = "203.0.113.5:50000".parse().expect("an address");
         let local: SocketAddr = "192.168.1.2:40000".parse().expect("an address");
-        let mut ours = new_peer_with(relayed, local, true, true).expect("a peer");
+        let mut ours = new_peer(relayed, local, true, true).expect("a peer");
         let offer = make_offer(&mut ours).expect("an offer");
         let mut chime_peer = RtcConfig::new()
             .set_crypto_provider(Arc::new(dtls::provider()))
@@ -1750,7 +1744,7 @@ mod tests {
     fn a_share_session_sends_and_receives_no_video() {
         let relayed: SocketAddr = "203.0.113.5:50000".parse().expect("an address");
         let local: SocketAddr = "192.168.1.2:40000".parse().expect("an address");
-        let mut ours = new_peer_with(relayed, local, false, true).expect("a peer");
+        let mut ours = new_peer(relayed, local, false, true).expect("a peer");
         let offer = make_offer(&mut ours).expect("an offer");
         let mut chime_peer = RtcConfig::new()
             .set_crypto_provider(Arc::new(dtls::provider()))
@@ -1887,7 +1881,7 @@ mod tests {
         ));
 
         // Offer, answer, as the session does.
-        let mut ours = new_peer(relayed, local, false).expect("a peer");
+        let mut ours = new_peer(relayed, local, false, false).expect("a peer");
         let offer = make_offer(&mut ours).expect("an offer");
         let mut chime = RtcConfig::new()
             .set_crypto_provider(Arc::new(dtls::provider()))

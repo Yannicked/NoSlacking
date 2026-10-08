@@ -672,7 +672,7 @@ fn send(
         let fps = gate.fps();
         gate.set_max_fps(control.max_fps());
         if gate.fps() != fps {
-            log::info!("huddle {what}: {} pictures a second", gate.fps());
+            log::info!("video {what}: {} pictures a second", gate.fps());
         }
         let wait = gate.wait(now);
         if !wait.is_zero() {
@@ -695,7 +695,7 @@ fn send(
                 capture.set_max_size(wanted_box)?;
                 boxed = wanted_box;
                 log::info!(
-                    "huddle {what}: pictures at most {}",
+                    "video {what}: pictures at most {}",
                     wanted_box.map_or_else(
                         || "as large as they come".to_owned(),
                         |(w, h)| format!("{w}x{h}")
@@ -716,7 +716,7 @@ fn send(
             Ok((_, None)) => continue,
             Ok((asking, Some(frame))) => (asking, frame),
             Err(CaptureTrouble::Lost(why)) if options.restart.is_some() => {
-                log::warn!("huddle {what}: the video helper failed ({why}): starting again");
+                log::warn!("video {what}: the video helper failed ({why}): starting again");
                 match options.restart.as_mut().map(|restart| restart()) {
                     Some(Ok(fresh)) => {
                         counts.restarts += 1;
@@ -730,14 +730,14 @@ fn send(
                         continue;
                     }
                     Some(Err(trouble)) => {
-                        log::warn!("huddle {what}: it did not start again: {trouble:?}");
+                        log::warn!("video {what}: it did not start again: {trouble:?}");
                         break Some((options.ending)(&trouble));
                     }
                     None => break Some((options.ending)(&CaptureTrouble::Lost(why))),
                 }
             }
             Err(trouble) => {
-                log::info!("huddle {what}: the capture stopped: {trouble:?}");
+                log::info!("video {what}: the capture stopped: {trouble:?}");
                 break Some((options.ending)(&trouble));
             }
         };
@@ -770,7 +770,7 @@ fn send(
         if (frame.width, frame.height) != size {
             size = (frame.width, frame.height);
             log::info!(
-                "huddle {what}: sending {}x{} at {} kbit/s, {} a second, encoded {}",
+                "video {what}: sending {}x{} at {} kbit/s, {} a second, encoded {}",
                 size.0,
                 size.1,
                 bitrate / 1000,
@@ -802,13 +802,13 @@ fn send(
         }
         if now >= next_report {
             next_report += REPORT_EVERY;
-            log::info!("huddle {what}: {counts:?}");
+            log::info!("video {what}: {counts:?}");
         }
     };
     if let Some(preview) = &options.preview {
         preview.clear();
     }
-    log::info!("huddle {what}: stopped sending; {counts:?}");
+    log::info!("video {what}: stopped sending; {counts:?}");
     ending
 }
 
