@@ -479,6 +479,40 @@ pub fn camera_failure(trouble: &CaptureTrouble, given_up: bool) -> Failure {
     })
 }
 
+/// The camera the helper is to start for the one `chosen` in the
+/// settings, among the `cameras` it lists now: that camera by its
+/// present id when it is there (found as [`crate::devices::find`] finds
+/// a camera, by its name, since `v4l2:/dev/video2` and `native:1` are
+/// only where it is plugged in now), the system's first while it is not.
+pub fn camera_choice(
+    chosen: &crate::devices::Choice,
+    cameras: &[ipc::Source],
+) -> ipc::CameraChoice {
+    let present = devices_of(cameras);
+    match crate::devices::find(crate::devices::Kind::Camera, chosen, &present) {
+        Some(camera) => ipc::CameraChoice::Device(camera.id.clone()),
+        None => {
+            log::info!(
+                "huddle camera: the chosen camera {:?} is not connected; the first",
+                chosen.name
+            );
+            ipc::CameraChoice::First
+        }
+    }
+}
+
+/// The helper's cameras as the interface's devices.
+pub fn devices_of(cameras: &[ipc::Source]) -> Vec<crate::devices::Device> {
+    cameras
+        .iter()
+        .filter(|c| c.kind == ipc::SourceKind::Camera)
+        .map(|c| crate::devices::Device {
+            id: c.id.clone(),
+            name: c.name.clone(),
+        })
+        .collect()
+}
+
 /// Starts the capture again in a fresh helper after the last one failed:
 /// the camera's (it has no dialog, so it can), none for a share.
 pub type Restart = Box<dyn FnMut() -> Result<RemoteCapture, CaptureTrouble> + Send>;
@@ -718,6 +752,47 @@ mod tests {
     use noslacking_video_ipc::{CameraChoice, CaptureProblem, Reply, Request};
 
     const FRAME: Duration = Duration::from_millis(33);
+
+    #[test]
+    fn the_chosen_camera_is_started_by_where_it_is_now() {
+        let camera = |id: &str, name: &str| ipc::Source {
+            id: id.into(),
+            name: name.into(),
+            kind: ipc::SourceKind::Camera,
+        };
+        let brio = crate::devices::Choice {
+            id: "v4l2:/dev/video2".into(),
+            name: "Logitech BRIO".into(),
+        };
+        // Where it was chosen.
+        assert_eq!(
+            camera_choice(
+                &brio,
+                &[
+                    camera("v4l2:/dev/video0", "Integrated Camera"),
+                    camera("v4l2:/dev/video2", "Logitech BRIO"),
+                ]
+            ),
+            CameraChoice::Device("v4l2:/dev/video2".into())
+        );
+        // Plugged in before the built-in one after a reboot.
+        assert_eq!(
+            camera_choice(
+                &brio,
+                &[
+                    camera("v4l2:/dev/video0", "Logitech BRIO"),
+                    camera("v4l2:/dev/video2", "Integrated Camera"),
+                ]
+            ),
+            CameraChoice::Device("v4l2:/dev/video0".into())
+        );
+        // Unplugged: the first, not whatever took its node.
+        assert_eq!(
+            camera_choice(&brio, &[camera("v4l2:/dev/video2", "Integrated Camera")]),
+            CameraChoice::First
+        );
+        assert_eq!(camera_choice(&brio, &[]), CameraChoice::First);
+    }
 
     #[test]
     fn bitrates_move_in_steps() {

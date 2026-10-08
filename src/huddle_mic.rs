@@ -43,6 +43,9 @@ pub enum MicNews {
     Live,
     /// It would not open; still muted.
     Failed(Failure),
+    /// Another microphone was chosen while it was open, and that one
+    /// would not open; muted now.
+    SwitchFailed(Failure),
 }
 
 /// The state after asking for `action` in state `mic`.
@@ -61,7 +64,7 @@ pub fn told(mic: Mic, news: &MicNews) -> Mic {
         (Mic::Muted, MicNews::Live) => Mic::Muted,
         (_, MicNews::Live) => Mic::Live,
         (Mic::Opening, MicNews::Muted) => Mic::Opening,
-        (_, MicNews::Muted | MicNews::Failed(_)) => Mic::Muted,
+        (_, MicNews::Muted | MicNews::Failed(_) | MicNews::SwitchFailed(_)) => Mic::Muted,
     }
 }
 
@@ -95,12 +98,15 @@ pub fn news(app: &mut App, team: &str, channel: &str, news: MicNews) {
         return;
     };
     listening.mic = told(listening.mic, &news);
-    if let MicNews::Failed(error) = news {
-        app.toast(
-            tf("Could not unmute: {error}", &[("error", &error.message())]),
-            true,
-        );
-    }
+    let text = match news {
+        MicNews::Failed(error) => tf("Could not unmute: {error}", &[("error", &error.message())]),
+        MicNews::SwitchFailed(error) => tf(
+            "Your microphone is muted: the one you chose could not be opened ({error})",
+            &[("error", &error.message())],
+        ),
+        MicNews::Muted | MicNews::Live => return,
+    };
+    app.toast(text, true);
 }
 
 #[cfg(test)]
@@ -132,5 +138,8 @@ mod tests {
         let failed = MicNews::Failed(Failure::Huddle(HuddleTrouble::Microphone));
         assert_eq!(told(Mic::Opening, &failed), Mic::Muted);
         assert_eq!(Mic::default(), Mic::Muted);
+        // Live, then switched to one that would not open.
+        let switched = MicNews::SwitchFailed(Failure::Huddle(HuddleTrouble::Microphone));
+        assert_eq!(told(Mic::Live, &switched), Mic::Muted);
     }
 }

@@ -1,6 +1,7 @@
 //! Playing what the huddle sends: Opus frames through the [`Jitter`]
 //! buffer, decoded on the sound device's own thread and played on the
-//! default output device.
+//! chosen output device (the system's default unless one is chosen, or
+//! while the chosen one is not connected; see [`crate::devices`]).
 //!
 //! A sibling of [`crate::audio`]'s device thread: the same rodio and cpal,
 //! but a stream that never ends instead of a file. The level is left as
@@ -23,6 +24,13 @@
 //! What is decoded is also handed to a [`RenderTap`] just before the
 //! device takes it: the far end the echo canceller needs while the
 //! microphone is open ([`super::processing`]).
+//!
+//! Choosing another speaker in a call opens it with [`Speaker::reopen`]
+//! on the same [`Feed`] and the same tap, so nothing queued is lost and
+//! the echo canceller goes on hearing what plays: it finds the new
+//! device's delay by itself in a second or two. A chosen speaker that
+//! will not open (busy, gone) gives way to the default, and says why, so
+//! the huddle is never played to nobody.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -302,24 +310,67 @@ impl std::fmt::Debug for Speaker {
     }
 }
 
+/// A speaker that opened, and why the chosen device did not, if it did
+/// not and the default plays instead.
+pub type Opened = (Speaker, Option<String>);
+
+/// Opens the output device `choice` names, falling back to the system's
+/// default if it would not open (saying why) or is not connected.
+fn open_sink(
+    choice: Option<&crate::devices::Choice>,
+) -> Result<(rodio::MixerDeviceSink, Option<String>), String> {
+    let default = || {
+        rodio::DeviceSinkBuilder::open_default_sink().map_err(|e| format!("no sound device: {e}"))
+    };
+    let Some((device, name)) = super::devices::chosen(crate::devices::Kind::Speaker, choice) else {
+        return default().map(|sink| (sink, None));
+    };
+    let chosen = rodio::DeviceSinkBuilder::from_device(device)
+        .and_then(|builder| builder.open_sink_or_fallback());
+    match chosen {
+        Ok(sink) => {
+            log::info!("huddle audio: playing on {name:?}");
+            Ok((sink, None))
+        }
+        Err(error) => {
+            let why = format!("{name:?} would not open: {error}");
+            log::warn!("huddle audio: {why}; playing on the default");
+            default().map(|sink| (sink, Some(why)))
+        }
+    }
+}
+
 impl Speaker {
-    /// Opens the default output device on a thread of its own and starts
-    /// playing (silence, until frames come), showing what it plays to
-    /// `tap`. Returns the speaker and its feed, or why no device would
-    /// open.
-    pub fn open(tap: Option<RenderTap>) -> Result<(Self, Feed), String> {
+    /// Opens the output device `choice` names (none: the system's
+    /// default) on a thread of its own and starts playing (silence,
+    /// until frames come), showing what it plays to `tap`. Returns the
+    /// speaker and why the chosen device gave way to the default, if it
+    /// did, and its feed; or why no device would open.
+    pub fn open(
+        tap: Option<RenderTap>,
+        choice: Option<crate::devices::Choice>,
+    ) -> Result<(Opened, Feed), String> {
         let shared = Arc::new(Shared::default());
-        let speaker = Self::start(shared.clone(), tap)?;
-        Ok((speaker, Feed { shared }))
+        let opened = Self::start(shared.clone(), tap, choice)?;
+        Ok((opened, Feed { shared }))
     }
 
-    /// Opens the default output device again for `feed`, after the last
-    /// one [`stopped`](Self::stopped). Let go of the old one first.
-    pub fn reopen(feed: &Feed, tap: Option<RenderTap>) -> Result<Self, String> {
-        Self::start(feed.shared.clone(), tap)
+    /// Opens an output device again for `feed`: after the last one
+    /// [`stopped`](Self::stopped), or to play on another one chosen. Let
+    /// go of the old one first.
+    pub fn reopen(
+        feed: &Feed,
+        tap: Option<RenderTap>,
+        choice: Option<crate::devices::Choice>,
+    ) -> Result<Opened, String> {
+        Self::start(feed.shared.clone(), tap, choice)
     }
 
-    fn start(shared: Arc<Shared>, tap: Option<RenderTap>) -> Result<Self, String> {
+    fn start(
+        shared: Arc<Shared>,
+        tap: Option<RenderTap>,
+        choice: Option<crate::devices::Choice>,
+    ) -> Result<Opened, String> {
         let device = Arc::new(Device::default());
         let source = Decoded::new(shared, device.clone(), tap, opus_decoder)?;
         let (opened, result) = std::sync::mpsc::channel();
@@ -327,17 +378,19 @@ impl Speaker {
         let thread = std::thread::Builder::new()
             .name("noslacking-huddle-speaker".into())
             .spawn(move || {
-                let mut sink = match rodio::DeviceSinkBuilder::open_default_sink() {
-                    Ok(sink) => sink,
+                // Found and opened here: the device stays on the thread
+                // that holds it.
+                let (mut sink, fell_back) = match open_sink(choice.as_ref()) {
+                    Ok(opened) => opened,
                     Err(error) => {
-                        let _ = opened.send(Err(format!("no sound device: {error}")));
+                        let _ = opened.send(Err(error));
                         return;
                     }
                 };
                 sink.log_on_drop(false);
                 let player = rodio::Player::connect_new(sink.mixer());
                 player.append(source);
-                let _ = opened.send(Ok(()));
+                let _ = opened.send(Ok(fell_back));
                 // Holds the device until told to stop; the source ends
                 // itself then too.
                 while !thread_device.stop.load(Ordering::Relaxed) {
@@ -347,14 +400,15 @@ impl Speaker {
                 guard::let_go(sink, thread_device.health.thread_gone());
             })
             .map_err(|e| format!("no audio thread: {e}"))?;
-        result
+        let fell_back = result
             .recv()
             .map_err(|_| "the audio thread stopped".to_owned())??;
-        Ok(Self {
+        let speaker = Self {
             device,
             thread: Some(thread),
             watchdog: Watchdog::default(),
-        })
+        };
+        Ok((speaker, fell_back))
     }
 
     /// Whether the device has stopped playing, as of `now`: its callback's
