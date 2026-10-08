@@ -37,7 +37,7 @@
 //! Every step logs at info level. The ICE password and the TURN
 //! credentials never do.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,21 +45,27 @@ use std::time::{Duration, Instant};
 
 use str0m::crypto::Fingerprint;
 use str0m::format::{Codec, FormatParams};
-use str0m::media::{Frequency, MediaKind, MediaTime, Mid, Pt};
-use str0m::net::{Protocol, Receive};
+use str0m::media::{Frequency, MediaKind, Mid, Pt};
+use str0m::net::Protocol;
 use str0m::{
     Candidate as IceCandidate, CandidateKind as IceKind, Event as RtcEvent, IceConnectionState,
-    IceCreds, Input, Output, Rtc, RtcConfig,
+    IceCreds, Rtc, RtcConfig,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{Candidate, CandidateKind, Direction, LocalMedia, RemoteMedia, Setup};
 use crate::huddle_audio::dtls;
-use crate::huddle_audio::media::{RelayIo, SILENT_OPUS, Uplink, connect_relay};
+use crate::huddle_audio::media::{Uplink, mute_change, next_frame};
 use crate::huddle_audio::microphone::ToneSource;
-use crate::huddle_audio::peer::{Flight, SKIP_AT_MOST, is_dtls, is_one_packet};
+#[cfg(feature = "huddle-camera")]
+use crate::huddle_audio::peer::AUDIO_BPS;
+use crate::huddle_audio::peer::{
+    self, AUDIO_TICK, BWE_START_KBPS, Driver, SILENT_OPUS, STATS_EVERY, estimate_bps, failure,
+    note_estimate, write_opus,
+};
+use crate::huddle_audio::relay::{RelayEvent, RelayPool, Udp};
 use crate::huddle_audio::speaker::Feed;
-use crate::huddle_audio::turn::{self, Server, Transport};
+use crate::huddle_audio::turn::{Server, Transport};
 use crate::huddle_audio::uplink::{Outbound, Outgoing, Stamp};
 
 /// How long one TURN server, over one transport, may take to give a
@@ -72,13 +78,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long ICE may stay disconnected, once it was up, before the call's
 /// media counts as lost: a peer on Wi-Fi drops checks for a moment.
 const RECONNECT_GRACE: Duration = Duration::from_secs(10);
-const STATS_EVERY: Duration = Duration::from_secs(5);
-/// What str0m's bandwidth estimate starts from, in kbit/s, before the
-/// far end's feedback says more.
-const BWE_START_KBPS: u64 = 700;
-/// Of the estimate, what the audio is left (Opus, with headroom).
-#[cfg(feature = "huddle-camera")]
-const AUDIO_BPS: u64 = 80_000;
 /// Video sent this long with no estimate means the far end sends no
 /// feedback we read: the share then goes at [`UNESTIMATED_SHARE_BPS`].
 #[cfg(feature = "huddle-camera")]
@@ -88,7 +87,6 @@ const NO_ESTIMATE_AFTER: Duration = Duration::from_secs(10);
 /// start is not.
 #[cfg(feature = "huddle-camera")]
 const UNESTIMATED_SHARE_BPS: u32 = 1_500_000;
-const AUDIO_TICK: Duration = Duration::from_millis(20);
 /// The audio m-line's mid in our offer (§D.1).
 pub const AUDIO_MID: &str = "0";
 /// Our camera line's mid in an offer, as the web client's (§D.1).
@@ -453,29 +451,8 @@ pub enum Stage {
     Media,
 }
 
-/// Why the media stopped before it was asked to. The worker turns it
-/// into a [`crate::failure::Failure`] for the interface; `why` is for the
-/// log only.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Failure {
-    /// Where it failed.
-    pub stage: Stage,
-    /// Why, for the log.
-    pub why: String,
-}
-
-impl std::fmt::Display for Failure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}: {}", self.stage, self.why)
-    }
-}
-
-fn failure(stage: Stage, why: impl Into<String>) -> Failure {
-    Failure {
-        stage,
-        why: why.into(),
-    }
-}
+/// Why the media stopped before it was asked to.
+pub type Failure = peer::Failure<Stage>;
 
 /// What a media session tells as it goes. The last is always
 /// [`MediaEvent::Failed`] or [`MediaEvent::Stopped`].
@@ -846,44 +823,6 @@ fn public(ip: IpAddr) -> bool {
     }
 }
 
-/// What went which way while connecting, by path and kind: which path
-/// ICE settled on, and whether the DTLS handshake crossed it, shows in
-/// the log when a call does not come up.
-#[derive(Clone, Copy, Debug, Default)]
-struct Paths {
-    /// `[in, out][direct, relayed][stun, dtls, rtp]`.
-    counts: [[[u64; 3]; 2]; 2],
-}
-
-impl Paths {
-    /// Counts a datagram going `out` (or in) on the relay (or directly).
-    fn count(&mut self, out: bool, relayed: bool, data: &[u8]) {
-        // RFC 7983's demultiplexing by the first byte.
-        let kind = match data.first() {
-            Some(0..=3) => 0,
-            Some(20..=63) => 1,
-            Some(128..=191) => 2,
-            _ => return,
-        };
-        self.counts[usize::from(out)][usize::from(relayed)][kind] += 1;
-    }
-
-    /// One line for the log.
-    fn line(&self) -> String {
-        let side = |dir: usize, path: usize| {
-            let [stun, dtls, rtp] = self.counts[dir][path];
-            format!("stun {stun} dtls {dtls} rtp {rtp}")
-        };
-        format!(
-            "direct in [{}] out [{}]; relayed in [{}] out [{}]",
-            side(0, 0),
-            side(1, 0),
-            side(0, 1),
-            side(1, 1)
-        )
-    }
-}
-
 /// Checks the far end's media description and turns it into what str0m
 /// is told; `opus_pt` is ours, which an answer must keep.
 fn plan(remote: &RemoteMedia, opus_pt: u8) -> Result<Plan, String> {
@@ -1110,36 +1049,6 @@ fn expect_remote(rtc: &mut Rtc, mid: Mid, pt: u8, seen: &mut HashSet<u32>, data:
     }
 }
 
-/// Writes one Opus packet: its RTP time and marker from `stamp`, its
-/// level for RFC 6464 (0 loudest, 127 silence). False if it could not.
-fn write_opus(
-    rtc: &mut Rtc,
-    mid: Mid,
-    pt: u8,
-    stamp: Stamp,
-    payload: Vec<u8>,
-    level: (u8, bool),
-) -> bool {
-    let Some(writer) = rtc.writer(mid) else {
-        return false;
-    };
-    // str0m takes the level negative, 0 to -127.
-    let (level, voice) = level;
-    let negative = -i8::try_from(level.min(127)).unwrap_or(127);
-    let time = MediaTime::new(stamp.time, Frequency::FORTY_EIGHT_KHZ);
-    match writer
-        .start_of_talkspurt(stamp.talkspurt)
-        .audio_level(negative, voice)
-        .write(Pt::from(pt), Instant::now(), time, payload)
-    {
-        Ok(()) => true,
-        Err(error) => {
-            log::debug!("media: could not send audio: {error}");
-            false
-        }
-    }
-}
-
 /// The foundation we write for each kind of candidate: one base each.
 fn foundation(kind: CandidateKind) -> &'static str {
     match kind {
@@ -1235,33 +1144,16 @@ fn route_ip() -> Option<IpAddr> {
     (!ip.is_unspecified() && !ip.is_loopback()).then_some(ip)
 }
 
-/// How the TURN server is reached.
-enum LinkIo {
-    /// Over UDP, from our one socket, at this address.
-    Shared(SocketAddr),
-    /// Over a TCP or TLS stream of its own.
-    Stream(RelayIo),
-}
-
-/// A TURN allocation being made or in use.
-struct Link {
-    server: Server,
-    client: turn::Client,
-    io: LinkIo,
-    /// Our end of the connection to the server.
-    local: SocketAddr,
-    relayed: Option<SocketAddr>,
-}
-
 /// Everything one session holds.
 struct Session {
     started: Instant,
-    socket: tokio::net::UdpSocket,
+    /// Our one UDP socket, shared with the relay when TURN goes over UDP.
+    socket: Arc<tokio::net::UdpSocket>,
     /// Our host candidate's address: what str0m sees direct traffic
     /// arrive at and leave from.
     host: Option<SocketAddr>,
-    rtc: Rtc,
-    rtc_timeout: Option<Instant>,
+    /// The peer, and what went which way.
+    driver: Driver,
     mid: Mid,
     ssrc: u32,
     opus_pt: u8,
@@ -1270,14 +1162,10 @@ struct Session {
     applied: Applied,
     send: bool,
     receive: bool,
-    /// The TURN credentials, while there are servers left to try.
-    turn: Option<(String, String)>,
-    attempts: VecDeque<Server>,
-    /// Whether a relay already sent us elsewhere: a second redirect is
-    /// not followed.
-    redirected: bool,
-    relay: Option<Link>,
-    relay_deadline: Option<Instant>,
+    /// Microsoft's TURN servers, tried in turn.
+    relay: RelayPool,
+    /// Whether the call was given TURN servers at all.
+    relay_wanted: bool,
     /// The far end's addresses the relay must let through.
     permits: Vec<IpAddr>,
     /// Our candidates, as the SDP lists them.
@@ -1289,10 +1177,6 @@ struct Session {
     connected: bool,
     flowing_told: bool,
     connect_deadline: Option<Instant>,
-    /// What went which way, by path and kind (see [`Paths`]).
-    paths: Paths,
-    /// Our last DTLS flight, to send again if it goes unanswered.
-    flight: Flight,
     disconnected_at: Option<Instant>,
     next_audio: Option<Instant>,
     next_stats: Instant,
@@ -1342,10 +1226,11 @@ impl Session {
         let socket = tokio::net::UdpSocket::bind((bind, 0))
             .await
             .map_err(|e| failure(Stage::Gather, format!("no UDP socket: {e}")))?;
-        let port = socket
+        let socket = Arc::new(socket);
+        let bound = socket
             .local_addr()
-            .map_err(|e| failure(Stage::Gather, e.to_string()))?
-            .port();
+            .map_err(|e| failure(Stage::Gather, e.to_string()))?;
+        let port = bound.port();
         let now = Instant::now();
         let video_codecs: Vec<(u8, Option<u8>)> = [&config.video, &config.share]
             .into_iter()
@@ -1433,20 +1318,31 @@ impl Session {
                 "controlled"
             }
         );
-        let (turn, attempts) = match &config.relay {
+        // TURN over UDP goes from our socket: its end is the host
+        // candidate's address, or the socket's own when there is none.
+        let udp = Udp::Shared {
+            socket: socket.clone(),
+            local: host.unwrap_or(bound),
+        };
+        let relay = match &config.relay {
             Some(relay) => {
                 log::info!(
                     "gather: TURN servers {:?} in realm {}",
                     relay.servers.iter().map(|s| &s.host).collect::<Vec<_>>(),
                     relay.realm
                 );
-                (
-                    Some((relay.username.clone(), relay.password.clone())),
-                    relay_attempts(relay).into(),
+                RelayPool::new(
+                    relay_attempts(relay),
+                    &relay.username,
+                    &relay.password,
+                    RELAY_TIMEOUT,
+                    udp,
                 )
             }
-            None => (None, VecDeque::new()),
+            None => RelayPool::new(Vec::new(), "", "", RELAY_TIMEOUT, udp),
         };
+        let mut driver = Driver::new(rtc);
+        driver.wake(now);
         let (frames, mut muted_rx) = match uplink {
             Some(uplink) => (Some(uplink.frames), Some(uplink.muted)),
             None => (None, None),
@@ -1456,8 +1352,7 @@ impl Session {
             started: now,
             socket,
             host,
-            rtc,
-            rtc_timeout: Some(now),
+            driver,
             mid,
             ssrc,
             opus_pt: config.opus_pt,
@@ -1465,11 +1360,8 @@ impl Session {
             applied: Applied::default(),
             send: true,
             receive: true,
-            turn,
-            attempts,
-            redirected: false,
-            relay: None,
-            relay_deadline: None,
+            relay_wanted: config.relay.is_some(),
+            relay,
             permits: Vec::new(),
             candidates,
             gathered: Some(gathered),
@@ -1478,8 +1370,6 @@ impl Session {
             connected: false,
             flowing_told: false,
             connect_deadline: None,
-            paths: Paths::default(),
-            flight: Flight::default(),
             disconnected_at: None,
             next_audio: None,
             next_stats: now + STATS_EVERY,
@@ -1514,59 +1404,52 @@ impl Session {
         self.forced_muted || self.uplink_muted || self.frames.is_none()
     }
 
-    /// Tries the next TURN server, or ends gathering without a relay when
-    /// none is left.
-    async fn next_relay(&mut self) {
-        self.relay = None;
-        self.relay_deadline = None;
-        let Some((username, password)) = self.turn.clone() else {
-            self.finish_gathering();
-            return;
-        };
-        while let Some(server) = self.attempts.pop_front() {
-            log::info!("relay: trying {server}");
-            let opened = match server.transport {
-                Transport::Udp => match self.host_or_socket() {
-                    Ok(local) => shared_link(&server, local).await,
-                    Err(why) => Err(why),
-                },
-                Transport::Tcp | Transport::Tls => {
-                    match tokio::time::timeout(RELAY_TIMEOUT, connect_relay(&server)).await {
-                        Ok(Ok((io, local))) => Ok((LinkIo::Stream(io), local)),
-                        Ok(Err(why)) => Err(why),
-                        Err(_) => Err("no connection in time".to_owned()),
-                    }
-                }
-            };
-            match opened {
-                Ok((io, local)) => {
-                    let mut client = turn::Client::new(server.transport, &username, &password);
-                    client.allocate(Instant::now());
-                    self.relay = Some(Link {
-                        server,
-                        client,
-                        io,
-                        local,
-                        relayed: None,
-                    });
-                    self.relay_deadline = Some(Instant::now() + RELAY_TIMEOUT);
-                    self.flush_relay().await;
-                    return;
-                }
-                Err(why) => log::warn!("relay: {server}: {why}"),
-            }
+    /// What the relay has: the allocation (its candidates end gathering),
+    /// a peer's packet, or the end of it.
+    async fn relay_events(&mut self) {
+        for event in self.relay.events().await {
+            self.on_relay(event);
         }
-        log::warn!("relay: no TURN server gave a relay; offering the host candidate only");
-        self.turn = None;
-        self.finish_gathering();
     }
 
-    /// Our end of TURN over UDP: the host candidate's address, or the
-    /// socket's own when there is none.
-    fn host_or_socket(&self) -> Result<SocketAddr, String> {
-        match self.host {
-            Some(host) => Ok(host),
-            None => self.socket.local_addr().map_err(|e| e.to_string()),
+    fn on_relay(&mut self, event: RelayEvent) {
+        match event {
+            RelayEvent::Allocated {
+                relayed,
+                mapped,
+                local,
+                shared,
+                ..
+            } => {
+                self.relay.permit(&self.permits, Instant::now());
+                // The address the server saw is our socket's only when
+                // TURN went over that socket.
+                if shared
+                    && let (Some(mapped), Some(host)) = (mapped, self.host)
+                    && mapped != host
+                    && mapped.is_ipv4() == host.is_ipv4()
+                {
+                    self.add_candidate(IceCandidate::server_reflexive(mapped, host, "udp"));
+                }
+                self.add_candidate(IceCandidate::relayed(relayed, local, "udp"));
+                self.finish_gathering();
+            }
+            RelayEvent::Data { peer, data } => {
+                if let Some(relayed) = self.relay.relayed() {
+                    self.feed_rtc(peer, relayed, &data);
+                }
+            }
+            // The call may still go on a direct path; ICE says if it
+            // does not.
+            RelayEvent::Lost(_) => {}
+            RelayEvent::Exhausted => {
+                if self.relay_wanted {
+                    log::warn!(
+                        "relay: no TURN server gave a relay; offering the host candidate only"
+                    );
+                }
+                self.finish_gathering();
+            }
         }
     }
 
@@ -1581,8 +1464,14 @@ impl Session {
             self.over = Some(Err(failed));
             return;
         }
-        let creds = self.rtc.direct_api().local_ice_credentials();
-        let fingerprint = self.rtc.direct_api().local_dtls_fingerprint().bytes.clone();
+        let creds = self.driver.rtc.direct_api().local_ice_credentials();
+        let fingerprint = self
+            .driver
+            .rtc
+            .direct_api()
+            .local_dtls_fingerprint()
+            .bytes
+            .clone();
         let mut local = local_media(
             &creds,
             &fingerprint,
@@ -1640,112 +1529,15 @@ impl Session {
             IceKind::Relayed => CandidateKind::Relay,
             IceKind::ServerReflexive | IceKind::PeerReflexive => CandidateKind::ServerReflexive,
         };
-        if let Some(added) = self.rtc.add_local_candidate(candidate) {
+        if let Some(added) = self.driver.rtc.add_local_candidate(candidate) {
             self.candidates.push(listed(addr, kind, added.prio()));
         }
     }
 
-    /// Writes what the TURN client queued.
-    async fn flush_relay(&mut self) {
-        let Some(link) = &mut self.relay else {
-            return;
-        };
-        while let Some(bytes) = link.client.poll_transmit() {
-            let sent = match &mut link.io {
-                LinkIo::Shared(server) => self.socket.send_to(&bytes, *server).await.map(|_| ()),
-                LinkIo::Stream(io) => io.send(&bytes).await,
-            };
-            if let Err(error) = sent {
-                log::warn!("relay: could not write to {}: {error}", link.server);
-                break;
-            }
-        }
-    }
-
-    /// Reads TURN events: the allocation, data for str0m, failures.
-    async fn relay_events(&mut self) {
-        loop {
-            let Some(link) = &mut self.relay else {
-                return;
-            };
-            let Some(event) = link.client.poll_event() else {
-                break;
-            };
-            match event {
-                turn::Event::Allocated {
-                    relayed,
-                    mapped,
-                    lifetime,
-                } => {
-                    link.relayed = Some(relayed);
-                    self.relay_deadline = None;
-                    log::info!(
-                        "relay: {} relays at {relayed} (it sees us at {}; {lifetime} s)",
-                        link.server,
-                        mapped.map_or_else(|| "?".to_owned(), |m| m.to_string())
-                    );
-                    let shared = matches!(link.io, LinkIo::Shared(_));
-                    let local = link.local;
-                    if !self.permits.is_empty() {
-                        link.client.permit(&self.permits, Instant::now());
-                    }
-                    // The address the server saw is our socket's only when
-                    // TURN went over that socket.
-                    if shared
-                        && let (Some(mapped), Some(host)) = (mapped, self.host)
-                        && mapped != host
-                        && mapped.is_ipv4() == host.is_ipv4()
-                    {
-                        self.add_candidate(IceCandidate::server_reflexive(mapped, host, "udp"));
-                    }
-                    self.add_candidate(IceCandidate::relayed(relayed, local, "udp"));
-                    self.turn = None;
-                    self.finish_gathering();
-                }
-                turn::Event::Permitted(ip) => log::info!("relay: {ip} may reach us"),
-                turn::Event::Data { peer, data } => {
-                    if let Some(relayed) = link.relayed {
-                        self.feed_rtc(peer, relayed, &data);
-                    }
-                }
-                turn::Event::Failed(why) => {
-                    let allocated = link.relayed.is_some();
-                    log::warn!("relay: {}: {why}", link.server);
-                    // Sent elsewhere (300 Try Alternate): ask there next,
-                    // over UDP, once, before falling back to TCP.
-                    if !allocated
-                        && link.server.transport == Transport::Udp
-                        && let Some(alternate) = link.client.alternate()
-                        && !self.redirected
-                    {
-                        log::info!("relay: sent to {alternate}");
-                        self.redirected = true;
-                        self.attempts.push_front(turn::Server {
-                            host: alternate.ip().to_string(),
-                            port: alternate.port(),
-                            transport: Transport::Udp,
-                        });
-                    }
-                    if allocated {
-                        // The call may still go on a direct path; ICE
-                        // says if it does not.
-                        self.relay = None;
-                    } else {
-                        self.next_relay().await;
-                    }
-                }
-                turn::Event::Note(note) => log::info!("relay: {note}"),
-            }
-        }
-        self.flush_relay().await;
-    }
-
     /// One datagram on our socket: the TURN server's, or the far end's.
     async fn datagram(&mut self, from: SocketAddr, data: &[u8]) {
-        if let Some(link) = &mut self.relay
-            && matches!(link.io, LinkIo::Shared(server) if server == from)
-        {
-            link.client.handle_input(data, Instant::now());
+        if self.relay.takes(from) {
+            self.relay.input(data, Instant::now());
             self.relay_events().await;
             return;
         }
@@ -1756,117 +1548,66 @@ impl Session {
 
     /// Feeds str0m what `source` sent to our `destination`.
     fn feed_rtc(&mut self, source: SocketAddr, destination: SocketAddr, data: &[u8]) {
-        let relayed = self.relay.as_ref().and_then(|l| l.relayed) == Some(destination);
-        self.paths.count(false, relayed, data);
-        if is_dtls(data) {
-            self.flight.heard();
-        }
+        let relayed = self.relay.relayed() == Some(destination);
         bump(&self.counters.packets_in, 1);
         bump(&self.counters.bytes_in, data.len());
-        expect_remote(&mut self.rtc, self.mid, self.opus_pt, &mut self.seen, data);
+        expect_remote(
+            &mut self.driver.rtc,
+            self.mid,
+            self.opus_pt,
+            &mut self.seen,
+            data,
+        );
         for line in self
             .video
             .iter_mut()
             .chain(self.share.iter_mut())
             .chain(self.more.iter_mut())
         {
-            line.learn(&mut self.rtc, data);
+            line.learn(&mut self.driver.rtc, data);
         }
-        let Ok(receive) = Receive::new(Protocol::Udp, source, destination, data) else {
-            log::debug!(
-                "connect: {} bytes from {source} that WebRTC does not read",
-                data.len()
-            );
-            return;
-        };
-        if let Err(error) = self
-            .rtc
-            .handle_input(Input::Receive(Instant::now(), receive))
-        {
-            log::debug!("connect: input from {source}: {error}");
-        }
-        self.rtc_timeout = Some(Instant::now());
+        self.driver
+            .receive(Instant::now(), source, destination, relayed, data);
     }
 
     /// Runs str0m until it waits: what it sends goes out directly or
     /// through the relay, what it tells is acted on.
     async fn drive_rtc(&mut self) {
         let now = Instant::now();
-        if self.rtc_timeout.is_some_and(|at| at <= now)
-            && let Err(error) = self.rtc.handle_input(Input::Timeout(now))
-        {
-            log::debug!("connect: timeout input: {error}");
-        }
         let mut direct = Vec::new();
-        let mut events = Vec::new();
-        // Packets dropped this round, so a stream of them cannot spin here.
-        let mut skipped = 0;
-        loop {
-            match self.rtc.poll_output() {
-                Ok(Output::Timeout(at)) => {
-                    self.rtc_timeout = Some(at);
-                    break;
-                }
-                Ok(Output::Transmit(transmit)) => {
-                    bump(&self.counters.packets_out, 1);
-                    bump(&self.counters.bytes_out, transmit.contents.len());
-                    match &mut self.relay {
-                        // A relay never carries traffic to a private address
-                        // (it refuses the permission, 403, every time ICE
-                        // tries): those checks are left unsent.
-                        Some(link)
-                            if Some(transmit.source) == link.relayed
-                                && !public(transmit.destination.ip()) => {}
-                        Some(link) if Some(transmit.source) == link.relayed => {
-                            self.paths.count(true, true, &transmit.contents);
-                            if !self.connected && is_dtls(&transmit.contents) {
-                                self.flight.sent(
-                                    true,
-                                    transmit.destination,
-                                    &transmit.contents,
-                                    now,
-                                );
-                            }
-                            link.client
-                                .send_to(transmit.destination, &transmit.contents, now);
-                        }
-                        _ => {
-                            self.paths.count(true, false, &transmit.contents);
-                            if !self.connected && is_dtls(&transmit.contents) {
-                                self.flight.sent(
-                                    false,
-                                    transmit.destination,
-                                    &transmit.contents,
-                                    now,
-                                );
-                            }
-                            direct.push((transmit.destination, transmit.contents.to_vec()));
-                        }
-                    }
-                }
-                Ok(Output::Event(event)) => events.push(event),
-                // One packet that does not read (a meeting's media server
-                // sent an H.264 packet too short to unpack, seen ending a
-                // call): dropped, the call goes on.
-                Err(error) if is_one_packet(&error) && skipped < SKIP_AT_MOST => {
-                    skipped += 1;
-                    log::info!("media: a packet dropped: {error}");
-                }
-                Err(error) => {
-                    self.over
-                        .get_or_insert(Err(failure(Stage::Media, format!("WebRTC: {error}"))));
-                    break;
-                }
+        let (relay, counters) = (&mut self.relay, &self.counters);
+        let driven = self.driver.drive(now, |transmit| {
+            bump(&counters.packets_out, 1);
+            bump(&counters.bytes_out, transmit.contents.len());
+            if Some(transmit.source) != relay.relayed() {
+                direct.push((transmit.destination, transmit.contents.to_vec()));
+                return Some(false);
             }
-        }
+            // A relay never carries traffic to a private address (it
+            // refuses the permission, 403, every time ICE tries): those
+            // checks are left unsent.
+            if !public(transmit.destination.ip()) {
+                return None;
+            }
+            relay.send_to(transmit.destination, &transmit.contents, now);
+            Some(true)
+        });
         for (destination, bytes) in direct {
             if let Err(error) = self.socket.send_to(&bytes, destination).await {
                 log::debug!("connect: could not send to {destination}: {error}");
             }
         }
-        self.flush_relay().await;
-        for event in events {
-            self.rtc_event(event);
+        self.relay.flush().await;
+        match driven {
+            Ok(events) => {
+                for event in events {
+                    self.rtc_event(event);
+                }
+            }
+            Err(error) => {
+                self.over
+                    .get_or_insert(Err(failure(Stage::Media, format!("WebRTC: {error}"))));
+            }
         }
     }
 
@@ -1888,7 +1629,7 @@ impl Session {
                 log::info!(
                     "connect: DTLS and SRTP are up after {:?} (DTLS {:?})",
                     self.since(),
-                    self.rtc.direct_api().dtls_protocol_version()
+                    self.driver.rtc.direct_api().dtls_protocol_version()
                 );
                 self.connected = true;
                 self.connect_deadline = None;
@@ -1941,7 +1682,7 @@ impl Session {
                 {
                     if line.is(data.mid) {
                         line.data(&data, Instant::now());
-                        self.rtc_timeout = Some(Instant::now());
+                        self.driver.wake(Instant::now());
                     }
                 }
             }
@@ -1988,7 +1729,8 @@ impl Session {
         if !self.connected || !self.send {
             return false;
         }
-        let written = write_opus(&mut self.rtc, self.mid, self.opus_pt, stamp, payload, level);
+        let pt = Pt::from(self.opus_pt);
+        let written = write_opus(&mut self.driver.rtc, self.mid, pt, stamp, payload, level);
         if written {
             bump(&self.counters.audio_out, 1);
             self.check_flowing();
@@ -2037,7 +1779,7 @@ impl Session {
             if plan.send { "" } else { "not " },
             if plan.receive { "" } else { "not " }
         );
-        match apply(&mut self.rtc, &mut self.applied, plan) {
+        match apply(&mut self.driver.rtc, &mut self.applied, plan) {
             Ok(notes) => {
                 for note in notes {
                     log::warn!("remote: {note}");
@@ -2051,7 +1793,7 @@ impl Session {
         // SCTP over the DTLS just started, as a browser's data channels
         // go: the DTLS client starts the association too.
         if self.data_ssrc.is_some() && self.channel.is_none() && self.applied.dtls {
-            let mut api = self.rtc.direct_api();
+            let mut api = self.driver.rtc.direct_api();
             api.start_sctp(plan.active);
             self.channel = Some(api.create_data_channel(str0m::channel::ChannelConfig {
                 label: super::channel::LABEL.to_owned(),
@@ -2084,15 +1826,11 @@ impl Session {
                 self.permits.push(*ip);
             }
         }
-        if let Some(link) = &mut self.relay
-            && link.relayed.is_some()
-        {
-            link.client.permit(&self.permits, Instant::now());
-        }
+        self.relay.permit(&self.permits, Instant::now());
         if !self.connected && self.connect_deadline.is_none() {
             self.connect_deadline = Some(Instant::now() + CONNECT_TIMEOUT);
         }
-        self.rtc_timeout = Some(Instant::now());
+        self.driver.wake(Instant::now());
     }
 
     /// One command from the handle; `None` when the handle is gone.
@@ -2121,14 +1859,14 @@ impl Session {
             Some(Command::Data(message)) => {
                 let written = self
                     .channel
-                    .and_then(|id| self.rtc.channel(id))
+                    .and_then(|id| self.driver.rtc.channel(id))
                     .map(|mut channel| channel.write(true, &message));
                 match written {
                     Some(Ok(_)) => {}
                     Some(Err(error)) => log::warn!("media: data channel: {error}"),
                     None => log::info!("media: the data channel is not open; message dropped"),
                 }
-                self.rtc_timeout = Some(Instant::now());
+                self.driver.wake(Instant::now());
             }
             Some(Command::Release(give)) => {
                 log::info!("media: stopping, the sound and pictures handed on");
@@ -2158,18 +1896,15 @@ impl Session {
             counts.silent_out,
             if self.muted() { "muted" } else { "unmuted" }
         );
-        log::info!("media: paths: {}", self.paths.line());
+        log::info!("media: paths: {}", self.driver.paths.line());
     }
 
     /// The next moment something is due.
     fn deadline(&self) -> Instant {
         let mut at = self.next_stats;
         for due in [
-            self.rtc_timeout,
-            self.relay.as_ref().and_then(|l| l.client.poll_timeout()),
-            self.relay_deadline,
+            self.driver.deadline(),
             self.connect_deadline,
-            self.flight.resend_at.filter(|_| !self.connected),
             self.disconnected_at.map(|at| at + RECONNECT_GRACE),
             self.next_audio,
             self.video
@@ -2190,30 +1925,17 @@ impl Session {
     /// What is due now.
     async fn on_time(&mut self) {
         let now = Instant::now();
-        if let Some(link) = &mut self.relay
-            && link.client.poll_timeout().is_some_and(|at| at <= now)
-        {
-            link.client.handle_timeout(now);
-        }
-        if self.relay_deadline.is_some_and(|at| at <= now) {
-            if let Some(link) = &self.relay {
-                log::warn!("relay: {}: no allocation in time", link.server);
-            }
-            self.next_relay().await;
-        }
-        if !self.connected && self.flight.due(now) {
-            self.resend_flight(now).await;
-        }
+        self.resend_flight(now).await;
         for line in self
             .video
             .iter_mut()
             .chain(self.share.iter_mut())
             .chain(self.more.iter_mut())
         {
-            line.on_time(&mut self.rtc, now);
+            line.on_time(&mut self.driver.rtc, now);
         }
         if self.connect_deadline.is_some_and(|at| at <= now) {
-            log::warn!("connect: gave up; paths: {}", self.paths.line());
+            log::warn!("connect: gave up; paths: {}", self.driver.paths.line());
             self.over.get_or_insert(Err(failure(
                 Stage::Connect,
                 format!("no media connection within {} s", CONNECT_TIMEOUT.as_secs()),
@@ -2258,15 +1980,10 @@ impl Session {
     /// share two thirds when the camera goes too, each sender within its
     /// own limits and a meeting's ceiling.
     fn bitrate_estimate(&mut self, estimate: &str0m::bwe::BweKind) {
-        let bps = match estimate {
-            str0m::bwe::BweKind::Twcc { estimate, .. } => estimate.as_u64(),
-            str0m::bwe::BweKind::Remb { estimate, .. } => estimate.as_u64(),
-            _ => return,
+        let Some(bps) = estimate_bps(estimate) else {
+            return;
         };
-        if self.estimate.is_none_or(|was| was.abs_diff(bps) > was / 5) {
-            log::info!("media: send bandwidth estimate {} kbit/s", bps / 1000);
-        }
-        self.estimate = Some(bps);
+        note_estimate(&mut self.estimate, bps);
         #[cfg(feature = "huddle-camera")]
         {
             let senders = self.senders();
@@ -2293,7 +2010,8 @@ impl Session {
             .map(|(_, control)| u64::from(control.limits().max_bitrate))
             .sum::<u64>()
             + AUDIO_BPS;
-        self.rtc
+        self.driver
+            .rtc
             .bwe()
             .set_desired_bitrate(str0m::bwe::Bitrate::bps(desired));
         let since = *self.video_since.get_or_insert(now);
@@ -2316,32 +2034,19 @@ impl Session {
     /// Sends our unanswered DTLS flight again, each datagram the way it
     /// went first.
     async fn resend_flight(&mut self, now: Instant) {
-        log::info!(
-            "connect: no DTLS answer; sending our {} handshake packets again (try {})",
-            self.flight.datagrams.len(),
-            self.flight.tries
-        );
-        let datagrams = self.flight.datagrams.clone();
-        for (relayed, to, data) in datagrams {
-            self.paths.count(true, relayed, &data);
+        for (relayed, to, data) in self.driver.resend(now).unwrap_or_default() {
             if relayed {
-                if let Some(link) = &mut self.relay {
-                    link.client.send_to(to, &data, now);
-                }
+                self.relay.send_to(to, &data, now);
             } else if let Err(error) = self.socket.send_to(&data, to).await {
                 log::debug!("connect: could not send to {to}: {error}");
             }
         }
-        self.flush_relay().await;
     }
 
     /// Lets go of the peer and the relay, and says how it ended.
     async fn close(&mut self) {
-        self.rtc.disconnect();
-        if let Some(link) = &mut self.relay {
-            link.client.close(Instant::now());
-        }
-        self.flush_relay().await;
+        self.driver.rtc.disconnect();
+        self.relay.close(Instant::now()).await;
         let result = self.over.take().unwrap_or(Ok(()));
         if let Some(give) = self.release.take() {
             let uplink = self.frames.take().zip(self.muted_rx.take());
@@ -2370,54 +2075,6 @@ impl Session {
     }
 }
 
-/// TURN over UDP from our own socket, which is at `local`: the server's
-/// IPv4 address.
-async fn shared_link(server: &Server, local: SocketAddr) -> Result<(LinkIo, SocketAddr), String> {
-    let address = tokio::time::timeout(
-        RELAY_TIMEOUT,
-        tokio::net::lookup_host((server.host.as_str(), server.port)),
-    )
-    .await
-    .map_err(|_| "no address in time".to_owned())?
-    .map_err(|e| format!("{}: {e}", server.host))?
-    .find(SocketAddr::is_ipv4)
-    .ok_or_else(|| format!("{} has no IPv4 address", server.host))?;
-    log::info!("relay: {server} at {address}, from our socket");
-    Ok((LinkIo::Shared(address), local))
-}
-
-/// The next messages from a TURN server reached over a stream, or never.
-async fn stream_recv(relay: &mut Option<Link>) -> std::io::Result<Vec<Vec<u8>>> {
-    match relay {
-        Some(Link {
-            io: LinkIo::Stream(io),
-            ..
-        }) => io.recv().await,
-        _ => std::future::pending().await,
-    }
-}
-
-/// The next frame from the microphone, or never while there is none.
-async fn next_frame(frames: &mut Option<mpsc::Receiver<Outgoing>>) -> Option<Outgoing> {
-    match frames {
-        Some(frames) => frames.recv().await,
-        None => std::future::pending().await,
-    }
-}
-
-/// The microphone's next mute change, or never while there is none.
-async fn mute_change(
-    muted: &mut Option<watch::Receiver<bool>>,
-) -> Result<bool, watch::error::RecvError> {
-    match muted {
-        Some(muted) => {
-            muted.changed().await?;
-            Ok(*muted.borrow_and_update())
-        }
-        None => std::future::pending().await,
-    }
-}
-
 /// The session, gathering to stopping.
 /// What the camera side has next; never without a camera line.
 async fn next_video(video: &mut Option<super::video::CallVideo>) -> super::video::Input {
@@ -2428,7 +2085,7 @@ async fn next_video(video: &mut Option<super::video::CallVideo>) -> super::video
 }
 
 async fn run(mut session: Session, mut commands: mpsc::UnboundedReceiver<Command>) {
-    session.next_relay().await;
+    session.relay_events().await;
     let mut buf = vec![0u8; DATAGRAM];
     while session.over.is_none() {
         session.drive_rtc().await;
@@ -2443,37 +2100,18 @@ async fn run(mut session: Session, mut commands: mpsc::UnboundedReceiver<Command
                 // earlier send this way; the socket itself is fine.
                 Err(error) => log::debug!("connect: socket: {error}"),
             },
-            received = stream_recv(&mut session.relay) => match received {
-                Ok(messages) => {
-                    let now = Instant::now();
-                    if let Some(link) = &mut session.relay {
-                        for message in messages {
-                            link.client.handle_input(&message, now);
-                        }
-                    }
-                    session.relay_events().await;
-                }
-                Err(error) => {
-                    let allocated = session.relay.as_ref().is_some_and(|l| l.relayed.is_some());
-                    log::warn!("relay: {error}");
-                    if allocated {
-                        session.relay = None;
-                    } else {
-                        session.next_relay().await;
-                    }
-                }
-            },
+            () = session.relay.wait() => session.relay_events().await,
             command = commands.recv() => session.command(command),
             input = next_video(&mut session.video) => {
                 let connected = session.connected;
                 if let Some(video) = &mut session.video {
-                    video.input(&mut session.rtc, input, connected);
+                    video.input(&mut session.driver.rtc, input, connected);
                 }
             }
             input = next_video(&mut session.share) => {
                 let connected = session.connected;
                 if let Some(share) = &mut session.share {
-                    share.input(&mut session.rtc, input, connected);
+                    share.input(&mut session.driver.rtc, input, connected);
                 }
             }
             frame = next_frame(&mut session.frames) => match frame {
@@ -2498,7 +2136,6 @@ async fn run(mut session: Session, mut commands: mpsc::UnboundedReceiver<Command
             }
             () = tokio::time::sleep_until(deadline.into()) => {
                 session.on_time().await;
-                session.relay_events().await;
             }
         }
     }
@@ -2509,6 +2146,8 @@ async fn run(mut session: Session, mut commands: mpsc::UnboundedReceiver<Command
 mod tests {
     use super::super::{Line, LineKind};
     use super::*;
+    use str0m::net::Receive;
+    use str0m::{Input, Output};
 
     #[cfg(feature = "huddle-camera")]
     #[test]
@@ -2589,20 +2228,6 @@ mod tests {
             ],
             video_streams: Vec::new(),
         }
-    }
-
-    #[test]
-    fn paths_count_by_kind() {
-        let mut paths = Paths::default();
-        paths.count(true, true, &[0x00, 0x01]);
-        paths.count(false, false, &[22, 254]);
-        paths.count(false, false, &[0x80, 111]);
-        paths.count(true, false, &[]);
-        assert_eq!(
-            paths.line(),
-            "direct in [stun 0 dtls 1 rtp 1] out [stun 0 dtls 0 rtp 0]; \
-             relayed in [stun 0 dtls 0 rtp 0] out [stun 1 dtls 0 rtp 0]"
-        );
     }
 
     #[test]
@@ -2975,7 +2600,7 @@ mod tests {
                     assert!(write_opus(
                         &mut side.rtc,
                         side.mid,
-                        pt,
+                        Pt::from(pt),
                         stamp,
                         payload,
                         (40, true)
