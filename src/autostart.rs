@@ -8,12 +8,14 @@
 
 use std::path::Path;
 
+use crate::failure::Failure;
+
 /// The flag that starts NoSlacking in the tray.
 pub const HIDDEN: &str = "--hidden";
 
 /// Adds (or with `false` removes) the login entry for this executable.
-pub fn set(enabled: bool) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+pub fn set(enabled: bool) -> Result<(), Failure> {
+    let exe = std::env::current_exe().map_err(|e| Failure::io(&e))?;
     platform::set(&exe, enabled)
 }
 
@@ -95,16 +97,14 @@ pub fn run_command(exe: &Path) -> String {
 
 /// Writes `contents` to `path`, or removes it, creating its folder.
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
-fn write_or_remove(path: &Path, contents: Option<String>) -> Result<(), String> {
+fn write_or_remove(path: &Path, contents: Option<String>) -> Result<(), Failure> {
     match contents {
+        // `write_atomic` makes the folder too.
         Some(contents) => {
-            if let Some(folder) = path.parent() {
-                std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
-            }
-            crate::paths::write_atomic(path, contents.as_bytes()).map_err(|e| e.to_string())
+            crate::paths::write_atomic(path, contents.as_bytes()).map_err(|e| Failure::io(&e))
         }
         None => match std::fs::remove_file(path) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(Failure::io(&error)),
             _ => Ok(()),
         },
     }
@@ -114,14 +114,16 @@ fn write_or_remove(path: &Path, contents: Option<String>) -> Result<(), String> 
 mod platform {
     use std::path::Path;
 
-    pub fn set(exe: &Path, enabled: bool) -> Result<(), String> {
+    use crate::failure::Failure;
+
+    pub fn set(exe: &Path, enabled: bool) -> Result<(), Failure> {
         // The sandbox may not write the user's autostart folder; Flatpak
         // apps ask the desktop through its background portal instead.
         if std::env::var_os("FLATPAK_ID").is_some() {
-            return Err("inside Flatpak, add NoSlacking to your desktop's startup apps".into());
+            return Err(Failure::AutostartInFlatpak);
         }
         let file = directories::BaseDirs::new()
-            .ok_or("no home folder")?
+            .ok_or(Failure::NoHomeFolder)?
             .config_dir()
             .join("autostart")
             .join(format!("{}.desktop", crate::paths::APP_ID));
@@ -133,10 +135,12 @@ mod platform {
 mod platform {
     use std::path::Path;
 
-    pub fn set(exe: &Path, enabled: bool) -> Result<(), String> {
+    use crate::failure::Failure;
+
+    pub fn set(exe: &Path, enabled: bool) -> Result<(), Failure> {
         // launchd reads the folder at the next login.
         let file = directories::BaseDirs::new()
-            .ok_or("no home folder")?
+            .ok_or(Failure::NoHomeFolder)?
             .home_dir()
             .join("Library/LaunchAgents")
             .join(format!("{}.plist", crate::paths::APP_ID));
@@ -148,9 +152,11 @@ mod platform {
 mod platform {
     use std::path::Path;
 
+    use crate::failure::Failure;
+
     const KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 
-    pub fn set(exe: &Path, enabled: bool) -> Result<(), String> {
+    pub fn set(exe: &Path, enabled: bool) -> Result<(), Failure> {
         let command = super::run_command(exe);
         let args: Vec<&str> = if enabled {
             vec![
@@ -170,12 +176,12 @@ mod platform {
         let status = std::process::Command::new("reg")
             .args(&args)
             .status()
-            .map_err(|e| format!("reg.exe: {e}"))?;
+            .map_err(|e| Failure::io(&e))?;
         // Deleting a value that is not there fails too, which is fine.
         if status.success() || !enabled {
             Ok(())
         } else {
-            Err("reg.exe could not add the login entry".into())
+            Err(Failure::ToolFailed("reg.exe".into()))
         }
     }
 }
@@ -184,8 +190,10 @@ mod platform {
 mod platform {
     use std::path::Path;
 
-    pub fn set(_exe: &Path, _enabled: bool) -> Result<(), String> {
-        Err("starting at login is not supported on this system".into())
+    use crate::failure::Failure;
+
+    pub fn set(_exe: &Path, _enabled: bool) -> Result<(), Failure> {
+        Err(Failure::NoAutostart)
     }
 }
 

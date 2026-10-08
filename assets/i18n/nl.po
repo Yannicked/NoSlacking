@@ -3143,3 +3143,19 @@ msgstr "er is geen vergadering met die link, of met die ID en wachtwoordcode"
 
 msgid "{name} is waiting in the lobby"
 msgstr "{name} wacht in de lobby"
+
+# Starting at login and handling links.
+msgid "there is no home folder"
+msgstr "er is geen thuismap"
+
+msgid "inside Flatpak, add NoSlacking to your desktop's startup apps"
+msgstr "voeg NoSlacking binnen Flatpak toe aan de opstart-apps van je bureaublad"
+
+msgid "this system cannot start apps at login"
+msgstr "dit systeem kan geen apps starten bij het inloggen"
+
+msgid "this system cannot hand links to NoSlacking yet"
+msgstr "dit systeem kan nog geen links aan NoSlacking doorgeven"
+
+msgid "{tool} did not succeed"
+msgstr "{tool} is niet gelukt"

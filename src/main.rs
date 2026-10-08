@@ -132,11 +132,13 @@ fn main() -> eframe::Result<()> {
                         Ok(true) => log::info!("gave back the slack:// links a sign-in left"),
                         Ok(false) => {}
                         Err(error) => {
-                            log::warn!("could not give the slack:// links back: {error}");
+                            log::warn!("could not give the slack:// links back: {error:?}");
                         }
                     }
                     if let Err(error) = noslacking::auth::register_scheme() {
-                        log::warn!("could not register as the noslacking:// link handler: {error}");
+                        log::warn!(
+                            "could not register as the noslacking:// link handler: {error:?}"
+                        );
                     }
                 });
                 Some(guard)
@@ -203,7 +205,7 @@ fn main() -> eframe::Result<()> {
         match noslacking::slack_links::release(&state) {
             Ok(true) => log::info!("gave the slack:// links back"),
             Ok(false) => {}
-            Err(error) => log::warn!("could not give the slack:// links back: {error}"),
+            Err(error) => log::warn!("could not give the slack:// links back: {error:?}"),
         }
     }
     ran
@@ -244,7 +246,7 @@ fn release_slack_links(state: &std::path::Path) {
     match noslacking::slack_links::release_at_start(state) {
         Ok(true) => println!("Gave slack:// links back."),
         Ok(false) => println!("NoSlacking does not hold slack:// links; nothing to give back."),
-        Err(error) => eprintln!("Could not give slack:// links back: {error}"),
+        Err(error) => eprintln!("Could not give slack:// links back: {}", error.message()),
     }
 }
 

@@ -34,7 +34,7 @@ pub struct Desktop {
     /// Requests from later launches (show the window, open a link).
     launches: Option<std::sync::mpsc::Receiver<crate::single_instance::Request>>,
     /// Why the login entry could not be changed, from its thread.
-    autostart: Option<std::sync::mpsc::Receiver<String>>,
+    autostart: Option<std::sync::mpsc::Receiver<crate::failure::Failure>>,
 }
 
 impl Desktop {
@@ -296,7 +296,7 @@ impl App {
         }
         self.tray_requests();
         self.launch_requests();
-        let failures: Vec<String> = self
+        let failures: Vec<crate::failure::Failure> = self
             .desktop
             .autostart
             .as_ref()
@@ -306,7 +306,7 @@ impl App {
             self.toast(
                 crate::i18n::tf(
                     "Could not change starting at login: {error}",
-                    &[("error", &error)],
+                    &[("error", &error.message())],
                 ),
                 true,
             );
@@ -376,7 +376,7 @@ impl App {
             .name("autostart".into())
             .spawn(move || {
                 if let Err(error) = crate::autostart::set(enabled) {
-                    log::warn!("could not change starting at login: {error}");
+                    log::warn!("could not change starting at login: {error:?}");
                     let _ = sender.send(error);
                     waker.wake();
                 }
