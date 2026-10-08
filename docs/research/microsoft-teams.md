@@ -70,6 +70,22 @@ gives as its own id); its replies are read from and posted to
 left unencoded (from the web client's code; no work-account traffic has
 been recorded yet).
 
+Recorded since (work web client, `teams.cloud.microsoft.har`): a channel
+is read through the CSA, `GET {csa}/api/v1/containers/{channel}/posts?
+modality=post&pageSize=20&teamId={team}&filterSystemMessage=true`
+(HTTP 207): `posts[].message` and `posts[].replies{messages,totalCount}`,
+camel case (`messageType`, `imDisplayName`, `parentMessageId`, bare-MRI
+`from`; a deleted post's `content` is `null`). The chat service's own
+history of a channel is mostly `ThreadActivity/*` lines, has no
+`backwardLink`, writes `conversationid` in lower case and names a reply's
+post as `rootMessageId` beside the `;messageid=` link. The teams list's
+channels carry `consumptionHorizon` as an object of numbers and
+`lastMessage` with a string `id` (its `parentMessageId` is not to be
+trusted); `isMessageRead` is a flag of its own. A team's picture is
+`{mt}/beta/users/{own object id}/profilepicturev2/teams/{groupId}?etag=
+"{pictureETag}"&displayName=…`, `groupId` from `teamSiteInformation`.
+Mentions were not in the capture.
+
 Sources:
 [chatMessage](https://learn.microsoft.com/graph/api/resources/chatmessage),
 [list chats](https://learn.microsoft.com/graph/api/chat-list),

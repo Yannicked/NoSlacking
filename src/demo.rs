@@ -1672,6 +1672,7 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
             name: name.into(),
             emoji: emoji.into(),
             channel_ids: ids.iter().map(|s| (*s).to_owned()).collect(),
+            icon: None,
         };
     sink.send(Event::Sections {
         team: TEAM.into(),

@@ -1428,6 +1428,7 @@ pub fn order_sections(sections: Vec<ChannelSection>) -> Vec<model::SidebarSectio
                 name: section.name.clone(),
                 emoji: section.emoji.trim_matches(':').to_owned(),
                 channel_ids: section.channel_ids_page.channel_ids.clone(),
+                icon: None,
             });
         }
         current = section

@@ -477,6 +477,9 @@ pub struct SidebarSection {
     /// The conversations placed in it explicitly. Slack's catch-all
     /// sections leave this empty.
     pub channel_ids: Vec<String>,
+    /// A picture for its header: a Microsoft Teams team's.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 /// An app or integration that posts messages.

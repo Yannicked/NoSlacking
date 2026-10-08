@@ -26,6 +26,9 @@ use crate::teams::socket::{TrouterEvent, handle_frame_control, parse_frame};
 
 /// How many messages a page of history asks for.
 const PAGE: usize = 50;
+/// How many channel posts a channel's first page holds, as the web client
+/// asks (recorded).
+const POSTS_PAGE: usize = 20;
 /// How long to wait before connecting again after Trouter failed.
 const RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -192,7 +195,14 @@ async fn boot(client: TeamsClient, workspace: Workspace, sink: Sink) {
     let mut sections = vec![chat_section()];
     match client.get_teams().await {
         Ok(teams) => {
-            let (teams, channels): (Vec<_>, Vec<_>) = teams.iter().map(translate_team).unzip();
+            let (teams, channels): (Vec<_>, Vec<_>) = teams
+                .iter()
+                .map(|t| {
+                    let (mut section, channels) = translate_team(t);
+                    section.icon = team_picture(&client, &team, t);
+                    (section, channels)
+                })
+                .unzip();
             let channels: Vec<_> = channels.into_iter().flatten().collect();
             if !channels.is_empty() {
                 sink.send(Event::Conversations {
@@ -395,6 +405,43 @@ pub async fn history(
     sink: Sink,
 ) {
     let older = cursor.is_some();
+    // A work channel reads as the web client reads it: its posts with
+    // their replies, without the membership lines that fill its history.
+    if !older && client.team_of_channel(&channel).is_some() {
+        match client.get_channel_posts(&channel, POSTS_PAGE).await {
+            Ok(posts) => {
+                let raw: Vec<crate::teams::types::Message> = posts
+                    .iter()
+                    .flat_map(|p| {
+                        std::iter::once(p.message.clone()).chain(p.replies.iter().cloned())
+                    })
+                    .collect();
+                let senders = senders(&raw);
+                let named: std::collections::HashSet<String> =
+                    senders.iter().map(|u| u.id.clone()).collect();
+                if !senders.is_empty() {
+                    sink.send(people_event(&client, &team, senders, &[]));
+                }
+                let messages = crate::backend::teams_translate::channel_posts(&posts);
+                name_the_rest(&client, &team, &messages, &named, &sink);
+                sink.send(Event::History {
+                    team,
+                    channel,
+                    messages,
+                    has_more: false,
+                    cursor: None,
+                    older,
+                    polled: false,
+                });
+                return;
+            }
+            Err(error) => {
+                log::info!(
+                    "could not read a Teams channel's posts ({error:?}); reading its history"
+                );
+            }
+        }
+    }
     match client.get_messages(&channel, cursor.as_deref(), PAGE).await {
         Ok(page) => {
             let senders = senders(&page.messages);
@@ -541,6 +588,19 @@ pub async fn open(client: TeamsClient, team: String, me: String, users: Vec<Stri
 /// to the replies the channel's newest messages hold.
 pub async fn thread(client: TeamsClient, team: String, channel: String, post: Ts, sink: Sink) {
     let post_id = ts_to_teams_id(&post);
+    // The web client's own address for a post's replies first.
+    if client.team_of_channel(&channel).is_some() {
+        match client.get_post_replies(&channel, &post_id, PAGE).await {
+            Ok(replies) if !replies.is_empty() => {
+                send_thread(&client, team, channel, post, &replies, &sink);
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => log::info!(
+                "could not read a Teams post's replies from the teams service ({error:?})"
+            ),
+        }
+    }
     let chain = match client.get_replies(&channel, &post_id, PAGE).await {
         Ok(page) => Ok(page),
         Err(error) => {
@@ -559,13 +619,25 @@ pub async fn thread(client: TeamsClient, team: String, channel: String, post: Ts
             return;
         }
     };
-    let senders = senders(&page.messages);
+    send_thread(&client, team, channel, post, &page.messages, &sink);
+}
+
+/// Tells the interface a post's thread from `raw`, its replies (and the
+/// post, if among them): the post first, every reply's thread set to it.
+fn send_thread(
+    client: &TeamsClient,
+    team: String,
+    channel: String,
+    post: Ts,
+    raw: &[crate::teams::types::Message],
+    sink: &Sink,
+) {
+    let senders = senders(raw);
     let named: std::collections::HashSet<String> = senders.iter().map(|u| u.id.clone()).collect();
     if !senders.is_empty() {
-        sink.send(people_event(&client, &team, senders, &[]));
+        sink.send(people_event(client, &team, senders, &[]));
     }
-    let mut messages: Vec<crate::model::Message> = page
-        .messages
+    let mut messages: Vec<crate::model::Message> = raw
         .iter()
         .filter_map(translate_message)
         .filter(|m| m.ts == post || m.thread_ts.as_ref() == Some(&post))
@@ -575,7 +647,7 @@ pub async fn thread(client: TeamsClient, team: String, channel: String, post: Ts
         message.thread_ts = Some(post.clone());
     }
     crate::backend::teams_translate::thread_posts(&mut messages);
-    name_the_rest(&client, &team, &messages, &named, &sink);
+    name_the_rest(client, &team, &messages, &named, sink);
     sink.send(Event::Thread {
         team,
         channel,
@@ -739,6 +811,32 @@ impl Post {
     }
 }
 
+/// Where a team's picture is, as the work web client asks for it
+/// (recorded): the middle tier's `profilepicturev2/teams/{groupId}` under
+/// your own id, with the picture's etag, quotes and all.
+fn team_picture(
+    client: &TeamsClient,
+    workspace: &str,
+    team: &crate::teams::types::Team,
+) -> Option<String> {
+    let group = team.site.as_ref()?.group_id.as_deref()?;
+    let etag = team.picture_etag.as_deref()?;
+    let base = client
+        .credentials()
+        .middle_tier_url()?
+        .trim_end_matches('/')
+        .to_owned();
+    let me = client.user_from_token()?.id;
+    let mut url = reqwest::Url::parse(&format!(
+        "{base}/beta/users/{me}/profilepicturev2/teams/{group}"
+    ))
+    .ok()?;
+    url.query_pairs_mut()
+        .append_pair("etag", &format!("\"{etag}\""))
+        .append_pair("displayName", &team.display_name);
+    Some(crate::images::authed(workspace, url.as_str()))
+}
+
 /// A Teams workspace's chat section: every 1:1, group and meeting chat
 /// not placed elsewhere, most recent first, with the button to start
 /// one.
@@ -749,6 +847,7 @@ fn chat_section() -> crate::model::SidebarSection {
         name: String::new(),
         emoji: String::new(),
         channel_ids: Vec::new(),
+        icon: None,
     }
 }
 

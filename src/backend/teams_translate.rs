@@ -458,6 +458,45 @@ fn mrkdwn_escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// A work channel's posts as the interface shows them: each post, then
+/// the replies it came with, the post carrying its thread's count (all of
+/// its replies, though only the newest few come with it), its people and
+/// its latest reply.
+pub fn channel_posts(posts: &[crate::teams::client::Post]) -> Vec<Message> {
+    let mut out = Vec::new();
+    for post in posts {
+        let Some(mut root) = translate_message(&post.message) else {
+            continue;
+        };
+        let replies: Vec<Message> = post
+            .replies
+            .iter()
+            .filter_map(translate_message)
+            .map(|mut reply| {
+                reply.thread_ts = Some(root.ts.clone());
+                reply
+            })
+            .collect();
+        if post.reply_count > 0 || !replies.is_empty() {
+            root.thread_ts = Some(root.ts.clone());
+            root.reply_count = post
+                .reply_count
+                .max(u32::try_from(replies.len()).unwrap_or(u32::MAX));
+            root.reply_users = Vec::new();
+            for user in replies.iter().filter_map(|r| r.user.clone()) {
+                if !root.reply_users.contains(&user) {
+                    root.reply_users.push(user);
+                }
+            }
+            root.latest_reply = replies.iter().map(|r| r.ts.clone()).max();
+            root.replies_known = true;
+        }
+        out.push(root);
+        out.extend(replies);
+    }
+    out
+}
+
 /// Gives each channel post in `messages` what its replies there say: the
 /// thread's counts, the people in it and its latest reply, as Slack gives
 /// a thread's parent. A Teams history holds a channel's replies among
@@ -668,6 +707,7 @@ pub fn translate_team(team: &types::Team) -> (SidebarSection, Vec<Conversation>)
         name: team.display_name.clone(),
         emoji: String::new(),
         channel_ids: channel_ids.clone(),
+        icon: None,
     };
 
     let conversations = team

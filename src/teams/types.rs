@@ -7,6 +7,14 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 /// A list that may come as itself or as JSON text of itself; anything
 /// unreadable is taken as none rather than failing the whole message.
+/// Text that may come as `null`, read as empty.
+fn null_as_empty<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 fn list_or_text<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -73,6 +81,16 @@ pub struct Team {
         deserialize_with = "de_trimmed_string"
     )]
     pub picture_etag: Option<String>,
+    /// Its group's site, whose group id names its picture.
+    #[serde(default, rename = "teamSiteInformation")]
+    pub site: Option<TeamSite>,
+}
+
+/// A team's group and site.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamSite {
+    #[serde(default, rename = "groupId")]
+    pub group_id: Option<String>,
 }
 
 /// A channel within a team.
@@ -246,25 +264,28 @@ pub struct Message {
     pub sequence_id: Option<u64>,
     #[serde(default, rename = "clientarrivaltime")]
     pub client_arrival_time: Option<String>,
-    #[serde(default, rename = "composetime")]
+    // The chat service writes these in lower case; the teams service's
+    // channel posts in camel case (recorded).
+    #[serde(default, rename = "composetime", alias = "composeTime")]
     pub compose_time: Option<String>,
-    #[serde(default, rename = "originalarrivaltime")]
+    #[serde(default, rename = "originalarrivaltime", alias = "originalArrivalTime")]
     pub original_arrival_time: Option<String>,
     #[serde(default)]
     pub from: Option<String>,
-    #[serde(default, rename = "imdisplayname")]
+    #[serde(default, rename = "imdisplayname", alias = "imDisplayName")]
     pub im_display_name: Option<String>,
-    #[serde(default)]
+    /// The HTML; a deleted channel post has none (`null`).
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub content: String,
-    #[serde(default, rename = "messagetype")]
+    #[serde(default, rename = "messagetype", alias = "messageType")]
     pub message_type: Option<String>,
     #[serde(default)]
     pub properties: Option<MessageProperties>,
-    #[serde(default, rename = "conversationId")]
+    #[serde(default, rename = "conversationid", alias = "conversationId")]
     pub conversation_id: Option<String>,
     /// The sender's own id for the message, which the echo of a message
     /// sent from here carries back.
-    #[serde(default, rename = "clientmessageid")]
+    #[serde(default, rename = "clientmessageid", alias = "clientMessageId")]
     pub client_message_id: Option<String>,
     /// Where the message lives: `…/conversations/{id}`, and for a reply
     /// in a channel `…/conversations/{channel};messageid={post}`.
@@ -272,8 +293,11 @@ pub struct Message {
     pub conversation_link: Option<String>,
     /// The post a channel message belongs to: its own id for the post
     /// itself (live events say this; history says it in the link).
-    #[serde(default, rename = "parentmessageid")]
+    #[serde(default, rename = "parentmessageid", alias = "parentMessageId")]
     pub parent_message_id: Option<serde_json::Value>,
+    /// The post a channel reply belongs to, as work history names it.
+    #[serde(default, rename = "rootMessageId")]
+    pub root_message_id: Option<serde_json::Value>,
 }
 
 impl Message {
@@ -292,15 +316,15 @@ impl Message {
                     .unwrap_or(rest)
                     .to_owned()
             });
-        let from_parent = self
-            .parent_message_id
-            .as_ref()
-            .and_then(|value| match value {
-                serde_json::Value::String(text) => Some(text.clone()),
-                serde_json::Value::Number(number) => Some(number.to_string()),
-                _ => None,
-            });
+        let id = |value: &serde_json::Value| match value {
+            serde_json::Value::String(text) => Some(text.clone()),
+            serde_json::Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        };
+        let from_root = self.root_message_id.as_ref().and_then(id);
+        let from_parent = self.parent_message_id.as_ref().and_then(id);
         from_link
+            .or(from_root)
             .or(from_parent)
             .filter(|post| !post.is_empty() && *post != self.id)
     }

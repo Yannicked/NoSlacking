@@ -650,9 +650,19 @@ fn section_view(
         40.0
     };
     job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - room);
+    // A team's picture before its name.
+    let mut text_left = rect.left() + 32.0;
+    if let Some(icon) = &section.icon {
+        let at = egui::Rect::from_center_size(
+            egui::pos2(text_left + 8.0, rect.center().y),
+            Vec2::splat(16.0),
+        );
+        super::paint_avatar(ui, at, Some(icon), &section.title, &section.title);
+        text_left += 22.0;
+    }
     let galley = ui.painter().layout_job(job);
     ui.painter().galley(
-        egui::pos2(rect.left() + 32.0, rect.center().y - galley.size().y / 2.0),
+        egui::pos2(text_left, rect.center().y - galley.size().y / 2.0),
         galley,
         palette.secondary,
     );
