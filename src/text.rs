@@ -30,9 +30,38 @@ pub fn hex(bytes: &[u8]) -> String {
     out
 }
 
+/// The bytes `text` spells in hex, either case; `None` unless it is pairs
+/// of hex digits and nothing else.
+pub fn unhex(text: &str) -> Option<Vec<u8>> {
+    let digit = |c: u8| {
+        char::from(c)
+            .to_digit(16)
+            .and_then(|d| u8::try_from(d).ok())
+    };
+    let (pairs, rest) = text.as_bytes().as_chunks::<2>();
+    if !rest.is_empty() {
+        return None;
+    }
+    pairs
+        .iter()
+        .map(|&[high, low]| Some(digit(high)? << 4 | digit(low)?))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unhex_undoes_hex() {
+        let bytes = [0x00, 0x0f, 0xa0, 0xff];
+        assert_eq!(unhex(&hex(&bytes)).as_deref(), Some(&bytes[..]));
+        assert_eq!(unhex("ABcd").as_deref(), Some(&[0xab, 0xcd][..]));
+        assert_eq!(unhex("").as_deref(), Some(&[][..]));
+        assert_eq!(unhex("abc"), None, "odd length");
+        assert_eq!(unhex("zz"), None);
+        assert_eq!(unhex("+1"), None);
+    }
 
     #[test]
     fn hex_is_lowercase_and_padded() {
