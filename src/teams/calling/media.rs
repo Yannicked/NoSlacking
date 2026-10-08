@@ -334,11 +334,9 @@ impl MediaConfig {
     }
 }
 
-/// How many more camera lines than one a meeting is offered (or answered
-/// with), each showing one more participant's camera. Written as the web
-/// client writes its own (see [`super::MoreCamera`]); as receive-only
-/// lines the meeting took them but then neither answered on the data
-/// channel nor sent audio.
+/// How many more camera lines than one a meeting may be offered (or
+/// answered with), each showing one more participant's camera, written as
+/// the web client writes its own (see [`super::MoreCamera`]).
 pub const MORE_CAMERAS: usize = 3;
 
 /// Where the sound goes and comes from.

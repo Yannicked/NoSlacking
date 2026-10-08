@@ -232,6 +232,8 @@ async fn run_meeting(
         camera_lines: Vec::new(),
         watching: Vec::new(),
         speaker: None,
+        syns: 0,
+        heard: 0,
     });
     call.relay = relay_for(client).await;
     let ended = call
@@ -484,6 +486,10 @@ struct InMeeting {
     watching: Vec<Option<(String, i64)>>,
     /// Who spoke last, by MRI, as the meeting says.
     speaker: Option<String>,
+    /// How many `syn`s went on the data channel since it opened.
+    syns: u32,
+    /// How many messages came on it since it opened.
+    heard: u32,
 }
 
 impl InMeeting {
@@ -521,6 +527,19 @@ struct KeepAlive {
     call_leg: String,
     every: Duration,
     next: tokio::time::Instant,
+}
+
+/// How long to wait for the meeting's `ack` before saying `syn` again.
+const SYN_AGAIN: Duration = Duration::from_secs(2);
+/// How many `syn`s to send before giving up on an answer.
+const SYNS: u32 = 5;
+
+/// Waits until `at`; never without one.
+async fn due(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// How long before Teams' keep-alive interval runs out to send one: at
@@ -669,6 +688,9 @@ impl Call {
     ) -> Result<(), Failure> {
         let ringing = tokio::time::sleep(RING_FOR);
         tokio::pin!(ringing);
+        // When to say `syn` again on the meeting's data channel, while it
+        // goes unanswered.
+        let mut syn_again: Option<tokio::time::Instant> = None;
         loop {
             tokio::select! {
                 push = inbox.recv() => {
@@ -695,7 +717,9 @@ impl Call {
                         if let Some(meeting) = &mut self.meeting {
                             meeting.channel = super::channel::Channel::default();
                             meeting.watching = vec![None; meeting.camera_lines.len()];
+                            meeting.syns = 1;
                             session.send_data(meeting.channel.syn());
+                            syn_again = Some(tokio::time::Instant::now() + SYN_AGAIN);
                         }
                     }
                     Some(MediaEvent::ChannelData(message)) => self.on_channel(&message, session, tell),
@@ -726,6 +750,9 @@ impl Call {
                     }
                 },
                 () = keep_alive_due(self.keep_alive.as_ref()) => self.send_keep_alive().await,
+                () = due(syn_again) => {
+                    syn_again = self.syn_again(session);
+                }
                 () = &mut ringing, if !self.accepted => {
                     log::info!("Teams call: nobody answered");
                     session.stop();
@@ -1261,6 +1288,27 @@ impl Call {
         Ok(())
     }
 
+    /// Says `syn` again while the meeting's data channel goes unanswered;
+    /// answers when to next.
+    fn syn_again(&mut self, session: &MediaSession) -> Option<tokio::time::Instant> {
+        let meeting = self.meeting.as_mut()?;
+        if meeting.channel.ready() {
+            return None;
+        }
+        if meeting.syns >= SYNS {
+            log::warn!(
+                "Teams meeting: no answer on the data channel after {} syns ({} messages heard)",
+                meeting.syns,
+                meeting.heard
+            );
+            return None;
+        }
+        meeting.syns += 1;
+        log::info!("Teams meeting: no answer on the data channel yet; syn again");
+        session.send_data(meeting.channel.syn());
+        Some(tokio::time::Instant::now() + SYN_AGAIN)
+    }
+
     /// Takes in a message on the meeting's data channel.
     fn on_channel(
         &mut self,
@@ -1271,6 +1319,18 @@ impl Call {
         let Some(meeting) = &mut self.meeting else {
             return;
         };
+        meeting.heard += 1;
+        if meeting.heard == 1 {
+            log::info!(
+                "Teams meeting: the data channel's first message ({} bytes, {})",
+                message.len(),
+                if super::channel::decode(message).is_some() {
+                    "readable"
+                } else {
+                    "not readable"
+                }
+            );
+        }
         for heard in meeting.channel.heard(message) {
             match heard {
                 super::channel::Heard::Ready => {
