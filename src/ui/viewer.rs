@@ -139,23 +139,33 @@ fn detail(viewer: &Viewer) -> Option<String> {
         return None;
     };
     Some(match &document.body {
-        Body::Sheets(sheets) if viewer.kind == Kind::Sheet => {
-            tn("{count} sheet", "{count} sheets", count(sheets.len()))
-        }
+        Body::Sheets(sheets) if viewer.kind == Kind::Sheet => tn(
+            "{count} sheet",
+            "{count} sheets",
+            crate::i18n::count(sheets.len()),
+        ),
         Body::Sheets(sheets) => tn(
             "{count} row",
             "{count} rows",
-            count(sheets.first().map_or(0, |s| s.rows.len())),
+            crate::i18n::count(sheets.first().map_or(0, |s| s.rows.len())),
         ),
         Body::Archive(archive) => format!(
             "{} · {}",
-            tn("{count} item", "{count} items", count(archive.count)),
+            tn(
+                "{count} item",
+                "{count} items",
+                crate::i18n::count(archive.count)
+            ),
             tf(
                 "{size} unpacked",
                 &[("size", &crate::ui::file_size(archive.unpacked))]
             )
         ),
-        Body::Text(text) => tn("{count} line", "{count} lines", count(text.lines.len())),
+        Body::Text(text) => tn(
+            "{count} line",
+            "{count} lines",
+            crate::i18n::count(text.lines.len()),
+        ),
     })
 }
 
@@ -163,11 +173,6 @@ fn detail(viewer: &Viewer) -> Option<String> {
 fn glyph(ui: &mut egui::Ui, icon: Icon, color: egui::Color32, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     icon.image(color, size).paint_at(ui, rect);
-}
-
-/// A count for [`tn`], which takes a `u32`.
-fn count(n: usize) -> u32 {
-    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 /// The panel under the bar: the file, or its loading or failure.
@@ -282,7 +287,7 @@ fn note_text(note: &Note) -> String {
         Note::LongCells { count: cut } => tn(
             "{count} long cell is cut short.",
             "{count} long cells are cut short.",
-            count(*cut),
+            crate::i18n::count(*cut),
         ),
         Note::Lines { shown } => tf(
             "Only the first {count} lines are shown.",
@@ -291,7 +296,7 @@ fn note_text(note: &Note) -> String {
         Note::LongLines { count: cut } => tn(
             "{count} long line is cut short.",
             "{count} long lines are cut short.",
-            count(*cut),
+            crate::i18n::count(*cut),
         ),
         Note::Entries { shown, total } => tf(
             "Only {shown} of {total} entries are listed.",

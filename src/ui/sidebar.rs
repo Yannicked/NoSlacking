@@ -710,7 +710,7 @@ fn section_view(
     // One last row: "N more" expands the section, "Show less" tidies it
     // again, and the choice is remembered like the folding.
     let last = if more > 0 {
-        let count = u32::try_from(more).unwrap_or(u32::MAX);
+        let count = crate::i18n::count(more);
         Some((tn("{count} more", "{count} more", count), true))
     } else if less {
         Some((t("Show less").into_owned(), false))

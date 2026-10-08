@@ -465,7 +465,7 @@ fn browse(app: &mut App, ctx: &egui::Context) {
                 crate::i18n::tn(
                     "{count} channel you can join",
                     "{count} channels you can join",
-                    u32::try_from(found.len()).unwrap_or(u32::MAX),
+                    crate::i18n::count(found.len()),
                 )
             };
             ui.horizontal(|ui| {

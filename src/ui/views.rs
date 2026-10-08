@@ -148,11 +148,7 @@ pub fn entries(
                     ))
                     .layout(egui::Layout::right_to_left(egui::Align::Center)),
             );
-            super::badge(
-                &mut badge,
-                palette,
-                u32::try_from(count).unwrap_or(u32::MAX),
-            );
+            super::badge(&mut badge, palette, crate::i18n::count(count));
         }
         theme::focus_ring(ui, &response, palette, theme::RADIUS_SMALL + 2);
         let spoken = if count > 0 {
@@ -688,7 +684,7 @@ fn unreads(
                     RichText::new(tn(
                         "{count} conversation with unread messages",
                         "{count} conversations with unread messages",
-                        u32::try_from(conversations.len()).unwrap_or(u32::MAX),
+                        crate::i18n::count(conversations.len()),
                     ))
                     .font(theme::regular(13.0))
                     .color(palette.secondary),
@@ -1023,7 +1019,7 @@ fn threads(
             }
             ThreadRow::Foot(i) => {
                 let thread = &threads[i];
-                let shown = u32::try_from(thread.replies.len()).unwrap_or(u32::MAX);
+                let shown = crate::i18n::count(thread.replies.len());
                 let total = thread.parent.reply_count.max(shown);
                 egui::Frame::new()
                     .inner_margin(Margin {
