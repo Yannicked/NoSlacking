@@ -896,9 +896,46 @@ engineering, as for the rest of the session sign-in.
         and Unmute: with headphones (is the voice
         clear, the level right?), then without (does the far end hear
         itself back?).
-      - Not done: choosing the input device (the system's default for
-        now), a level meter, reconnects, a microphone that fails while
-        open (it logs and goes quiet; mute and unmute again).
+      - Not done: a level meter, reconnects, a microphone that fails
+        while open (it logs and goes quiet; mute and unmute again).
+        Choosing the devices is done (below).
+- [x] **Choosing the camera, microphone and speaker** (2026-10-08,
+      `feat/device-pickers`, `src/devices.rs`): Settings → Huddles has a
+      picker each ("System default" / "First camera", then what is
+      plugged in, listed again whenever a picker opens), and in a call
+      a small arrow beside Mute (microphones and speakers) and beside
+      Video (cameras), in the call bar and the call window. A choice is
+      remembered by id and name: sound devices by cpal's id (ALSA's PCM
+      name, Core Audio's UID, the WASAPI endpoint id, which cpal keeps
+      across reboots and replugging), then by name; cameras by name,
+      since the helper's `/dev/videoN` or `native:N` is only where it is
+      plugged in now. One not connected is kept, shown "(not
+      connected)", and the default used meanwhile. Switching in a call
+      is live: the microphone reopens on the new device (one that will
+      not open leaves you muted, saying so), the speaker reopens on the
+      same feed and echo canceller's tap (one that will not open gives
+      way to the default, saying so), a camera that is on restarts on
+      the new one with a keyframe. Listing runs on blocking threads
+      (cameras through the helper's camera lane, which opens none). On
+      ALSA the pickers show one line per card (`sysdefault:CARD=…`) and
+      per HDMI/DisplayPort output, not ALSA's forty aliases.
+      - [ ] Try it: plug in a headset during a call, open the arrow
+            beside Mute and pick it (hear the others in it; do they hear
+            you, without echo, from its microphone?); pick the laptop's
+            speakers back; unplug the headset (does the speaker give way
+            to the default with a toast, and the picker say "not
+            connected"?). Two cameras: switch while on (the others see
+            the new one within a second), swap their USB ports and
+            reboot (the chosen one is still found).
+      - [ ] Linux with PipeWire or PulseAudio: cpal speaks ALSA, so a
+            chosen card is opened directly, not through the sound
+            server; while the server plays on that card it may be busy
+            (the speaker then plays on the default, saying so). Check
+            how often that happens; a PipeWire/Pulse host in cpal, or
+            ALSA's `pipewire:NODE=…` PCM, would choose the server's own
+            devices instead.
+      - [ ] Cameras of one model: `/dev/v4l/by-id/` ids from the
+            helper would tell them apart across replugging.
 - [ ] **File upstream: opus-decoder's collapse mask overflows.** A real
       huddle stopped playing in a debug build: opus-decoder panicked on
       the sound device's thread. Fixed in our patched copy
@@ -1080,11 +1117,10 @@ engineering, as for the rest of the session sign-in.
         are (YUY2/NV12 in memory; MJPG needs zune-jpeg on the stream's
         thread); dma-bufs from it would need YUY2/NV12 imports in
         `va/prime.rs` (RGB only today).
-  - [ ] Choosing the camera (Settings) when there is more than one;
-        today the first is taken. The helper lists them already
-        (`ListCameras`, ids `v4l2:/dev/videoN` or `native:N`) and starts
-        one by id (`CameraChoice::Device`); the app needs the setting and
-        a list in Settings (asked of the helper's camera lane).
+  - [x] Choosing the camera (Settings → Huddles, and the arrow beside
+        Video in a call), found by name in the helper's list, started by
+        its present id; see "Choosing the camera, microphone and
+        speaker" above.
   - [x] Stage 4 built, behind `huddle-share` (off by default; brings
         `huddle-camera`), not yet tried against Slack: Share beside Mute
         and Video (Ctrl+Shift+E), "You are sharing your screen" with Stop
