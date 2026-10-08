@@ -153,16 +153,7 @@ async fn live_event(live: &mut Option<Live>) -> LiveEvent {
             *up = None;
             LiveEvent::Up(ok)
         }
-        ending = async {
-            loop {
-                if let Some(ending) = ended.borrow_and_update().clone() {
-                    return ending;
-                }
-                if ended.changed().await.is_err() {
-                    return std::future::pending().await;
-                }
-            }
-        } => LiveEvent::Ended(ending),
+        ending = crate::huddle_audio::camera_send::ended(ended) => LiveEvent::Ended(ending),
         () = async {
             if refusals.recv().await.is_none() {
                 std::future::pending::<()>().await;
@@ -270,12 +261,6 @@ fn go_live(content: &ChimeJoin, share: RemoteCapture) -> Result<Live, String> {
     })
 }
 
-/// Stops the sending thread, and with it the share in the helper, off
-/// the async threads (it waits on the helper).
-async fn stop_sending(encoding: Option<Encoding>) {
-    let _ = tokio::task::spawn_blocking(move || drop(encoding)).await;
-}
-
 /// Stops a running share: its session leaves (waited for a moment), then
 /// its sending thread and the capture.
 async fn stop_live(live: Option<Live>) {
@@ -291,7 +276,7 @@ async fn stop_live(live: Option<Live>) {
             live.session.abort();
         }
     }
-    stop_sending(live.encoding.take()).await;
+    Encoding::stop(live.encoding.take()).await;
 }
 
 fn log_ending(report: &media::Report, result: &Result<(), media::Failure>) {
@@ -411,7 +396,7 @@ pub async fn run(
                         }
                     };
                     if let Some(mut finished) = finished {
-                        stop_sending(finished.encoding.take()).await;
+                        Encoding::stop(finished.encoding.take()).await;
                     }
                     tell(failure.map_or(ShareNews::Off, ShareNews::Failed));
                 }

@@ -501,6 +501,19 @@ pub enum Ending {
     Failed(Failure),
 }
 
+/// How the capture behind `ended` ended, once it has; never if its
+/// sender is gone without saying.
+pub async fn ended(ended: &mut watch::Receiver<Option<Ending>>) -> Ending {
+    loop {
+        if let Some(ending) = ended.borrow_and_update().clone() {
+            return ending;
+        }
+        if ended.changed().await.is_err() {
+            return std::future::pending().await;
+        }
+    }
+}
+
 /// What a camera that would not start, or stopped, tells the interface:
 /// a camera the helper could not open, or no helper (`given_up`: none
 /// installed, or it keeps failing) or one that stopped.
@@ -593,6 +606,14 @@ pub struct Encoding {
 }
 
 impl Encoding {
+    /// Stops the sending thread, and with it the capture in the helper,
+    /// off the async threads: joining it waits on the helper.
+    pub async fn stop(encoding: Option<Self>) {
+        if encoding.is_some() {
+            let _ = tokio::task::spawn_blocking(move || drop(encoding)).await;
+        }
+    }
+
     /// Starts sending what `capture` encodes into `frames` (none: only
     /// its self-view is wanted, the demo's camera), as `control` says;
     /// tells `ended` if the capture ends by itself.
