@@ -219,7 +219,7 @@ pub fn renegotiation_answer(
     media_content.client_location = Some("NL".to_owned());
     RenegotiationAnswer {
         media_answer: OurMediaAnswer {
-            call_modalities: vec!["Audio".to_owned()],
+            call_modalities: crate::teams::calling::sdp::modalities(answer),
             sender: me.clone(),
             links: AcknowledgementLinks {
                 media_acknowledgement: Some(callbacks.link(Scope::Call, "mediaAcknowledgement")),
@@ -516,6 +516,49 @@ impl CallApi {
             media_answer_url,
             Some(body),
             "answer a renegotiation",
+        )
+        .await
+        .map(drop)
+    }
+
+    /// Starts a renegotiation of ours (§C.6): our `offer` on the media leg
+    /// `media_leg_id`, posted to the far end's `mediaRenegotiation` link
+    /// as the web client's `StartRenegotiation` does. Its answer comes as
+    /// a `call/mediaAnswer` push to the link given here, a refusal to
+    /// `call/rejection`; the HTTP answer says nothing.
+    pub async fn renegotiate(
+        &self,
+        url: &str,
+        offer: &str,
+        media_leg_id: &str,
+    ) -> Result<(), Failure> {
+        let mut media_content = MediaContent::ours(offer.to_owned(), media_leg_id.to_owned());
+        media_content.client_location = Some("NL".to_owned());
+        let body = serde_json::json!({
+            "mediaNegotiation": {
+                "callModalities": crate::teams::calling::sdp::modalities(offer),
+                "sender": self.me,
+                "links": {
+                    "mediaAnswer": self.callbacks.link(Scope::Call, "mediaAnswer"),
+                    "rejection": self.callbacks.link(Scope::Call, "rejection"),
+                },
+                "mediaContent": media_content,
+            }
+        });
+        self.send(reqwest::Method::POST, url, Some(body), "renegotiate")
+            .await
+            .map(drop)
+    }
+
+    /// Acknowledges the far end's answer to a renegotiation of ours, at
+    /// its `mediaAcknowledgement` link, as the web client does (an empty
+    /// body).
+    pub async fn acknowledge_answer(&self, url: &str) -> Result<(), Failure> {
+        self.send(
+            reqwest::Method::POST,
+            url,
+            Some(serde_json::Value::Null),
+            "acknowledge an answer",
         )
         .await
         .map(drop)

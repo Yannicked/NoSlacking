@@ -139,6 +139,9 @@ async fn probe(options: &Options, handle: tokio::runtime::Handle) -> i32 {
                     log::info!("teams call probe: audio flows both ways");
                 }
                 Some(CallEvent::AnsweredElsewhere) => {}
+                Some(CallEvent::FarEndShare(on)) => {
+                    log::info!("teams call probe: the far end's screen share {}", if on { "shows" } else { "stopped" });
+                }
                 Some(CallEvent::FarEndVideo(on)) => {
                     log::info!("teams call probe: the far end's camera {}", if on { "shows" } else { "stopped" });
                 }

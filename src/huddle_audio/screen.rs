@@ -232,6 +232,17 @@ impl Decoding {
         self.send(Job::Start, true);
     }
 
+    /// How many frames wait to be decoded: a sender whose frames come in
+    /// bursts holds the rest back while this is high, rather than
+    /// overflow the queue (which costs a keyframe).
+    pub fn waiting(&self) -> usize {
+        self.queue()
+            .jobs
+            .iter()
+            .filter(|job| matches!(job, Job::Frame { .. }))
+            .count()
+    }
+
     /// The next frame of the watched stream; `contiguous` false when
     /// frames before it were lost.
     pub fn push(&mut self, unit: Vec<u8>, contiguous: bool) {

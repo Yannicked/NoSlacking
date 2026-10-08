@@ -36,6 +36,9 @@ const LEAVE_WITHIN: Duration = Duration::from_secs(5);
 pub enum Control {
     /// Mute (or unmute) the microphone, and tell the far end.
     Mute(bool),
+    /// Start (or stop) sending our screen share: a renegotiation of
+    /// ours turns the share line on or off (§C.6).
+    Share(bool),
     /// End the call.
     HangUp,
 }
@@ -53,6 +56,8 @@ pub enum CallEvent {
     FarEndMuted(bool),
     /// The far end's camera started (`true`) or stopped showing.
     FarEndVideo(bool),
+    /// The far end's screen share started (`true`) or stopped showing.
+    FarEndShare(bool),
     /// An incoming call stopped ringing because another device of yours
     /// (or another delivery of the same call here) picked it up: not a
     /// missed call.
@@ -270,6 +275,28 @@ struct Call {
     /// What the roster last said of them: its version, and whether
     /// they were muted.
     far_end: Option<(u64, bool)>,
+    /// The far end's latest description: the shape our own offers take.
+    last_remote: Option<RemoteMedia>,
+    /// Where our renegotiations go: the far end's `mediaRenegotiation`.
+    renegotiation: Option<String>,
+    /// The call's media leg id, which every SDP of ours names.
+    leg: String,
+    /// Our screen share as renegotiated.
+    share: ShareState,
+}
+
+/// Where our screen share's renegotiation stands.
+#[derive(Debug, Default)]
+struct ShareState {
+    /// Whether we want to share.
+    wanted: bool,
+    /// Whether we share as last agreed.
+    agreed: bool,
+    /// The sharing an offer of ours asked for, while it waits for its
+    /// answer.
+    offered: Option<bool>,
+    /// Whether a refused offer was sent again already.
+    retried: bool,
 }
 
 /// The call leg's keep-alive: its link, and when it is next due.
@@ -321,6 +348,10 @@ impl Call {
             keep_alive: None,
             callee: String::new(),
             far_end: None,
+            last_remote: None,
+            renegotiation: None,
+            leg: String::new(),
+            share: ShareState::default(),
         }
     }
 
@@ -334,6 +365,7 @@ impl Call {
         tell: &(impl Fn(CallEvent) + Send),
     ) -> Result<(), Failure> {
         self.callee = callee.to_owned();
+        self.leg = self.api.ids().media_leg_id.clone();
         let offer = sdp::offer(local);
         self.conversation = Some(self.api.create_call(callee, &offer).await?);
         log::info!("Teams call: placed, ringing");
@@ -372,6 +404,7 @@ impl Call {
                         }
                     }
                     Some(MediaEvent::FarVideo(on)) => tell(CallEvent::FarEndVideo(on)),
+                    Some(MediaEvent::FarShare(on)) => tell(CallEvent::FarEndShare(on)),
                     Some(MediaEvent::AudioFlowing) => {
                         log::info!("Teams call: audio flows both ways");
                         tell(CallEvent::AudioFlowing);
@@ -384,6 +417,11 @@ impl Call {
                 },
                 asked = control.recv() => match asked {
                     Some(Control::Mute(muted)) => self.mute(session, muted).await,
+                    Some(Control::Share(on)) => {
+                        self.share.wanted = on;
+                        self.share.retried = false;
+                        self.offer_share(local).await;
+                    }
                     // Asked to stop, or whoever steered the call is gone.
                     Some(Control::HangUp) | None => {
                         session.stop();
@@ -521,6 +559,8 @@ impl Call {
         tell: &(impl Fn(CallEvent) + Send),
     ) -> Result<(), Failure> {
         session.apply_remote(remote).map_err(media_failure)?;
+        self.last_remote = Some(remote.clone());
+        self.leg = call.offer.media_leg_id.clone();
         let answer = sdp::answer(local, remote);
         // As the web client does before picking up: not muted.
         if let Some(url) = self
@@ -541,6 +581,7 @@ impl Call {
             .accept(url, &answer, &call.offer.media_leg_id)
             .await?;
         log::info!("Teams call: picked up here");
+        self.renegotiation = acknowledged.links.media_renegotiation.clone();
         self.accepted = true;
         if let (Some(call_leg), Some(interval)) = (
             acknowledged.links.call_leg.clone(),
@@ -587,7 +628,24 @@ impl Call {
         match push {
             Push::MediaAnswer(answer) => {
                 log::info!("Teams call: the far end answered the offer");
-                apply(session, &answer.media_content.blob);
+                if let Some(remote) = apply(session, &answer.media_content.blob) {
+                    self.last_remote = Some(remote);
+                }
+                // The answer to a renegotiation of ours: acknowledged, and
+                // the next one sent if the wish changed meanwhile.
+                if let Some(offered) = self.share.offered.take() {
+                    self.share.agreed = offered;
+                    if let Some(url) = &answer.links.media_acknowledgement
+                        && let Err(error) = self.api.acknowledge_answer(url).await
+                    {
+                        log::info!("Teams call: answer not acknowledged: {error:?}");
+                    }
+                    log::info!(
+                        "Teams call: our screen share is {}",
+                        if offered { "on" } else { "off" }
+                    );
+                    self.offer_share(local).await;
+                }
             }
             Push::Acceptance(acceptance) => {
                 log::info!("Teams call: picked up");
@@ -608,9 +666,12 @@ impl Call {
                         next: tokio::time::Instant::now() + every,
                     });
                 }
-                if let Some(content) = &acceptance.media_content {
-                    apply(session, &content.blob);
+                if let Some(content) = &acceptance.media_content
+                    && let Some(remote) = apply(session, &content.blob)
+                {
+                    self.last_remote = Some(remote);
                 }
+                self.renegotiation = acceptance.links.media_renegotiation.clone();
                 if self.connected {
                     tell(CallEvent::Live);
                 }
@@ -626,6 +687,7 @@ impl Call {
             Push::MediaNegotiation(negotiation) => {
                 // Unusable offers are logged by `apply`; the call goes on.
                 let remote = apply(session, &negotiation.media_content.blob)?;
+                self.last_remote = Some(remote.clone());
                 let Some(url) = negotiation.links.media_answer.as_deref() else {
                     log::warn!("Teams call: a renegotiation without an answer link");
                     return None;
@@ -636,6 +698,12 @@ impl Call {
                 match self.api.answer_renegotiation(url, &answer, &leg).await {
                     Ok(()) => log::info!("Teams call: renegotiation answered"),
                     Err(error) => log::warn!("Teams call: renegotiation not answered: {error:?}"),
+                }
+                // Ours, crossed by this one, is refused: sent again once.
+                if self.share.offered.is_some() && !self.share.retried {
+                    self.share.offered = None;
+                    self.share.retried = true;
+                    self.offer_share(local).await;
                 }
             }
             Push::MediaAcknowledgement(ack) => {
@@ -665,6 +733,13 @@ impl Call {
                     tell(CallEvent::FarEndMuted(muted));
                 }
             }
+            Push::Other(name) if name == "rejection" || name == "mediaNegotiationFailure" => {
+                log::info!("Teams call: our renegotiation was refused ({name})");
+                if self.share.offered.take().is_some() && !self.share.retried {
+                    self.share.retried = true;
+                    self.offer_share(local).await;
+                }
+            }
             Push::Other(name) => log::debug!("Teams call: push {name} not acted on"),
         }
         None
@@ -689,6 +764,35 @@ impl Call {
         let call_leg = keep_alive.call_leg.clone();
         if let Err(error) = self.api.keep_alive(&call_leg).await {
             log::warn!("Teams call: keep-alive refused: {error:?}");
+        }
+    }
+
+    /// Offers the screen share as wished, if that is not what was last
+    /// agreed and no offer of ours waits for its answer: our own offer in
+    /// the shape of the far end's latest description.
+    async fn offer_share(&mut self, local: &mut LocalMedia) {
+        if self.share.offered.is_some() || self.share.wanted == self.share.agreed {
+            return;
+        }
+        let (Some(url), Some(last)) = (self.renegotiation.clone(), self.last_remote.as_ref())
+        else {
+            log::warn!("Teams call: no way to renegotiate the screen share yet");
+            return;
+        };
+        local.sharing = self.share.wanted;
+        local.session_version += 1;
+        let offer = sdp::reoffer(local, last);
+        match self.api.renegotiate(&url, &offer, &self.leg).await {
+            Ok(()) => {
+                log::info!(
+                    "Teams call: asked to {} sharing our screen",
+                    if self.share.wanted { "start" } else { "stop" }
+                );
+                self.share.offered = Some(self.share.wanted);
+            }
+            Err(error) => {
+                log::warn!("Teams call: the screen share was not renegotiated: {error:?}")
+            }
         }
     }
 

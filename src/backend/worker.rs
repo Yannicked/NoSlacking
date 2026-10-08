@@ -2062,6 +2062,8 @@ impl Worker {
                 crate::people::Command::LeaveHuddle => self.teams_call.stop(),
                 #[cfg(feature = "huddle-camera")]
                 crate::people::Command::CameraHuddle { on } => self.teams_call.set_camera(on),
+                #[cfg(feature = "huddle-share")]
+                crate::people::Command::ShareHuddle { request } => self.teams_call.share(request),
                 crate::people::Command::MuteHuddle { muted } => self.teams_call.set_muted(muted),
                 _ => {}
             }

@@ -110,6 +110,9 @@ pub struct RemoteMedia {
     /// The H.264 the camera line (`main-video`) offers or answers, if it
     /// has one we can use.
     pub video: Option<VideoCodec>,
+    /// The H.264 the screen share's line (`applicationsharing-video`)
+    /// offers or answers, if it is in use and has one we can use.
+    pub share_video: Option<VideoCodec>,
     /// Every m-line, in order.
     pub lines: Vec<Line>,
 }
@@ -128,10 +131,20 @@ impl RemoteMedia {
             .find(|l| l.label.as_deref() == Some(CAMERA_LABEL))
             .or_else(|| video().find(|l| l.label.is_none()))
     }
+
+    /// The screen share's m-line (`applicationsharing-video`), in use or
+    /// not.
+    pub fn share(&self) -> Option<&Line> {
+        self.lines
+            .iter()
+            .find(|l| l.kind == LineKind::Video && l.label.as_deref() == Some(SHARE_LABEL))
+    }
 }
 
 /// The label of the camera's video line, which Microsoft keys it by.
 pub const CAMERA_LABEL: &str = "main-video";
+/// The label of the screen share's video line.
+pub const SHARE_LABEL: &str = "applicationsharing-video";
 
 /// An H.264 codec on a video line: packetization mode 1, the only one
 /// str0m and our encoder speak.
@@ -180,6 +193,19 @@ pub struct LocalMedia {
     /// for the whole call, the camera sending only while it is on, so
     /// turning it on needs no renegotiation.
     pub video_direction: Direction,
+    /// The SSRCs our screen share goes out on (and its resends), or
+    /// `None` to keep the share line `inactive` in an offer and reject it
+    /// in an answer (a build without sharing).
+    pub share_ssrc: Option<u32>,
+    pub share_rtx_ssrc: Option<u32>,
+    /// The share line's H.264 and retransmission payload types.
+    pub share_pt: u8,
+    pub share_rtx: Option<u8>,
+    /// Whether we share our screen now: the share line is `sendonly` in
+    /// our offers, and kept in our answers even to a far end that does
+    /// not share. Not sharing, an offer leaves it `inactive` and an
+    /// answer takes only what the far end shares.
+    pub sharing: bool,
     /// The SSRC of the data m-line (`m=x-data`), or `None` to leave the
     /// data line out of an offer and reject it in an answer. Nothing
     /// speaks SCTP over it yet; offering it is only to look like the web

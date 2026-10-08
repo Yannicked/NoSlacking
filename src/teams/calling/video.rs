@@ -1,6 +1,12 @@
-//! The camera in a Teams call: the far end's on the `main-video` line,
-//! decoded by the video helper into a [`Gallery`] tile, and ours from the
-//! camera's encoder, both through the huddle's video system.
+//! The pictures in a Teams call: the camera, the far end's on the
+//! `main-video` line decoded by the video helper into a [`Gallery`] tile
+//! and ours from the camera's encoder; and the screen share, on the
+//! `applicationsharing-video` line, decoded into a [`Screen`] and ours
+//! from the helper's screen capture. Both go through the huddle's video
+//! system, one `CallVideo` per line.
+//!
+//! The share line is used only while someone shares: the sharer
+//! renegotiates it on (`docs/research/teams-calls.md` §C.6).
 //!
 //! A 1:1 call's video is only the SDP (`docs/research/teams-calls.md`
 //! §D): the camera line is kept `sendrecv` for the whole call and our
@@ -23,6 +29,8 @@ use tokio::sync::mpsc;
 
 #[cfg(feature = "huddle-video")]
 use crate::huddle_audio::gallery::{CameraDecoding, Gallery};
+#[cfg(feature = "huddle-video")]
+use crate::huddle_audio::screen::{self, Screen};
 
 use super::media::MediaEvent;
 
@@ -61,6 +69,119 @@ pub struct Video {
     /// Our camera's encoded pictures, while it is on.
     #[cfg(feature = "huddle-camera")]
     pub camera: Option<CameraFeed>,
+    /// The far end's screen share is shown here.
+    #[cfg(feature = "huddle-video")]
+    pub screen: Option<Screen>,
+    /// Our screen share's encoded pictures, while we share.
+    #[cfg(feature = "huddle-share")]
+    pub share: Option<CameraFeed>,
+}
+
+/// Which of a call's video lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Which {
+    Camera,
+    Share,
+}
+
+/// One line's ends: where the far end's pictures show, where ours come
+/// from.
+#[derive(Default)]
+pub(super) struct Ends {
+    #[cfg(feature = "huddle-video")]
+    shown: Option<Shown>,
+    #[cfg(feature = "huddle-camera")]
+    feed: Option<CameraFeed>,
+}
+
+impl Video {
+    /// The camera line's ends and the share line's.
+    pub(super) fn split(self) -> (Ends, Ends) {
+        #[cfg(feature = "huddle-video")]
+        let (tile, screen) = (
+            self.gallery.map(Shown::tile),
+            self.screen.map(Shown::screen),
+        );
+        let camera = Ends {
+            #[cfg(feature = "huddle-video")]
+            shown: tile.flatten(),
+            #[cfg(feature = "huddle-camera")]
+            feed: self.camera,
+        };
+        let share = Ends {
+            #[cfg(feature = "huddle-video")]
+            shown: screen.flatten(),
+            #[cfg(feature = "huddle-share")]
+            feed: self.share,
+            #[cfg(all(feature = "huddle-camera", not(feature = "huddle-share")))]
+            feed: None,
+        };
+        #[cfg(not(any(feature = "huddle-video", feature = "huddle-camera")))]
+        let _ = self;
+        (camera, share)
+    }
+}
+
+/// Where the far end's pictures on a line are decoded and shown.
+#[cfg(feature = "huddle-video")]
+enum Shown {
+    /// A tile in the call window's gallery, under [`FAR_CAMERA`].
+    Tile(CameraDecoding, Gallery),
+    /// The call window's shared screen.
+    Screen(screen::Decoding, Screen),
+}
+
+#[cfg(feature = "huddle-video")]
+impl Shown {
+    fn tile(gallery: Gallery) -> Option<Self> {
+        CameraDecoding::spawn(gallery.clone())
+            .map_err(|error| log::warn!("video: no decoding thread: {error}"))
+            .ok()
+            .map(|decoding| Self::Tile(decoding, gallery))
+    }
+
+    fn screen(screen: Screen) -> Option<Self> {
+        screen::Decoding::spawn(screen.clone())
+            .map_err(|error| log::warn!("video: no decoding thread: {error}"))
+            .ok()
+            .map(|decoding| Self::Screen(decoding, screen))
+    }
+
+    fn start(&mut self) {
+        match self {
+            Self::Tile(decoding, _) => decoding.start(FAR_CAMERA),
+            Self::Screen(decoding, _) => decoding.start(),
+        }
+    }
+
+    fn stop(&mut self) {
+        match self {
+            Self::Tile(decoding, _) => decoding.stop(FAR_CAMERA),
+            Self::Screen(decoding, _) => decoding.stop(),
+        }
+    }
+
+    fn push(&mut self, unit: Vec<u8>, contiguous: bool) {
+        match self {
+            Self::Tile(decoding, _) => decoding.push(FAR_CAMERA, unit, contiguous),
+            Self::Screen(decoding, _) => decoding.push(unit, contiguous),
+        }
+    }
+
+    fn waiting(&self) -> usize {
+        match self {
+            Self::Tile(decoding, _) => decoding.waiting(FAR_CAMERA),
+            Self::Screen(decoding, _) => decoding.waiting(),
+        }
+    }
+
+    /// Whether the decoder asked for a keyframe since last asked.
+    fn take_keyframe_wish(&self) -> bool {
+        match self {
+            Self::Tile(_, gallery) => gallery.take_keyframe_wish(FAR_CAMERA),
+            Self::Screen(_, screen) => screen.take_keyframe_wish(),
+        }
+    }
 }
 
 impl std::fmt::Debug for Video {
@@ -111,8 +232,9 @@ struct Report {
     held: usize,
 }
 
-/// The camera line of one call.
+/// One video line of a call: the camera's or the share's.
 pub(super) struct CallVideo {
+    which: Which,
     mid: Mid,
     /// Our camera's SSRC, and its resends', which str0m must have
     /// whenever the codec has a retransmission payload type (it panics
@@ -149,9 +271,8 @@ pub(super) struct CallVideo {
     backlog: VecDeque<Vec<u8>>,
     backlog_contiguous: bool,
     #[cfg(feature = "huddle-video")]
-    decoding: Option<CameraDecoding>,
-    #[cfg(feature = "huddle-video")]
-    gallery: Option<Gallery>,
+    shown: Option<Shown>,
+    /// Our pictures for the line: the camera's, or the screen's.
     #[cfg(feature = "huddle-camera")]
     camera: Option<CameraFeed>,
     /// Whether our camera is on, and whether its next picture must be a
@@ -165,14 +286,15 @@ pub(super) struct CallVideo {
 }
 
 impl CallVideo {
-    /// The camera line `mid` with H.264 at `pt`, sending on `ssrc`;
+    /// The `which` line `mid` with H.264 at `pt`, sending on `ssrc`;
     /// declared to `rtc` here.
     pub(super) fn new(
         rtc: &mut Rtc,
+        which: Which,
         mid: Mid,
         (pt, rtx): (u8, Option<u8>),
         ssrc: u32,
-        video: Video,
+        ends: Ends,
         tell: mpsc::UnboundedSender<MediaEvent>,
     ) -> Self {
         let rtx_ssrc = rtx.map(|_| {
@@ -186,14 +308,8 @@ impl CallVideo {
         let mut api = rtc.direct_api();
         api.declare_media(mid, MediaKind::Video);
         api.declare_stream_tx(ssrc.into(), rtx_ssrc.map(Into::into), mid, None);
-        #[cfg(feature = "huddle-video")]
-        let decoding = video.gallery.clone().and_then(|gallery| {
-            CameraDecoding::spawn(gallery)
-                .map_err(|error| log::warn!("video: no decoding thread: {error}"))
-                .ok()
-        });
         #[cfg(feature = "huddle-camera")]
-        let (camera, camera_on) = match video.camera {
+        let (camera, camera_on) = match ends.feed {
             Some(mut feed) => {
                 let on = *feed.on.borrow_and_update();
                 (Some(feed), on)
@@ -201,9 +317,10 @@ impl CallVideo {
             None => (None, false),
         };
         #[cfg(not(any(feature = "huddle-video", feature = "huddle-camera")))]
-        let _ = video;
-        log::info!("video: camera line {mid}, H.264 at {pt}, our SSRC {ssrc}");
+        let _ = ends;
+        log::info!("video: {which:?} line {mid}, H.264 at {pt}, our SSRC {ssrc}");
         Self {
+            which,
             mid,
             ssrc,
             rtx_ssrc,
@@ -225,9 +342,7 @@ impl CallVideo {
             backlog: VecDeque::new(),
             backlog_contiguous: true,
             #[cfg(feature = "huddle-video")]
-            decoding,
-            #[cfg(feature = "huddle-video")]
-            gallery: video.gallery,
+            shown: ends.shown,
             #[cfg(feature = "huddle-camera")]
             camera,
             #[cfg(feature = "huddle-camera")]
@@ -340,10 +455,10 @@ impl CallVideo {
         if !self.showing {
             self.showing = true;
             #[cfg(feature = "huddle-video")]
-            if let Some(decoding) = &mut self.decoding {
-                decoding.start(FAR_CAMERA);
+            if let Some(shown) = &mut self.shown {
+                shown.start();
             }
-            let _ = self.tell.send(MediaEvent::FarVideo(true));
+            let _ = self.tell.send(self.event(true));
             self.want_pli = true;
         }
         self.report.pictures += 1;
@@ -363,11 +478,7 @@ impl CallVideo {
             self.unanswered = 0;
         }
         #[cfg(feature = "huddle-video")]
-        if self
-            .gallery
-            .as_ref()
-            .is_some_and(|g| g.take_keyframe_wish(FAR_CAMERA))
-        {
+        if self.shown.as_ref().is_some_and(Shown::take_keyframe_wish) {
             self.want_pli = true;
         }
         self.backlog.push_back(data.data.to_vec());
@@ -387,12 +498,12 @@ impl CallVideo {
     /// Hands waiting frames to the decoder while its queue has room.
     fn feed(&mut self) {
         #[cfg(feature = "huddle-video")]
-        if let Some(decoding) = &mut self.decoding {
-            while !self.backlog.is_empty() && decoding.waiting(FAR_CAMERA) < FEED_AHEAD {
+        if let Some(shown) = &mut self.shown {
+            while !self.backlog.is_empty() && shown.waiting() < FEED_AHEAD {
                 let Some(unit) = self.backlog.pop_front() else {
                     break;
                 };
-                decoding.push(FAR_CAMERA, unit, self.backlog_contiguous);
+                shown.push(unit, self.backlog_contiguous);
                 self.backlog_contiguous = true;
             }
             return;
@@ -416,7 +527,10 @@ impl CallVideo {
     /// What is due at `now`: a keyframe request, the far end's camera
     /// gone quiet.
     pub(super) fn on_time(&mut self, rtc: &mut Rtc, now: Instant) {
+        // A still shared screen may send rarely: a share stops when it is
+        // renegotiated off.
         if self.showing
+            && self.which == Which::Camera
             && self
                 .last_picture
                 .is_some_and(|at| now.saturating_duration_since(at) >= FAR_STOPPED)
@@ -479,7 +593,7 @@ impl CallVideo {
     pub(super) fn deadline(&self) -> Option<Instant> {
         let quiet = self
             .last_picture
-            .filter(|_| self.showing)
+            .filter(|_| self.showing && self.which == Which::Camera)
             .map(|at| at + FAR_STOPPED);
         let pli = (self.want_pli && self.showing)
             .then(|| self.last_pli.map_or_else(Instant::now, |at| at + PLI_EVERY));
@@ -502,10 +616,19 @@ impl CallVideo {
         self.backlog_contiguous = true;
         self.unanswered = 0;
         #[cfg(feature = "huddle-video")]
-        if let Some(decoding) = &mut self.decoding {
-            decoding.stop(FAR_CAMERA);
+        if let Some(shown) = &mut self.shown {
+            shown.stop();
         }
-        let _ = self.tell.send(MediaEvent::FarVideo(false));
+        let _ = self.tell.send(self.event(false));
+    }
+
+    /// What the media tells of the far end's pictures on this line
+    /// starting (`true`) or stopping.
+    fn event(&self, on: bool) -> MediaEvent {
+        match self.which {
+            Which::Camera => MediaEvent::FarVideo(on),
+            Which::Share => MediaEvent::FarShare(on),
+        }
     }
 
     /// What the camera has next: never, without one.

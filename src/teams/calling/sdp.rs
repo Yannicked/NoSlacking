@@ -15,7 +15,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use super::{
     CAMERA_LABEL, Candidate, CandidateKind, Direction, Line, LineKind, LocalMedia, RemoteMedia,
-    Setup, VideoCodec,
+    SHARE_LABEL, Setup, VideoCodec,
 };
 
 /// Why an SDP could not be read.
@@ -180,6 +180,10 @@ pub fn read(sdp: &str) -> Result<RemoteMedia, SdpError> {
                 .find(|l| l.media == "video" && l.port != 0 && l.attr("label").is_none())
         });
     let video = camera.and_then(h264_of);
+    let share_video = raw
+        .iter()
+        .find(|l| l.media == "video" && l.port != 0 && l.attr("label") == Some(SHARE_LABEL))
+        .and_then(h264_of);
 
     let session_direction = direction_in(&session);
     let lines = raw
@@ -210,6 +214,7 @@ pub fn read(sdp: &str) -> Result<RemoteMedia, SdpError> {
         candidates,
         opus_pt,
         video,
+        share_video,
         lines,
     })
 }
@@ -470,26 +475,42 @@ pub fn offer(local: &LocalMedia) -> String {
     } else {
         (108, 109)
     };
-    for (mid, label) in [("1", CAMERA_LABEL), ("2", "applicationsharing-video")] {
+    for (mid, label) in [("1", CAMERA_LABEL), ("2", SHARE_LABEL)] {
         // The camera's line carries our camera when this build has video.
         if label == CAMERA_LABEL
             && let Some(ssrc) = local.video_ssrc
         {
-            let setup = setup_text(local.setup);
-            let codec = VideoCodec {
-                pt: local.video_pt,
-                rtx: local.video_rtx,
-            };
-            camera_line(
-                &mut out,
-                local,
+            let line = VideoLine {
                 mid,
-                codec,
-                (ssrc, local.video_rtx_ssrc),
-                local.video_direction,
-                setup,
-                false,
-            );
+                label: CAMERA_LABEL,
+                codec: VideoCodec {
+                    pt: local.video_pt,
+                    rtx: local.video_rtx,
+                },
+                ssrcs: (ssrc, local.video_rtx_ssrc),
+                direction: local.video_direction,
+                share: false,
+            };
+            video_line(&mut out, local, &line, setup_text(local.setup), false);
+            continue;
+        }
+        // The share line carries our screen while we share.
+        if label == SHARE_LABEL
+            && local.sharing
+            && let Some(ssrc) = local.share_ssrc
+        {
+            let line = VideoLine {
+                mid,
+                label: SHARE_LABEL,
+                codec: VideoCodec {
+                    pt: local.share_pt,
+                    rtx: local.share_rtx,
+                },
+                ssrcs: (ssrc, local.share_rtx_ssrc),
+                direction: Direction::SendOnly,
+                share: true,
+            };
+            video_line(&mut out, local, &line, setup_text(local.setup), false);
             continue;
         }
         push(&mut out, &format!("m=video {port} RTP/SAVP {h264} {rtx}"));
@@ -545,6 +566,30 @@ pub fn offer(local: &LocalMedia) -> String {
 /// extension ids, which [`RemoteMedia`] does not carry, and audio works
 /// without them.
 pub fn answer(local: &LocalMedia, remote: &RemoteMedia) -> String {
+    lines_for(local, remote, Role::Answer)
+}
+
+/// Writes our own offer in the middle of a call, to start or stop our
+/// screen share (§C.6): the lines of the call's `last` description, in
+/// its order and with its mids and payload types, each as we want it.
+/// The share line is `sendonly` while `local.sharing` and rejected
+/// otherwise, as the far end's own renegotiations drop it; the DTLS role
+/// stays the one the call has.
+pub fn reoffer(local: &LocalMedia, last: &RemoteMedia) -> String {
+    lines_for(local, last, Role::Offer)
+}
+
+/// Which way [`lines_for`] writes: an answer takes from the far end's
+/// offer; our own offer says what we want.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Answer,
+    Offer,
+}
+
+/// The SDP for the lines of `remote`, in its order and number, as `role`
+/// says (see [`answer`] and [`reoffer`]).
+fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
     let (address, port) = media_address(local);
     let setup = setup_text(answer_setup(remote.setup));
     let audio_index = remote
@@ -552,18 +597,48 @@ pub fn answer(local: &LocalMedia, remote: &RemoteMedia) -> String {
         .iter()
         .position(|l| l.kind == LineKind::Audio && l.port != 0);
     let camera_mid = remote.camera().map(|l| l.mid.as_str());
+    let share_mid = remote.share().map(|l| l.mid.as_str());
+    // The share line's H.264: its own, or, re-enabling a line that was
+    // dropped, the camera's (one codec, one number in a bundle).
+    let share_codec = remote.share_video.or(remote.video);
+    let sends = |d: Direction| matches!(d, Direction::SendRecv | Direction::SendOnly);
+    // What we want of the share line, and what it comes to.
+    let share_direction = |theirs: Direction| match role {
+        Role::Offer => Direction::SendOnly,
+        Role::Answer => {
+            let ours = if local.sharing {
+                Direction::SendRecv
+            } else {
+                Direction::RecvOnly
+            };
+            answer_direction(ours, theirs)
+        }
+    };
     let accepted = |i: usize, line: &Line| -> bool {
-        line.port != 0
-            && match line.kind {
-                LineKind::Audio => Some(i) == audio_index && remote.opus_pt.is_some(),
-                LineKind::Data => local.data_ssrc.is_some(),
-                LineKind::Video => {
-                    Some(line.mid.as_str()) == camera_mid
-                        && local.video_ssrc.is_some()
-                        && remote.video.is_some()
-                }
-                LineKind::Other => false,
+        let open = line.port != 0;
+        match line.kind {
+            LineKind::Audio => open && Some(i) == audio_index && remote.opus_pt.is_some(),
+            LineKind::Data => open && local.data_ssrc.is_some(),
+            LineKind::Video if Some(line.mid.as_str()) == share_mid => {
+                local.share_ssrc.is_some()
+                    && share_codec.is_some()
+                    && match role {
+                        // Ours to bring back, while we share.
+                        Role::Offer => local.sharing,
+                        // Theirs to share, or ours to.
+                        Role::Answer => {
+                            open && (sends(line.direction) || local.sharing)
+                                && share_direction(line.direction) != Direction::Inactive
+                        }
+                    }
             }
+            LineKind::Video => {
+                open && Some(line.mid.as_str()) == camera_mid
+                    && local.video_ssrc.is_some()
+                    && remote.video.is_some()
+            }
+            LineKind::Other => false,
+        }
     };
     let kept: Vec<&str> = remote
         .lines
@@ -585,6 +660,10 @@ pub fn answer(local: &LocalMedia, remote: &RemoteMedia) -> String {
         }
         let first = !candidates_written;
         candidates_written = true;
+        let direction = |ours: Direction| match role {
+            Role::Answer => answer_direction(ours, line.direction),
+            Role::Offer => ours,
+        };
         match (line.kind, remote.opus_pt, local.data_ssrc) {
             (LineKind::Audio, Some(opus), _) => {
                 push(&mut out, &format!("m=audio {port} RTP/SAVP {opus}"));
@@ -599,10 +678,7 @@ pub fn answer(local: &LocalMedia, remote: &RemoteMedia) -> String {
                 push(&mut out, &format!("a=rtcp-fb:{opus} transport-cc"));
                 push(&mut out, &format!("a=setup:{setup}"));
                 push(&mut out, &format!("a=mid:{}", line.mid));
-                push(
-                    &mut out,
-                    direction_text(answer_direction(local.audio_direction, line.direction)),
-                );
+                push(&mut out, direction_text(direction(local.audio_direction)));
                 transport_part(&mut out, local, first);
                 let label = line.label.as_deref().unwrap_or("main-audio");
                 push(&mut out, &format!("a=label:{label}"));
@@ -610,25 +686,39 @@ pub fn answer(local: &LocalMedia, remote: &RemoteMedia) -> String {
             (LineKind::Data, _, Some(ssrc)) => {
                 data_line(&mut out, local, &line.mid, ssrc, setup, first);
             }
+            (LineKind::Video, _, _) if Some(line.mid.as_str()) == share_mid => {
+                // `accepted` keeps the share line only with both.
+                if let (Some(offered), Some(ssrc)) = (share_codec, local.share_ssrc) {
+                    let line_spec = VideoLine {
+                        mid: &line.mid,
+                        label: SHARE_LABEL,
+                        codec: VideoCodec {
+                            pt: offered.pt,
+                            rtx: offered.rtx.filter(|_| local.share_rtx.is_some()),
+                        },
+                        ssrcs: (ssrc, local.share_rtx_ssrc),
+                        direction: share_direction(line.direction),
+                        share: true,
+                    };
+                    video_line(&mut out, local, &line_spec, setup, first);
+                }
+            }
             (LineKind::Video, _, _) => {
                 // `accepted` keeps the camera's line only with both.
                 if let (Some(offered), Some(ssrc)) = (remote.video, local.video_ssrc) {
-                    let direction = answer_direction(local.video_direction, line.direction);
-                    // Resends only if both sides do them.
-                    let codec = VideoCodec {
-                        pt: offered.pt,
-                        rtx: offered.rtx.filter(|_| local.video_rtx.is_some()),
+                    let line_spec = VideoLine {
+                        mid: &line.mid,
+                        label: CAMERA_LABEL,
+                        // Resends only if both sides do them.
+                        codec: VideoCodec {
+                            pt: offered.pt,
+                            rtx: offered.rtx.filter(|_| local.video_rtx.is_some()),
+                        },
+                        ssrcs: (ssrc, local.video_rtx_ssrc),
+                        direction: direction(local.video_direction),
+                        share: false,
                     };
-                    camera_line(
-                        &mut out,
-                        local,
-                        &line.mid,
-                        codec,
-                        (ssrc, local.video_rtx_ssrc),
-                        direction,
-                        setup,
-                        first,
-                    );
+                    video_line(&mut out, local, &line_spec, setup, first);
                 }
             }
             // `accepted` keeps nothing else.
@@ -638,6 +728,33 @@ pub fn answer(local: &LocalMedia, remote: &RemoteMedia) -> String {
     out
 }
 
+/// The call's modalities, as a request says them (`callModalities`), from
+/// our own SDP `ours`: `Audio`, `Video` while our camera line sends,
+/// `ScreenSharer` while our share line sends, `ScreenViewer` while it
+/// receives, as the web client derives them.
+pub fn modalities(ours: &str) -> Vec<String> {
+    let mut out = vec!["Audio".to_owned()];
+    let Ok(read) = read(ours) else {
+        return out;
+    };
+    let sends = |d: Direction| matches!(d, Direction::SendRecv | Direction::SendOnly);
+    let receives = |d: Direction| matches!(d, Direction::SendRecv | Direction::RecvOnly);
+    if read
+        .camera()
+        .is_some_and(|l| l.port != 0 && sends(l.direction))
+    {
+        out.push("Video".to_owned());
+    }
+    if let Some(share) = read.share().filter(|l| l.port != 0) {
+        if sends(share.direction) {
+            out.push("ScreenSharer".to_owned());
+        }
+        if receives(share.direction) {
+            out.push("ScreenViewer".to_owned());
+        }
+    }
+    out
+}
 /// Our direction for a line, given what we want and what the offer
 /// allows: we send only if it receives, and receive only if it sends.
 fn answer_direction(ours: Direction, theirs: Direction) -> Direction {
@@ -658,30 +775,37 @@ fn answer_direction(ours: Direction, theirs: Direction) -> Direction {
 /// up, as the web client's placeholder is.
 const CNAME: &str = "noslackingcname";
 
-/// The camera's line (`main-video`): H.264 at `codec.pt`, packetization
-/// mode 1, constrained baseline as our encoder makes it, the receiver
-/// free to send another level (`level-asymmetry-allowed`), as the web
-/// client's answers write it (§D.4). With `codec.rtx`, lost packets are
-/// asked for again (`nack`) and come on the retransmission's payload
-/// type; a picture that cannot be mended asks for a keyframe (`nack
-/// pli`).
-#[expect(
-    clippy::too_many_arguments,
-    reason = "an m-line's parts, as `data_line` takes them"
-)]
-fn camera_line(
+/// A video line to write: the camera's (`main-video`) or the screen
+/// share's (`applicationsharing-video`).
+struct VideoLine<'a> {
+    mid: &'a str,
+    label: &'a str,
+    codec: VideoCodec,
+    /// Our SSRC on it, and our resends'.
+    ssrcs: (u32, Option<u32>),
+    direction: Direction,
+    /// The share line: the web client's limits for a screen, 15 pictures
+    /// a second of up to 8160 macroblocks (1920×1088).
+    share: bool,
+}
+
+/// A video line: H.264 at `codec.pt`, packetization mode 1, constrained
+/// baseline as our encoder makes it, the receiver free to send another
+/// level (`level-asymmetry-allowed`), as the web client's answers write
+/// it (§D.4). With `codec.rtx`, lost packets are asked for again
+/// (`nack`) and come on the retransmission's payload type; a picture
+/// that cannot be mended asks for a keyframe (`nack pli`).
+fn video_line(
     out: &mut String,
     local: &LocalMedia,
-    mid: &str,
-    codec: VideoCodec,
-    (ssrc, rtx_ssrc): (u32, Option<u32>),
-    direction: Direction,
+    line: &VideoLine<'_>,
     setup: &str,
     candidates: bool,
 ) {
     let (address, port) = media_address(local);
-    let pt = codec.pt;
-    let payloads = match codec.rtx {
+    let VideoCodec { pt, rtx } = line.codec;
+    let (ssrc, rtx_ssrc) = line.ssrcs;
+    let payloads = match rtx {
         Some(rtx) => format!("{pt} {rtx}"),
         None => pt.to_string(),
     };
@@ -690,37 +814,42 @@ fn camera_line(
     push(out, "a=x-signaling-fb:* x-message app send:src recv:src,vc");
     push(out, &ssrc_range(ssrc));
     push(out, &format!("a=rtpmap:{pt} H264/90000"));
+    let limits = if line.share {
+        ";max-fs=8160;max-mbps=135000;max-fps=1500"
+    } else {
+        ""
+    };
     push(
         out,
         &format!(
-            "a=fmtp:{pt} level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+            "a=fmtp:{pt} level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f{limits}"
         ),
     );
-    if let Some(rtx) = codec.rtx {
+    if let Some(rtx) = rtx {
         push(out, &format!("a=rtpmap:{rtx} rtx/90000"));
         push(out, &format!("a=fmtp:{rtx} apt={pt}"));
     }
     push(out, &format!("a=rtcp:{port}"));
     push(out, "a=rtcp-fb:* goog-remb");
     push(out, "a=rtcp-fb:* transport-cc");
-    if codec.rtx.is_some() {
+    if rtx.is_some() {
         push(out, "a=rtcp-fb:* nack");
     }
     push(out, "a=rtcp-fb:* nack pli");
-    // Our resends' stream, paired with the camera's, as the web client
+    // Our resends' stream, paired with the line's, as the web client
     // writes it.
-    if let (Some(_), Some(rtx_ssrc)) = (codec.rtx, rtx_ssrc) {
+    if let (Some(_), Some(rtx_ssrc)) = (rtx, rtx_ssrc) {
         for one in [ssrc, rtx_ssrc] {
             push(out, &format!("a=ssrc:{one} cname:{CNAME}"));
         }
         push(out, &format!("a=ssrc-group:FID {ssrc} {rtx_ssrc}"));
     }
     push(out, &format!("a=setup:{setup}"));
-    push(out, &format!("a=mid:{mid}"));
-    push(out, direction_text(direction));
+    push(out, &format!("a=mid:{}", line.mid));
+    push(out, direction_text(line.direction));
     transport_part(out, local, candidates);
     push(out, "a=rtcp-rsize");
-    push(out, &format!("a=label:{CAMERA_LABEL}"));
+    push(out, &format!("a=label:{}", line.label));
 }
 
 /// A rejected line, as the web client writes one: port 0, a placeholder
@@ -946,6 +1075,11 @@ mod tests {
             video_pt: 108,
             video_rtx: Some(109),
             video_rtx_ssrc: Some(78),
+            share_ssrc: None,
+            share_rtx_ssrc: None,
+            share_pt: 108,
+            share_rtx: Some(109),
+            sharing: false,
             video_direction: Direction::SendRecv,
             opus_pt: 111,
             audio_direction: Direction::SendRecv,
@@ -1389,6 +1523,51 @@ mod tests {
             .cloned()
             .expect("kept");
         assert_eq!(camera.direction, Direction::SendOnly);
+    }
+
+    #[test]
+    fn a_screen_share_is_renegotiated_on_and_off_and_answered() {
+        let ours = LocalMedia {
+            video_ssrc: Some(77),
+            share_ssrc: Some(88),
+            share_rtx_ssrc: Some(89),
+            ..local()
+        };
+        // The call so far, as the far end last described it: our own
+        // first offer stands in, with its three lines.
+        let last = read(&offer(&ours)).expect("our offer reads back");
+        assert_eq!(last.share().map(|l| l.direction), Some(Direction::Inactive));
+
+        // Starting: the share line sendonly, as a sharer offers it.
+        let sharing = LocalMedia {
+            sharing: true,
+            ..ours.clone()
+        };
+        let start = reoffer(&sharing, &last);
+        let read_back = read(&start).expect("the reoffer reads back");
+        let share = read_back.share().expect("the share line");
+        assert_ne!(share.port, 0);
+        assert_eq!(share.direction, Direction::SendOnly);
+        assert!(start.contains("max-fps=1500"), "{start}");
+        assert!(start.contains("a=ssrc-group:FID 88 89"), "{start}");
+        assert!(modalities(&start).contains(&"ScreenSharer".to_owned()));
+        assert_eq!(read_back.camera().map(|l| l.mid.as_str()), Some("1"));
+
+        // Stopping: the line dropped, as the far end's renegotiations do.
+        let stop = reoffer(&ours, &last);
+        assert_eq!(read(&stop).expect("reads").share().map(|l| l.port), Some(0));
+        assert!(!modalities(&stop).iter().any(|m| m.starts_with("Screen")));
+
+        // The far end shares: we take it, receiving.
+        let theirs = read(&start).expect("reads");
+        let answered = answer(&ours, &theirs);
+        let share = read(&answered)
+            .expect("reads")
+            .share()
+            .cloned()
+            .expect("kept");
+        assert_eq!(share.direction, Direction::RecvOnly);
+        assert!(modalities(&answered).contains(&"ScreenViewer".to_owned()));
     }
 
     #[test]

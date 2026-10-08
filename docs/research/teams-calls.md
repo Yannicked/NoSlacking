@@ -803,6 +803,35 @@ a normal end.
 followed by a `conversation/conversationEnd` push. Either way, close the
 media locally at once: a hang-up must never wait on the network.
 
+### C.6 Screen sharing (from the web client's code; not yet captured)
+
+A share in a 1:1 call is a renegotiation by the sharer, nothing else: no
+content-sharing session, no conversation modality, no data-channel
+message. The sharer offers the `applicationsharing-video` line
+`sendonly` (H.264 at the camera's number, `max-fs=8160;max-mbps=135000;
+max-fps=1500`, 15 fps), with `callModalities` gaining `ScreenSharer`
+(the values are `Audio`, `Video`, `ScreenSharer`, `ScreenViewer`, from the
+directions of the offerer's own lines). The offer goes to the far end's
+`mediaRenegotiation` link (from its acceptance, or our acceptance's
+acknowledgement), as
+
+```text
+{"mediaNegotiation": {"callModalities": [...], "sender": {us},
+  "links": {"mediaAnswer": {callback}/call/mediaAnswer/,
+            "rejection": {callback}/call/rejection/},
+  "mediaContent": {blob, contentType, mediaLegId, …}}}
+```
+
+and its answer comes as a `call/mediaAnswer` push (the HTTP answer says
+nothing), acknowledged at its `mediaAcknowledgement` link; a refusal comes
+to `call/rejection` (`491`/`3118` when two renegotiations cross, after
+which the web client answers the other and sends its own again).
+Stopping is the same with the line inactive or dropped and no
+`ScreenSharer`. The receiver answers the share line `recvonly` with
+`ScreenViewer`. We offer in the shape of the far end's latest
+description (its mids and payload types), keep the DTLS role, and drop
+the line again to stop, as the far end's own renegotiations do.
+
 ---
 
 ## D. The SDP

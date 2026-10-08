@@ -61,7 +61,7 @@ use crate::people;
 use crate::slack::Client;
 
 #[cfg(feature = "huddle-share")]
-mod share;
+pub(super) mod share;
 
 /// The shortest time between two rosters sent to the interface. Chime
 /// sends volumes several times a second; the window need not wake for

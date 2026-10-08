@@ -84,6 +84,9 @@ struct Running {
     /// Whether the interface wants the camera on.
     #[cfg(feature = "huddle-camera")]
     camera: watch::Sender<bool>,
+    /// What the interface asks of the screen share.
+    #[cfg(feature = "huddle-share")]
+    share: mpsc::UnboundedSender<crate::huddle_share::ShareRequest>,
 }
 
 /// An incoming call ringing here, waiting for the person to decide.
@@ -119,6 +122,13 @@ struct Wanted {
     microphone: watch::Receiver<bool>,
     #[cfg(feature = "huddle-camera")]
     camera: watch::Receiver<bool>,
+    /// The screen share's requests, and where the share task tells the
+    /// call to renegotiate it.
+    #[cfg(feature = "huddle-share")]
+    share: (
+        mpsc::UnboundedReceiver<crate::huddle_share::ShareRequest>,
+        mpsc::UnboundedSender<Control>,
+    ),
 }
 
 /// A call's controls: for the caller to keep, and for the call's task
@@ -131,6 +141,10 @@ fn controls() -> (Running, mpsc::UnboundedReceiver<Control>, Wanted) {
     // The camera starts off.
     #[cfg(feature = "huddle-camera")]
     let (camera_sender, camera) = watch::channel(false);
+    #[cfg(feature = "huddle-share")]
+    let (share_sender, share_requests) = mpsc::unbounded_channel();
+    #[cfg(feature = "huddle-share")]
+    let share = (share_requests, control.clone());
     let running = Running {
         team: String::new(),
         call_id: None,
@@ -138,11 +152,15 @@ fn controls() -> (Running, mpsc::UnboundedReceiver<Control>, Wanted) {
         muted,
         #[cfg(feature = "huddle-camera")]
         camera: camera_sender,
+        #[cfg(feature = "huddle-share")]
+        share: share_sender,
     };
     let wanted = Wanted {
         microphone,
         #[cfg(feature = "huddle-camera")]
         camera,
+        #[cfg(feature = "huddle-share")]
+        share,
     };
     (running, controls, wanted)
 }
@@ -247,6 +265,15 @@ impl Caller {
         }
     }
 
+    /// Starts, picks or stops sharing your screen in the call, if there is
+    /// one.
+    #[cfg(feature = "huddle-share")]
+    pub fn share(&mut self, request: crate::huddle_share::ShareRequest) {
+        if let Some(running) = &self.running {
+            let _ = running.share.send(request);
+        }
+    }
+
     /// Hangs up; the call says when it has ended.
     pub fn stop(&mut self) {
         if let Some(running) = self.running.take() {
@@ -323,6 +350,9 @@ struct Devices {
     passing: tokio::task::JoinHandle<()>,
     #[cfg(feature = "huddle-camera")]
     camera: CameraTask,
+    /// The screen share's task, and what ends it.
+    #[cfg(feature = "huddle-share")]
+    share: (tokio::task::JoinHandle<()>, oneshot::Sender<()>),
     /// How loud the far end plays.
     meter: crate::huddle_audio::speaker::Feed,
     /// Whether you spoke since last asked.
@@ -354,6 +384,8 @@ impl Devices {
             microphone: wanted,
             #[cfg(feature = "huddle-camera")]
                 camera: camera_wanted,
+            #[cfg(feature = "huddle-share")]
+                share: (share_requests, call),
         } = wanted;
         let tap = RenderTap::default();
         let speaker_tap = tap.clone();
@@ -417,6 +449,17 @@ impl Devices {
         };
         #[cfg(feature = "huddle-camera")]
         let (camera, camera_feed) = camera_task(place, camera_wanted, sink, tell);
+        // The far end's screen share.
+        #[cfg(feature = "huddle-video")]
+        let screen = {
+            let waker = sink.waker();
+            let screen = crate::huddle_audio::screen::Screen::new(move || waker.wake());
+            tell(Listen::Screen(screen.clone()));
+            screen
+        };
+        // Ours: nothing captured until asked.
+        #[cfg(feature = "huddle-share")]
+        let (share, share_feed) = share_task(place, share_requests, call, sink);
         #[cfg(not(any(feature = "huddle-video", feature = "huddle-camera")))]
         let _ = tell;
         let video = crate::teams::calling::video::Video {
@@ -424,6 +467,10 @@ impl Devices {
             gallery: Some(gallery),
             #[cfg(feature = "huddle-camera")]
             camera: Some(camera_feed),
+            #[cfg(feature = "huddle-video")]
+            screen: Some(screen),
+            #[cfg(feature = "huddle-share")]
+            share: Some(share_feed),
         };
         let audio = Audio {
             feed: Some(feed.clone()),
@@ -440,6 +487,8 @@ impl Devices {
             passing,
             #[cfg(feature = "huddle-camera")]
             camera,
+            #[cfg(feature = "huddle-share")]
+            share,
             meter: feed,
             spoke,
         };
@@ -448,6 +497,13 @@ impl Devices {
 
     /// Closes the microphone, then the speaker.
     async fn close(self) {
+        // The share first: its capture ends with it.
+        #[cfg(feature = "huddle-share")]
+        {
+            let (task, close) = self.share;
+            let _ = close.send(());
+            let _ = task.await;
+        }
         #[cfg(feature = "huddle-camera")]
         {
             let _ = self.camera.close.send(());
@@ -517,6 +573,181 @@ fn camera_task(
     (task, feed)
 }
 
+/// The far end's screen share's key in the call bar and window: a 1:1
+/// call has one far end, so one share.
+#[cfg(feature = "huddle-video")]
+const FAR_SHARE: &str = "far-share";
+
+/// Starts the screen share's task for the call in `place`: it captures
+/// nothing until asked; then, through the video helper as a huddle's
+/// share starts (the system's dialog or a list to pick from), it
+/// captures and encodes the screen, and tells the call (`call`) to
+/// renegotiate the share line on, and off again when it stops. Answers
+/// the task and what the call sends from.
+#[cfg(feature = "huddle-share")]
+fn share_task(
+    place: &Place,
+    requests: mpsc::UnboundedReceiver<crate::huddle_share::ShareRequest>,
+    call: mpsc::UnboundedSender<Control>,
+    sink: &Sink,
+) -> (
+    (tokio::task::JoinHandle<()>, oneshot::Sender<()>),
+    crate::teams::calling::video::CameraFeed,
+) {
+    use crate::huddle_audio::camera_send::{Limits, QUEUE, SendControl};
+
+    let (frames, frames_in) = mpsc::channel(QUEUE);
+    let control = SendControl::new(Limits::SHARE);
+    let (on, on_rx) = watch::channel(false);
+    let (sink, team, channel) = (sink.clone(), place.team.clone(), place.channel.clone());
+    let tell = move |news: crate::huddle_share::ShareNews| {
+        sink.send(Event::People {
+            team: team.clone(),
+            event: people::Event::Share {
+                channel: channel.clone(),
+                news,
+            },
+        });
+    };
+    let (close, done) = oneshot::channel();
+    let task = tokio::spawn(share(
+        requests,
+        done,
+        frames,
+        control.clone(),
+        on,
+        call,
+        tell,
+    ));
+    let feed = crate::teams::calling::video::CameraFeed {
+        frames: frames_in,
+        on: on_rx,
+        control,
+    };
+    ((task, close), feed)
+}
+
+/// The screen share of a call, from its first request to the call's end
+/// (`done`).
+#[cfg(feature = "huddle-share")]
+async fn share(
+    mut requests: mpsc::UnboundedReceiver<crate::huddle_share::ShareRequest>,
+    mut done: oneshot::Receiver<()>,
+    frames: mpsc::Sender<crate::huddle_audio::camera_send::VideoFrame>,
+    control: crate::huddle_audio::camera_send::SendControl,
+    on: watch::Sender<bool>,
+    call: mpsc::UnboundedSender<Control>,
+    tell: impl Fn(crate::huddle_share::ShareNews),
+) {
+    use super::listen::share::{Begin, Step, begin};
+    use crate::huddle_audio::camera_send::{Encoding, Ending};
+    use crate::huddle_share::{ShareNews, ShareRequest};
+
+    let mut encoding: Option<Encoding> = None;
+    let mut ended: Option<watch::Receiver<Option<Ending>>> = None;
+    // Stops sharing: the capture ends with its sending thread, and the
+    // call renegotiates the line off.
+    let stop = |encoding: &mut Option<Encoding>,
+                ended: &mut Option<watch::Receiver<Option<Ending>>>| {
+        let running = encoding.take();
+        *ended = None;
+        let _ = on.send(false);
+        let _ = call.send(Control::Share(false));
+        running
+    };
+    loop {
+        let request = tokio::select! {
+            _ = &mut done => break,
+            request = requests.recv() => match request {
+                Some(request) => request,
+                None => break,
+            },
+            ending = async {
+                match ended.as_mut() {
+                    Some(ended) => loop {
+                        if let Some(ending) = ended.borrow_and_update().clone() {
+                            return ending;
+                        }
+                        if ended.changed().await.is_err() {
+                            return std::future::pending().await;
+                        }
+                    },
+                    None => std::future::pending().await,
+                }
+            } => {
+                let running = stop(&mut encoding, &mut ended);
+                let _ = tokio::task::spawn_blocking(move || drop(running)).await;
+                tell(match ending {
+                    Ending::Ended => ShareNews::Ended,
+                    Ending::Failed(failure) => ShareNews::Failed(failure),
+                });
+                continue;
+            }
+        };
+        let asked = match request {
+            ShareRequest::Stop => {
+                let running = stop(&mut encoding, &mut ended);
+                let _ = tokio::task::spawn_blocking(move || drop(running)).await;
+                tell(ShareNews::Off);
+                continue;
+            }
+            ShareRequest::Start { again } => Begin::Start { again },
+            ShareRequest::Pick(id) => Begin::Pick(id),
+        };
+        // A new choice replaces what is shared.
+        if let Some(running) = encoding.take() {
+            let _ = tokio::task::spawn_blocking(move || drop(running)).await;
+        }
+        // The helper, the system's dialog and the user all take their
+        // time: not on this thread.
+        let step = match tokio::task::spawn_blocking(move || begin(asked)).await {
+            Ok(step) => step,
+            Err(error) => {
+                log::warn!("Teams share: the start failed: {error}");
+                tell(ShareNews::Failed(crate::failure::Failure::Huddle(
+                    crate::failure::HuddleTrouble::VideoHelperLost,
+                )));
+                continue;
+            }
+        };
+        match step {
+            Step::Choose(sources) => tell(ShareNews::Choose(sources)),
+            Step::Started(Err(failure)) => {
+                let _ = on.send(false);
+                tell(ShareNews::Failed(failure));
+            }
+            Step::Started(Ok(capture)) => {
+                let (ending, ending_rx) = watch::channel(None);
+                match crate::huddle_audio::share_send::spawn(
+                    capture,
+                    frames.clone(),
+                    control.clone(),
+                    ending,
+                ) {
+                    Ok(started) => {
+                        encoding = Some(started);
+                        ended = Some(ending_rx);
+                        let _ = on.send(true);
+                        let _ = call.send(Control::Share(true));
+                        log::info!(
+                            "Teams share: capturing; the call renegotiates the share line on"
+                        );
+                        tell(ShareNews::On);
+                    }
+                    Err(why) => {
+                        log::warn!("Teams share: {why}");
+                        tell(ShareNews::Failed(crate::failure::Failure::Huddle(
+                            crate::failure::HuddleTrouble::VideoHelperLost,
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    let running = encoding.take();
+    let _ = tokio::task::spawn_blocking(move || drop(running)).await;
+}
+
 /// What tells the interface where the call in `place` is.
 fn teller(place: &Place, sink: &Sink) -> impl Fn(Listen) + Clone + Send + 'static {
     let (sink, team, channel) = (sink.clone(), place.team.clone(), place.channel.clone());
@@ -561,6 +792,25 @@ impl<T: Fn(Listen)> Shown<'_, T> {
         let _ = on;
     }
 
+    /// The far end's screen share started or stopped: the bar offers it
+    /// to watch, or no longer.
+    fn far_share(&self, on: bool) {
+        #[cfg(feature = "huddle-video")]
+        {
+            let shares = if on {
+                vec![crate::huddle_audio::video::Share {
+                    key: FAR_SHARE.to_owned(),
+                    user: Some(self.callee.to_owned()),
+                }]
+            } else {
+                Vec::new()
+            };
+            (self.tell)(Listen::Shares(shares));
+        }
+        #[cfg(not(feature = "huddle-video"))]
+        let _ = on;
+    }
+
     /// Changes what is shown of who is in the call, telling the bar the
     /// whole of it if that changed anything.
     fn change(&mut self, change: impl FnOnce(&mut FarEnd)) {
@@ -579,6 +829,7 @@ impl<T: Fn(Listen)> Shown<'_, T> {
             CallEvent::AudioFlowing => {}
             CallEvent::FarEndMuted(muted) => self.change(|far| far.muted = muted),
             CallEvent::FarEndVideo(on) => self.far_video(on),
+            CallEvent::FarEndShare(on) => self.far_share(on),
             // Only an incoming call's ringing says this, and that is over.
             CallEvent::AnsweredElsewhere => {}
             CallEvent::Ended { result, .. } => self.ended = Some(result),

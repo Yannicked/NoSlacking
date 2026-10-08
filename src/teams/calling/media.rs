@@ -77,6 +77,8 @@ const AUDIO_TICK: Duration = Duration::from_millis(20);
 pub const AUDIO_MID: &str = "0";
 /// Our camera line's mid in an offer, as the web client's (§D.1).
 pub const VIDEO_MID: &str = "1";
+/// Our screen share line's mid in an offer.
+pub const SHARE_MID: &str = "2";
 /// Our Opus payload type in an offer, as the web client's (§D.1).
 pub const OPUS_PT: u8 = 111;
 /// The largest datagram read: more than any Ethernet MTU.
@@ -176,6 +178,8 @@ pub struct MediaConfig {
     /// The camera line, in a build with video: its mid and H.264 payload
     /// type (ours in an offer, the offerer's in an answer).
     pub video: Option<VideoLine>,
+    /// The screen share's line, likewise.
+    pub share: Option<VideoLine>,
 }
 
 /// The camera's m-line, as a media session is started with it.
@@ -218,6 +222,12 @@ impl MediaConfig {
                 pt: offer_video_pt(OPUS_PT),
                 rtx: Some(offer_video_pt(OPUS_PT) + 1),
             }),
+            // The same H.264 as the camera's: one codec, one number.
+            share: HAS_VIDEO.then(|| VideoLine {
+                mid: SHARE_MID.to_owned(),
+                pt: offer_video_pt(OPUS_PT),
+                rtx: Some(offer_video_pt(OPUS_PT) + 1),
+            }),
         }
     }
 
@@ -235,6 +245,15 @@ impl MediaConfig {
             video: offer
                 .camera()
                 .zip(offer.video)
+                .filter(|_| HAS_VIDEO)
+                .map(|(line, codec)| VideoLine {
+                    mid: line.mid.clone(),
+                    pt: codec.pt,
+                    rtx: codec.rtx,
+                }),
+            share: offer
+                .share()
+                .zip(offer.share_video.or(offer.video))
                 .filter(|_| HAS_VIDEO)
                 .map(|(line, codec)| VideoLine {
                     mid: line.mid.clone(),
@@ -336,6 +355,8 @@ pub enum MediaEvent {
     AudioFlowing,
     /// The far end's camera started (`true`) or stopped showing.
     FarVideo(bool),
+    /// The far end's screen share started (`true`) or stopped showing.
+    FarShare(bool),
     /// The media broke; nothing more comes.
     Failed(Failure),
     /// Stopped as asked.
@@ -409,6 +430,9 @@ struct Plan {
     /// Whether to send our camera and show the far end's, if the
     /// description has a camera line.
     video: Option<(bool, bool)>,
+    /// Whether to send our screen and show the far end's, if the
+    /// description has the share line in use.
+    share: Option<(bool, bool)>,
 }
 
 impl std::fmt::Debug for Plan {
@@ -759,6 +783,10 @@ fn plan(remote: &RemoteMedia, opus_pt: u8) -> Result<Plan, String> {
         .camera()
         .filter(|_| remote.video.is_some())
         .map(|line| flows(line.direction));
+    let share = remote
+        .share()
+        .filter(|line| line.port != 0 && remote.share_video.is_some())
+        .map(|line| flows(line.direction));
     Ok(Plan {
         creds: IceCreds {
             ufrag: remote.ice_ufrag.clone(),
@@ -771,6 +799,7 @@ fn plan(remote: &RemoteMedia, opus_pt: u8) -> Result<Plan, String> {
         send,
         receive,
         video,
+        share,
     })
 }
 
@@ -822,7 +851,7 @@ fn apply(rtc: &mut Rtc, applied: &mut Applied, plan: &Plan) -> Result<Vec<String
 }
 
 /// The peer: Opus alone at `opus_pt`, OpenSSL's DTLS, full ICE.
-fn new_rtc(opus_pt: u8, video: Option<(u8, Option<u8>)>, controlling: bool, now: Instant) -> Rtc {
+fn new_rtc(opus_pt: u8, video: &[(u8, Option<u8>)], controlling: bool, now: Instant) -> Rtc {
     let mut config = RtcConfig::new()
         .clear_codecs()
         .set_ice_lite(false)
@@ -841,7 +870,13 @@ fn new_rtc(opus_pt: u8, video: Option<(u8, Option<u8>)>, controlling: bool, now:
             ..Default::default()
         },
     );
-    if let Some((pt, rtx)) = video {
+    // Each video line's H.264, once per number.
+    let mut registered = Vec::new();
+    for &(pt, rtx) in video {
+        if registered.contains(&pt) {
+            continue;
+        }
+        registered.push(pt);
         // H.264 as our encoder makes it and the far end sends it:
         // packetization mode 1, constrained baseline, any level the other
         // side likes.
@@ -971,6 +1006,11 @@ fn local_media(
         video_pt: offer_video_pt(opus_pt),
         video_rtx: None,
         video_rtx_ssrc: None,
+        share_ssrc: None,
+        share_rtx_ssrc: None,
+        share_pt: offer_video_pt(opus_pt),
+        share_rtx: None,
+        sharing: false,
         video_direction: Direction::SendRecv,
         // No data channel offered: audio only, the third attempt of §F.3.
         data_ssrc: None,
@@ -1082,6 +1122,8 @@ struct Session {
     feed: Option<Feed>,
     /// The camera line, in a build with video.
     video: Option<super::video::CallVideo>,
+    /// The screen share's line, likewise.
+    share: Option<super::video::CallVideo>,
     frames: Option<mpsc::Receiver<Outgoing>>,
     muted_rx: Option<watch::Receiver<bool>>,
     /// The microphone's mute.
@@ -1111,8 +1153,12 @@ impl Session {
             .map_err(|e| failure(Stage::Gather, e.to_string()))?
             .port();
         let now = Instant::now();
-        let video_codec = config.video.as_ref().map(|v| (v.pt, v.rtx));
-        let mut rtc = new_rtc(config.opus_pt, video_codec, config.controlling, now);
+        let video_codecs: Vec<(u8, Option<u8>)> = [&config.video, &config.share]
+            .into_iter()
+            .flatten()
+            .map(|v| (v.pt, v.rtx))
+            .collect();
+        let mut rtc = new_rtc(config.opus_pt, &video_codecs, config.controlling, now);
         let mid = Mid::from(config.audio_mid.as_str());
         // Any but zero, which libwebrtc keeps for its bandwidth probes.
         let ssrc = rand::random::<u32>().max(1);
@@ -1122,22 +1168,28 @@ impl Session {
             uplink,
             video,
         } = audio;
-        let video = config.video.as_ref().map(|line| {
-            let video_ssrc = loop {
-                let candidate = rand::random::<u32>().max(1);
-                if candidate != ssrc {
-                    break candidate;
-                }
-            };
-            super::video::CallVideo::new(
-                &mut rtc,
-                Mid::from(line.mid.as_str()),
-                (line.pt, line.rtx),
-                video_ssrc,
-                video,
-                tell.clone(),
-            )
-        });
+        let (camera_ends, share_ends) = video.split();
+        let fresh_ssrc = || loop {
+            let candidate = rand::random::<u32>().max(1);
+            if candidate != ssrc {
+                break candidate;
+            }
+        };
+        let mut line = |which, config: &Option<VideoLine>, ends| {
+            config.as_ref().map(|line| {
+                super::video::CallVideo::new(
+                    &mut rtc,
+                    which,
+                    Mid::from(line.mid.as_str()),
+                    (line.pt, line.rtx),
+                    fresh_ssrc(),
+                    ends,
+                    tell.clone(),
+                )
+            })
+        };
+        let video = line(super::video::Which::Camera, &config.video, camera_ends);
+        let share = line(super::video::Which::Share, &config.share, share_ends);
         let mut candidates = Vec::new();
         let host = config
             .host
@@ -1217,6 +1269,7 @@ impl Session {
             outbound: Outbound::default(),
             feed,
             video,
+            share,
             frames,
             muted_rx,
             uplink_muted,
@@ -1316,6 +1369,12 @@ impl Session {
             local.video_pt = video.pt();
             local.video_rtx = video.rtx();
             local.video_rtx_ssrc = video.rtx_ssrc();
+        }
+        if let Some(share) = &self.share {
+            local.share_ssrc = Some(share.ssrc());
+            local.share_pt = share.pt();
+            local.share_rtx = share.rtx();
+            local.share_rtx_ssrc = share.rtx_ssrc();
         }
         log::info!(
             "gather: done after {:?}: {}",
@@ -1469,8 +1528,8 @@ impl Session {
         bump(&self.counters.packets_in, 1);
         bump(&self.counters.bytes_in, data.len());
         expect_remote(&mut self.rtc, self.mid, self.opus_pt, &mut self.seen, data);
-        if let Some(video) = &mut self.video {
-            video.learn(&mut self.rtc, data);
+        for line in [&mut self.video, &mut self.share].into_iter().flatten() {
+            line.learn(&mut self.rtc, data);
         }
         let Ok(receive) = Receive::new(Protocol::Udp, source, destination, data) else {
             log::debug!(
@@ -1624,16 +1683,16 @@ impl Session {
                 self.check_flowing();
             }
             RtcEvent::MediaData(data) => {
-                if let Some(video) = &mut self.video
-                    && video.is(data.mid)
-                {
-                    video.data(&data, Instant::now());
-                    self.rtc_timeout = Some(Instant::now());
+                for line in [&mut self.video, &mut self.share].into_iter().flatten() {
+                    if line.is(data.mid) {
+                        line.data(&data, Instant::now());
+                        self.rtc_timeout = Some(Instant::now());
+                    }
                 }
             }
             RtcEvent::KeyframeRequest(request) => {
-                if let Some(video) = &mut self.video {
-                    video.keyframe_request(&request);
+                for line in [&mut self.video, &mut self.share].into_iter().flatten() {
+                    line.keyframe_request(&request);
                 }
             }
             _ => {}
@@ -1723,6 +1782,11 @@ impl Session {
         if let (Some(video), Some((send, receive))) = (&mut self.video, plan.video) {
             video.set_flows(send, receive);
         }
+        if let Some(share) = &mut self.share {
+            // A description without the share line in use shares nothing.
+            let (send, receive) = plan.share.unwrap_or((false, false));
+            share.set_flows(send, receive);
+        }
         for ip in &plan.permits {
             if !self.permits.contains(ip) {
                 self.permits.push(*ip);
@@ -1792,6 +1856,9 @@ impl Session {
             self.video
                 .as_ref()
                 .and_then(super::video::CallVideo::deadline),
+            self.share
+                .as_ref()
+                .and_then(super::video::CallVideo::deadline),
         ]
         .into_iter()
         .flatten()
@@ -1818,8 +1885,8 @@ impl Session {
         if !self.connected && self.flight.due(now) {
             self.resend_flight(now).await;
         }
-        if let Some(video) = &mut self.video {
-            video.on_time(&mut self.rtc, now);
+        for line in [&mut self.video, &mut self.share].into_iter().flatten() {
+            line.on_time(&mut self.rtc, now);
         }
         if self.connect_deadline.is_some_and(|at| at <= now) {
             log::warn!("connect: gave up; paths: {}", self.paths.line());
@@ -1998,6 +2065,12 @@ async fn run(mut session: Session, mut commands: mpsc::UnboundedReceiver<Command
                     video.input(&mut session.rtc, input, connected);
                 }
             }
+            input = next_video(&mut session.share) => {
+                let connected = session.connected;
+                if let Some(share) = &mut session.share {
+                    share.input(&mut session.rtc, input, connected);
+                }
+            }
             frame = next_frame(&mut session.frames) => match frame {
                 Some(frame) => session.send_frame(frame),
                 // The microphone's side is gone: silence from here.
@@ -2083,6 +2156,7 @@ mod tests {
             ],
             opus_pt: Some(111),
             video: None,
+            share_video: None,
             lines: vec![
                 audio_line(Direction::SendRecv),
                 Line {
@@ -2395,7 +2469,7 @@ mod tests {
     impl Side {
         fn new(at: &str, controlling: bool, opus_pt: u8, ssrc: u32, now: Instant) -> Self {
             let at = addr(at);
-            let mut rtc = new_rtc(opus_pt, None, controlling, now);
+            let mut rtc = new_rtc(opus_pt, &[], controlling, now);
             let mid = Mid::from(AUDIO_MID);
             declare_audio(&mut rtc, mid, ssrc);
             rtc.add_local_candidate(IceCandidate::host(at, "udp").expect("a candidate"));
@@ -2433,6 +2507,7 @@ mod tests {
                 candidates: local.candidates,
                 opus_pt: Some(local.opus_pt),
                 video: None,
+                share_video: None,
                 lines: vec![audio_line(Direction::SendRecv)],
             }
         }
