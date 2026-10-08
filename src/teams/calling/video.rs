@@ -283,11 +283,9 @@ impl ParameterSets {
     fn complete(&mut self, unit: &[u8]) -> Option<Vec<u8>> {
         use crate::huddle_audio::bitstream::{nal_type, nal_units, parse_sps};
         let nals = nal_units(unit);
-        let mut has = (false, false);
         for nal in &nals {
             match nal_type(nal) {
                 Some(7) => {
-                    has.0 = true;
                     if self.sps.as_deref() != Some(*nal) {
                         if let Some(sps) = parse_sps(nal) {
                             log::info!(
@@ -302,7 +300,6 @@ impl ParameterSets {
                     }
                 }
                 Some(8) => {
-                    has.1 = true;
                     self.pps = Some(nal.to_vec());
                 }
                 _ => {}
@@ -315,17 +312,23 @@ impl ParameterSets {
         }
         let keyframe = nals.iter().any(|n| nal_type(n) == Some(5));
         let mut out = std::mem::take(&mut self.held);
-        if keyframe {
-            for (have, set) in [(has.0, &self.sps), (has.1, &self.pps)] {
-                if let (false, Some(set)) = (have, set)
-                    && !out.windows(set.len()).any(|w| w == set.as_slice())
-                {
-                    out.extend_from_slice(&START);
-                    out.extend_from_slice(set);
-                }
+        if !keyframe {
+            out.extend_from_slice(unit);
+            return Some(out);
+        }
+        // The parameter sets first, then the rest in order: a meeting's
+        // screen share puts them after its keyframe's slice (recorded:
+        // NAL units 5, 7, 8), which no decoder starts on.
+        for set in [&self.sps, &self.pps].into_iter().flatten() {
+            if !out.windows(set.len()).any(|w| w == set.as_slice()) {
+                out.extend_from_slice(&START);
+                out.extend_from_slice(set);
             }
         }
-        out.extend_from_slice(unit);
+        for nal in nals.iter().filter(|n| !matches!(nal_type(n), Some(7 | 8))) {
+            out.extend_from_slice(&START);
+            out.extend_from_slice(nal);
+        }
         Some(out)
     }
 }
@@ -929,6 +932,10 @@ mod tests {
         // Parameter sets in a frame of their own wait for the picture.
         let alone = [nal(&sps), nal(&pps)].concat();
         assert_eq!(sets.complete(&alone), None);
-        assert_eq!(sets.complete(&bare), Some(first));
+        assert_eq!(sets.complete(&bare), Some(first.clone()));
+        // A keyframe with its parameter sets after the slice, as a
+        // meeting's screen share sends it: put first.
+        let backwards = [nal(&idr), nal(&sps), nal(&pps)].concat();
+        assert_eq!(sets.complete(&backwards), Some(first));
     }
 }

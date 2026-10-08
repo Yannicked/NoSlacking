@@ -1671,3 +1671,9 @@ their `applicationsharing-video` stream's `sourceId`, on our share line's
 `streamMsid`, at the screen's limits
 (`{"max-fs":8160,"max-mbps":135000,"max-fps":1500}`), and `-1` when it
 ends. The stream is `recvonly` in the roster until they share.
+
+**A meeting's screen share puts its parameter sets after the keyframe's
+slice.** Each keyframe arrives as NAL units 5, 7, 8 (once 5, 12, 7, 8),
+where cameras send 7, 8, 5. A decoder needs the SPS and PPS before the
+slice, so ours kept waiting for a keyframe it already had. We now put the
+parameter sets first in every keyframe, the rest after in its order.
