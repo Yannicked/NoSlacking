@@ -281,7 +281,7 @@ mod tests {
             HuddleTrouble::ShareRefused,
             HuddleTrouble::ShareLost,
             HuddleTrouble::NoVideoHelper,
-            HuddleTrouble::ShareHelperLost,
+            HuddleTrouble::VideoHelperLost,
         ] {
             let failed = ShareNews::Failed(Failure::Huddle(trouble));
             assert_eq!(told(Sharing::Starting, &failed), Sharing::Off);

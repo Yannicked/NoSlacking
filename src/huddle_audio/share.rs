@@ -13,7 +13,7 @@
 
 use crate::failure::{Failure, HuddleTrouble};
 
-pub use noslacking_video_ipc::{ShareProblem, Source, SourceKind};
+pub use noslacking_video_ipc::{CaptureProblem, Source, SourceKind};
 
 /// The largest picture a share sends: 1080p, as Slack's own shares do
 /// (the helper's GPU; software sends at most 1280×720).
@@ -32,13 +32,15 @@ pub fn may_share(others: usize) -> bool {
 
 /// What a share that did not start, or stopped, tells the interface,
 /// from what the helper said.
-pub fn problem_failure(problem: ShareProblem) -> Failure {
+pub fn problem_failure(problem: CaptureProblem) -> Failure {
     Failure::Huddle(match problem {
-        ShareProblem::Cancelled => HuddleTrouble::ShareCancelled,
-        ShareProblem::Denied => HuddleTrouble::ShareDenied,
-        ShareProblem::Unavailable => HuddleTrouble::NoScreenCapture,
-        ShareProblem::Gone => HuddleTrouble::ShareGone,
-        ShareProblem::Ended | ShareProblem::Failed => HuddleTrouble::ShareCapture,
+        CaptureProblem::Cancelled => HuddleTrouble::ShareCancelled,
+        CaptureProblem::Denied => HuddleTrouble::ShareDenied,
+        CaptureProblem::Unavailable => HuddleTrouble::NoScreenCapture,
+        CaptureProblem::Gone => HuddleTrouble::ShareGone,
+        CaptureProblem::Ended | CaptureProblem::Failed | CaptureProblem::Busy => {
+            HuddleTrouble::ShareCapture
+        }
     })
 }
 
@@ -57,11 +59,11 @@ mod tests {
     #[test]
     fn the_helpers_problems_have_their_words() {
         for (problem, trouble) in [
-            (ShareProblem::Cancelled, HuddleTrouble::ShareCancelled),
-            (ShareProblem::Denied, HuddleTrouble::ShareDenied),
-            (ShareProblem::Unavailable, HuddleTrouble::NoScreenCapture),
-            (ShareProblem::Gone, HuddleTrouble::ShareGone),
-            (ShareProblem::Failed, HuddleTrouble::ShareCapture),
+            (CaptureProblem::Cancelled, HuddleTrouble::ShareCancelled),
+            (CaptureProblem::Denied, HuddleTrouble::ShareDenied),
+            (CaptureProblem::Unavailable, HuddleTrouble::NoScreenCapture),
+            (CaptureProblem::Gone, HuddleTrouble::ShareGone),
+            (CaptureProblem::Failed, HuddleTrouble::ShareCapture),
         ] {
             assert_eq!(problem_failure(problem), Failure::Huddle(trouble));
         }

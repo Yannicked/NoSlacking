@@ -1074,10 +1074,17 @@ engineering, as for the rest of the session sign-in.
         log's bandwidth estimate (is TWCC or REMB there?).
   - [ ] The camera in the Flatpak: the Camera portal (`ashpd`'s
         `desktop::camera`, a PipeWire fd read with the `pipewire` crate,
-        which needs libpipewire and libclang to build) instead of raw
-        V4L2, which would need `--device=all`.
+        in the helper behind its `pipewire` feature, as the share's
+        stream) instead of V4L2, which would need `--device=all`. The
+        helper's pipeline takes a PipeWire camera node's frames as they
+        are (YUY2/NV12 in memory; MJPG needs zune-jpeg on the stream's
+        thread); dma-bufs from it would need YUY2/NV12 imports in
+        `va/prime.rs` (RGB only today).
   - [ ] Choosing the camera (Settings) when there is more than one;
-        today the first is taken.
+        today the first is taken. The helper lists them already
+        (`ListCameras`, ids `v4l2:/dev/videoN` or `native:N`) and starts
+        one by id (`CameraChoice::Device`); the app needs the setting and
+        a list in Settings (asked of the helper's camera lane).
   - [x] Stage 4 built, behind `huddle-share` (off by default; brings
         `huddle-camera`), not yet tried against Slack: Share beside Mute
         and Video (Ctrl+Shift+E), "You are sharing your screen" with Stop
@@ -1107,7 +1114,7 @@ engineering, as for the rest of the session sign-in.
         into the helper's VA-API encoder, §6.10);
         try xcap on a real Mac and Windows machine (built here
         only against its signatures).
-  - [ ] **All video in the helper (decided 2026-10-07).** The helper
+  - [x] **All video in the helper (decided 2026-10-07, done 2026-10-08).** The helper
         (`noslacking-video`) does everything that touches pixels; the app
         keeps the call (signaling, DTLS/SRTP, RTP, the UI) and all audio
         (small, latency-sensitive, and echo cancellation needs the
@@ -1164,7 +1171,40 @@ engineering, as for the rest of the session sign-in.
              of the encoding time if the app paces from capture time;
              the import path (DRM PRIME → video processing → encoder
              input) takes PipeWire camera nodes as they are.
-        3. The camera in the helper (capture + encode).
+        3. [x] The camera in the helper (capture + encode). Done
+           2026-10-08 (`feat/video-helper-camera`, research doc §6.11):
+           protocol 5 (list and start cameras, `NextFrame` for any
+           capture, each camera frame with a self-view the helper makes
+           before encoding; no pictures from the app to encode any
+           more); the share's pipeline is any capture's (a `Profile`);
+           V4L2 spoken directly on Linux (no libclang), nokhwa in the
+           helper on macOS and Windows; GPU or software as for the
+           share. The app lost its encoder, nokhwa and the camera
+           conversions: it touches pixels only to show them. No helper,
+           no camera; a helper crash starts the camera again in a new
+           one (a camera has no dialog), up to `MAX_RESTARTS`. The
+           app's part of sending a camera fell to 0.4 % of a core; the
+           whole costs about what it did (GPU 3.5 %, software 17 %).
+           - [ ] Try it against Slack (the app's Video button, and the
+                 probe's `--send-test-video`, now the helper's test
+                 camera): does the light go on only while on, does a
+                 camera another app holds say so, does unplugging it
+                 say "Your camera stopped", does killing the helper
+                 (`pkill noslacking-video`) bring the camera back with a
+                 keyframe? On a Mac: the camera question, asked from
+                 the helper inside the bundle; on Windows: its privacy
+                 settings. nokhwa in the helper is only built in CI.
+           - [ ] The Camera portal and PipeWire camera nodes (above).
+        The whole move, in short: the app keeps the call and the
+        interface and shows pictures; the helper decodes every stream
+        (§6.9: a decoder's crash costs the helper, not the app), shares
+        the screen (§6.10: dma-bufs into VA-API, 1.3 % of a core for
+        1080p15) and sends the camera (§6.11), each in a process of its
+        own (a lane), over one protocol of pull requests. The app's tree
+        lost rusty_h264, nokhwa, ashpd, pipewire, xcap, bindgen and
+        libclang; its video threads do a fraction of what they did, and
+        a missing or failing helper means no video, said so, never a
+        crash.
   - [ ] **Hardware video decoding (and maybe encoding), in a separate
         process.** Pure Rust in software costs little today (about 0.4 ms
         per 480×480 camera frame, 3–5 ms per 1080p share frame, 4 ms to

@@ -10,7 +10,8 @@
 #   packaging/macos/bundle.sh target/release/noslacking 0.1.0 dist target/release/noslacking-video
 #
 # The helper goes beside the app in Contents/MacOS, where the app looks;
-# huddle video is decoded only there.
+# huddle video is decoded only there, and the camera and a shared
+# screen captured there (covered by the app's permissions).
 #
 # The bundle is signed ad hoc, not with a Developer ID, so Gatekeeper asks
 # before the first launch of a downloaded copy.

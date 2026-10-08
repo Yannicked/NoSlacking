@@ -5,9 +5,11 @@
 //! Turning it on shows at once as "turning on" and becomes on when the
 //! worker says the camera is open; turning it off shows at once, as the
 //! camera closes then. A camera that would not open, or a huddle that
-//! takes no video from you (Chime's "view only"), says so and stays off.
-//! The worker keeps the rule itself (see
-//! [`crate::huddle_audio::camera`]); this is only its picture.
+//! takes no video from you (Chime's "view only"), says so and stays off;
+//! so does one that stops by itself while on. The video helper keeps the
+//! rule itself (it opens the camera only when asked, closes it when its
+//! capture is closed); the worker asks it (`backend::listen`); this is
+//! only its picture.
 
 use crate::app::App;
 use crate::backend;
@@ -47,6 +49,9 @@ pub enum CamNews {
     On,
     /// It would not open, or the huddle took no video; it is off.
     Failed(Failure),
+    /// It was on and stopped by itself (unplugged, or the video helper
+    /// failing for good); it is off.
+    Stopped(Failure),
 }
 
 /// The state after asking for `action` in state `cam`.
@@ -65,7 +70,7 @@ pub fn told(cam: Cam, news: &CamNews) -> Cam {
         (Cam::Off, CamNews::On) => Cam::Off,
         (_, CamNews::On) => Cam::On,
         (Cam::Opening, CamNews::Off) => Cam::Opening,
-        (_, CamNews::Off | CamNews::Failed(_)) => Cam::Off,
+        (_, CamNews::Off | CamNews::Failed(_) | CamNews::Stopped(_)) => Cam::Off,
     }
 }
 
@@ -99,17 +104,21 @@ pub fn news(app: &mut App, team: &str, channel: &str, news: CamNews) {
         return;
     };
     listening.camera = told(listening.camera, &news);
-    if let CamNews::Failed(error) = news {
-        let text = if error == Failure::Huddle(HuddleTrouble::ViewOnly) {
+    let text = match news {
+        CamNews::Failed(error) if error == Failure::Huddle(HuddleTrouble::ViewOnly) => {
             error.message()
-        } else {
-            tf(
-                "Could not turn on your camera: {error}",
-                &[("error", &error.message())],
-            )
-        };
-        app.toast(text, true);
-    }
+        }
+        CamNews::Failed(error) => tf(
+            "Could not turn on your camera: {error}",
+            &[("error", &error.message())],
+        ),
+        CamNews::Stopped(error) => tf(
+            "Your camera stopped: {error}",
+            &[("error", &error.message())],
+        ),
+        CamNews::Off | CamNews::On => return,
+    };
+    app.toast(text, true);
 }
 
 #[cfg(test)]
@@ -141,6 +150,8 @@ mod tests {
             HuddleTrouble::NoCamera,
             HuddleTrouble::CameraDenied,
             HuddleTrouble::Camera,
+            HuddleTrouble::CameraNeedsHelper,
+            HuddleTrouble::VideoHelperLost,
             HuddleTrouble::ViewOnly,
         ] {
             let failed = CamNews::Failed(Failure::Huddle(trouble));
@@ -149,5 +160,14 @@ mod tests {
             assert!(!Failure::Huddle(trouble).message().is_empty());
         }
         assert_eq!(Cam::default(), Cam::Off);
+        // One that was on and stopped by itself is off too.
+        for trouble in [
+            HuddleTrouble::CameraGone,
+            HuddleTrouble::VideoHelperLost,
+            HuddleTrouble::CameraNeedsHelper,
+        ] {
+            let stopped = CamNews::Stopped(Failure::Huddle(trouble));
+            assert_eq!(told(Cam::On, &stopped), Cam::Off);
+        }
     }
 }

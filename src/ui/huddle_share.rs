@@ -183,6 +183,9 @@ pub fn picker(ui: &mut egui::Ui, palette: &Palette, sources: &[Source]) -> Optio
                         let icon = match source.kind {
                             SourceKind::Screen => Icon::Monitor,
                             SourceKind::Window => Icon::AppWindow,
+                            // The helper lists cameras only when asked
+                            // for them, never as something to share.
+                            SourceKind::Camera => Icon::Video,
                         };
                         let line = ui
                             .add(

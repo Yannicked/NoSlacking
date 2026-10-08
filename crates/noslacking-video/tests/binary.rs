@@ -151,7 +151,7 @@ fn the_helper_says_its_version_and_probes() {
         .output()
         .expect("runs");
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("protocol 4"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("protocol 5"));
     let output = Command::new(env!("CARGO_BIN_EXE_noslacking-video"))
         .arg("--probe")
         .env("NOSLACKING_VIDEO_BACKEND", "none")
@@ -191,10 +191,10 @@ fn the_helper_shares_the_test_screen_until_it_is_closed() {
     );
     let sources = call(2, Request::ListSources);
     assert!(
-        matches!(sources, Reply::Sources { .. } | Reply::ShareProblem { .. }),
+        matches!(sources, Reply::Sources { .. } | Reply::Problem { .. }),
         "{sources:?}"
     );
-    let Reply::ShareStarted { id, .. } = call(
+    let Reply::Started { id, .. } = call(
         3,
         Request::StartShare {
             choice: ShareChoice::Test,
@@ -209,14 +209,14 @@ fn the_helper_shares_the_test_screen_until_it_is_closed() {
     for seq in 4..40 {
         match call(
             seq,
-            Request::NextShareFrame {
+            Request::NextFrame {
                 id,
                 force_keyframe: false,
                 repeat: false,
-                wait_ms: ipc::MAX_SHARE_WAIT_MS,
+                wait_ms: ipc::MAX_WAIT_MS,
             },
         ) {
-            Reply::ShareFrame(frame) => frames.push(frame),
+            Reply::Frame(frame) => frames.push(frame),
             Reply::NoPicture => {}
             other => panic!("{other:?}"),
         }
@@ -236,7 +236,7 @@ fn the_helper_shares_the_test_screen_until_it_is_closed() {
     assert!(matches!(
         call(
             51,
-            Request::NextShareFrame {
+            Request::NextFrame {
                 id,
                 force_keyframe: false,
                 repeat: true,
@@ -245,6 +245,81 @@ fn the_helper_shares_the_test_screen_until_it_is_closed() {
         ),
         Reply::Failed { .. }
     ));
+    drop(input);
+    assert!(child.wait().expect("it ends").success());
+}
+
+/// The test camera through the program, in software (no back end):
+/// what the probe and the demo send, never a real camera. Every frame
+/// carries its self-view; closing it ends its capture.
+#[test]
+fn the_helper_sends_the_test_camera_with_its_self_view() {
+    use noslacking_video_ipc::CameraChoice;
+    let mut child = helper("none");
+    let mut input = child.stdin.take().expect("stdin");
+    let mut output = BufReader::new(child.stdout.take().expect("stdout"));
+    let mut call = |seq: u32, request: Request| {
+        ipc::write_request(&mut input, seq, &request).expect("sent");
+        let (got, reply) = ipc::read_reply(&mut output)
+            .expect("read")
+            .expect("a reply");
+        assert_eq!(got, seq);
+        reply
+    };
+    call(
+        1,
+        Request::Hello {
+            version: ipc::VERSION,
+        },
+    );
+    // What cameras there are depends on the machine (listing opens none
+    // of them): only that it answers.
+    let cameras = call(2, Request::ListCameras);
+    assert!(
+        matches!(
+            cameras,
+            Reply::Sources { dialog: false, .. } | Reply::Problem { .. }
+        ),
+        "{cameras:?}"
+    );
+    let Reply::Started { id, .. } = call(
+        3,
+        Request::StartCamera {
+            choice: CameraChoice::Test,
+            hardware: true,
+            bitrate: 600_000,
+            preview: 320,
+        },
+    ) else {
+        panic!("a camera");
+    };
+    let mut frames = Vec::new();
+    for seq in 4..40 {
+        match call(
+            seq,
+            Request::NextFrame {
+                id,
+                force_keyframe: false,
+                repeat: false,
+                wait_ms: ipc::MAX_WAIT_MS,
+            },
+        ) {
+            Reply::Frame(frame) => frames.push(frame),
+            Reply::NoPicture => {}
+            other => panic!("{other:?}"),
+        }
+        if frames.len() == 3 {
+            break;
+        }
+    }
+    assert_eq!(frames.len(), 3);
+    assert!(frames[0].keyframe && !frames[1].keyframe);
+    for frame in &frames {
+        assert!(!frame.hardware && (frame.width, frame.height) == (640, 480));
+        let preview = frame.preview.as_ref().expect("a self-view");
+        assert_eq!((preview.width, preview.height), (320, 240));
+    }
+    assert_eq!(call(50, Request::Close { id }), Reply::Done);
     drop(input);
     assert!(child.wait().expect("it ends").success());
 }

@@ -65,11 +65,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Toolchain
         run: rustup toolchain install
-      # libclang-dev: the all-features build's camera (nokhwa) generates its
-      # V4L2 bindings with bindgen, which loads libclang.
-      # libpipewire-0.3-dev: the video helper's `pipewire` feature (screen
-      # sharing under Wayland; the app itself no longer links PipeWire)
-      # generates its bindings against PipeWire's headers.
+      # libpipewire-0.3-dev and libclang-dev: the video helper's
+      # `pipewire` feature (screen sharing under Wayland; the app itself
+      # links no PipeWire) generates its bindings against PipeWire's
+      # headers with bindgen, which loads libclang. Nothing else needs
+      # them: the camera is the helper's, through V4L2 spoken directly.
       # libssl-dev: huddles' DTLS links the system's OpenSSL on Linux;
       # macOS and Windows build their own (Perl, and NASM if the runner
       # has it, else OpenSSL's C code alone).

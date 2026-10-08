@@ -425,36 +425,60 @@ async fn probe(
     )
 }
 
-/// The test video's threads and the ends of its channels the session
-/// does not hold; dropped, the threads stop.
+/// The test video's sending thread and the ends of its channels the
+/// session does not hold; dropped, the thread stops and the helper's test
+/// camera with it.
 #[cfg(feature = "huddle-camera")]
 struct TestVideo {
-    _pattern: super::camera::Capturing,
     _encoding: super::camera_send::Encoding,
     _on: tokio::sync::watch::Sender<bool>,
     _refusals: tokio::sync::mpsc::Receiver<()>,
 }
 
-/// The test picture as an always-on camera, encoded on its own thread:
-/// the session's side of it, and the threads.
+/// The video helper's test camera (a moving picture with a clock, never
+/// a real camera) as an always-on camera, fetched on its own thread: the
+/// session's side of it, and the thread. Starts the helper, which takes
+/// a moment.
 #[cfg(feature = "huddle-camera")]
 fn test_video() -> Result<(super::camera_send::CameraUplink, TestVideo), String> {
-    use super::camera::Latest;
-    use super::camera_send::{self, CameraUplink, Encoding, SendControl};
-    let latest = Latest::default();
+    use super::camera_send::{
+        self, CameraUplink, Encoding, Ending, Options, Pace, START_BITRATE, SendControl,
+    };
+    use super::helper::{self, Lane};
+    let helper = helper::shared(Lane::Camera)
+        .ok_or("no video helper (noslacking-video) to send the camera with")?;
+    let start = move || {
+        helper.start_camera(
+            noslacking_video_ipc::CameraChoice::Test,
+            helper::gpu(),
+            START_BITRATE,
+            0,
+        )
+    };
+    let camera = start().map_err(|trouble| format!("the test camera: {trouble:?}"))?;
     let (frames, frames_in) = tokio::sync::mpsc::channel(camera_send::QUEUE);
     let control = SendControl::default();
-    let encoding = Encoding::spawn(latest.clone(), frames, control.clone(), None)?;
-    let pattern = camera_send::test_pattern(latest)?;
+    let (ended, _) = tokio::sync::watch::channel(None);
+    let options = Options {
+        what: "camera",
+        pace: Pace::CAMERA,
+        preview: None,
+        restart: Some(Box::new(start)),
+        ending: Box::new(|trouble| {
+            log::warn!("probe: the test camera stopped: {trouble:?}");
+            Ending::Ended
+        }),
+    };
+    let encoding = Encoding::spawn(camera, Some(frames), control.clone(), ended, options)?;
     // On from the start; the sender lives as long as the session, or the
     // session would take its end for "off".
     let (on, on_rx) = tokio::sync::watch::channel(true);
     let (refused, refusals) = tokio::sync::mpsc::channel(1);
     log::info!(
-        "probe: sending a test picture as our camera, {}x{} at {} fps",
-        super::camera::MAX_WIDTH,
-        super::camera::MAX_HEIGHT,
-        super::camera::FPS
+        "probe: sending the helper's test picture as our camera, {}x{} at {} fps",
+        camera_send::MAX_WIDTH,
+        camera_send::MAX_HEIGHT,
+        camera_send::FPS
     );
     Ok((
         CameraUplink {
@@ -462,10 +486,9 @@ fn test_video() -> Result<(super::camera_send::CameraUplink, TestVideo), String>
             on: on_rx,
             control,
             refused,
-            descriptor: super::camera_send::DESCRIPTOR,
+            descriptor: camera_send::DESCRIPTOR,
         },
         TestVideo {
-            _pattern: pattern,
             _encoding: encoding,
             _on: on,
             _refusals: refusals,
@@ -483,10 +506,9 @@ async fn test_share(
     up: tokio::sync::oneshot::Receiver<()>,
     stopped: tokio::sync::watch::Receiver<bool>,
 ) -> Vec<String> {
-    use super::camera_send::{QUEUE, SendControl};
+    use super::camera_send::{Limits, QUEUE, START_BITRATE, SendControl};
     use super::helper::{self, Lane};
-    use super::share_send::{self, Encoding};
-    use super::video_encoder::{Limits, START_BITRATE};
+    use super::share_send;
     if up.await.is_err() {
         return vec!["summary: share: not started, the audio never came up".into()];
     }
@@ -519,7 +541,7 @@ async fn test_share(
     let (encoded, encoded_in) = tokio::sync::mpsc::channel(QUEUE);
     let control = SendControl::new(Limits::SHARE);
     let (ending, _ended) = tokio::sync::watch::channel(None);
-    let encoding = match Encoding::spawn(share, encoded, control.clone(), ending) {
+    let encoding = match share_send::spawn(share, encoded, control.clone(), ending) {
         Ok(encoding) => encoding,
         Err(why) => return vec![format!("summary: share: no sending thread: {why}")],
     };
