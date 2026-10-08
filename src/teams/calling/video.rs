@@ -395,14 +395,12 @@ pub(super) struct CallVideo {
     /// Our pictures for the line: the camera's, or the screen's.
     #[cfg(feature = "huddle-camera")]
     camera: Option<CameraFeed>,
-    /// Whether our camera is on, and whether its next picture must be a
-    /// keyframe (the first since it went on).
+    /// Whether our camera is on.
     #[cfg(feature = "huddle-camera")]
     camera_on: bool,
+    /// Writes our pictures, from a keyframe on.
     #[cfg(feature = "huddle-camera")]
-    awaiting_keyframe: bool,
-    #[cfg(feature = "huddle-camera")]
-    pictures_out: u64,
+    sender: crate::huddle_audio::camera_send::VideoSender,
     /// The far end's parameter sets.
     parameters: ParameterSets,
 }
@@ -472,9 +470,7 @@ impl CallVideo {
             #[cfg(feature = "huddle-camera")]
             camera_on,
             #[cfg(feature = "huddle-camera")]
-            awaiting_keyframe: true,
-            #[cfg(feature = "huddle-camera")]
-            pictures_out: 0,
+            sender: crate::huddle_audio::camera_send::VideoSender::default(),
             parameters: ParameterSets::default(),
         }
     }
@@ -524,7 +520,7 @@ impl CallVideo {
         }
         #[cfg(feature = "huddle-camera")]
         if send && !self.send {
-            self.awaiting_keyframe = true;
+            self.sender.restart();
         }
         self.send = send;
         self.receive = receive;
@@ -894,7 +890,7 @@ impl CallVideo {
                 );
                 self.camera_on = on;
                 if on {
-                    self.awaiting_keyframe = true;
+                    self.sender.restart();
                     if let Some(camera) = &self.camera {
                         camera.control.want_keyframe();
                     }
@@ -916,32 +912,16 @@ impl CallVideo {
         frame: crate::huddle_audio::camera_send::VideoFrame,
         connected: bool,
     ) {
-        use str0m::media::{Frequency, MediaTime, Pt};
-
-        if !connected || !self.send || !self.camera_on {
-            return;
-        }
-        if self.awaiting_keyframe {
-            if !frame.keyframe {
-                if let Some(camera) = &self.camera {
-                    camera.control.want_keyframe();
-                }
-                return;
-            }
-            self.awaiting_keyframe = false;
-        }
-        let Some(writer) = rtc.writer(self.mid) else {
+        let Some(camera) = &self.camera else {
             return;
         };
-        let time = MediaTime::new(frame.time, Frequency::NINETY_KHZ);
-        match writer.write(Pt::from(self.pt), frame.at, time, frame.data) {
-            Ok(()) => {
-                self.pictures_out += 1;
-                if self.pictures_out == 1 {
-                    log::info!("video: {:?} line: our first picture sent", self.which);
-                }
-            }
-            Err(error) => log::debug!("video: could not send a picture: {error}"),
+        let live = connected && self.send && self.camera_on;
+        let pt = Some(str0m::media::Pt::from(self.pt));
+        let first = self
+            .sender
+            .send(rtc, self.mid, pt, frame, live, &camera.control);
+        if first {
+            log::info!("video: {:?} line: our first picture sent", self.which);
         }
     }
 }

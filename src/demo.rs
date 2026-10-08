@@ -6,7 +6,10 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 mod files;
+pub mod setup;
 mod views;
+
+pub use setup::View;
 
 use crate::backend::{Command, Event, Sink, Socket, UploadGate};
 use crate::credentials::AppCredentials;

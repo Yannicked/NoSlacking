@@ -69,6 +69,7 @@ pub mod peer;
 pub mod probe;
 pub mod processing;
 pub mod region;
+pub mod relay;
 pub mod roster;
 #[cfg(feature = "huddle-video")]
 pub mod screen;
