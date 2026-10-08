@@ -929,14 +929,6 @@ impl Memo {
     }
 }
 
-/// The section a conversation is shown in, for "Move to".
-pub fn section_of(shown: &[Shown<'_>], channel: &str) -> Option<String> {
-    shown
-        .iter()
-        .find(|s| s.conversations.iter().any(|c| c.id == channel))
-        .and_then(|s| s.id.clone())
-}
-
 /// Applies an edit to the local copy, before Slack confirms it.
 pub fn apply(sections: &mut Vec<SidebarSection>, edit: &SidebarEdit) {
     match edit {

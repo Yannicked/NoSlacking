@@ -356,12 +356,6 @@ impl std::fmt::Debug for Client {
     }
 }
 
-/// The shared HTTP client for Web API calls, through the current proxy
-/// (see [`super::net`]).
-pub fn http() -> reqwest::Client {
-    super::net::api()
-}
-
 /// The client for uploads and downloads, through the current proxy.
 fn transfers() -> reqwest::Client {
     super::net::transfers()

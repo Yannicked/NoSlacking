@@ -35,9 +35,9 @@ mod workspace;
 
 #[cfg(feature = "huddle-video")]
 pub use call::CallWindow;
-pub use drafts::{Drafts, Taken};
+pub use drafts::Drafts;
 pub use popout::Popout;
-pub use wire::{edit_source, to_editable, to_mrkdwn, to_wire};
+pub use wire::{edit_source, to_editable, to_wire};
 use workspace::first_unread;
 pub use workspace::{WorkspaceState, active_in};
 
@@ -1297,7 +1297,6 @@ impl App {
                     });
                 }
             }
-            Action::CloseViewer => self.viewer = None,
             Action::Sidebar(edit) => self.edit_sidebar(edit),
             // What floats over the window.
             Action::PickReaction { channel, ts } => {

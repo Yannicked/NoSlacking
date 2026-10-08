@@ -23,8 +23,6 @@ pub enum When {
     HalfHour,
     /// Tomorrow at nine in the morning.
     TomorrowMorning,
-    /// This moment, in seconds since the epoch.
-    At(i64),
 }
 
 impl When {
@@ -37,7 +35,6 @@ impl When {
                 let nine = tomorrow.at(9, 0, 0, 0).to_zoned(now.time_zone().clone());
                 Some(nine.ok()?.timestamp().as_second())
             }
-            Self::At(seconds) => Some(seconds),
         }
     }
 }
@@ -165,13 +162,9 @@ impl fmt::Display for Problem {
 }
 
 /// The moment `date` and `time` name in `zone`, in seconds since the
-/// epoch, if it is one Slack can send at, seen from `now` (seconds).
-pub fn moment(date: &str, time: &str, zone: &TimeZone, now: i64) -> Result<i64, Problem> {
-    moment_within(date, time, zone, now, MAX_AHEAD)
-}
-
-/// [`moment`], for a time at most `max_ahead` seconds from `now`: the
-/// limit of a message, or of a reminder ([`super::remind::MAX_AHEAD`]).
+/// epoch, if it is one Slack can send at, seen from `now` (seconds), at
+/// most `max_ahead` seconds from `now`: the limit of a message
+/// ([`MAX_AHEAD`]), or of a reminder ([`super::remind::MAX_AHEAD`]).
 pub fn moment_within(
     date: &str,
     time: &str,
@@ -240,7 +233,6 @@ mod tests {
             local.strftime("%Y-%m-%d %H:%M").to_string(),
             "2026-03-29 09:00"
         );
-        assert_eq!(When::At(5).post_at(&now), Some(5));
     }
 
     #[test]
@@ -248,30 +240,34 @@ mod tests {
         let now = amsterdam("2026-03-28T22:15");
         let zone = now.time_zone().clone();
         let seconds = now.timestamp().as_second();
-        let tomorrow = moment("2026-03-29", "9:30", &zone, seconds).expect("tomorrow");
-        assert_eq!(moment("2026-03-29", "0930", &zone, seconds), Ok(tomorrow));
+        let tomorrow =
+            moment_within("2026-03-29", "9:30", &zone, seconds, MAX_AHEAD).expect("tomorrow");
         assert_eq!(
-            moment("29-03-2026", "09:30", &zone, seconds),
+            moment_within("2026-03-29", "0930", &zone, seconds, MAX_AHEAD),
+            Ok(tomorrow)
+        );
+        assert_eq!(
+            moment_within("29-03-2026", "09:30", &zone, seconds, MAX_AHEAD),
             Err(Problem::Date)
         );
         assert_eq!(
-            moment("2026-03-29", "9.30", &zone, seconds),
+            moment_within("2026-03-29", "9.30", &zone, seconds, MAX_AHEAD),
             Err(Problem::Time)
         );
         assert_eq!(
-            moment("2026-03-29", "25:00", &zone, seconds),
+            moment_within("2026-03-29", "25:00", &zone, seconds, MAX_AHEAD),
             Err(Problem::Time)
         );
         assert_eq!(
-            moment("2026-03-29", "9:3", &zone, seconds),
+            moment_within("2026-03-29", "9:3", &zone, seconds, MAX_AHEAD),
             Err(Problem::Time)
         );
         assert_eq!(
-            moment("2026-03-28", "22:15", &zone, seconds),
+            moment_within("2026-03-28", "22:15", &zone, seconds, MAX_AHEAD),
             Err(Problem::Past)
         );
         assert_eq!(
-            moment("2026-12-31", "09:00", &zone, seconds),
+            moment_within("2026-12-31", "09:00", &zone, seconds, MAX_AHEAD),
             Err(Problem::TooFar)
         );
         // A reminder may be set that far ahead, but not past five years.

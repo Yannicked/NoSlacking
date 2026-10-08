@@ -218,7 +218,7 @@ pub fn standard(name: &str) -> Option<&'static emojis::Emoji> {
 }
 
 /// Whether the emoji comes in skin tones (`:+1:` does, `:tada:` not).
-pub fn has_tones(name: &str) -> bool {
+fn has_tones(name: &str) -> bool {
     standard(name).is_some_and(|e| e.skin_tones().is_some())
 }
 

@@ -130,7 +130,7 @@ pub fn copy_image(pixels: arboard::ImageData<'static>) -> Result<(), String> {
 /// Writes `rgba` pixels, `width` by `height`, as `dir/name`, numbered
 /// (`name-2.png`) when a file of that name is already there: two pastes
 /// in one second must not overwrite each other mid-upload.
-pub fn save_png(
+fn save_png(
     dir: &Path,
     name: &str,
     width: usize,

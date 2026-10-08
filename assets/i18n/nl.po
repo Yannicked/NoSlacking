@@ -276,17 +276,11 @@ msgstr "App maken op Slack"
 msgid "Copy manifest"
 msgstr "Manifest kopiëren"
 
-msgid "After creating it, add a redirect URL under OAuth & Permissions that matches the one below, and generate an app-level token with connections:write on Basic Information."
-msgstr "Voeg daarna onder OAuth & Permissions een redirect-URL toe die overeenkomt met die hieronder, en maak onder Basic Information een app-token met connections:write."
-
 msgid "Paste the app's credentials"
 msgstr "Plak de gegevens van de app"
 
 msgid "Client ID"
 msgstr "Client-ID"
-
-msgid "Client secret"
-msgstr "Clientgeheim"
 
 msgid "App-level token"
 msgstr "App-token"
@@ -489,9 +483,6 @@ msgstr "Kies een gesprek"
 msgid "Loading conversations…"
 msgstr "Gesprekken laden…"
 
-msgid "Jump to… ({shortcut})"
-msgstr "Ga naar… ({shortcut})"
-
 msgid "No live connection: new messages in this conversation are fetched every few seconds."
 msgstr "Geen live-verbinding: nieuwe berichten in dit gesprek worden om de paar seconden opgehaald."
 
@@ -512,9 +503,6 @@ msgstr "Dit is het allereerste begin van je privéberichten met {name}."
 
 msgid "This is the very beginning of this group conversation."
 msgstr "Dit is het allereerste begin van dit groepsgesprek."
-
-msgid "This is the very beginning of #{name}."
-msgstr "Dit is het allereerste begin van #{name}."
 
 msgid "New"
 msgstr "Nieuw"
@@ -1792,12 +1780,6 @@ msgstr "het netwerk liet het afweten: {detail}"
 msgid "HTTP {status}"
 msgstr "HTTP {status}"
 
-msgid "Slack answered unexpectedly: {detail}"
-msgstr "Slack gaf een onverwacht antwoord: {detail}"
-
-msgid "Slack did not return the message"
-msgstr "Slack stuurde het bericht niet terug"
-
 msgid "it is larger than Slack's 1 GB limit"
 msgstr "het is groter dan de limiet van 1 GB van Slack"
 
@@ -2800,9 +2782,6 @@ msgstr "de camera is losgekoppeld of werkt niet meer"
 msgid "your camera needs NoSlacking's video helper (noslacking-video), which is missing or keeps failing"
 msgstr "voor je camera is de videohulp van NoSlacking (noslacking-video) nodig, en die ontbreekt of loopt steeds vast"
 
-msgid "This huddle takes no more video, so your camera stays off"
-msgstr "Deze huddle neemt geen video meer aan, dus je camera blijft uit"
-
 msgid "{count} camera on"
 msgid_plural "{count} cameras on"
 msgstr[0] "{count} camera aan"
@@ -2833,10 +2812,6 @@ msgstr[1] "nog {count} camera's"
 
 msgid "{name} (you)"
 msgstr "{name} (jij)"
-
-# Settings: the group for calls.
-msgid "Huddles"
-msgstr "Huddles"
 
 msgid "Use the graphics card for video"
 msgstr "De videokaart voor video gebruiken"

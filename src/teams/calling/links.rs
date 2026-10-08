@@ -93,11 +93,6 @@ impl Callbacks {
             .map(|event| ((*event).to_owned(), self.link(scope, event)))
             .collect()
     }
-
-    /// The call agent id, which every push for this call names.
-    pub fn call_agent_id(&self) -> &str {
-        &self.call_agent_id
-    }
 }
 
 /// What a push's path says: which call, and which callback.
