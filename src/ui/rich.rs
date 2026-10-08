@@ -448,12 +448,7 @@ fn shorten(url: &str) -> String {
         .or_else(|| url.strip_prefix("mailto:"))
         .unwrap_or(url);
     let bare = bare.strip_suffix('/').unwrap_or(bare);
-    if bare.chars().count() > 60 {
-        let cut: String = bare.chars().take(57).collect();
-        format!("{cut}…")
-    } else {
-        bare.to_owned()
-    }
+    crate::text::ellipsize(bare, 60).0.into_owned()
 }
 
 #[cfg(test)]

@@ -77,10 +77,10 @@ impl Worker {
             }
             let claimed = tokio::task::spawn_blocking(move || crate::slack_links::claim(&state))
                 .await
-                .unwrap_or_else(|error| Err(error.to_string()));
+                .unwrap_or_else(|error| Err(Failure::Unexpected(error.to_string())));
             if let Err(error) = claimed {
                 // The link can still be pasted by hand.
-                log::warn!("could not register as the slack:// link handler: {error}");
+                log::warn!("could not register as the slack:// link handler: {error:?}");
             }
             if let Err(error) = open::that_detached(crate::slack::magic::SIGN_IN_URL) {
                 log::warn!("could not open the browser: {error}");
@@ -111,11 +111,11 @@ impl Worker {
             }
             let released = tokio::task::spawn_blocking(move || crate::slack_links::release(&state))
                 .await
-                .unwrap_or_else(|error| Err(error.to_string()));
+                .unwrap_or_else(|error| Err(Failure::Unexpected(error.to_string())));
             match released {
                 Ok(true) => log::info!("gave the slack:// links back"),
                 Ok(false) => {}
-                Err(error) => log::warn!("could not give the slack:// links back: {error}"),
+                Err(error) => log::warn!("could not give the slack:// links back: {error:?}"),
             }
         });
     }
@@ -219,11 +219,9 @@ impl Worker {
         match redirect {
             Redirect::Scheme => {
                 if let Err(error) = auth::register_scheme() {
-                    log::warn!("could not register noslacking:// links: {error}");
-                    self.sink.send(Event::Error(Problem::new(
-                        Doing::RegisterLinks,
-                        Failure::Other(error),
-                    )));
+                    log::warn!("could not register noslacking:// links: {error:?}");
+                    self.sink
+                        .send(Event::Error(Problem::new(Doing::RegisterLinks, error)));
                 }
                 open_browser(&flow.url);
             }

@@ -95,9 +95,7 @@ impl SessionResponse {
     /// Builds the URL-encoded query string for `connectparams`.
     fn connectparams_query(&self) -> String {
         let cp = &self.connectparams;
-        let enc = |s: &str| {
-            percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
-        };
+        let enc = |s: &str| crate::percent::encode_strict(s).to_string();
         format!(
             "sr={}&issuer={}&sp={}&se={}&st={}&sig={}",
             enc(&cp.sr),
@@ -113,9 +111,7 @@ impl SessionResponse {
     pub fn session_url(&self, epid: &str) -> String {
         let host = self.socketio.trim_end_matches('/');
         let cp_query = self.connectparams_query();
-        let enc = |s: &str| {
-            percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
-        };
+        let enc = |s: &str| crate::percent::encode_strict(s).to_string();
         let tc =
             r#"{"cv":"TEAMS_TROUTER_TCCV","ua":"TeamsCDL","hr":"","v":"TEAMS_CLIENTINFO_VERSION"}"#;
 
@@ -138,9 +134,7 @@ impl SessionResponse {
     pub fn ws_url(&self, session_id: &str, epid: &str) -> String {
         let host = self.socketio.trim_end_matches('/');
         let cp_query = self.connectparams_query();
-        let enc = |s: &str| {
-            percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
-        };
+        let enc = |s: &str| crate::percent::encode_strict(s).to_string();
         let tc =
             r#"{"cv":"TEAMS_TROUTER_TCCV","ua":"TeamsCDL","hr":"","v":"TEAMS_CLIENTINFO_VERSION"}"#;
 

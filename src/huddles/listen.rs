@@ -292,13 +292,7 @@ pub fn leave_alone(since: Option<Instant>, now: Instant) -> bool {
 
 /// A call's length as a clock: `0:05`, `12:34`, `1:02:03`.
 pub fn clock(length: Duration) -> String {
-    let seconds = length.as_secs();
-    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
+    crate::model::duration_text(length.as_secs().saturating_mul(1000))
 }
 
 /// Where the huddle is, for the bar's title.

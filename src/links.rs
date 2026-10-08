@@ -3,6 +3,7 @@
 //! `slack://` deep links the desktop hands to whichever app handles them.
 
 use crate::model::Ts;
+use crate::percent::query_param;
 
 /// Where a link into Slack points.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,7 +116,7 @@ pub fn parse_web(url: &str) -> Option<Link> {
         }
         ["archives", channel, message, ..] if is_id(channel) => {
             let ts = message_ts(message)?;
-            let thread = param(query, "thread_ts").and_then(|t| real_ts(&t));
+            let thread = query_param(query, "thread_ts").and_then(|t| Ts::parse(&t));
             Target::Message {
                 channel: (*channel).to_owned(),
                 ts,
@@ -137,14 +138,17 @@ pub fn parse_web(url: &str) -> Option<Link> {
 pub fn parse_deep(url: &str) -> Option<Link> {
     let rest = url.strip_prefix("slack://")?;
     let (kind, query) = rest.split_once('?').unwrap_or((rest, ""));
-    let team = param(query, "team").filter(|t| is_id(t))?;
-    let id = param(query, "id").filter(|id| is_id(id));
+    let team = query_param(query, "team").filter(|t| is_id(t))?;
+    let id = query_param(query, "id").filter(|id| is_id(id));
     let target = match kind.trim_end_matches('/') {
-        "channel" => match (id, param(query, "message").and_then(|t| real_ts(&t))) {
+        "channel" => match (
+            id,
+            query_param(query, "message").and_then(|t| Ts::parse(&t)),
+        ) {
             (Some(channel), Some(ts)) => Target::Message {
                 channel,
                 ts,
-                thread: param(query, "thread_ts").and_then(|t| real_ts(&t)),
+                thread: query_param(query, "thread_ts").and_then(|t| Ts::parse(&t)),
             },
             (Some(channel), None) => Target::Conversation(channel),
             (None, _) => return None,
@@ -181,24 +185,6 @@ fn message_ts(segment: &str) -> Option<Ts> {
     }
     let (secs, micros) = digits.split_at(digits.len() - 6);
     Some(Ts::new(format!("{secs}.{micros}")))
-}
-
-/// A timestamp from a query, if it is a real one.
-fn real_ts(text: &str) -> Option<Ts> {
-    let ts = Ts::new(text);
-    let (secs, micros) = text.split_once('.')?;
-    let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
-    (digits(secs) && digits(micros)).then_some(ts)
-}
-
-/// The decoded value of `key` in a query string.
-fn param(query: &str, key: &str) -> Option<String> {
-    query
-        .split('&')
-        .filter_map(|pair| pair.split_once('='))
-        .find(|(k, _)| *k == key)
-        .and_then(|(_, value)| crate::percent::decode(value).ok())
-        .map(|value| value.into_owned())
 }
 
 #[cfg(test)]

@@ -162,7 +162,7 @@ impl BootRetry {
 /// reach Slack.
 fn boot_wait(failures: u32) -> Duration {
     let doublings = failures.saturating_sub(1).min(10);
-    (BOOT_RETRY_FIRST * 2u32.pow(doublings)).min(BOOT_RETRY_MAX)
+    crate::retry::backoff(BOOT_RETRY_FIRST, BOOT_RETRY_MAX, doublings)
 }
 
 struct Team {

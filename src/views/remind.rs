@@ -85,9 +85,12 @@ pub fn reminder_text(plain: &str, permalink: &str) -> String {
     if line.is_empty() {
         return permalink.to_owned();
     }
-    let mut excerpt: String = line.chars().take(EXCERPT).collect();
-    if line.chars().count() > EXCERPT || plain.trim() != line {
-        excerpt = excerpt.trim_end().to_owned();
+    // EXCERPT characters and the ellipsis; one also marks a message that
+    // goes on past its first line.
+    let (excerpt, cut) = crate::text::ellipsize(line, EXCERPT + 1);
+    let mut excerpt = excerpt.into_owned();
+    if !cut && plain.trim() != line {
+        excerpt.truncate(excerpt.trim_end().len());
         excerpt.push('…');
     }
     format!("“{excerpt}” {permalink}")

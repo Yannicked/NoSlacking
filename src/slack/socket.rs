@@ -138,7 +138,7 @@ fn wait_before_next(ended: &Ended, lasted: Duration, backoff: &mut Duration) -> 
         Ended::RateLimited(asked) => (*asked).max(*backoff),
         _ => *backoff,
     };
-    *backoff = (*backoff * 2).min(MAX_BACKOFF);
+    *backoff = crate::retry::backoff(*backoff, MAX_BACKOFF, 1);
     wait
 }
 
