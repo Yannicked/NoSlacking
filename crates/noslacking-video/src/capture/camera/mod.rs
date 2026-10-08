@@ -190,13 +190,18 @@ pub fn fed(pipeline: &mut Pipeline, inbox: &mpsc::Receiver<Ask>) {
 
 /// The test camera: [`super::pattern::pattern`] at 640×480 and 30 a
 /// second, its colour bars sliding and its clock running, never anyone's
-/// camera.
+/// camera. With `NOSLACKING_VIDEO_TEST_CAMERA=yuyv` its pictures are made
+/// once as YUYV, as a webcam hands them over, and each is converted as a
+/// V4L2 camera's is: so the benchmarks measure the real path, not the
+/// drawing.
 #[derive(Debug)]
 pub struct TestCamera {
     size: (u32, u32),
     began: Instant,
     due: Instant,
     n: u64,
+    /// The pictures as YUYV, gone round and round, if so.
+    yuyv: Vec<Vec<u8>>,
 }
 
 impl TestCamera {
@@ -208,12 +213,35 @@ impl TestCamera {
             began: now,
             due: now,
             n: 0,
+            yuyv: Vec::new(),
+        }
+    }
+
+    /// The same, its pictures handed over as YUYV a webcam's would be.
+    pub fn yuyv(width: u32, height: u32) -> Self {
+        let frames = (0..super::pattern::LOOP)
+            .map(|n| {
+                let at = Duration::from_millis(n * 1000 / 30);
+                convert::to_yuyv(&super::pattern::pattern(width, height, n, at))
+            })
+            .collect();
+        Self {
+            yuyv: frames,
+            ..Self::new(width, height)
         }
     }
 
     /// The test camera as a device to open.
     pub fn opener() -> Opener {
-        Box::new(|| Ok(Box::new(Self::new(640, 480)) as Box<dyn Device>))
+        Box::new(|| {
+            let yuyv = std::env::var("NOSLACKING_VIDEO_TEST_CAMERA").is_ok_and(|v| v == "yuyv");
+            let camera = if yuyv {
+                Self::yuyv(640, 480)
+            } else {
+                Self::new(640, 480)
+            };
+            Ok(Box::new(camera) as Box<dyn Device>)
+        })
     }
 }
 
@@ -228,12 +256,14 @@ impl Device for TestCamera {
             std::thread::sleep(self.due - now);
         }
         let at = Instant::now();
-        let picture = super::pattern::pattern(
-            self.size.0,
-            self.size.1,
-            self.n,
-            at.duration_since(self.began),
-        );
+        let (width, height) = self.size;
+        let picture = if self.yuyv.is_empty() {
+            super::pattern::pattern(width, height, self.n, at.duration_since(self.began))
+        } else {
+            let frame = &self.yuyv[usize::try_from(self.n).unwrap_or(0) % self.yuyv.len()];
+            convert::from_yuyv(frame, width, height, width as usize * 2)
+                .ok_or_else(|| Trouble::failed("the test camera's frame did not read"))?
+        };
         self.n += 1;
         self.due += Duration::from_secs(1) / crate::pipeline::Profile::CAMERA.fps;
         if self.due < at {

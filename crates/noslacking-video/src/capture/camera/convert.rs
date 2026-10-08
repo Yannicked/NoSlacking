@@ -198,6 +198,27 @@ pub fn from_mjpeg(data: &[u8]) -> Option<Planes> {
     from_rgb(&rgb, width, height, usize::try_from(width).ok()? * 3)
 }
 
+/// An I420 picture (even-sized) as tightly packed YUYV, each chroma
+/// sample used for both rows it covers: what a webcam would have handed
+/// over for it (the test camera's, the benchmarks').
+pub fn to_yuyv(picture: &Planes) -> Vec<u8> {
+    let (w, h) = (picture.width as usize, picture.height as usize);
+    let mut out = Vec::with_capacity(w * h * 2);
+    for row in 0..h {
+        let luma = &picture.y[row * w..(row + 1) * w];
+        let chroma = (row / 2) * (w / 2);
+        for (x, pair) in luma.as_chunks::<2>().0.iter().enumerate() {
+            out.extend_from_slice(&[
+                pair[0],
+                picture.u[chroma + x],
+                pair[1],
+                picture.v[chroma + x],
+            ]);
+        }
+    }
+    out
+}
+
 fn avg2(a: u8, b: u8) -> u8 {
     u8::try_from((u16::from(a) + u16::from(b)).div_ceil(2)).unwrap_or(u8::MAX)
 }
@@ -261,6 +282,15 @@ mod tests {
         assert!(from_yuyv(&yuyv, 4, 2, 4).is_none());
         // A size past what a picture may be is refused before reading.
         assert!(from_gray(&[0u8; 16], 8192, 2, 8192).is_none());
+    }
+
+    /// An I420 picture made YUYV and read back is the same picture.
+    #[test]
+    fn yuyv_goes_both_ways() {
+        let picture = crate::capture::pattern::pattern(64, 48, 3, std::time::Duration::ZERO);
+        let yuyv = to_yuyv(&picture);
+        assert_eq!(yuyv.len(), 64 * 48 * 2);
+        assert_eq!(from_yuyv(&yuyv, 64, 48, 128), Some(picture));
     }
 
     /// A JPEG frame decodes, as a webcam's MJPEG would.
