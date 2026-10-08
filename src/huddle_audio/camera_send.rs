@@ -1,7 +1,8 @@
 //! What we send, on its way out (the `huddle-camera` feature): the
 //! thread between the video helper, which captures and encodes our
 //! camera (or our shared screen, `super::share_send`), and the session;
-//! the controls the session turns (keyframes, bitrate); and the camera's
+//! the controls the session turns (keyframes, bitrate, and the frame
+//! rate and picture size a Teams meeting allows); and the camera's
 //! self-preview the call bar shows.
 //!
 //! The helper ([`RemoteCapture`]) keeps the newest captured picture and
@@ -120,8 +121,9 @@ pub struct VideoFrame {
 }
 
 /// What the session tells the sender: a receiver wants a keyframe, the
-/// bandwidth estimate changed. It also keeps the stream's RTP clock, so
-/// a camera turned off and on again goes on from where it was.
+/// bandwidth estimate changed, a meeting allows fewer pictures a second
+/// or smaller ones. It also keeps the stream's RTP clock, so a camera
+/// turned off and on again goes on from where it was.
 #[derive(Clone, Debug)]
 pub struct SendControl {
     shared: Arc<ControlShared>,
@@ -131,7 +133,15 @@ pub struct SendControl {
 #[derive(Debug)]
 struct ControlShared {
     keyframe: AtomicBool,
+    /// The bitrate aimed at, as the bandwidth estimate says.
     bitrate: AtomicU32,
+    /// The most bitrate whatever the estimate (a Teams meeting's
+    /// `max-br`); 0 for no ceiling.
+    max_bitrate: AtomicU32,
+    /// The most pictures a second; 0 for no ceiling (the pace's own).
+    max_fps: AtomicU32,
+    /// The box pictures fit within, width in the high half; 0 for none.
+    max_size: AtomicU64,
     /// Where the RTP clock starts.
     epoch: Instant,
     /// The last RTP time handed out.
@@ -152,6 +162,9 @@ impl SendControl {
             shared: Arc::new(ControlShared {
                 keyframe: AtomicBool::new(false),
                 bitrate: AtomicU32::new(limits.bitrate(START_BITRATE)),
+                max_bitrate: AtomicU32::new(0),
+                max_fps: AtomicU32::new(0),
+                max_size: AtomicU64::new(0),
                 epoch: Instant::now(),
                 last_time: AtomicU64::new(0),
             }),
@@ -186,9 +199,48 @@ impl SendControl {
             .store(self.limits.bitrate(bitrate), Ordering::Relaxed);
     }
 
-    /// The bitrate aimed at now.
+    /// The bitrate aimed at now: the estimate's, under any ceiling.
     pub fn bitrate(&self) -> u32 {
-        self.shared.bitrate.load(Ordering::Relaxed)
+        let bitrate = self.shared.bitrate.load(Ordering::Relaxed);
+        match self.shared.max_bitrate.load(Ordering::Relaxed) {
+            0 => bitrate,
+            max => self.limits.bitrate(bitrate.min(max)),
+        }
+    }
+
+    /// At most `bitrate` bit/s whatever the estimate says (a Teams
+    /// meeting's `max-br`); none lifts the ceiling.
+    pub fn set_max_bitrate(&self, bitrate: Option<u32>) {
+        let bitrate = bitrate.filter(|&b| b > 0).unwrap_or(0);
+        self.shared.max_bitrate.store(bitrate, Ordering::Relaxed);
+    }
+
+    /// At most `fps` pictures a second, below the sender's own pace (a
+    /// Teams meeting's `max-fps`); none lifts the ceiling.
+    pub fn set_max_fps(&self, fps: Option<u32>) {
+        let fps = fps.filter(|&fps| fps > 0).unwrap_or(0);
+        self.shared.max_fps.store(fps, Ordering::Relaxed);
+    }
+
+    /// The ceiling on pictures a second, if any.
+    pub fn max_fps(&self) -> Option<u32> {
+        Some(self.shared.max_fps.load(Ordering::Relaxed)).filter(|&fps| fps > 0)
+    }
+
+    /// Pictures fit within `max` as well as their own limits (a Teams
+    /// meeting's `max-fs`); none lifts the box.
+    pub fn set_max_size(&self, max: Option<(u32, u32)>) {
+        let packed = max
+            .filter(|&(w, h)| w > 0 && h > 0)
+            .map_or(0, |(w, h)| u64::from(w) << 32 | u64::from(h));
+        self.shared.max_size.store(packed, Ordering::Relaxed);
+    }
+
+    /// The box pictures fit within, if any.
+    pub fn max_size(&self) -> Option<(u32, u32)> {
+        let packed = self.shared.max_size.load(Ordering::Relaxed);
+        let (w, h) = ((packed >> 32) as u32, packed as u32);
+        (w > 0 && h > 0).then_some((w, h))
     }
 
     /// The RTP time of a picture taken at `at`: 90 kHz from when these
@@ -393,6 +445,8 @@ impl Pace {
 #[derive(Clone, Copy, Debug)]
 pub struct Gate {
     pace: Pace,
+    /// A ceiling under the pace's own frame rate (a meeting's).
+    max_fps: Option<u32>,
     last_sent: Option<Instant>,
 }
 
@@ -410,16 +464,30 @@ impl Gate {
     pub fn new(pace: Pace) -> Self {
         Self {
             pace,
+            max_fps: None,
             last_sent: None,
         }
+    }
+
+    /// At most `fps` pictures a second from now on, if that is fewer
+    /// than the pace's; none goes back to the pace. A still screen's
+    /// keepalive is not changed.
+    pub fn set_max_fps(&mut self, fps: Option<u32>) {
+        self.max_fps = fps;
+    }
+
+    /// The pictures a second asked for now.
+    pub fn fps(&self) -> u32 {
+        self.max_fps
+            .map_or(self.pace.fps, |max| self.pace.fps.min(max))
+            .max(1)
     }
 
     /// How long to wait before asking at `now`; zero when it is time.
     pub fn wait(&self, now: Instant) -> Duration {
         // A little under a frame's time, so a capture a millisecond early
         // is not missed.
-        let frame = (Duration::from_secs(1) / self.pace.fps.max(1))
-            .saturating_sub(Duration::from_millis(5));
+        let frame = (Duration::from_secs(1) / self.fps()).saturating_sub(Duration::from_millis(5));
         self.last_sent.map_or(Duration::ZERO, |at| {
             (at + frame).saturating_duration_since(now)
         })
@@ -597,6 +665,8 @@ fn send(
     let mut force_next = false;
     let mut bitrate = control.bitrate();
     let mut retuned: Option<Instant> = None;
+    // The box last asked of the helper: none, as it starts.
+    let mut boxed: Option<(u32, u32)> = None;
     let mut size = (0, 0);
     let mut next_report = Instant::now() + REPORT_EVERY;
     let ending = loop {
@@ -604,6 +674,11 @@ fn send(
             break None;
         }
         let now = Instant::now();
+        let fps = gate.fps();
+        gate.set_max_fps(control.max_fps());
+        if gate.fps() != fps {
+            log::info!("huddle {what}: {} pictures a second", gate.fps());
+        }
         let wait = gate.wait(now);
         if !wait.is_zero() {
             std::thread::park_timeout(wait);
@@ -617,6 +692,20 @@ fn send(
                 capture.set_bitrate(wanted)?;
                 bitrate = wanted;
                 retuned = Some(now);
+            }
+            // A meeting's box, passed on as it changes: the helper starts
+            // the new size with a keyframe.
+            let wanted_box = control.max_size();
+            if wanted_box != boxed {
+                capture.set_max_size(wanted_box)?;
+                boxed = wanted_box;
+                log::info!(
+                    "huddle {what}: pictures at most {}",
+                    wanted_box.map_or_else(
+                        || "as large as they come".to_owned(),
+                        |(w, h)| format!("{w}x{h}")
+                    )
+                );
             }
             // A receiver's request a moment after a keyframe waits its
             // turn.
@@ -642,6 +731,7 @@ fn send(
                         force_next = true;
                         retuned = None;
                         bitrate = 0;
+                        boxed = None;
                         continue;
                     }
                     Some(Err(trouble)) => {
@@ -689,7 +779,7 @@ fn send(
                 size.0,
                 size.1,
                 bitrate / 1000,
-                options.pace.fps,
+                gate.fps(),
                 if frame.hardware {
                     "on the GPU"
                 } else {
@@ -808,6 +898,57 @@ mod tests {
         control.set_bitrate(50_000_000);
         assert_eq!(control.bitrate(), MAX_BITRATE);
         assert_eq!(Limits::SHARE.bitrate(50_000_000), 2_500_000);
+    }
+
+    #[test]
+    fn a_bitrate_ceiling_holds_whatever_the_estimate() {
+        let control = SendControl::new(Limits::SHARE);
+        control.set_bitrate(2_000_000);
+        control.set_max_bitrate(Some(825_000));
+        assert_eq!(control.bitrate(), 825_000);
+        // A lower estimate goes below it; a higher one stays under it.
+        control.set_bitrate(400_000);
+        assert_eq!(control.bitrate(), 400_000);
+        control.set_bitrate(9_000_000);
+        assert_eq!(control.bitrate(), 825_000);
+        // Never below the sender's least, and lifted by none.
+        control.set_max_bitrate(Some(1));
+        assert_eq!(control.bitrate(), MIN_BITRATE);
+        control.set_max_bitrate(None);
+        assert_eq!(control.bitrate(), 2_500_000);
+    }
+
+    #[test]
+    fn a_meetings_ceilings_are_kept_until_lifted() {
+        let control = SendControl::default();
+        assert_eq!((control.max_fps(), control.max_size()), (None, None));
+        control.set_max_fps(Some(15));
+        control.set_max_size(Some((1280, 720)));
+        let shared = control.clone();
+        assert_eq!(shared.max_fps(), Some(15));
+        assert_eq!(shared.max_size(), Some((1280, 720)));
+        // Zero is no ceiling, as none is.
+        control.set_max_fps(Some(0));
+        control.set_max_size(Some((0, 720)));
+        assert_eq!((shared.max_fps(), shared.max_size()), (None, None));
+    }
+
+    #[test]
+    fn a_ceiling_slows_the_gate_but_never_speeds_it() {
+        let start = Instant::now();
+        let mut gate = Gate::new(Pace::CAMERA);
+        gate.sent(start);
+        let at_30 = gate.wait(start);
+        gate.set_max_fps(Some(15));
+        assert_eq!(gate.fps(), 15);
+        let at_15 = gate.wait(start);
+        assert!(at_15 > at_30 + Duration::from_millis(30), "{at_15:?}");
+        assert_eq!(gate.wait(start + Duration::from_millis(67)), Duration::ZERO);
+        // A ceiling above the pace changes nothing; none is the pace.
+        gate.set_max_fps(Some(60));
+        assert_eq!((gate.fps(), gate.wait(start)), (30, at_30));
+        gate.set_max_fps(None);
+        assert_eq!(gate.fps(), 30);
     }
 
     #[test]

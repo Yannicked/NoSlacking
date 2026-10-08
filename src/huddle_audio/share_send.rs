@@ -245,6 +245,63 @@ mod tests {
         )
     }
 
+    /// A meeting's box reaches the helper as it changes, and is lifted
+    /// again; nothing is asked while there is none.
+    #[test]
+    fn a_box_reaches_the_helper_as_it_changes() {
+        let boxes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&boxes);
+        let pretend = Pretend::new(move |request| match request {
+            Request::Hello { .. } => Act::Reply(welcome()),
+            Request::StartShare { .. } => Act::Reply(Reply::Started {
+                id: 1,
+                restore: String::new(),
+            }),
+            Request::SetMaxSize { width, height, .. } => {
+                seen.lock().expect("a lock").push((*width, *height));
+                Act::Reply(Reply::Done)
+            }
+            Request::NextFrame { force_keyframe, .. } => {
+                let data = if *force_keyframe {
+                    vec![
+                        0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 1, 0, 0, 0, 1, 0x65, 1,
+                    ]
+                } else {
+                    vec![0, 0, 0, 1, 0x41, 1]
+                };
+                Act::Reply(Reply::Frame(ipc::CapturedFrame {
+                    keyframe: *force_keyframe,
+                    hardware: true,
+                    width: 1280,
+                    height: 720,
+                    age_us: 1_000,
+                    data,
+                    preview: None,
+                }))
+            }
+            _ => Act::Reply(Reply::Done),
+        });
+        let helper = Helper::with_timeouts(
+            Arc::new(pretend),
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+        );
+        let (share, _) = helper
+            .start_share(ShareChoice::Test, true, 1_000_000, "")
+            .expect("started");
+        let (frames, mut out) = mpsc::channel(64);
+        let (ended, _) = watch::channel(None);
+        let control = SendControl::new(Limits::SHARE);
+        let encoding = spawn(share, frames, control.clone(), ended).expect("a thread");
+        collect(&mut out, 2);
+        control.set_max_size(Some((1280, 720)));
+        collect(&mut out, 2);
+        control.set_max_size(None);
+        collect(&mut out, 2);
+        drop(encoding);
+        assert_eq!(*boxes.lock().expect("a lock"), [(1280, 720), (0, 0)]);
+    }
+
     /// A receiver's PLI makes the next picture a keyframe.
     #[test]
     fn a_receiver_gets_its_keyframe() {
