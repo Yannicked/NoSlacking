@@ -214,6 +214,10 @@ pub struct CpconvAnswer {
     /// passcode comes back as the meeting's own, not the link's token).
     /// Holds the passcode: never logged.
     pub meeting_data: Option<serde_json::Value>,
+    /// Who is in the conversation: in a meeting already going, those in
+    /// it before us, cameras and all (recorded: the meeting pushes only
+    /// changes after we join).
+    pub roster: Option<RosterUpdate>,
 }
 
 /// The conversation's links we use; the rest are for group calls.
@@ -486,6 +490,24 @@ impl RosterParticipant {
     /// Whether the participant is in the call.
     pub fn is_active(&self) -> bool {
         self.state == "active"
+    }
+
+    /// Their screen share's source id, while they share: the `sourceId` of
+    /// an `applicationsharing-video` stream sending from a device in the
+    /// call (`recvonly` while they do not, recorded).
+    pub fn share_source(&self) -> Option<i64> {
+        self.endpoints
+            .values()
+            .filter_map(|e| e.call.as_ref()?.get("mediaStreams")?.as_array())
+            .flatten()
+            .find(|s| {
+                s.get("label").and_then(|l| l.as_str()) == Some("applicationsharing-video")
+                    && matches!(
+                        s.get("direction").and_then(|d| d.as_str()),
+                        Some("sendrecv" | "sendonly")
+                    )
+            })
+            .and_then(|s| s.get("sourceId")?.as_i64())
     }
 
     /// The directions of their `main-video` streams in the call, for the
@@ -1233,5 +1255,29 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_meetings_answer_names_who_is_in_already() {
+        let stream = |kind: &str, label: &str, id: i64, direction: &str| serde_json::json!({"type": kind, "label": label, "sourceId": id, "direction": direction});
+        let answer: CpconvAnswer = serde_json::from_value(serde_json::json!({
+            "conversationController": "https://example.test/conv/1",
+            "links": {"leave": "https://example.test/leave"},
+            "roster": {"type": "Delta", "sequenceNumber": 64, "participants": {
+                "8:guest:abc": {"version": 3, "state": "active", "role": "guest",
+                    "details": {"id": "8:guest:abc", "displayName": "Gus"},
+                    "endpoints": {"e1": {"call": {"mediaStreams": [
+                        stream("audio", "main-audio", 407, "sendrecv"),
+                        stream("video", "main-video", 408, "sendrecv"),
+                        stream("applicationsharing-video", "applicationsharing-video", 418, "sendonly"),
+                    ]}}}}
+            }}
+        }))
+        .expect("reads");
+        let roster = answer.roster.expect("a roster");
+        let gus = &roster.participants["8:guest:abc"];
+        assert_eq!(gus.camera_source(), Some(408));
+        assert_eq!(gus.audio_source(), Some(407));
+        assert_eq!(gus.share_source(), Some(418));
     }
 }

@@ -32,9 +32,11 @@ pub const SERVER: i32 = -4;
 /// Our id until the server gives one.
 const UNNAMED: i32 = -2;
 /// What we ask for in an `sr`: H.264 up to 1080p, as the web client
-/// asks (recorded).
+/// asks (recorded); for a screen share, 15 pictures a second.
 const VIDEO_FORMAT: &str =
     r#"{"max-fs":8160,"max-mbps":244800,"max-fps":3000,"profile-level-id":"64001f"}"#;
+const SCREEN_FORMAT: &str =
+    r#"{"max-fs":8160,"max-mbps":135000,"max-fps":1500,"profile-level-id":"64001f"}"#;
 
 /// One message of the channel: its header's parts and its messages.
 #[derive(Clone, Debug, PartialEq)]
@@ -155,16 +157,22 @@ impl Channel {
     }
 
     /// A source request: `source`'s video (a roster `sourceId`, or none)
-    /// on our receiving stream `stream`. `None` before the handshake is
-    /// done.
-    pub fn request_video(&mut self, source: Option<i64>, stream: u32) -> Option<Vec<u8>> {
+    /// on our receiving stream `stream`, a camera's or (`screen`) a screen
+    /// share's. `None` before the handshake is done.
+    pub fn request_video(
+        &mut self,
+        source: Option<i64>,
+        stream: u32,
+        screen: bool,
+    ) -> Option<Vec<u8>> {
         let us = self.us?;
         self.request = if self.request == 0 {
             1
         } else {
             self.request + 2
         };
-        let format: serde_json::Value = serde_json::from_str(VIDEO_FORMAT).unwrap_or_default();
+        let format = if screen { SCREEN_FORMAT } else { VIDEO_FORMAT };
+        let format: serde_json::Value = serde_json::from_str(format).unwrap_or_default();
         let message = serde_json::json!({
             "type": "sr",
             "controlVideoStreaming": {
@@ -210,7 +218,7 @@ mod tests {
         assert_eq!(ours[..HEADER], syn[..HEADER]);
         assert_eq!(decode(&ours), decode(&syn));
         assert!(!channel.ready());
-        assert_eq!(channel.request_video(Some(202), 404), None);
+        assert_eq!(channel.request_video(Some(202), 404, false), None);
 
         // The server's ack names us 415.
         let ack = hex(concat!(
@@ -221,7 +229,7 @@ mod tests {
         assert!(channel.ready());
 
         // The first request, as recorded but for its JSON's key order.
-        let request = channel.request_video(Some(202), 404).expect("ready");
+        let request = channel.request_video(Some(202), 404, false).expect("ready");
         assert_eq!(
             request[..HEADER],
             hex("100f920001000000019f01fffffffc01")[..]
@@ -237,7 +245,7 @@ mod tests {
             "64001f"
         );
         // Then none, numbered two on.
-        let none = decode(&channel.request_video(None, 404).expect("ready")).expect("reads");
+        let none = decode(&channel.request_video(None, 404, false).expect("ready")).expect("reads");
         assert_eq!(none.seq, 2);
         let info = &none.messages[0]["controlVideoStreaming"];
         assert_eq!(info["sequenceNumber"], 3);

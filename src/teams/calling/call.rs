@@ -106,6 +106,8 @@ pub struct Attendee {
     pub camera: Option<i64>,
     /// Their sound's source id, which the meeting names who speaks by.
     pub audio: Option<i64>,
+    /// Their screen share's source id, while they share.
+    pub share: Option<i64>,
 }
 
 /// Who is in a meeting, from its roster's deltas.
@@ -142,6 +144,7 @@ impl People {
                 muted: them.is_muted(),
                 camera: them.camera_source(),
                 audio: them.audio_source(),
+                share: them.share_source(),
             };
             let was = self
                 .by_mri
@@ -232,6 +235,7 @@ async fn run_meeting(
         camera_lines: Vec::new(),
         watching: Vec::new(),
         speaker: None,
+        watching_share: None,
         syns: 0,
         heard: 0,
         sharing: false,
@@ -487,6 +491,9 @@ struct InMeeting {
     watching: Vec<Option<(String, i64)>>,
     /// Who spoke last, by MRI, as the meeting says.
     speaker: Option<String>,
+    /// Whose screen share was last asked for, by MRI and source id; the
+    /// outer `None` while none was ever asked for.
+    watching_share: Option<Option<(String, i64)>>,
     /// How many `syn`s went on the data channel since it opened.
     syns: u32,
     /// How many messages came on it since it opened.
@@ -645,10 +652,24 @@ impl Call {
         {
             log::info!("Teams meeting: the preheat not ended: {error:?}");
         }
+        // Who is in already: the meeting pushes only what changes after.
+        if let Some(meeting) = &mut self.meeting {
+            for roster in [&preheated.roster, &joined.roster].into_iter().flatten() {
+                meeting.people.take(roster, &meeting.me);
+            }
+            let people = meeting.people.list();
+            log::info!(
+                "Teams meeting: {} in already, {} with a camera on",
+                people.iter().filter(|p| !p.waiting).count(),
+                people.iter().filter(|p| p.camera.is_some()).count()
+            );
+            tell(CallEvent::People(people));
+        }
         self.conversation = Some(CpconvAnswer {
             conversation_controller: preheated.conversation_controller,
             links,
             meeting_data: None,
+            roster: None,
         });
         log::info!("Teams meeting: joined, waiting for its answer");
         let ended = self
@@ -723,6 +744,7 @@ impl Call {
                         if let Some(meeting) = &mut self.meeting {
                             meeting.channel = super::channel::Channel::default();
                             meeting.watching = vec![None; meeting.camera_lines.len()];
+                            meeting.watching_share = None;
                             meeting.syns = 1;
                             session.send_data(meeting.channel.syn());
                             syn_again = Some(tokio::time::Instant::now() + SYN_AGAIN);
@@ -794,6 +816,7 @@ impl Call {
             conversation_controller: call.conversation.clone(),
             links: attached.conversation().cloned().unwrap_or_default(),
             meeting_data: None,
+            roster: None,
         });
         if let Some(url) = &invitation.links.progress
             && let Err(error) = self.api.ringing(url).await
@@ -1424,7 +1447,7 @@ impl Call {
                 continue;
             };
             let source = want.as_ref().map(|(_, source)| *source);
-            let Some(request) = meeting.channel.request_video(source, stream) else {
+            let Some(request) = meeting.channel.request_video(source, stream, false) else {
                 return;
             };
             session.send_data(request);
@@ -1438,6 +1461,34 @@ impl Call {
             );
             meeting.watching[line] = want.clone();
             changed = true;
+        }
+        // Someone's screen share, on our share line.
+        let sharing = meeting
+            .people
+            .list()
+            .into_iter()
+            .filter(|a| !a.waiting)
+            .find_map(|a| Some((a.mri, a.share?)));
+        let share_stream = remote.share().and_then(|l| remote.stream_of(&l.mid));
+        if let Some(stream) = share_stream
+            && meeting.watching_share.as_ref() != Some(&sharing)
+            && !(meeting.watching_share.is_none() && sharing.is_none())
+            && let Some(request) = meeting.channel.request_video(
+                sharing.as_ref().map(|(_, source)| *source),
+                stream,
+                true,
+            )
+        {
+            session.send_data(request);
+            log::info!(
+                "Teams meeting: asked for {}",
+                if sharing.is_some() {
+                    "a screen share"
+                } else {
+                    "no screen share"
+                }
+            );
+            meeting.watching_share = Some(sharing);
         }
         if changed {
             tell(CallEvent::Watching(

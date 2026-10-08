@@ -1661,6 +1661,13 @@ No renegotiation is involved.
 **A full roster.** The web client was let in from the lobby, and right
 after that the meeting pushed one roster with everyone in it, cameras
 included, on the join's roster callback. The roster in the join's own
-answer has only ourselves. When we joined directly (as the meeting's
-organizer, rejoining), no such full roster came, so cameras already on
-went unseen. What makes the meeting send it has not been recorded.
+answer has only ourselves. When we joined directly, no full roster was pushed. It does not need to
+be: the answers to the preheat and the join carry the roster with
+everyone already in (`teams.live.com12.har`: two, with their camera and
+share streams). We now read it from them.
+
+**Receiving someone's screen share** works like a camera: an `sr` with
+their `applicationsharing-video` stream's `sourceId`, on our share line's
+`streamMsid`, at the screen's limits
+(`{"max-fs":8160,"max-mbps":135000,"max-fps":1500}`), and `-1` when it
+ends. The stream is `recvonly` in the roster until they share.
