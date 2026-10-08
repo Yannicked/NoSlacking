@@ -36,9 +36,16 @@ ZapFast and Spotifast.
 - Every public item is documented. Comments say why, in plain words.
 - The code compiles on Linux, macOS and Windows; platform code is behind
   `cfg` with a fallback.
+- Huddle video, the camera, screen sharing and Teams are default features;
+  code for them stays behind their `cfg` so a build without them
+  (`--no-default-features`) still compiles. All video runs in the
+  `noslacking-video` helper, never in the app.
 - Work against a pretend Slack with `cargo run --features demo`; capture a
   screenshot with `--demo --demo-shot out.png [--demo-view thread|settings|
-  sign-in|dm] [--demo-light]`.
+  sign-in|dm] [--demo-light]`. Calls have views of their own (`listening`,
+  `talking`, `meeting`, `calling`, `call-window`, `cameras`,
+  `meeting-window`, …; see `DemoSetup` in `src/main.rs`), and
+  `--demo-size WxH` sizes the call window.
 
 ## Checks
 

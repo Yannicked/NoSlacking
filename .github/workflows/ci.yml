@@ -66,7 +66,7 @@ jobs:
       - name: Toolchain
         run: rustup toolchain install
       # libpipewire-0.3-dev and libclang-dev: the video helper's
-      # `pipewire` feature (screen sharing under Wayland; the app itself
+      # `pipewire` feature, on by default (screen sharing under Wayland; the app itself
       # links no PipeWire) generates its bindings against PipeWire's
       # headers with bindgen, which loads libclang. Nothing else needs
       # them: the camera is the helper's, through V4L2 spoken directly.
@@ -116,7 +116,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake xvfb xauth libgl1-mesa-dri libegl-mesa0 libxkbcommon-x11-0
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake libclang-dev libpipewire-0.3-dev xvfb xauth libgl1-mesa-dri libegl-mesa0 libxkbcommon-x11-0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Demo build
         run: cargo build --locked --features demo

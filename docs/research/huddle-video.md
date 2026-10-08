@@ -6,6 +6,14 @@ Read-only research. NoSlacking at `e7e58a899e4b2548c0e54a577352e4f526aa3109`
 sources (AGPL) read only for behaviour, nothing
 copied. Line refs are `file:line` at those commits.
 
+**Status (2026-10-08):** all four stages are built and on by default
+(`huddle-video`, `huddle-camera` and `huddle-share`), all video in the
+helper (section 6.9 onwards). They have been used in Teams meetings;
+the stages' own "not yet tried against Slack" notes below are as they
+were written, and the trials are listed in TODO.md. The helper's
+`pipewire` feature is on by default too. GPU video is Linux-only (VA-API); macOS and
+Windows decode and encode in software.
+
 ## TL;DR
 
 - **Yes, receiving video is realistic**, and the path is the one audio
