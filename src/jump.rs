@@ -128,7 +128,7 @@ impl Jump {
 /// list's own coordinates) in a view `view` tall, for a list that scrolls
 /// as far as `max`: centred, or for a row taller than most of the view,
 /// its top a little below the view's.
-pub fn offset_for(top: f32, bottom: f32, view: f32, max: f32) -> f32 {
+fn offset_for(top: f32, bottom: f32, view: f32, max: f32) -> f32 {
     let height = bottom - top;
     let wanted = if height > view * 0.8 {
         top - 24.0

@@ -305,11 +305,6 @@ impl Workspace {
         self.service == Service::Teams
     }
 
-    /// Whether this workspace is backed by Slack.
-    pub fn is_slack(&self) -> bool {
-        self.service == Service::Slack
-    }
-
     /// Whether this workspace's service can do `ability` here.
     pub fn offers(&self, ability: Ability) -> bool {
         self.service.offers(ability)
@@ -1691,10 +1686,8 @@ pub enum Action {
         kind: crate::viewer::Kind,
         size: u64,
     },
-    /// Closes the file viewer.
-    CloseViewer,
     OpenUrl(String),
-    /// Plays, pauses, seeks or stops a sound in the app (see
+    /// Plays, pauses or seeks a sound in the app (see
     /// [`crate::audio`]).
     Audio(crate::audio::Request),
     /// Presses an app's interactive button, or sends a menu choice. When

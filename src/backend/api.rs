@@ -1,11 +1,15 @@
-//! What every Web API call shares: what its failures mean, and
-//! walking a listing page by page.
+//! What every Web API call shares: what its failures mean, calls whose
+//! refusals can mean "already done", walking a listing page by page, and
+//! reading a conversation's history.
 
 use std::collections::HashSet;
 
+use serde_json::Value;
+
 use crate::failure::Failure;
-use crate::slack::SlackError;
+use crate::model::Ts;
 use crate::slack::session::Refusal;
+use crate::slack::{Client, SlackError, types};
 
 /// What an API failure means for the interface, which words it.
 pub(super) fn failure(error: &SlackError) -> Failure {
@@ -32,7 +36,11 @@ pub(super) fn failure(error: &SlackError) -> Failure {
             }
             "error_bad_upload" | "error_bad_format" | "error_bad_wide" | "error_no_image"
             | "no_image_uploaded" => Failure::BadEmojiImage,
-            "not_allowed_token_type" => Failure::NeedsSession,
+            // Slack's own refusal of the sign-in's kind: an OAuth sign-in
+            // made without what the method needs (search, say). A call only
+            // a browser session may make is refused before Slack is asked,
+            // as `SlackError::NeedsSession`.
+            "not_allowed_token_type" => Failure::MissingPermission,
             "no_permission" => Failure::Restricted,
             "invalid_code" | "code_already_used" => Failure::LinkExpired,
             "bad_redirect_uri" => Failure::BadRedirect,
@@ -53,6 +61,7 @@ pub(super) fn failure(error: &SlackError) -> Failure {
         SlackError::Network(detail) => Failure::Network(detail.clone()),
         SlackError::Decode(detail) => Failure::Unexpected(detail.clone()),
         SlackError::NoUserToken => Failure::NoUserToken,
+        SlackError::NeedsSession => Failure::NeedsSession,
         SlackError::Session(refusal) => match refusal {
             Refusal::NotACookie => Failure::NoSessionCookie,
             Refusal::NotSlack => Failure::NotSlackAddress,
@@ -60,6 +69,202 @@ pub(super) fn failure(error: &SlackError) -> Failure {
             Refusal::CookieRefused => Failure::CookieRefused,
         },
     }
+}
+
+/// The outcome of a call made for its effect, where Slack refusing it
+/// with one of `done` means it is already as asked (a reaction already
+/// there, a file already gone), which is no failure.
+pub(super) fn done_if<T>(result: Result<T, SlackError>, done: &[&str]) -> Result<(), SlackError> {
+    match result {
+        Err(error) if error.is_code(done) => Ok(()),
+        other => other.map(|_| ()),
+    }
+}
+
+/// A Web API call made for its effect: its method, its parameters, and
+/// the error codes that mean it is already done.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Call {
+    pub method: &'static str,
+    pub params: Vec<(&'static str, String)>,
+    pub done: &'static [&'static str],
+}
+
+impl Call {
+    /// A call that the `done` refusals count as done.
+    pub fn new(
+        method: &'static str,
+        params: Vec<(&'static str, String)>,
+        done: &'static [&'static str],
+    ) -> Self {
+        Self {
+            method,
+            params,
+            done,
+        }
+    }
+
+    /// Makes the call (see [`act_with_blocks`]); a `done` refusal is
+    /// success.
+    pub async fn run(self, client: &Client) -> Result<(), SlackError> {
+        done_if(
+            act_with_blocks::<Value>(client, self.method, &self.params).await,
+            self.done,
+        )
+    }
+}
+
+/// Adds a message's text as Slack's own composer sends it: the mrkdwn
+/// `text`, which notifications and older clients show, and the same
+/// message as a `rich_text` block, which Slack draws. When no block can be
+/// made (see [`crate::slack::rich_out`]), the text goes alone.
+pub(super) fn with_text(params: &mut Vec<(&'static str, String)>, text: String) {
+    let blocks = crate::slack::rich_out::blocks_param(&text);
+    params.push(("text", text));
+    if let Some(blocks) = blocks {
+        params.push(("blocks", blocks));
+    }
+}
+
+/// Slack's answers when it will not take a message's `blocks`.
+const BLOCKS_REFUSED: [&str; 3] = [
+    "invalid_blocks",
+    "invalid_blocks_format",
+    "msg_blocks_too_long",
+];
+
+/// Makes a call that may carry `blocks`; should Slack refuse them, the
+/// same call goes again with the text alone, so a message is never lost
+/// to its layout.
+pub(super) async fn act_with_blocks<T: serde::de::DeserializeOwned>(
+    client: &Client,
+    method: &str,
+    params: &[(&'static str, String)],
+) -> Result<T, SlackError> {
+    match client.act::<T>(method, params).await {
+        Err(error)
+            if error.is_code(&BLOCKS_REFUSED)
+                && params.iter().any(|(name, _)| *name == "blocks") =>
+        {
+            log::warn!("Slack refused a message's blocks ({error}); sending its text alone");
+            client.act(method, &without_blocks(params)).await
+        }
+        other => other,
+    }
+}
+
+/// The same parameters without `blocks`.
+fn without_blocks(params: &[(&'static str, String)]) -> Vec<(&'static str, String)> {
+    params
+        .iter()
+        .filter(|(name, _)| *name != "blocks")
+        .cloned()
+        .collect()
+}
+
+/// A `conversations.history` request. Each reader asks a little
+/// differently; this keeps the parameters in one place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct HistoryQuery {
+    channel: String,
+    limit: u32,
+    /// Sends `include_all_metadata=false`, as the readers of whole pages
+    /// do.
+    no_metadata: bool,
+    /// The newest message to read, itself included.
+    latest: Option<Ts>,
+    /// The message to read after, and what to tell Slack about including
+    /// it, if anything.
+    oldest: Option<(Ts, Option<bool>)>,
+    cursor: Option<String>,
+}
+
+impl HistoryQuery {
+    /// Up to `limit` of `channel`'s newest messages.
+    pub fn new(channel: &str, limit: u32) -> Self {
+        Self {
+            channel: channel.to_owned(),
+            limit,
+            no_metadata: false,
+            latest: None,
+            oldest: None,
+            cursor: None,
+        }
+    }
+
+    /// Leaves out the messages' metadata.
+    pub fn without_metadata(mut self) -> Self {
+        self.no_metadata = true;
+        self
+    }
+
+    /// Reads back from `ts`, which is included.
+    pub fn up_to(mut self, ts: &Ts) -> Self {
+        self.latest = Some(ts.clone());
+        self
+    }
+
+    /// Reads on from `ts`. `inclusive` is sent when given; left out,
+    /// Slack's default leaves `ts` itself out.
+    pub fn after(mut self, ts: &Ts, inclusive: Option<bool>) -> Self {
+        self.oldest = Some((ts.clone(), inclusive));
+        self
+    }
+
+    /// Reads the page at `cursor`, if any.
+    pub fn at(mut self, cursor: Option<String>) -> Self {
+        self.cursor = cursor;
+        self
+    }
+
+    /// The form parameters.
+    pub fn params(&self) -> Vec<(&'static str, String)> {
+        let mut params = vec![
+            ("channel", self.channel.clone()),
+            ("limit", self.limit.to_string()),
+        ];
+        if self.no_metadata {
+            params.push(("include_all_metadata", "false".to_owned()));
+        }
+        if let Some(latest) = &self.latest {
+            params.push(("latest", latest.0.clone()));
+            params.push(("inclusive", "true".to_owned()));
+        }
+        if let Some((oldest, inclusive)) = &self.oldest {
+            params.push(("oldest", oldest.0.clone()));
+            if let Some(inclusive) = inclusive {
+                params.push(("inclusive", inclusive.to_string()));
+            }
+        }
+        with_cursor(params, self.cursor.clone())
+    }
+
+    /// Asks Slack for the page.
+    pub async fn page<T: serde::de::DeserializeOwned>(
+        &self,
+        client: &Client,
+    ) -> Result<T, SlackError> {
+        client.call("conversations.history", &self.params()).await
+    }
+}
+
+/// One page of your `users.conversations` of `kinds`, for [`paginate`].
+pub(super) async fn my_conversations_page(
+    client: &Client,
+    kinds: &str,
+    cursor: Option<String>,
+) -> Result<(Vec<types::Channel>, Option<String>), SlackError> {
+    let params = with_cursor(
+        vec![
+            ("types", kinds.to_owned()),
+            ("exclude_archived", "true".to_owned()),
+            ("limit", "200".to_owned()),
+        ],
+        cursor,
+    );
+    let page: types::ConversationsPage = client.call("users.conversations", &params).await?;
+    let next = page.response_metadata.cursor();
+    Ok((page.channels, next))
 }
 
 /// Walks a cursor-paged listing.
@@ -75,29 +280,50 @@ pub(super) fn failure(error: &SlackError) -> Failure {
 pub(super) async fn paginate<T, Fut>(
     what: &str,
     max_pages: usize,
-    mut page: impl FnMut(Option<String>) -> Fut,
+    page: impl FnMut(Option<String>) -> Fut,
     mut each: impl FnMut(Vec<T>) -> bool,
+) -> Result<(), SlackError>
+where
+    Fut: std::future::Future<Output = Result<(Vec<T>, Option<String>), SlackError>>,
+{
+    walk(what, max_pages, page, |items, _| each(items)).await
+}
+
+/// [`paginate`], telling `each` whether its page is the last one the walk
+/// reads (short of a failure), for a caller that says when a listing is
+/// complete.
+pub(super) async fn walk<T, Fut>(
+    what: &str,
+    max_pages: usize,
+    mut page: impl FnMut(Option<String>) -> Fut,
+    mut each: impl FnMut(Vec<T>, bool) -> bool,
 ) -> Result<(), SlackError>
 where
     Fut: std::future::Future<Output = Result<(Vec<T>, Option<String>), SlackError>>,
 {
     let mut cursor = None;
     let mut given = HashSet::new();
-    for _ in 0..max_pages {
+    for read in 1..=max_pages {
         let (items, next) = page(cursor.take()).await?;
-        if !each(items) {
-            return Ok(());
-        }
-        match next.filter(|next| !next.is_empty()) {
+        let next = match next.filter(|next| !next.is_empty()) {
             Some(next) if !given.insert(next.clone()) => {
                 log::debug!("{what}: Slack repeated a cursor; that was the last page");
-                return Ok(());
+                None
             }
+            next => next,
+        };
+        let capped = next.is_some() && read == max_pages;
+        if !each(items, next.is_none() || capped) {
+            return Ok(());
+        }
+        if capped {
+            log::warn!("{what}: stopped after {max_pages} pages; the rest is left out");
+        }
+        match next {
             Some(next) => cursor = Some(next),
             None => return Ok(()),
         }
     }
-    log::warn!("{what}: stopped after {max_pages} pages; the rest is left out");
     Ok(())
 }
 
@@ -115,7 +341,7 @@ pub(super) fn with_cursor(
 /// Whether a failed fetch may work later: an outage or a rate limit, not
 /// Slack saying no (an unknown id stays unknown).
 pub(super) fn worth_retrying(error: &SlackError) -> bool {
-    !matches!(error, SlackError::Api(_))
+    !matches!(error, SlackError::Api(_) | SlackError::NeedsSession)
 }
 
 #[cfg(test)]
@@ -177,6 +403,129 @@ mod tests {
         .await;
         assert_eq!(walked, Ok(()));
         assert_eq!(asked.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn walk_says_which_page_is_the_last() {
+        let mut asked = Vec::new();
+        let mut lasts = Vec::new();
+        let walked = walk("t", 10, pages(2, None, &mut asked), |_, last| {
+            lasts.push(last);
+            true
+        })
+        .await;
+        assert_eq!(walked, Ok(()));
+        assert_eq!(lasts, [false, false, true]);
+        // Cut short by the cap, the last page read is the last.
+        let mut asked = Vec::new();
+        let mut lasts = Vec::new();
+        let walked = walk("t", 2, pages(100, None, &mut asked), |_, last| {
+            lasts.push(last);
+            true
+        })
+        .await;
+        assert_eq!(walked, Ok(()));
+        assert_eq!(lasts, [false, true]);
+        // A repeated cursor ends it too.
+        let mut lasts = Vec::new();
+        let walked = walk(
+            "t",
+            10,
+            |_| std::future::ready(Ok((vec![1], Some("same".to_owned())))),
+            |_: Vec<u32>, last| {
+                lasts.push(last);
+                true
+            },
+        )
+        .await;
+        assert_eq!(walked, Ok(()));
+        assert_eq!(lasts, [false, true]);
+    }
+
+    #[test]
+    fn a_refused_layout_leaves_the_text() {
+        let params = vec![
+            ("channel", "C1".to_owned()),
+            ("text", "hi".to_owned()),
+            ("blocks", "[]".to_owned()),
+        ];
+        assert_eq!(without_blocks(&params), params[..2]);
+    }
+
+    #[test]
+    fn already_done_refusals_are_success() {
+        let done = ["already_reacted", "no_reaction"];
+        assert_eq!(done_if(Ok::<u8, SlackError>(1), &done), Ok(()));
+        assert_eq!(
+            done_if::<()>(Err(SlackError::Api("no_reaction".into())), &done),
+            Ok(())
+        );
+        assert_eq!(
+            done_if::<()>(Err(SlackError::Api("channel_not_found".into())), &done),
+            Err(SlackError::Api("channel_not_found".into()))
+        );
+        // Only Slack's own codes count; a transport failure never does.
+        assert_eq!(
+            done_if::<()>(Err(SlackError::RateLimited), &done),
+            Err(SlackError::RateLimited)
+        );
+        assert!(SlackError::Api("a".into()).is_code(&["b", "a"]));
+        assert!(!SlackError::NeedsSession.is_code(&["not_allowed_token_type"]));
+    }
+
+    #[test]
+    fn history_queries_ask_as_each_reader_does() {
+        let ts = Ts::new("1.000100");
+        let pairs = |query: HistoryQuery| query.params();
+        assert_eq!(
+            pairs(HistoryQuery::new("C1", 1)),
+            [("channel", "C1".to_owned()), ("limit", "1".to_owned())]
+        );
+        assert_eq!(
+            pairs(
+                HistoryQuery::new("C1", 50)
+                    .without_metadata()
+                    .at(Some("next".into()))
+            ),
+            [
+                ("channel", "C1".to_owned()),
+                ("limit", "50".to_owned()),
+                ("include_all_metadata", "false".to_owned()),
+                ("cursor", "next".to_owned()),
+            ]
+        );
+        assert_eq!(
+            pairs(HistoryQuery::new("C1", 25).without_metadata().up_to(&ts)),
+            [
+                ("channel", "C1".to_owned()),
+                ("limit", "25".to_owned()),
+                ("include_all_metadata", "false".to_owned()),
+                ("latest", "1.000100".to_owned()),
+                ("inclusive", "true".to_owned()),
+            ]
+        );
+        assert_eq!(
+            pairs(
+                HistoryQuery::new("C1", 25)
+                    .without_metadata()
+                    .after(&ts, Some(false))
+            ),
+            [
+                ("channel", "C1".to_owned()),
+                ("limit", "25".to_owned()),
+                ("include_all_metadata", "false".to_owned()),
+                ("oldest", "1.000100".to_owned()),
+                ("inclusive", "false".to_owned()),
+            ]
+        );
+        assert_eq!(
+            pairs(HistoryQuery::new("C1", 50).after(&ts, None)),
+            [
+                ("channel", "C1".to_owned()),
+                ("limit", "50".to_owned()),
+                ("oldest", "1.000100".to_owned()),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -246,7 +595,7 @@ mod tests {
             ("error_lower_case_names_only", Failure::InvalidName),
             ("resized_but_still_too_large", Failure::EmojiTooBig),
             ("error_bad_upload", Failure::BadEmojiImage),
-            ("not_allowed_token_type", Failure::NeedsSession),
+            ("not_allowed_token_type", Failure::MissingPermission),
             ("code_already_used", Failure::LinkExpired),
             ("bad_redirect_uri", Failure::BadRedirect),
             ("bad_client_secret", Failure::BadClient),
@@ -260,6 +609,12 @@ mod tests {
         ] {
             assert_eq!(failure(&SlackError::Api(code.into())), meant, "{code}");
         }
+    }
+
+    #[test]
+    fn a_call_only_a_session_may_make_says_so() {
+        assert_eq!(failure(&SlackError::NeedsSession), Failure::NeedsSession);
+        assert!(!worth_retrying(&SlackError::NeedsSession));
     }
 
     #[test]

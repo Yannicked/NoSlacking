@@ -4,7 +4,7 @@
 
 use serde::Deserialize;
 
-use super::api::failure;
+use super::api::{done_if, failure, paginate, walk, with_cursor};
 use super::{Event, Sink};
 use crate::convos::{self, Command};
 use crate::model::Conversation;
@@ -121,7 +121,7 @@ struct SavedBookmark {
 /// Runs one command and reports back. Every failure is answered, so a
 /// dialog waiting on it never waits for ever.
 pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
-    let what = command.failure();
+    let what = command.doing();
     let result = match command {
         Command::Open { users } => open(&client, &team, &users, &sink).await,
         // A Slack workspace has everyone already: nothing to ask.
@@ -170,16 +170,11 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
         }
         Command::Pin { channel, ts, pin } => {
             let method = if pin { "pins.add" } else { "pins.remove" };
-            match client
+            let pinned = client
                 .act::<serde_json::Value>(method, &[("channel", channel), ("timestamp", ts.0)])
-                .await
-            {
-                // Already as asked: nothing to undo.
-                Err(SlackError::Api(code)) if code == "already_pinned" || code == "no_pin" => {
-                    Ok(())
-                }
-                other => other.map(|_| ()),
-            }
+                .await;
+            // Already as asked: nothing to undo.
+            done_if(pinned, &["already_pinned", "no_pin"])
         }
         Command::Bookmark { channel, change } => {
             save_bookmark(&client, &team, channel, &change, &sink).await
@@ -323,11 +318,11 @@ async fn save_bookmark(
             Ok(())
         }
         convos::BookmarkChange::Remove { .. } => {
-            match client.act::<serde_json::Value>(method, &params).await {
-                // Gone already, maybe removed by someone else.
-                Err(SlackError::Api(code)) if code == "not_found" => Ok(()),
-                other => other.map(|_| ()),
-            }
+            // Gone already, maybe removed by someone else.
+            done_if(
+                client.act::<serde_json::Value>(method, &params).await,
+                &["not_found"],
+            )
         }
     }
 }
@@ -401,24 +396,23 @@ async fn about(client: &Client, channel: &str) -> Result<convos::About, SlackErr
 /// Everyone in a conversation.
 async fn members(client: &Client, channel: &str) -> Result<Vec<String>, SlackError> {
     let mut all = Vec::new();
-    let mut cursor: Option<String> = None;
-    let mut seen = std::collections::HashSet::new();
-    for _ in 0..MEMBER_PAGES {
-        let mut params = vec![("channel", channel.to_owned()), ("limit", "200".to_owned())];
-        if let Some(cursor) = cursor.take() {
-            params.push(("cursor", cursor));
-        }
-        let page: MembersPage = client.call("conversations.members", &params).await?;
-        all.extend(page.members);
-        match page
-            .response_metadata
-            .cursor()
-            .filter(|next| seen.insert(next.clone()))
-        {
-            Some(next) => cursor = Some(next),
-            None => break,
-        }
-    }
+    paginate(
+        "conversations.members",
+        MEMBER_PAGES,
+        |cursor| async move {
+            let params = with_cursor(
+                vec![("channel", channel.to_owned()), ("limit", "200".to_owned())],
+                cursor,
+            );
+            let page: MembersPage = client.call("conversations.members", &params).await?;
+            Ok((page.members, page.response_metadata.cursor()))
+        },
+        |members| {
+            all.extend(members);
+            true
+        },
+    )
+    .await?;
     Ok(all)
 }
 
@@ -481,7 +475,7 @@ async fn describe_channel(
 }
 
 /// Tells the interface that `what` failed.
-fn fail(sink: &Sink, team: String, what: convos::Failure, error: &SlackError) {
+fn fail(sink: &Sink, team: String, what: convos::Doing, error: &SlackError) {
     sink.send(Event::Convos {
         team,
         event: convos::Event::Failed {
@@ -507,37 +501,33 @@ fn opened(sink: &Sink, team: &str, conversation: Conversation) {
 /// Lists the public channels you are not in, page by page, so the browser
 /// fills as they come.
 async fn browse(client: &Client, team: &str, sink: &Sink) -> Result<(), SlackError> {
-    let mut cursor: Option<String> = None;
-    let mut seen = std::collections::HashSet::new();
-    for page in 1..=BROWSE_PAGES {
-        let mut params = vec![
-            ("types", "public_channel".to_owned()),
-            ("exclude_archived", "true".to_owned()),
-            ("limit", "200".to_owned()),
-        ];
-        if let Some(cursor) = cursor.take() {
-            params.push(("cursor", cursor));
-        }
-        let answer: ListPage = client.call("conversations.list", &params).await?;
-        // Slack repeating a cursor would page for ever.
-        let next = answer
-            .response_metadata
-            .cursor()
-            .filter(|next| seen.insert(next.clone()));
-        let done = next.is_none() || page == BROWSE_PAGES;
-        sink.send(Event::Convos {
-            team: team.to_owned(),
-            event: convos::Event::Browsed {
-                channels: joinable(answer.channels),
-                done,
-            },
-        });
-        if done {
-            break;
-        }
-        cursor = next;
-    }
-    Ok(())
+    walk(
+        "conversations.list",
+        BROWSE_PAGES,
+        |cursor| async move {
+            let params = with_cursor(
+                vec![
+                    ("types", "public_channel".to_owned()),
+                    ("exclude_archived", "true".to_owned()),
+                    ("limit", "200".to_owned()),
+                ],
+                cursor,
+            );
+            let answer: ListPage = client.call("conversations.list", &params).await?;
+            Ok((answer.channels, answer.response_metadata.cursor()))
+        },
+        |channels, done| {
+            sink.send(Event::Convos {
+                team: team.to_owned(),
+                event: convos::Event::Browsed {
+                    channels: joinable(channels),
+                    done,
+                },
+            });
+            true
+        },
+    )
+    .await
 }
 
 /// The channels of a listing you are not in, as the browser shows them.
@@ -570,15 +560,11 @@ async fn join(client: &Client, team: &str, channel: &str, sink: &Sink) -> Result
 
 /// Leaves a channel; the sidebar drops it once Slack agrees.
 async fn leave(client: &Client, team: &str, channel: &str, sink: &Sink) -> Result<(), SlackError> {
-    match client
+    let left = client
         .act::<serde_json::Value>("conversations.leave", &[("channel", channel.to_owned())])
-        .await
-    {
-        Ok(_) => {}
-        // Not in it any more: gone all the same.
-        Err(SlackError::Api(code)) if code == "not_in_channel" => {}
-        Err(error) => return Err(error),
-    }
+        .await;
+    // Not in it any more: gone all the same.
+    done_if(left, &["not_in_channel"])?;
     sink.send(Event::ConversationGone {
         team: team.to_owned(),
         channel: channel.to_owned(),

@@ -328,21 +328,11 @@ impl Settings {
         (settings, problems)
     }
 
-    pub fn save(&self, path: &Path) {
-        if let Some(bytes) = self.encode() {
-            write(path, &bytes);
-        }
-    }
-
     /// The file's bytes, or `None` (logged) if they cannot be encoded.
     pub fn encode(&self) -> Option<Vec<u8>> {
         serde_json::to_vec_pretty(self)
             .map_err(|error| log::warn!("could not encode settings: {error}"))
             .ok()
-    }
-
-    pub fn workspace(&self, team: &str) -> Option<&WorkspaceMeta> {
-        self.workspaces.iter().find(|w| w.team_id == team)
     }
 
     /// Adds or refreshes a workspace, keeping its place in the rail.
@@ -618,7 +608,7 @@ mod tests {
             damaged
         );
         // Saving then overwrites the original, but the backup stays.
-        settings.save(&path);
+        write(&path, &settings.encode().expect("encodes"));
         assert!(dir.0.join("settings.json.bad").exists());
         assert_eq!(Settings::load(&path).zoom, 1.5);
     }
@@ -649,7 +639,7 @@ mod tests {
         assert!(!dir.0.join("settings.json.bad").exists());
 
         let good = dir.0.join("good.json");
-        Settings::default().save(&good);
+        write(&good, &Settings::default().encode().expect("encodes"));
         let _ = Settings::load(&good);
         let mut names: Vec<_> = std::fs::read_dir(&dir.0)
             .expect("list")

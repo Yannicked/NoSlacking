@@ -27,7 +27,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use super::api::{paginate, with_cursor};
+use super::api::{HistoryQuery, my_conversations_page, paginate};
 use super::fetch::history_page;
 use super::{Event, Sink};
 use crate::model::Ts;
@@ -260,7 +260,7 @@ pub(super) async fn round(
     sink: Sink,
 ) {
     state.round += 1;
-    let session = client.token().is_session() && !state.no_counts;
+    let session = client.is_session() && !state.no_counts;
     let result = if session {
         session_round(&client, &team, open.as_deref(), state, &sink).await
     } else {
@@ -353,11 +353,8 @@ async fn direct_round(
         if n > 0 || relist {
             tokio::time::sleep(OAUTH_PAUSE).await;
         }
-        let page = client
-            .call::<types::HistoryPage>(
-                "conversations.history",
-                &[("channel", channel.clone()), ("limit", "1".into())],
-            )
+        let page = HistoryQuery::new(&channel, 1)
+            .page::<types::HistoryPage>(client)
             .await;
         let latest = match page {
             Ok(page) => page.messages.first().and_then(|m| types::real_ts(&m.ts)),
@@ -414,15 +411,9 @@ async fn newest_page(
     channel: &str,
     sink: &Sink,
 ) -> Result<(), SlackError> {
-    let page = client
-        .call::<types::HistoryPage>(
-            "conversations.history",
-            &[
-                ("channel", channel.to_owned()),
-                ("limit", super::fetch::HISTORY_PAGE.to_string()),
-                ("include_all_metadata", "false".to_owned()),
-            ],
-        )
+    let page = HistoryQuery::new(channel, super::fetch::HISTORY_PAGE)
+        .without_metadata()
+        .page::<types::HistoryPage>(client)
         .await;
     let page = match page {
         Ok(page) => page,
@@ -452,22 +443,7 @@ async fn list_direct(client: &Client) -> Result<Vec<String>, SlackError> {
     paginate(
         "users.conversations",
         LIST_PAGES,
-        |cursor| {
-            let params = with_cursor(
-                vec![
-                    ("types", "im,mpim".to_owned()),
-                    ("exclude_archived", "true".to_owned()),
-                    ("limit", "200".to_owned()),
-                ],
-                cursor,
-            );
-            async move {
-                let page: types::ConversationsPage =
-                    client.call("users.conversations", &params).await?;
-                let next = page.response_metadata.cursor();
-                Ok((page.channels, next))
-            }
-        },
+        |cursor| my_conversations_page(client, "im,mpim", cursor),
         |channels| {
             ids.extend(channels.into_iter().map(|c| c.into_model().id));
             true

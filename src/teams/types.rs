@@ -54,17 +54,6 @@ pub struct UserDetails {
     pub image_uri: Option<String>,
 }
 
-/// User presence information from Teams presence service.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PresenceInfo {
-    #[serde(default)]
-    pub availability: Option<String>,
-    #[serde(default)]
-    pub activity: Option<String>,
-    #[serde(default, rename = "deviceType")]
-    pub device_type: Option<String>,
-}
-
 /// A team in Microsoft Teams (CSA endpoint).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Team {
@@ -448,30 +437,6 @@ pub struct TeamsResponse {
     pub teams: Vec<Team>,
 }
 
-/// Trouter session negotiation response from `go.trouter.teams.microsoft.com`.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrouterSession {
-    pub socketio: String,
-    pub surl: String,
-    pub url: String,
-    #[serde(default)]
-    pub ttl: u64,
-    pub connectparams: TrouterConnectParams,
-    #[serde(default)]
-    pub ccid: Option<String>,
-}
-
-/// Query parameters for connecting to Trouter's Socket.IO.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrouterConnectParams {
-    pub sr: String,
-    pub issuer: String,
-    pub sp: String,
-    pub se: String,
-    pub st: String,
-    pub sig: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,33 +503,6 @@ mod tests {
         let emotions = props.emotions.as_ref().expect("emotions");
         assert_eq!(emotions.len(), 1);
         assert_eq!(emotions[0].key, "like");
-    }
-
-    #[test]
-    fn parses_trouter_session() {
-        let json = r#"{
-            "socketio": "https://emea.trouter.teams.microsoft.com:443/",
-            "surl": "https://emea-01.trouter.teams.microsoft.com/v4/f/surl-id/",
-            "url": "https://emea-01.trouter.teams.microsoft.com/v4/f/url-id/",
-            "ttl": 86400,
-            "ccid": "ccid-123",
-            "connectparams": {
-                "sr": "res",
-                "issuer": "iss",
-                "sp": "r",
-                "se": "2026-10-08",
-                "st": "2026-10-07",
-                "sig": "signature"
-            }
-        }"#;
-
-        let session: TrouterSession = serde_json::from_str(json).expect("valid session");
-        assert_eq!(
-            session.socketio,
-            "https://emea.trouter.teams.microsoft.com:443/"
-        );
-        assert_eq!(session.ccid.as_deref(), Some("ccid-123"));
-        assert_eq!(session.connectparams.issuer, "iss");
     }
 
     #[test]

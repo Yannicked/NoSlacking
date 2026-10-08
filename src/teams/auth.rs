@@ -181,22 +181,6 @@ impl std::fmt::Debug for TeamsCredentials {
 }
 
 impl TeamsCredentials {
-    /// Constructs credentials from an access token and optional refresh token.
-    pub fn new(
-        access_token: String,
-        refresh_token: Option<String>,
-        expires_in_secs: Option<u64>,
-    ) -> Self {
-        let expires_at = expires_in_secs.map(|s| now_secs() + s);
-        Self {
-            access_token,
-            refresh_token,
-            expires_at,
-            tenant_id: Some(DEFAULT_TENANT.to_owned()),
-            ..Self::default()
-        }
-    }
-
     /// Whether the access token is expired or within 5 minutes of expiring.
     pub fn is_expired(&self, now_secs: u64) -> bool {
         match self.expires_at {
@@ -228,15 +212,6 @@ impl TeamsCredentials {
             .as_ref()
             .and_then(|v| v.get("middleTier"))
             .and_then(|s| s.as_str())
-    }
-
-    /// The chat service aggregator URL from `region_gtms`.
-    pub fn chatsvcagg_url(&self) -> &str {
-        self.region_gtms
-            .as_ref()
-            .and_then(|v| v.get("chatServiceAggregator"))
-            .and_then(|s| s.as_str())
-            .unwrap_or("https://chatsvcagg.teams.microsoft.com")
     }
 }
 

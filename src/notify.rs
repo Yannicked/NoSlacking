@@ -75,7 +75,7 @@ pub fn names_me(text: &str, me: &str) -> bool {
 /// Whether `text` calls on everyone present: `@here`, `@channel` or
 /// `@everyone`. Slack only sends these to members, so the message reaching
 /// you means you are one.
-pub fn calls_everyone(text: &str) -> bool {
+fn calls_everyone(text: &str) -> bool {
     ["<!here", "<!channel", "<!everyone"].iter().any(|tag| {
         text.match_indices(tag)
             .any(|(at, _)| matches!(text[at + tag.len()..].chars().next(), Some('>' | '|')))

@@ -57,8 +57,10 @@ pub const MAGIC: [u8; 4] = *b"NSVH";
 /// decoded without its picture ([`Request::Decode`]'s `show`, answered
 /// [`Reply::Kept`]), which [`Request::Fetch`] asks for later, and a
 /// picture the same as the last one sent is answered
-/// [`Reply::Unchanged`] instead of being sent again.
-pub const VERSION: u16 = 6;
+/// [`Reply::Unchanged`] instead of being sent again; version 7 lets the
+/// app keep a capture's pictures within a box ([`Request::SetMaxSize`]),
+/// as a Teams meeting asks.
+pub const VERSION: u16 = 7;
 
 /// The largest frame either side accepts, in bytes: room for an I420
 /// picture at [`MAX_SIDE`] square (24 MiB) and its header.
@@ -792,6 +794,18 @@ pub enum Request {
         /// Bits a second.
         bitrate: u32,
     },
+    /// Capture `id`'s pictures from now on fit within a `width`×`height`
+    /// box, their shape kept, as well as within what the capture sends
+    /// at most anyway; a new size starts with a keyframe. 0×0 (the start)
+    /// means no box. The reply is [`Reply::Done`].
+    SetMaxSize {
+        /// The capture.
+        id: u32,
+        /// The box's width in pixels.
+        width: u32,
+        /// The box's height in pixels.
+        height: u32,
+    },
     /// Decoder or capture `id` is no longer needed (a capture stops, its
     /// device closed); the reply is [`Reply::Done`].
     Close {
@@ -1155,6 +1169,9 @@ impl Request {
                 .done(),
             Self::ListCameras => Out::new(12).done(),
             Self::Fetch { id } => Out::new(14).u32(*id).done(),
+            Self::SetMaxSize { id, width, height } => {
+                Out::new(15).u32(*id).u32(*width).u32(*height).done()
+            }
             Self::StartCamera {
                 choice,
                 hardware,
@@ -1246,6 +1263,11 @@ impl Request {
                 },
             },
             14 => Self::Fetch { id: input.u32()? },
+            15 => Self::SetMaxSize {
+                id: input.u32()?,
+                width: input.side("width")?,
+                height: input.side("height")?,
+            },
             tag => return Err(Error::UnknownTag(tag)),
         };
         input.end()?;
@@ -1475,6 +1497,16 @@ mod tests {
             Request::SetBitrate {
                 id: 2,
                 bitrate: 900_000,
+            },
+            Request::SetMaxSize {
+                id: 2,
+                width: 1280,
+                height: 720,
+            },
+            Request::SetMaxSize {
+                id: 2,
+                width: 0,
+                height: 0,
             },
             Request::Close { id: 7 },
             Request::SetOutputSize {

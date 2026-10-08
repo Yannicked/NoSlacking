@@ -44,6 +44,7 @@ pub use super::cameras::Wish;
 use super::chime::{self, FrameType};
 use super::dtls;
 use super::join::ChimeJoin;
+use super::peer::{self, Flight};
 use super::roster::{self, Roster, Voices};
 use super::sdp::{self, Mids};
 use super::signaling::{Ending, Handshake, Incoming, Socket, Step, TurnCredentials};
@@ -413,6 +414,8 @@ struct Session<'a> {
     relay_deadline: Option<Instant>,
     rtc: Option<Rtc>,
     rtc_timeout: Option<Instant>,
+    /// Our last DTLS flight, to send again if it goes unanswered.
+    flight: Flight,
     pending: Option<SdpPendingOffer>,
     mids: Mids,
     audio: Option<Mid>,
@@ -796,6 +799,9 @@ impl Session<'_> {
             );
             return;
         };
+        if peer::is_dtls(data) {
+            self.flight.heard();
+        }
         if let Err(error) = rtc.handle_input(Input::Receive(Instant::now(), receive)) {
             log::debug!("connect: input from {peer}: {error}");
         }
@@ -815,6 +821,8 @@ impl Session<'_> {
             log::debug!("connect: timeout input: {error}");
         }
         let mut events = Vec::new();
+        // Packets dropped this round, so a stream of them cannot spin here.
+        let mut skipped = 0;
         loop {
             match rtc.poll_output() {
                 Ok(Output::Timeout(at)) => {
@@ -823,6 +831,10 @@ impl Session<'_> {
                 }
                 Ok(Output::Transmit(transmit)) => match &mut self.relay {
                     Some(relay) if Some(transmit.source) == relay.relayed => {
+                        if self.report.dtls_up.is_none() && peer::is_dtls(&transmit.contents) {
+                            self.flight
+                                .sent(true, transmit.destination, &transmit.contents, now);
+                        }
                         relay
                             .client
                             .send_to(transmit.destination, &transmit.contents, now);
@@ -833,6 +845,12 @@ impl Session<'_> {
                     ),
                 },
                 Ok(Output::Event(event)) => events.push(event),
+                // One packet that does not read (as a malformed one ended
+                // a Teams call): dropped, the huddle goes on.
+                Err(error) if peer::is_one_packet(&error) && skipped < peer::SKIP_AT_MOST => {
+                    skipped += 1;
+                    log::info!("media: a packet dropped: {error}");
+                }
                 Err(error) => {
                     self.over
                         .get_or_insert(Err(failure(Stage::Media, format!("WebRTC: {error}"))));
@@ -1027,6 +1045,25 @@ impl Session<'_> {
         self.camera_stats();
     }
 
+    /// Sends our unanswered DTLS flight again through the relay.
+    ///
+    /// The relay leg to Chime's media server is UDP, and over a UDP relay
+    /// so is ours to it: a lost ClientHello would otherwise leave the
+    /// huddle connecting until it gives up.
+    async fn resend_flight(&mut self, now: Instant) {
+        log::info!(
+            "connect: no DTLS answer; sending our {} handshake packets again (try {})",
+            self.flight.datagrams.len(),
+            self.flight.tries
+        );
+        if let Some(relay) = &mut self.relay {
+            for (_, to, data) in &self.flight.datagrams {
+                relay.client.send_to(*to, data, now);
+            }
+        }
+        self.flush_relay().await;
+    }
+
     /// The next moment something is due.
     fn deadline(&self) -> Instant {
         let mut at = self.last_inbound + SILENCE_LIMIT;
@@ -1036,6 +1073,9 @@ impl Session<'_> {
             self.relay_deadline,
             self.index_deadline,
             self.connect_deadline,
+            self.flight
+                .resend_at
+                .filter(|_| self.report.dtls_up.is_none()),
             self.leave_deadline,
             self.next_ping,
             self.next_audio,
@@ -1079,6 +1119,9 @@ impl Session<'_> {
             self.index_deadline = None;
             let steps = self.handshake.index_timed_out();
             self.carry(steps).await;
+        }
+        if self.report.dtls_up.is_none() && self.flight.due(now) {
+            self.resend_flight(now).await;
         }
         if self.connect_deadline.is_some_and(|at| at <= now) {
             self.over.get_or_insert(Err(failure(
@@ -1370,6 +1413,7 @@ pub async fn listen(
         relay_deadline: None,
         rtc: None,
         rtc_timeout: None,
+        flight: Flight::default(),
         pending: None,
         mids: Mids::default(),
         audio: None,

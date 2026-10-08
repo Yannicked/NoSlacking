@@ -529,10 +529,10 @@ pub enum Doing {
     Open {
         name: String,
     },
-    /// A Web API call made for its effect, by its method name.
-    Call {
-        method: String,
-    },
+    /// Closing a direct message, which hides it from the sidebar.
+    CloseConversation,
+    /// Moving your read marker in a conversation.
+    MarkRead,
     UseProxy,
     /// Registering `noslacking://` links for the OAuth redirect.
     RegisterLinks,
@@ -607,9 +607,13 @@ impl Problem {
                 &t("Could not open {name}: {error}"),
                 &[("name", name), ("error", error)],
             ),
-            Doing::Call { method } => fill(
-                &t("{method} failed: {error}"),
-                &[("method", method), ("error", error)],
+            Doing::CloseConversation => fill(
+                &t("Could not close the conversation: {error}"),
+                &[("error", error)],
+            ),
+            Doing::MarkRead => fill(
+                &t("Could not mark the conversation read: {error}"),
+                &[("error", error)],
             ),
             Doing::UseProxy => fill(&t("Could not use the proxy: {error}"), &[("error", error)]),
             Doing::RegisterLinks => fill(
@@ -757,9 +761,8 @@ mod tests {
             Doing::Open {
                 name: "a.png".into(),
             },
-            Doing::Call {
-                method: "conversations.mark".into(),
-            },
+            Doing::CloseConversation,
+            Doing::MarkRead,
             Doing::UseProxy,
             Doing::RegisterLinks,
         ]

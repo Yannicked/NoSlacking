@@ -70,11 +70,6 @@ impl RenderTap {
         }
     }
 
-    /// Whether a microphone is taking frames.
-    pub fn is_on(&self) -> bool {
-        lock(&self.inner).on
-    }
-
     /// Takes `samples` as played: 48 kHz, `channels` interleaved.
     pub fn push(&self, samples: &[f32], channels: usize) {
         let mut tap = lock(&self.inner);

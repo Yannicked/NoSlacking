@@ -788,16 +788,6 @@ impl ParseCache {
     pub fn sweep(&mut self) {
         self.entries.retain(|_, (_, used)| std::mem::take(used));
     }
-
-    /// How many texts are kept.
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Whether nothing is kept.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
 }
 
 /// Whether a message is only emoji (and whitespace), drawn large like Slack.
@@ -1491,12 +1481,12 @@ mod tests {
         );
         cache.get("other");
         cache.sweep();
-        assert_eq!(cache.len(), 2, "both were used before the sweep");
+        assert_eq!(cache.entries.len(), 2, "both were used before the sweep");
         cache.get("*hi*");
         cache.sweep();
-        assert_eq!(cache.len(), 1, "unused since the last sweep");
+        assert_eq!(cache.entries.len(), 1, "unused since the last sweep");
         cache.sweep();
-        assert!(cache.is_empty());
+        assert!(cache.entries.is_empty());
     }
 
     #[test]

@@ -21,7 +21,7 @@ use egui::{Color32, ColorImage};
 use super::bitstream;
 use super::helper::{self, Helper, HelperTrouble, Lane, RemoteDecoder};
 
-pub use super::helper::{Outcome, Picture};
+pub use super::helper::Outcome;
 
 /// Why a frame gave no picture.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -146,11 +146,6 @@ impl H264 {
     /// decoded until a keyframe.
     pub fn lost(&mut self) {
         self.waiting = true;
-    }
-
-    /// Whether it waits for a keyframe.
-    pub fn waiting(&self) -> bool {
-        self.waiting
     }
 
     /// A decoder in the helper for the stream starting at keyframe
@@ -336,6 +331,7 @@ pub fn to_image(yuv: &Yuv) -> Result<ColorImage, Trouble> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::huddle_audio::helper::Picture;
     use crate::huddle_audio::helper::pretend::{Act, Pretend, picture, welcome};
     use crate::sync::lock;
     use noslacking_video_ipc::{FailKind, Reply, Request};
@@ -449,7 +445,6 @@ mod tests {
         let mut decoder = H264::with_helper(Some(helper), Some(true));
         assert_eq!(decoder.decode(&frames[0], false), Ok(Outcome::Kept));
         assert_eq!(decoder.decode(&frames[1], true), Ok(Outcome::Unchanged));
-        assert!(!decoder.waiting());
         let fetched = decoder.fetch().expect("fetches").picture();
         assert_eq!(fetched.map(|p| p.yuv.y[0]), Some(9));
     }
@@ -686,7 +681,6 @@ mod tests {
             shown(&mut decoder, &frames[0]),
             Err(Trouble::Broken(_))
         ));
-        assert!(decoder.waiting());
         assert_eq!(shown(&mut decoder, &frames[0]), Err(Trouble::NeedKeyframe));
         assert_eq!(
             launches.load(Ordering::Relaxed),

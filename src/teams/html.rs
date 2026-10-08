@@ -207,26 +207,6 @@ pub fn resolve_mentions(blocks: Vec<Block>, people: &[(String, String)]) -> Vec<
         .collect()
 }
 
-/// Converts a plain message or typed text into a Teams HTML payload.
-pub fn text_to_teams_html(text: &str) -> String {
-    let escaped = xml_escape(text);
-    if escaped.contains('\n') {
-        let paragraphs: Vec<String> = escaped
-            .split('\n')
-            .map(|line| {
-                if line.is_empty() {
-                    "<p>&nbsp;</p>".to_string()
-                } else {
-                    format!("<p>{}</p>", line)
-                }
-            })
-            .collect();
-        paragraphs.join("")
-    } else {
-        format!("<p>{}</p>", escaped)
-    }
-}
-
 /// Extracts plain text from Teams HTML by stripping tags and unescaping entities.
 pub fn strip_tags(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
@@ -537,18 +517,6 @@ fn tag_name(tag: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn plain_text_escapes_into_teams_html() {
-        let html = text_to_teams_html("Hello <world> & \"teams\"");
-        assert_eq!(html, "<p>Hello &lt;world&gt; &amp; &quot;teams&quot;</p>");
-    }
-
-    #[test]
-    fn multiline_text_becomes_multiple_paragraphs() {
-        let html = text_to_teams_html("Line 1\nLine 2");
-        assert_eq!(html, "<p>Line 1</p><p>Line 2</p>");
-    }
 
     #[test]
     fn strips_tags_accurately() {

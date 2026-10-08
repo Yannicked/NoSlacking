@@ -1,10 +1,10 @@
 //! Asks Slack's search for a page of results.
 
+use super::api::failure;
 use super::{Event, Sink};
-use crate::failure::Failure;
 use crate::search::{PAGE_SIZE, Query, Scope, Sort};
+use crate::slack::Client;
 use crate::slack::search::{FilesAnswer, MessagesAnswer};
-use crate::slack::{Client, SlackError};
 
 /// The parameters of page `page` of `query`.
 pub fn params(query: &Query, page: u32) -> Vec<(&'static str, String)> {
@@ -23,16 +23,6 @@ pub fn params(query: &Query, page: u32) -> Vec<(&'static str, String)> {
         ("sort_dir", "desc".to_owned()),
         ("highlight", "true".to_owned()),
     ]
-}
-
-/// What a refusal means for the person searching: as for any call, but a
-/// token type search does not take also means a missing permission.
-pub fn failure(error: &SlackError) -> Failure {
-    match error.code() {
-        // An OAuth sign-in made before NoSlacking asked for search:read.
-        Some("not_allowed_token_type") => Failure::MissingPermission,
-        _ => super::api::failure(error),
-    }
 }
 
 /// Reads page `page` of `query` and answers request `request`.
@@ -58,6 +48,8 @@ pub async fn search(client: Client, query: Query, page: u32, request: u64, sink:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::failure::Failure;
+    use crate::slack::SlackError;
 
     #[test]
     fn queries_go_to_slack_as_typed() {
@@ -74,6 +66,8 @@ mod tests {
         assert!(params.contains(&("highlight", "true".into())));
     }
 
+    /// An OAuth sign-in made before NoSlacking asked for search:read is
+    /// refused either way.
     #[test]
     fn a_missing_permission_is_told_apart() {
         for code in ["missing_scope", "not_allowed_token_type"] {

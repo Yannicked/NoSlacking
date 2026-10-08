@@ -65,10 +65,6 @@ impl AppDirs {
         self.config.join("themes")
     }
 
-    pub fn read_state_file(&self) -> PathBuf {
-        self.state.join("read.json")
-    }
-
     /// Unsent messages, so they survive a restart. State, not config:
     /// they are yours alone and nothing to back up or sync.
     pub fn drafts_file(&self) -> PathBuf {

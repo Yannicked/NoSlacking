@@ -24,7 +24,7 @@ pub use crate::huddle_audio::cameras::{Camera, MAX_TILES, Wish};
 pub use crate::huddle_audio::gallery::Gallery;
 pub use crate::huddle_audio::roster::{Person, Roster};
 #[cfg(feature = "huddle-video")]
-pub use crate::huddle_audio::screen::{Picture, Screen};
+pub use crate::huddle_audio::screen::Screen;
 #[cfg(feature = "huddle-video")]
 pub use crate::huddle_audio::video::Share;
 
@@ -33,6 +33,10 @@ pub use crate::huddle_audio::video::Share;
 pub const ALONE_FOR: Duration = Duration::from_secs(60);
 /// How long a failure shows in the call bar, unless closed sooner.
 pub const FAILED_FOR: Duration = Duration::from_secs(30);
+/// How long someone you pressed Admit for shows as being let in: Teams
+/// lets them in within a few seconds; past this it did not, and Admit
+/// can be pressed again.
+pub const ADMIT_WAIT: Duration = Duration::from_secs(20);
 
 /// How listening ended without failing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +122,10 @@ pub struct Listening {
     pub meeting: bool,
     /// The meeting's join link, once known.
     pub invite: Option<crate::meetings::MeetingLink>,
+    /// Those in the lobby you pressed Admit for, and when: the bar shows
+    /// them being let in until they leave the lobby, or for
+    /// [`ADMIT_WAIT`] at most.
+    pub admitting: Vec<(String, Instant)>,
     /// Who shares their screen, as last told.
     #[cfg(feature = "huddle-video")]
     pub shares: Vec<Share>,
@@ -168,6 +176,7 @@ impl Listening {
             answered: false,
             meeting: false,
             invite: None,
+            admitting: Vec::new(),
             #[cfg(feature = "huddle-video")]
             shares: Vec::new(),
             #[cfg(feature = "huddle-video")]
@@ -219,6 +228,14 @@ impl Listening {
     /// Who waits in the meeting's lobby, as last told.
     pub fn waiting(&self) -> impl Iterator<Item = &Person> {
         self.roster.people.iter().filter(|p| p.waiting)
+    }
+
+    /// Whether `user`, waiting in the lobby, is being let in at `now`:
+    /// Admit was pressed for them less than [`ADMIT_WAIT`] ago.
+    pub fn is_admitting(&self, user: &str, now: Instant) -> bool {
+        self.admitting
+            .iter()
+            .any(|(who, at)| who == user && now < *at + ADMIT_WAIT)
     }
 
     /// What the call window wants, given room for `tiles` tiles of
@@ -437,9 +454,16 @@ fn own_name(app: &App, team: &str) -> String {
 /// Lets `user` (by the id the interface knows them by) in from the
 /// meeting's lobby.
 pub fn admit(app: &mut App, user: String) {
-    let Some(listening) = app.huddles.listening.as_ref().filter(|l| l.meeting) else {
+    let Some(listening) = app.huddles.listening.as_mut().filter(|l| l.meeting) else {
         return;
     };
+    let now = Instant::now();
+    if listening.is_admitting(&user, now) {
+        return;
+    }
+    // Those let in, or long since asked for, are forgotten.
+    listening.admitting.retain(|(_, at)| now < *at + ADMIT_WAIT);
+    listening.admitting.push((user.clone(), now));
     let team = listening.team.clone();
     app.backend.send(backend::Command::People {
         team,
@@ -749,6 +773,18 @@ pub fn quit(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn someone_admitted_shows_as_let_in_for_a_while() {
+        let now = Instant::now();
+        let mut meeting = Listening::meeting("T1");
+        assert!(!meeting.is_admitting("U1", now));
+        meeting.admitting.push(("U1".into(), now));
+        assert!(meeting.is_admitting("U1", now + Duration::from_secs(5)));
+        assert!(!meeting.is_admitting("U2", now));
+        // Past the wait, Admit is offered again.
+        assert!(!meeting.is_admitting("U1", now + ADMIT_WAIT));
+    }
 
     fn person(user: &str, me: bool, muted: bool, speaking: bool) -> Person {
         Person {

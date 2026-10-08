@@ -6,9 +6,12 @@
 
 use std::time::Duration;
 
+use serde::Deserialize;
 use serde_json::Value;
 
-use super::api::{failure, paginate, with_cursor, worth_retrying};
+use super::api::{
+    HistoryQuery, done_if, failure, my_conversations_page, paginate, with_cursor, worth_retrying,
+};
 use super::{Event, Sink};
 use crate::failure::{Doing, Problem};
 use crate::model::{Conversation, ConversationKind, Message, Ts, User, Workspace};
@@ -37,7 +40,7 @@ pub(super) async fn emoji(client: &Client, team: &str, sink: &Sink) {
         Ok(list) => sink.send(Event::Emoji {
             team: team.to_owned(),
             emoji: list.emoji,
-            can_add: client.token().is_session(),
+            can_add: client.is_session(),
         }),
         Err(error) => log::info!("emoji.list: {error}"),
     }
@@ -52,7 +55,7 @@ pub(super) async fn workspace_details(client: &Client, team: &str, user: &str) -
         domain: String::new(),
         icon: None,
         user_id: user.to_owned(),
-        sign_in: crate::model::SignInKind::of(client.token().is_session()),
+        sign_in: crate::model::SignInKind::of(client.is_session()),
         // Slack names them with every answer, so they are known once
         // team.info (or auth.test) is back; set below.
         scopes: None,
@@ -187,7 +190,7 @@ async fn user_groups(client: &Client, team: &str, sink: &Sink) {
             team: team.to_owned(),
             groups: list.into_model(),
         }),
-        Err(SlackError::Api(code)) if code == "missing_scope" => {
+        Err(error) if error.is_code(&["missing_scope"]) => {
             log::info!("usergroups.list: no usergroups:read permission, so no group mentions");
         }
         Err(error) => log::info!("usergroups.list: {error}"),
@@ -205,23 +208,7 @@ pub(super) async fn conversations(
     let walked = paginate(
         "users.conversations",
         CONVERSATION_PAGES,
-        |cursor| {
-            let params = with_cursor(
-                vec![
-                    ("types", "public_channel,private_channel,mpim,im".to_owned()),
-                    ("exclude_archived", "true".to_owned()),
-                    ("limit", "200".to_owned()),
-                ],
-                cursor,
-            );
-            let client = &client;
-            async move {
-                let page: types::ConversationsPage =
-                    client.call("users.conversations", &params).await?;
-                let next = page.response_metadata.cursor();
-                Ok((page.channels, next))
-            }
-        },
+        |cursor| my_conversations_page(&client, "public_channel,private_channel,mpim,im", cursor),
         |channels| {
             list.extend(channels.into_iter().map(types::Channel::into_model));
             true
@@ -478,18 +465,11 @@ pub(super) async fn edit_sidebar(
                 } else {
                     "stars.remove"
                 };
-                match client
+                let starred = client
                     .act::<Value>(method, &[("channel", channel.clone())])
-                    .await
-                {
-                    // Already as asked.
-                    Err(SlackError::Api(code))
-                        if code == "already_starred" || code == "not_starred" =>
-                    {
-                        Ok(())
-                    }
-                    other => other.map(|_| ()),
-                }
+                    .await;
+                // Already as asked.
+                done_if(starred, &["already_starred", "not_starred"])
             }
         };
         if let Err(error) = result {
@@ -547,7 +527,7 @@ async fn users(client: Client, team: String, cache: Cache, sink: Sink) {
 /// messages first, skipping conversations whose state is already known.
 /// A rate limit pauses the sweep rather than skipping conversations.
 async fn unread_sweep(client: Client, team: String, list: Vec<Conversation>, sink: Sink) {
-    let mut list = if client.token().is_session() {
+    let mut list = if client.is_session() {
         match client
             .call::<types::ClientCounts>("client.counts", &[])
             .await
@@ -653,11 +633,8 @@ async fn fetch_conversation(
         Ok(info) => {
             let mut conversation = info.channel.into_model();
             if conversation.latest.is_none()
-                && let Ok(page) = client
-                    .call::<types::HistoryPage>(
-                        "conversations.history",
-                        &[("channel", channel.to_owned()), ("limit", "1".into())],
-                    )
+                && let Ok(page) = HistoryQuery::new(channel, 1)
+                    .page::<types::HistoryPage>(client)
                     .await
             {
                 conversation.latest = page.messages.first().map(|m| Ts::new(m.ts.clone()));
@@ -670,7 +647,7 @@ async fn fetch_conversation(
             });
             Ok(())
         }
-        Err(SlackError::Api(code)) if code == "channel_not_found" => {
+        Err(error) if error.is_code(&["channel_not_found"]) => {
             sink.send(Event::ConversationGone {
                 team: team.to_owned(),
                 channel: channel.to_owned(),
@@ -718,25 +695,17 @@ pub(super) async fn history(
             });
         }
     }
-    let mut params = vec![
-        ("channel", channel.clone()),
-        ("limit", HISTORY_PAGE.to_string()),
-        ("include_all_metadata", "false".to_owned()),
-    ];
     let older = cursor.is_some();
-    if let Some(cursor) = cursor {
-        params.push(("cursor", cursor));
-    }
+    let query = HistoryQuery::new(&channel, HISTORY_PAGE)
+        .without_metadata()
+        .at(cursor);
     // As Slack sent it, so the cache keeps the page exactly and reads it
     // back the same way.
-    let answer = client
-        .call::<Value>("conversations.history", &params)
-        .await
-        .and_then(|value| {
-            serde_json::from_value::<types::HistoryPage>(value.clone())
-                .map(|page| (page, value))
-                .map_err(|error| SlackError::Decode(error.to_string()))
-        });
+    let answer = query.page::<Value>(&client).await.and_then(|value| {
+        types::HistoryPage::deserialize(&value)
+            .map(|page| (page, value))
+            .map_err(|error| SlackError::Decode(error.to_string()))
+    });
     match answer {
         Ok((page, value)) => {
             // A huddle still going on shows on its conversation. Only the
