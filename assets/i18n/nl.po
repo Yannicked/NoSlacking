@@ -1888,8 +1888,11 @@ msgstr "Kan {name} niet opslaan: {error}"
 msgid "Could not open {name}: {error}"
 msgstr "Kan {name} niet openen: {error}"
 
-msgid "{method} failed: {error}"
-msgstr "{method} mislukt: {error}"
+msgid "Could not close the conversation: {error}"
+msgstr "Kan het gesprek niet sluiten: {error}"
+
+msgid "Could not mark the conversation read: {error}"
+msgstr "Kan het gesprek niet als gelezen markeren: {error}"
 
 msgid "Could not use the proxy: {error}"
 msgstr "Kan de proxy niet gebruiken: {error}"

@@ -201,14 +201,16 @@ impl Command {
                 starred: false,
             },
             Self::Reminders => Event::Reminders { result: Err(error) },
-            Self::Save { channel, ts, save } => Event::SaveFailed {
-                channel: channel.clone(),
-                ts: ts.clone(),
-                save: *save,
+            Self::Save { channel, ts, save } => Event::Failed {
+                what: Doing::Save {
+                    channel: channel.clone(),
+                    ts: ts.clone(),
+                    save: *save,
+                },
                 error,
             },
-            Self::CompleteReminder { id } => Event::CompleteFailed {
-                id: id.clone(),
+            Self::CompleteReminder { id } => Event::Failed {
+                what: Doing::CompleteReminder { id: id.clone() },
                 error,
             },
             Self::Scheduled => Event::ScheduledList { result: Err(error) },
@@ -216,7 +218,10 @@ impl Command {
                 request: *request,
                 result: Err(error),
             },
-            Self::CancelScheduled { .. } => Event::CancelFailed { error },
+            Self::CancelScheduled { .. } => Event::Failed {
+                what: Doing::CancelScheduled,
+                error,
+            },
             Self::Remind { time, .. } => Event::Reminded {
                 time: *time,
                 result: Err(error),
@@ -226,14 +231,35 @@ impl Command {
                 thread,
                 follow,
                 ..
-            } => Event::FollowFailed {
-                channel: channel.clone(),
-                thread: thread.clone(),
-                follow: *follow,
+            } => Event::Failed {
+                what: Doing::Follow {
+                    channel: channel.clone(),
+                    thread: thread.clone(),
+                    follow: *follow,
+                },
                 error,
             },
         }
     }
+}
+
+/// Which change failed, already shown as done, so the interface can take
+/// it back and say so.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Doing {
+    /// Saving (`save`) a message or taking it off the list; the list
+    /// shows it as it was.
+    Save { channel: String, ts: Ts, save: bool },
+    /// Completing a reminder; the reminders are read again.
+    CompleteReminder { id: String },
+    /// Cancelling a scheduled message; the list is read again.
+    CancelScheduled,
+    /// Following (`follow`) a thread, or stopping: it shows as it was.
+    Follow {
+        channel: String,
+        thread: Ts,
+        follow: bool,
+    },
 }
 
 /// What the worker answers.
@@ -269,16 +295,8 @@ pub enum Event {
     Reminders {
         result: Result<Vec<Reminder>, Failure>,
     },
-    /// Saving (`save`) or taking a message off the list failed; the list
-    /// shows it as it was.
-    SaveFailed {
-        channel: String,
-        ts: Ts,
-        save: bool,
-        error: Failure,
-    },
-    /// Completing a reminder failed; the reminders are read again.
-    CompleteFailed { id: String, error: Failure },
+    /// A change already shown as done failed.
+    Failed { what: Doing, error: Failure },
     /// The messages waiting to be sent, soonest first.
     ScheduledList {
         result: Result<Vec<schedule::Scheduled>, Failure>,
@@ -288,20 +306,10 @@ pub enum Event {
         request: u64,
         result: Result<schedule::Scheduled, Failure>,
     },
-    /// A scheduled message could not be cancelled; the list is read again.
-    CancelFailed { error: Failure },
     /// Slack answered a reminder set for `time`.
     Reminded {
         time: i64,
         result: Result<(), Failure>,
-    },
-    /// Following (`follow`) a thread, or stopping, failed: it shows as it
-    /// was.
-    FollowFailed {
-        channel: String,
-        thread: Ts,
-        follow: bool,
-        error: Failure,
     },
     /// You followed a thread or stopped, here or in another Slack client
     /// (`thread_subscribed` and `thread_unsubscribed`).
@@ -1402,12 +1410,35 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
             views.saved.arrived(result);
         }
         Event::Reminders { result } => app.views.team_mut(team).reminders.arrived(result),
-        Event::SaveFailed {
+        Event::Failed { what, error } => failed(app, team, what, &error),
+        Event::ScheduledList { result } => app.views.team_mut(team).scheduled.arrived(result),
+        Event::ScheduleDone { request, result } => scheduled(app, team, request, result),
+        Event::Reminded { time, result } => match result {
+            Ok(()) => {
+                let when = crate::ui::moment_label(time);
+                app.toast(tf("I will remind you {when}", &[("when", &when)]), false);
+                // The Later view lists reminders: it shows the new one.
+                let views = app.views.team_mut(team);
+                if views.reminders.value.is_some() || views.reminders.loading {
+                    views.reminders.start();
+                    send(app, team, Command::Reminders);
+                }
+            }
+            Err(error) => app.toast(remind_failure(&error), true),
+        },
+        Event::Followed {
             channel,
-            ts,
-            save,
-            error,
-        } => {
+            thread,
+            follow,
+        } => show_followed(app, team, &channel, &thread, follow),
+        Event::Nothing => {}
+    }
+}
+
+/// Takes back a change that failed and says so.
+fn failed(app: &mut App, team: &str, what: Doing, error: &Failure) {
+    match what {
+        Doing::Save { channel, ts, save } => {
             let message = app
                 .workspaces
                 .iter()
@@ -1428,7 +1459,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
             };
             app.toast(text, true);
         }
-        Event::CompleteFailed { id, error } => {
+        Doing::CompleteReminder { id } => {
             log::debug!("reminder {id} was not completed");
             app.toast(
                 tf(
@@ -1440,9 +1471,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
             app.views.team_mut(team).reminders.start();
             send(app, team, Command::Reminders);
         }
-        Event::ScheduledList { result } => app.views.team_mut(team).scheduled.arrived(result),
-        Event::ScheduleDone { request, result } => scheduled(app, team, request, result),
-        Event::CancelFailed { error } => {
+        Doing::CancelScheduled => {
             app.toast(
                 tf(
                     "Could not cancel the scheduled message: {error}",
@@ -1453,24 +1482,10 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
             app.views.team_mut(team).scheduled.start();
             send(app, team, Command::Scheduled);
         }
-        Event::Reminded { time, result } => match result {
-            Ok(()) => {
-                let when = crate::ui::moment_label(time);
-                app.toast(tf("I will remind you {when}", &[("when", &when)]), false);
-                // The Later view lists reminders: it shows the new one.
-                let views = app.views.team_mut(team);
-                if views.reminders.value.is_some() || views.reminders.loading {
-                    views.reminders.start();
-                    send(app, team, Command::Reminders);
-                }
-            }
-            Err(error) => app.toast(remind_failure(&error), true),
-        },
-        Event::FollowFailed {
+        Doing::Follow {
             channel,
             thread,
             follow,
-            error,
         } => {
             show_followed(app, team, &channel, &thread, !follow);
             let error = error.message();
@@ -1484,12 +1499,6 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
             };
             app.toast(text, true);
         }
-        Event::Followed {
-            channel,
-            thread,
-            follow,
-        } => show_followed(app, team, &channel, &thread, follow),
-        Event::Nothing => {}
     }
 }
 

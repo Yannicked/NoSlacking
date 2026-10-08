@@ -7,13 +7,15 @@
 
 use serde::Deserialize;
 
-use super::api::failure;
+use super::api::{
+    HistoryQuery, act_with_blocks, done_if, failure, paginate, with_cursor, with_text,
+};
 use super::{Event, Sink};
 use crate::model::{Message, Ts};
 use crate::slack::search::MessagesAnswer;
 use crate::slack::{Client, SlackError, types};
 use crate::views::schedule::Scheduled;
-use crate::views::{self, Activity, Command, Followed, Reason, Reminder, Saved};
+use crate::views::{self, Activity, Command, Doing, Followed, Reason, Reminder, Saved};
 
 /// How many items of the activity feed are read.
 const FEED_LIMIT: usize = 50;
@@ -22,9 +24,9 @@ const SEARCH_COUNT: usize = 50;
 /// The most messages fetched one by one to fill in a list of references.
 const FILL_LIMIT: usize = 40;
 /// How many unread messages of one conversation are read.
-const UNREAD_COUNT: usize = 50;
+const UNREAD_COUNT: u32 = 50;
 /// How many messages are shown of a conversation with no read marker.
-const UNMARKED_COUNT: usize = 10;
+const UNMARKED_COUNT: u32 = 10;
 /// How many followed threads are listed.
 const THREADS_LIMIT: usize = 25;
 /// How many threads found by searching for your replies are read whole.
@@ -69,7 +71,7 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
             ts,
         } => {
             // Only the web client keeps a thread's read state.
-            if client.token().is_session() {
+            if client.is_session() {
                 let marked = client
                     .act::<serde_json::Value>(
                         "subscriptions.thread.mark",
@@ -106,10 +108,8 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
         },
         Command::Save { channel, ts, save } => match keep(&client, &channel, &ts, save).await {
             Ok(()) => views::Event::Nothing,
-            Err(error) => views::Event::SaveFailed {
-                channel,
-                ts,
-                save,
+            Err(error) => views::Event::Failed {
+                what: Doing::Save { channel, ts, save },
                 error: failure(&error),
             },
         },
@@ -147,7 +147,8 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
         Command::CancelScheduled { channel, id } => {
             match unschedule(&client, &channel, &id).await {
                 Ok(()) => views::Event::Nothing,
-                Err(error) => views::Event::CancelFailed {
+                Err(error) => views::Event::Failed {
+                    what: Doing::CancelScheduled,
                     error: failure(&error),
                 },
             }
@@ -161,17 +162,18 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
             let (method, params) = views::follow_request(&channel, &thread, &last_read, follow);
             // Only a browser session's token may call the web client's
             // methods; the interface never asks otherwise.
-            let result = if client.token().is_session() {
-                client.act::<serde_json::Value>(method, &params).await
-            } else {
-                Err(SlackError::Api("not_allowed_token_type".to_owned()))
+            let result = match client.require_session() {
+                Ok(()) => client.act::<serde_json::Value>(method, &params).await,
+                Err(error) => Err(error),
             };
             match result {
                 Ok(_) => views::Event::Nothing,
-                Err(error) => views::Event::FollowFailed {
-                    channel,
-                    thread,
-                    follow,
+                Err(error) => views::Event::Failed {
+                    what: Doing::Follow {
+                        channel,
+                        thread,
+                        follow,
+                    },
                     error: failure(&error),
                 },
             }
@@ -184,18 +186,19 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
                 .map(|_| ())
                 .map_err(|e| failure(&e)),
         },
-        Command::CompleteReminder { id } => match client
-            .act::<serde_json::Value>("reminders.complete", &[("reminder", id.clone())])
-            .await
-        {
+        Command::CompleteReminder { id } => {
+            let completed = client
+                .act::<serde_json::Value>("reminders.complete", &[("reminder", id.clone())])
+                .await;
             // Already done elsewhere: nothing to undo.
-            Ok(_) => views::Event::Nothing,
-            Err(SlackError::Api(code)) if code == "already_complete" => views::Event::Nothing,
-            Err(error) => views::Event::CompleteFailed {
-                id,
-                error: failure(&error),
-            },
-        },
+            match done_if(completed, &["already_complete"]) {
+                Ok(()) => views::Event::Nothing,
+                Err(error) => views::Event::Failed {
+                    what: Doing::CompleteReminder { id },
+                    error: failure(&error),
+                },
+            }
+        }
     };
     reply(&sink, &team, event);
 }
@@ -251,19 +254,20 @@ fn scheduled_items(page: Vec<ScheduledItem>) -> Vec<Scheduled> {
 /// Every message waiting to be sent, soonest first.
 async fn scheduled(client: &Client) -> Result<Vec<Scheduled>, SlackError> {
     let mut out = Vec::new();
-    let mut cursor: Option<String> = None;
-    for _ in 0..SCHEDULED_PAGES {
-        let mut params = vec![("limit", "100".to_owned())];
-        if let Some(cursor) = cursor.take() {
-            params.push(("cursor", cursor));
-        }
-        let page: ScheduledPage = client.call("chat.scheduledMessages.list", &params).await?;
-        out.extend(scheduled_items(page.scheduled_messages));
-        match page.response_metadata.cursor() {
-            Some(next) => cursor = Some(next),
-            None => break,
-        }
-    }
+    paginate(
+        "chat.scheduledMessages.list",
+        SCHEDULED_PAGES,
+        |cursor| async move {
+            let params = with_cursor(vec![("limit", "100".to_owned())], cursor);
+            let page: ScheduledPage = client.call("chat.scheduledMessages.list", &params).await?;
+            Ok((page.scheduled_messages, page.response_metadata.cursor()))
+        },
+        |page| {
+            out.extend(scheduled_items(page));
+            true
+        },
+    )
+    .await?;
     out.sort_by_key(|s| s.post_at);
     Ok(out)
 }
@@ -278,8 +282,7 @@ async fn schedule(
     post_at: i64,
 ) -> Result<String, SlackError> {
     let params = schedule_params(channel, text, thread, post_at);
-    let answer: ScheduleAnswer =
-        super::worker::act_with_blocks(client, "chat.scheduleMessage", &params).await?;
+    let answer: ScheduleAnswer = act_with_blocks(client, "chat.scheduleMessage", &params).await?;
     Ok(answer.scheduled_message_id)
 }
 
@@ -292,7 +295,7 @@ fn schedule_params(
     post_at: i64,
 ) -> Vec<(&'static str, String)> {
     let mut params = vec![("channel", channel.to_owned())];
-    super::worker::with_text(&mut params, text.to_owned());
+    with_text(&mut params, text.to_owned());
     params.push(("post_at", post_at.to_string()));
     if let Some(thread) = thread {
         params.push(("thread_ts", thread.0.clone()));
@@ -303,7 +306,7 @@ fn schedule_params(
 /// Keeps a scheduled message from being sent. One already gone is no
 /// failure.
 async fn unschedule(client: &Client, channel: &str, id: &str) -> Result<(), SlackError> {
-    match client
+    let deleted = client
         .act::<serde_json::Value>(
             "chat.deleteScheduledMessage",
             &[
@@ -311,11 +314,8 @@ async fn unschedule(client: &Client, channel: &str, id: &str) -> Result<(), Slac
                 ("scheduled_message_id", id.to_owned()),
             ],
         )
-        .await
-    {
-        Err(SlackError::Api(code)) if code == "invalid_scheduled_message_id" => Ok(()),
-        other => other.map(|_| ()),
-    }
+        .await;
+    done_if(deleted, &["invalid_scheduled_message_id"])
 }
 
 // ---- later ------------------------------------------------------------
@@ -418,7 +418,7 @@ fn reminders(list: RemindersList) -> Vec<Reminder> {
 /// cannot be read) the older starred messages. Answers whether they are
 /// the starred ones.
 async fn saved(client: &Client) -> Result<(Vec<Saved>, bool), SlackError> {
-    if client.token().is_session() {
+    if client.is_session() {
         match client
             .call::<SavedList>("saved.list", &[("limit", SAVED_LIMIT.to_string())])
             .await
@@ -454,11 +454,7 @@ async fn saved(client: &Client) -> Result<(Vec<Saved>, bool), SlackError> {
 /// session, else (or when Later refuses) with a star. Being already as
 /// asked is no failure.
 async fn keep(client: &Client, channel: &str, ts: &Ts, save: bool) -> Result<(), SlackError> {
-    let settled = |result: Result<serde_json::Value, SlackError>, done: &[&str]| match result {
-        Err(SlackError::Api(code)) if done.contains(&code.as_str()) => Ok(()),
-        other => other.map(|_| ()),
-    };
-    if client.token().is_session() {
+    if client.is_session() {
         let method = if save { "saved.add" } else { "saved.delete" };
         let result = client
             .act::<serde_json::Value>(
@@ -470,7 +466,7 @@ async fn keep(client: &Client, channel: &str, ts: &Ts, save: bool) -> Result<(),
                 ],
             )
             .await;
-        match settled(result, &["already_saved", "not_saved", "item_not_found"]) {
+        match done_if(result, &["already_saved", "not_saved", "item_not_found"]) {
             Ok(()) => return Ok(()),
             Err(error) if error.is_auth() => return Err(error),
             Err(error) => log::info!("{method}: {error}; starring instead"),
@@ -483,7 +479,7 @@ async fn keep(client: &Client, channel: &str, ts: &Ts, save: bool) -> Result<(),
             &[("channel", channel.to_owned()), ("timestamp", ts.0.clone())],
         )
         .await;
-    settled(result, &["already_starred", "not_starred"])
+    done_if(result, &["already_starred", "not_starred"])
 }
 
 // ---- threads ----------------------------------------------------------
@@ -625,7 +621,7 @@ fn replied_thread(
 /// session, else (or when that cannot be read) the threads a search finds
 /// you replied in. Answers whether it searched.
 async fn threads(client: &Client, me: &str) -> Result<(Vec<Followed>, bool), SlackError> {
-    if client.token().is_session() {
+    if client.is_session() {
         match client
             .call::<ThreadView>(
                 "subscriptions.thread.getView",
@@ -702,15 +698,11 @@ async fn unread(
     channel: &str,
     after: Option<&Ts>,
 ) -> Result<(Vec<Message>, bool), SlackError> {
-    let mut params = vec![("channel", channel.to_owned())];
-    match after {
-        Some(after) => {
-            params.push(("oldest", after.0.clone()));
-            params.push(("limit", UNREAD_COUNT.to_string()));
-        }
-        None => params.push(("limit", UNMARKED_COUNT.to_string())),
-    }
-    let page: types::HistoryPage = client.call("conversations.history", &params).await?;
+    let query = match after {
+        Some(after) => HistoryQuery::new(channel, UNREAD_COUNT).after(after, None),
+        None => HistoryQuery::new(channel, UNMARKED_COUNT),
+    };
+    let page: types::HistoryPage = query.page(client).await?;
     Ok(unread_page(page, after))
 }
 
@@ -855,7 +847,7 @@ fn references(feed: Feed) -> Vec<Reference> {
 /// the feed cannot be read) the messages a search finds naming you.
 /// Answers whether it searched.
 async fn activity(client: &Client, me: &str) -> Result<(Vec<Activity>, bool), SlackError> {
-    if client.token().is_session() {
+    if client.is_session() {
         match feed(client).await {
             Ok(items) => return Ok((items, false)),
             Err(error) => log::info!("activity.feed: {error}; searching for mentions instead"),
