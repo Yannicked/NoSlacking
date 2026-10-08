@@ -1404,8 +1404,19 @@ impl Call {
         meeting.camera_on = on;
         meeting.request += 1;
         meeting.changes += 1;
-        let descriptions =
-            super::api::media_descriptions(Some(&mid), on, share.as_deref(), meeting.request);
+        let more: Vec<&str> = meeting
+            .camera_lines
+            .iter()
+            .skip(1)
+            .map(String::as_str)
+            .collect();
+        let descriptions = super::api::media_descriptions(
+            Some(&mid),
+            on,
+            &more,
+            share.as_deref(),
+            meeting.request,
+        );
         let number = meeting.changes;
         let (update, capabilities) = (
             meeting.update_descriptions.clone(),
@@ -1733,7 +1744,14 @@ mod tests {
     fn our_camera_lines_are_the_cameras_then_the_receiving_ones() {
         let local = LocalMedia {
             video_ssrc: Some(77),
-            receive_cameras: vec!["4".into(), "5".into()],
+            receive_cameras: ["4", "5"]
+                .into_iter()
+                .map(|mid| super::super::MoreCamera {
+                    mid: mid.into(),
+                    ssrc: 4,
+                    rtx_ssrc: None,
+                })
+                .collect(),
             ..LocalMedia::default()
         };
         assert_eq!(camera_lines(&sdp::offer(&local)), ["1", "4", "5"]);

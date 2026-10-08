@@ -219,6 +219,19 @@ pub struct VideoCodec {
     pub rtx: Option<u8>,
 }
 
+/// One more camera line of ours, as the web client writes its own (lines
+/// 2–6 of its offer, recorded): `sendrecv` with SSRCs of its own, though
+/// nothing is sent on it, and listed as receiving in the meeting's
+/// `mediaDescriptions`. Its receive-only lines with a placeholder stream
+/// are for something else: no camera is asked for on them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoreCamera {
+    pub mid: String,
+    pub ssrc: u32,
+    /// Its resends' SSRC.
+    pub rtx_ssrc: Option<u32>,
+}
+
 /// What our SDP says about us: what [`sdp`] writes an offer or an answer
 /// from.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -264,10 +277,10 @@ pub struct LocalMedia {
     /// The share line's H.264 and retransmission payload types.
     pub share_pt: u8,
     pub share_rtx: Option<u8>,
-    /// More camera lines, receive-only, by mid: in a meeting each shows
-    /// one more participant's camera. In an offer they follow the data
-    /// line; in an answer they are those of the far end's lines kept.
-    pub receive_cameras: Vec<String>,
+    /// More camera lines: in a meeting each shows one more participant's
+    /// camera. In an offer they come before the data line; in an answer
+    /// they are those of the far end's lines kept.
+    pub receive_cameras: Vec<MoreCamera>,
     /// Whether we share our screen now: the share line is `sendonly` in
     /// our offers, and kept in our answers even to a far end that does
     /// not share. Not sharing, an offer leaves it `inactive` and an

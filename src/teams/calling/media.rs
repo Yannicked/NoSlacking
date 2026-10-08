@@ -335,11 +335,11 @@ impl MediaConfig {
 }
 
 /// How many more camera lines than one a meeting is offered (or answered
-/// with). None for now: with them (each as the web client writes its
-/// own), the meeting took the lines but then neither answered on the data
-/// channel nor sent audio, in three tries. One line follows whoever speaks
-/// instead.
-pub const MORE_CAMERAS: usize = 0;
+/// with), each showing one more participant's camera. Written as the web
+/// client writes its own (see [`super::MoreCamera`]); as receive-only
+/// lines the meeting took them but then neither answered on the data
+/// channel nor sent audio.
+pub const MORE_CAMERAS: usize = 3;
 
 /// Where the sound goes and comes from.
 #[derive(Debug, Default)]
@@ -1602,7 +1602,15 @@ impl Session {
             local.share_rtx_ssrc = share.rtx_ssrc();
         }
         local.data_ssrc = self.data_ssrc;
-        local.receive_cameras = self.more.iter().map(|m| m.mid().to_string()).collect();
+        local.receive_cameras = self
+            .more
+            .iter()
+            .map(|m| super::MoreCamera {
+                mid: m.mid().to_string(),
+                ssrc: m.ssrc(),
+                rtx_ssrc: m.rtx_ssrc(),
+            })
+            .collect();
         log::info!(
             "gather: done after {:?}: {}",
             self.since(),

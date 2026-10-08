@@ -14,8 +14,8 @@
 use std::net::{IpAddr, SocketAddr};
 
 use super::{
-    CAMERA_LABEL, Candidate, CandidateKind, Direction, Line, LineKind, LocalMedia, RemoteMedia,
-    SHARE_LABEL, Setup, VideoCodec,
+    CAMERA_LABEL, Candidate, CandidateKind, Direction, Line, LineKind, LocalMedia, MoreCamera,
+    RemoteMedia, SHARE_LABEL, Setup, VideoCodec,
 };
 
 /// Why an SDP could not be read.
@@ -434,7 +434,7 @@ pub fn offer(local: &LocalMedia) -> String {
     // web client orders them (recorded); after it, the meeting took the
     // lines but neither answered on the data channel nor sent audio.
     let mut mids = vec!["0", "1", "2"];
-    mids.extend(local.receive_cameras.iter().map(String::as_str));
+    mids.extend(local.receive_cameras.iter().map(|c| c.mid.as_str()));
     if local.data_ssrc.is_some() {
         mids.push("3");
     }
@@ -508,7 +508,6 @@ pub fn offer(local: &LocalMedia) -> String {
                 ssrcs: (ssrc, local.video_rtx_ssrc),
                 direction: local.video_direction,
                 share: false,
-                placeholder: false,
             };
             video_line(&mut out, local, &line, setup_text(local.setup), false);
             continue;
@@ -528,7 +527,6 @@ pub fn offer(local: &LocalMedia) -> String {
                 ssrcs: (ssrc, local.share_rtx_ssrc),
                 direction: Direction::SendOnly,
                 share: true,
-                placeholder: false,
             };
             video_line(&mut out, local, &line, setup_text(local.setup), false);
             continue;
@@ -562,8 +560,12 @@ pub fn offer(local: &LocalMedia) -> String {
         push(&mut out, &format!("a=label:{label}"));
     }
 
-    for mid in &local.receive_cameras {
-        let line = receiving_camera(mid, local.video_pt, local.video_rtx);
+    for camera in &local.receive_cameras {
+        let codec = VideoCodec {
+            pt: local.video_pt,
+            rtx: local.video_rtx,
+        };
+        let line = more_camera(camera, codec);
         video_line(&mut out, local, &line, setup_text(local.setup), false);
     }
     if let Some(ssrc) = local.data_ssrc {
@@ -572,16 +574,15 @@ pub fn offer(local: &LocalMedia) -> String {
     out
 }
 
-/// One more camera's line, receive-only: it names no stream of ours.
-fn receiving_camera(mid: &str, pt: u8, rtx: Option<u8>) -> VideoLine<'_> {
+/// One more camera's line (see [`MoreCamera`]), at `codec`.
+fn more_camera(camera: &MoreCamera, codec: VideoCodec) -> VideoLine<'_> {
     VideoLine {
-        mid,
+        mid: &camera.mid,
         label: CAMERA_LABEL,
-        codec: VideoCodec { pt, rtx },
-        ssrcs: (0, None),
-        direction: Direction::RecvOnly,
+        codec,
+        ssrcs: (camera.ssrc, camera.rtx_ssrc),
+        direction: Direction::SendRecv,
         share: false,
-        placeholder: true,
     }
 }
 
@@ -681,7 +682,7 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
                         }
                     }
             }
-            LineKind::Video if local.receive_cameras.contains(&line.mid) => {
+            LineKind::Video if local.receive_cameras.iter().any(|c| c.mid == line.mid) => {
                 open && remote.video.is_some()
             }
             LineKind::Video => {
@@ -753,16 +754,19 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
                         ssrcs: (ssrc, local.share_rtx_ssrc),
                         direction: share_direction(line.direction),
                         share: true,
-                        placeholder: false,
                     };
                     video_line(&mut out, local, &line_spec, setup, first);
                 }
             }
-            (LineKind::Video, _, _) if local.receive_cameras.contains(&line.mid) => {
-                if let Some(offered) = remote.video {
-                    let rtx = offered.rtx.filter(|_| local.video_rtx.is_some());
-                    let mut line_spec = receiving_camera(&line.mid, offered.pt, rtx);
-                    line_spec.direction = direction(Direction::RecvOnly);
+            (LineKind::Video, _, _) if local.receive_cameras.iter().any(|c| c.mid == line.mid) => {
+                let camera = local.receive_cameras.iter().find(|c| c.mid == line.mid);
+                if let (Some(offered), Some(camera)) = (remote.video, camera) {
+                    let codec = VideoCodec {
+                        pt: offered.pt,
+                        rtx: offered.rtx.filter(|_| local.video_rtx.is_some()),
+                    };
+                    let mut line_spec = more_camera(camera, codec);
+                    line_spec.direction = direction(Direction::SendRecv);
                     video_line(&mut out, local, &line_spec, setup, first);
                 }
             }
@@ -780,7 +784,6 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
                         ssrcs: (ssrc, local.video_rtx_ssrc),
                         direction: direction(local.video_direction),
                         share: false,
-                        placeholder: false,
                     };
                     video_line(&mut out, local, &line_spec, setup, first);
                 }
@@ -874,10 +877,6 @@ struct VideoLine<'a> {
     /// The share line: the web client's limits for a screen, 15 pictures
     /// a second of up to 8160 macroblocks (1920×1088).
     share: bool,
-    /// One more camera's line, receive-only: it names the placeholder
-    /// stream 1, as the web client's do (recorded), or a meeting rejects
-    /// it.
-    placeholder: bool,
 }
 
 /// A video line: H.264 at `codec.pt`, packetization mode 1, constrained
@@ -908,8 +907,6 @@ fn video_line(
     let sending = matches!(line.direction, Direction::SendRecv | Direction::SendOnly);
     if sending {
         push(out, &ssrc_range(ssrc));
-    } else if line.placeholder {
-        push(out, "a=x-ssrc-range:1-1");
     }
     push(out, &format!("a=rtpmap:{pt} H264/90000"));
     let limits = if line.share {
@@ -941,9 +938,6 @@ fn video_line(
             push(out, &format!("a=ssrc:{one} cname:{CNAME}"));
         }
         push(out, &format!("a=ssrc-group:FID {ssrc} {rtx_ssrc}"));
-    }
-    if line.placeholder && !sending {
-        push(out, &format!("a=ssrc:1 cname:{CNAME}"));
     }
     push(out, &format!("a=setup:{setup}"));
     push(out, &format!("a=mid:{}", line.mid));
@@ -1834,12 +1828,20 @@ mod tests {
         assert!(bundle.starts_with("a=group:BUNDLE 1"), "{bundle}");
     }
 
+    fn more(mid: &str, ssrc: u32) -> MoreCamera {
+        MoreCamera {
+            mid: mid.to_owned(),
+            ssrc,
+            rtx_ssrc: Some(ssrc + 1),
+        }
+    }
+
     #[test]
     fn a_meeting_is_offered_and_answered_more_cameras_to_receive() {
         let local = LocalMedia {
             video_ssrc: Some(77),
             data_ssrc: Some(99),
-            receive_cameras: vec!["4".into(), "5".into()],
+            receive_cameras: vec![more("4", 401), more("5", 501)],
             ..local()
         };
         let sdp = offer(&local);
@@ -1859,14 +1861,15 @@ mod tests {
             .filter(|l| l.mid == "4" || l.mid == "5")
             .map(|l| (l.mid.as_str(), l.direction))
             .collect();
+        // Sending and receiving, as the web client's are, each naming
+        // its own streams.
         assert_eq!(
             extra,
-            [("4", Direction::RecvOnly), ("5", Direction::RecvOnly)]
+            [("4", Direction::SendRecv), ("5", Direction::SendRecv)]
         );
         assert_eq!(offered.camera().map(|l| l.mid.as_str()), Some("1"));
-        // With the web client's placeholder stream, once each.
-        assert_eq!(sdp.matches("a=x-ssrc-range:1-1\r\n").count(), 2);
-        assert_eq!(sdp.matches("a=ssrc:1 cname:").count(), 2);
+        assert!(sdp.contains("a=x-ssrc-range:401-401\r\n"));
+        assert!(sdp.contains("a=ssrc-group:FID 501 502\r\n"));
 
         // To the meeting's media server's offer: its camera line, and the
         // lines asked for, receiving; its other video lines rejected.
@@ -1875,7 +1878,7 @@ mod tests {
             video_ssrc: Some(77),
             data_ssrc: Some(99),
             opus_pt: 102,
-            receive_cameras: vec!["5".into(), "6".into()],
+            receive_cameras: vec![more("5", 501), more("6", 601)],
             ..local
         };
         let answered = read(&answer(&ours, &remote)).expect("our answer reads back");
@@ -1889,8 +1892,8 @@ mod tests {
             open,
             [
                 ("2", Direction::SendRecv),
-                ("5", Direction::RecvOnly),
-                ("6", Direction::RecvOnly)
+                ("5", Direction::SendRecv),
+                ("6", Direction::SendRecv)
             ]
         );
     }

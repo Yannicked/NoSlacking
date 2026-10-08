@@ -1598,3 +1598,25 @@ shows what else the web client does, we offer the one camera line. It
 follows whoever speaks with a camera on, by the data channel's `dsh`
 (the speakers' audio source ids, newest first), matched to the roster's
 `main-audio` `sourceId`.
+
+**Several cameras, recorded (`teams.live.com10.har` and its data channel
+log).** The web client joined through the lobby. Its answer to the media
+server's offer kept:
+- six camera lines `sendrecv` (mids 2, 5–9), each with SSRCs of its own;
+- four `recvonly` lines with the placeholder stream (mids 10–13), which
+  the server's second offer marks `sendonly`.
+
+Its `mediaDescriptions` list the six as `recvonly`, then the share line.
+It asked for two cameras on two of the six:
+- `streamMsid` 2075 is mid 2's `x-source-streamid`;
+- 2076 is mid 5's.
+
+So cameras come on the send-and-receive camera lines, never on the
+placeholder ones. Each `sr` asks for the size its tile needs (`max-fs`
+8160, 3600 or 920) and is sent again when the tile changes. After the
+move to the new server the client opened a new `main-channel` there and
+started over with `syn`.
+
+We now write our three extra camera lines as its lines 5–9 are (we send
+nothing on them), list them as receiving in `mediaDescriptions`, and ask
+for one camera on each.
