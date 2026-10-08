@@ -398,13 +398,17 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     let mut target: Option<(f32, f32)> = None;
     // Where the "New" line starts, to offer a way back up to it.
     let mut unread_top: Option<f32> = None;
-    let height_id = egui::Id::new(("content-height", &scroll_key));
+    // What a window remembers of the list is its own: a chat popped out
+    // is also open in the main window, at another width, and sharing its
+    // row heights there had each window measure them anew every frame.
+    let window = ui.ctx().viewport_id();
+    let height_id = egui::Id::new(("content-height", &scroll_key, window));
     let previous_height: Option<f32> = ui.data(|d| d.get_temp(height_id));
     let mut area = egui::ScrollArea::vertical()
-        .id_salt(("messages", &scroll_key))
+        .id_salt(("messages", &scroll_key, window))
         .auto_shrink([false, false])
         .stick_to_bottom(!steering && !detached);
-    let offset_id = egui::Id::new(("scroll-offset", &scroll_key));
+    let offset_id = egui::Id::new(("scroll-offset", &scroll_key, window));
     if let Some(offset) = ui.data_mut(|d| d.remove_temp::<f32>(offset_id)) {
         area = area.vertical_scroll_offset(offset);
     }
@@ -415,7 +419,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         .and_then(|line| line.read.clone());
     // Heights of the rows as last drawn: only the rows in and near the
     // view are laid out, the rest are placed by these.
-    let heights_id = egui::Id::new(("row-heights", &scroll_key));
+    let heights_id = egui::Id::new(("row-heights", &scroll_key, window));
     let mut heights: rows::Heights = ui
         .data_mut(|d| d.remove_temp(heights_id))
         .unwrap_or_default();

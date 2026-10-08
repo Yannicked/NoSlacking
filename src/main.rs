@@ -787,6 +787,11 @@ impl DemoSetup {
                     broadcast: false,
                 });
             }
+            // #design open, and popped out into a window of its own too.
+            Some("popout") => {
+                app.actions.push(Action::OpenConversation("C03".into()));
+                app.actions.push(Action::PopOut("C03".into()));
+            }
             // #design, with a huddle going on.
             Some("huddle") => app.actions.push(Action::OpenConversation("C03".into())),
             // Listening to #design's huddle: the call bar.
