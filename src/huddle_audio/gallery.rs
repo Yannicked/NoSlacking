@@ -9,16 +9,19 @@
 //! the video helper (its own process, `helper::Lane::Cameras`, beside the
 //! share's). Each picture comes back shrunk to the tile's size and
 //! becomes RGBA here, and the newest per camera waits in the [`Gallery`]
-//! for the window to take: an older one still waiting is dropped, never
-//! queued. The window is woken only when it had taken everything, so at
-//! most once a frame however many cameras play.
+//! for the window to take. As for the share, a camera's picture the
+//! window would not see (it has not taken that camera's last one, or the
+//! window cannot be seen) is decoded but kept back in the helper, and
+//! only the newest fetched once the window can take it: never a queue.
+//! The window is woken only when it had taken everything, so at most
+//! once a frame however many cameras play.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use super::decode::{self, H264, Trouble};
+use super::decode::{self, H264, Outcome, Trouble};
 use super::helper::Lane;
 use super::screen::Picture;
 
@@ -39,6 +42,13 @@ pub struct Gallery {
 
 struct Shared {
     newest: Mutex<BTreeMap<String, Picture>>,
+    /// Whether the window showing the tiles can be seen.
+    visible: AtomicBool,
+    /// The cameras whose helper kept back a newer picture than the window
+    /// has: fetched once the window can take it.
+    kept: Mutex<BTreeSet<String>>,
+    /// Has the decoder thread fetch a camera's kept picture.
+    fetch: Mutex<Option<Fetch>>,
     /// A tile's size in pixels, width in the high half.
     fit: AtomicU64,
     /// The cameras whose decoder wants a keyframe: set by it, taken by
@@ -64,6 +74,9 @@ impl std::fmt::Debug for Gallery {
     }
 }
 
+/// What has the decoder thread fetch a camera's kept picture.
+type Fetch = Box<dyn Fn(&str) + Send + Sync>;
+
 /// One gallery is only ever equal to itself (its clones).
 impl PartialEq for Gallery {
     fn eq(&self, other: &Self) -> bool {
@@ -84,6 +97,9 @@ impl Gallery {
         Self {
             shared: Arc::new(Shared {
                 newest: Mutex::new(BTreeMap::new()),
+                visible: AtomicBool::new(true),
+                kept: Mutex::new(BTreeSet::new()),
+                fetch: Mutex::new(None),
                 fit: AtomicU64::new(0),
                 keyframes: Mutex::new(BTreeSet::new()),
                 no_video: AtomicBool::new(false),
@@ -110,14 +126,67 @@ impl Gallery {
         }
     }
 
-    /// The newest picture of each camera that has a new one.
+    /// The newest picture of each camera that has a new one. The helper
+    /// is then asked for any of theirs it kept back meanwhile.
     pub fn take(&self) -> BTreeMap<String, Picture> {
-        std::mem::take(&mut *lock(&self.shared.newest))
+        let taken = std::mem::take(&mut *lock(&self.shared.newest));
+        for key in taken.keys() {
+            self.fetch_kept(key);
+        }
+        taken
     }
 
-    /// Forgets `key`'s picture not taken: its tile went.
+    /// Forgets `key`'s picture not taken, and any kept back: its tile
+    /// went, or its stream started again.
     pub fn clear(&self, key: &str) {
         lock(&self.shared.newest).remove(key);
+        lock(&self.shared.kept).remove(key);
+    }
+
+    /// Whether `key`'s next picture should be sent: the window can be
+    /// seen and has taken that camera's last one. Otherwise the helper
+    /// keeps it back ([`Self::keep`]).
+    pub fn wants_picture(&self, key: &str) -> bool {
+        self.visible() && !lock(&self.shared.newest).contains_key(key)
+    }
+
+    /// The helper kept a picture of `key` back: it is fetched as soon as
+    /// the window can take it, which may be now.
+    pub fn keep(&self, key: &str) {
+        lock(&self.shared.kept).insert(key.to_owned());
+        // The window may have taken the last picture since it was asked.
+        self.fetch_kept(key);
+    }
+
+    /// Asks the decoder thread for `key`'s kept picture if the window can
+    /// take one; only one asker wins it.
+    fn fetch_kept(&self, key: &str) {
+        let won = self.wants_picture(key) && lock(&self.shared.kept).remove(key);
+        if won && let Some(fetch) = lock(&self.shared.fetch).as_ref() {
+            fetch(key);
+        }
+    }
+
+    /// What has the decoder thread fetch a camera's kept picture.
+    fn on_fetch(&self, fetch: impl Fn(&str) + Send + Sync + 'static) {
+        *lock(&self.shared.fetch) = Some(Box::new(fetch));
+    }
+
+    /// Says whether the window showing the tiles can be seen; when it can
+    /// again, each camera's newest picture kept meanwhile is fetched.
+    pub fn set_visible(&self, visible: bool) {
+        let was = self.shared.visible.swap(visible, Ordering::Relaxed);
+        if visible && !was {
+            let kept: Vec<String> = lock(&self.shared.kept).iter().cloned().collect();
+            for key in kept {
+                self.fetch_kept(&key);
+            }
+        }
+    }
+
+    /// Whether the window showing the tiles can be seen.
+    pub fn visible(&self) -> bool {
+        self.shared.visible.load(Ordering::Relaxed)
     }
 
     /// How many pictures have been put.
@@ -196,6 +265,9 @@ enum Job {
     },
     /// A camera's tile went.
     Stop(String),
+    /// The window can take the picture of this camera the helper kept
+    /// back.
+    Fetch(String),
 }
 
 #[derive(Default)]
@@ -227,6 +299,21 @@ impl CameraDecoding {
     /// Starts the thread, idle until a camera starts.
     pub fn spawn(gallery: Gallery) -> std::io::Result<Self> {
         let jobs: Jobs = Arc::default();
+        let fetching = Arc::downgrade(&jobs);
+        gallery.on_fetch(move |key| {
+            if let Some(jobs) = fetching.upgrade() {
+                let mut queue = lock(&jobs.0);
+                if !queue
+                    .jobs
+                    .iter()
+                    .any(|job| matches!(job, Job::Fetch(k) if k == key))
+                {
+                    queue.jobs.push_back(Job::Fetch(key.to_owned()));
+                }
+                drop(queue);
+                jobs.1.notify_one();
+            }
+        });
         let (thread_jobs, thread_gallery) = (jobs.clone(), gallery.clone());
         std::thread::Builder::new()
             .name("huddle-cameras".into())
@@ -242,11 +329,12 @@ impl CameraDecoding {
         lock(&self.jobs.0)
     }
 
-    /// Drops `key`'s frames still waiting: they are stale.
+    /// Drops `key`'s frames and fetches still waiting: they are stale.
     fn forget(queue: &mut Queue, key: &str) {
-        queue
-            .jobs
-            .retain(|job| !matches!(job, Job::Frame { key: k, .. } if k == key));
+        queue.jobs.retain(|job| match job {
+            Job::Frame { key: k, .. } | Job::Fetch(k) => k != key,
+            Job::Start(_) | Job::Stop(_) => true,
+        });
     }
 
     fn send(&self, job: Job) {
@@ -333,6 +421,10 @@ struct Timings {
     pictures: u32,
     working: Duration,
     errors: u32,
+    /// Frames whose picture the helper kept back, unseen.
+    kept: u32,
+    /// Pictures the same as the last.
+    unchanged: u32,
     shown: [usize; 2],
 }
 
@@ -345,17 +437,19 @@ impl Timings {
         if now < since + REPORT_EVERY {
             return;
         }
-        if self.pictures > 0 || self.errors > 0 {
+        if self.pictures > 0 || self.errors > 0 || self.kept > 0 {
             let seconds = now.duration_since(since).as_secs_f64();
             log::info!(
                 "video: {cameras} cameras: {} pictures in {seconds:.0} s, shown at {}x{}: {:.2} ms \
-                 a picture through the helper and converting, busy {:.1} % of the time; {} frames \
-                 did not decode",
+                 a picture through the helper and converting, busy {:.1} % of the time; {} kept \
+                 back unseen, {} unchanged; {} frames did not decode",
                 self.pictures,
                 self.shown[0],
                 self.shown[1],
                 self.working.as_secs_f64() * 1000.0 / f64::from(self.pictures.max(1)),
                 self.working.as_secs_f64() * 100.0 / seconds.max(0.001),
+                self.kept,
+                self.unchanged,
                 self.errors
             );
         }
@@ -366,23 +460,29 @@ impl Timings {
     }
 }
 
-/// One frame of camera `key` through its decoder into the gallery.
+/// One frame of camera `key` through its decoder into the gallery, or,
+/// with no frame, the picture the helper kept back.
 fn decode_one(
     key: &str,
     decoder: &mut H264,
-    unit: &[u8],
-    contiguous: bool,
+    frame: Option<(&[u8], bool)>,
     gallery: &Gallery,
     timings: &mut Timings,
 ) {
-    if !contiguous {
-        decoder.lost();
-    }
     let started = Instant::now();
     let (width, height) = gallery.fit();
     decoder.set_fit(width, height);
-    match decoder.decode(unit) {
-        Ok(Some(picture)) => {
+    let decoded = match frame {
+        Some((unit, contiguous)) => {
+            if !contiguous {
+                decoder.lost();
+            }
+            decoder.decode(unit, gallery.wants_picture(key))
+        }
+        None => decoder.fetch(),
+    };
+    match decoded {
+        Ok(Outcome::Picture(picture)) => {
             gallery.set_no_video(false);
             let source = picture.source;
             #[cfg_attr(not(feature = "demo"), allow(unused_mut))]
@@ -408,7 +508,12 @@ fn decode_one(
                 }
             }
         }
-        Ok(None) => {}
+        Ok(Outcome::Kept) => {
+            timings.kept += 1;
+            gallery.keep(key);
+        }
+        Ok(Outcome::Unchanged) => timings.unchanged += 1,
+        Ok(Outcome::Nothing) => {}
         Err(Trouble::NeedKeyframe) => gallery.want_keyframe(key),
         Err(Trouble::NoHelper) => gallery.set_no_video(true),
         Err(error) => {
@@ -443,8 +548,19 @@ fn run(jobs: &Jobs, gallery: &Gallery) {
                 contiguous,
             } => {
                 if let Some(decoder) = decoders.get_mut(&key) {
-                    decode_one(&key, decoder, &unit, contiguous, gallery, &mut timings);
+                    decode_one(
+                        &key,
+                        decoder,
+                        Some((&unit, contiguous)),
+                        gallery,
+                        &mut timings,
+                    );
                     timings.log(Instant::now(), decoders.len());
+                }
+            }
+            Job::Fetch(key) => {
+                if let Some(decoder) = decoders.get_mut(&key) {
+                    decode_one(&key, decoder, None, gallery, &mut timings);
                 }
             }
         }
@@ -539,10 +655,33 @@ mod tests {
         assert_ne!(Gallery::new(|| {}), gallery);
     }
 
+    /// Waits up to 20 s for `gallery` to have had `n` pictures put.
+    fn wait_for(gallery: &Gallery, n: usize) {
+        let until = Instant::now() + Duration::from_secs(20);
+        while gallery.pictures() < n && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// What the helper (its own code on a thread) makes of `frames` at
+    /// `fit`, the last picture as egui's pixels.
+    fn reference(frames: &[Vec<u8>], fit: (usize, usize)) -> egui::ColorImage {
+        let mut decoder = H264::new(Lane::Cameras);
+        decoder.set_fit(fit.0, fit.1);
+        let mut last = None;
+        for frame in frames {
+            if let Ok(Outcome::Picture(picture)) = decoder.decode(frame, true) {
+                last = Some(picture);
+            }
+        }
+        decode::to_image(&last.expect("pictures").yuv).expect("converts")
+    }
+
     /// Two cameras on the one thread, each with its own decoder: one
     /// joined mid-stream waits for its keyframe without holding the other
-    /// up; pictures come at the tile's size; a stopped camera's frames go
-    /// nowhere.
+    /// up; pictures come at the tile's size; a picture the window has not
+    /// taken holds the next ones back in the helper until it does, and
+    /// then only the newest comes; a stopped camera's frames go nowhere.
     #[test]
     fn one_thread_decodes_each_camera_on_its_own() {
         let frames =
@@ -557,18 +696,52 @@ mod tests {
             // Bob joined late: P frames, then his keyframe at 44.
             decoding.push("bob", frames[40 + n].clone(), true);
         }
-        let until = Instant::now() + Duration::from_secs(20);
-        // Ana's six and Bob's 44 and 45.
-        while gallery.pictures() < 8 && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(gallery.pictures(), 8);
+        // Ana's first and Bob's 44: the window has taken neither, so the
+        // frames after them are decoded but kept back.
+        wait_for(&gallery, 2);
+        // The rest of the frames reach the thread.
+        decoding.push("ana", frames[6].clone(), true);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            gallery.pictures(),
+            2,
+            "nothing sent the window would not see"
+        );
         assert!(gallery.take_keyframe_wish("bob"), "Bob asked for one");
         let taken = gallery.take();
         assert_eq!(taken.len(), 2);
         let ana = &taken["ana"];
         assert_eq!(ana.source, [480, 480]);
         assert_eq!(ana.image.size, [160, 160], "a third: still covers 160x120");
+        assert_eq!(*ana.image, reference(&frames[..1], (160, 120)));
+        // Taken: each camera's newest kept picture comes, no other.
+        wait_for(&gallery, 4);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(gallery.pictures(), 4);
+        let taken = gallery.take();
+        assert_eq!(*taken["ana"].image, reference(&frames[..7], (160, 120)));
+        assert_eq!(
+            *taken["bob"].image,
+            reference(&frames[44..46], (160, 120)),
+            "Bob's 45"
+        );
+        // Nothing kept now: taking brings nothing more.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(gallery.pictures(), 4);
+        // While the window cannot be seen, nothing is sent; when it can
+        // again, the newest comes.
+        gallery.set_visible(false);
+        for frame in &frames[7..10] {
+            decoding.push("ana", frame.clone(), true);
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(gallery.pictures(), 4, "hidden: nothing sent");
+        gallery.set_visible(true);
+        wait_for(&gallery, 5);
+        assert_eq!(
+            *gallery.take()["ana"].image,
+            reference(&frames[..10], (160, 120))
+        );
         decoding.stop("ana");
         decoding.push("ana", frames[0].clone(), true);
         std::thread::sleep(Duration::from_millis(100));
@@ -605,6 +778,8 @@ mod tests {
                 while gallery.pictures() < (n + 1) * cameras && Instant::now() < until {
                     std::thread::yield_now();
                 }
+                // As the window does: the next pictures are then sent.
+                gallery.take();
             }
             let took = started.elapsed().as_secs_f64() * 1000.0;
             let pictures = gallery.pictures();

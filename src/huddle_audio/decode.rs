@@ -21,7 +21,7 @@ use egui::{Color32, ColorImage};
 use super::bitstream;
 use super::helper::{self, Helper, HelperTrouble, Lane, RemoteDecoder};
 
-pub use super::helper::Picture;
+pub use super::helper::{Outcome, Picture};
 
 /// Why a frame gave no picture.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -198,9 +198,11 @@ impl H264 {
         Ok(())
     }
 
-    /// Decodes one frame: a picture, or none for a frame that carries
-    /// only parameter sets.
-    pub fn decode(&mut self, unit: &[u8]) -> Result<Option<Picture>, Trouble> {
+    /// Decodes one frame: its picture if `show`, else the helper keeps
+    /// it back for [`Self::fetch`] ([`Outcome::Kept`]); or none for a
+    /// frame that carries only parameter sets. Every frame must be given,
+    /// shown or not: the ones after it refer to it.
+    pub fn decode(&mut self, unit: &[u8], show: bool) -> Result<Outcome, Trouble> {
         let keyframe = is_keyframe(unit);
         if self.waiting {
             if !keyframe {
@@ -215,29 +217,52 @@ impl H264 {
         }
         let decoded = match self.tell_fit() {
             Ok(()) => match &mut self.decoder {
-                Some(decoder) => decoder.decode(unit, keyframe),
+                Some(decoder) => decoder.decode(unit, keyframe, show),
                 None => Err(HelperTrouble::Lost("no decoder".into())),
             },
             Err(trouble) => Err(trouble),
         };
+        self.checked(decoded)
+    }
+
+    /// The picture the helper kept back from the last frame, at the size
+    /// shown now, if no frame since replaced it: the window can take one
+    /// again. Nothing while the stream waits for a keyframe.
+    pub fn fetch(&mut self) -> Result<Outcome, Trouble> {
+        if self.waiting || self.decoder.is_none() {
+            return Ok(Outcome::Nothing);
+        }
+        let fetched = match self.tell_fit() {
+            Ok(()) => match &mut self.decoder {
+                Some(decoder) => decoder.fetch(),
+                None => Ok(Outcome::Nothing),
+            },
+            Err(trouble) => Err(trouble),
+        };
+        self.checked(fetched)
+    }
+
+    /// What the helper answered, checked, and what it means for the
+    /// stream.
+    fn checked(&mut self, decoded: Result<Outcome, HelperTrouble>) -> Result<Outcome, Trouble> {
         match decoded {
-            Ok(Some(picture)) if picture.yuv.whole() => {
+            Ok(Outcome::Picture(picture)) if picture.yuv.whole() => {
                 if !picture.gpu && !self.software_only && self.gpu.unwrap_or_else(helper::gpu) {
                     // The helper moved it to software: not the GPU again
                     // at the next start either.
                     log::info!("video: the GPU cannot decode this stream; software in the helper");
                     self.software_only = true;
                 }
-                Ok(Some(picture))
+                Ok(Outcome::Picture(picture))
             }
-            Ok(Some(picture)) => {
+            Ok(Outcome::Picture(picture)) => {
                 self.waiting = true;
                 Err(Trouble::Broken(format!(
                     "planes do not match {}x{}",
                     picture.yuv.width, picture.yuv.height
                 )))
             }
-            Ok(None) => Ok(None),
+            Ok(other) => Ok(other),
             Err(HelperTrouble::NeedKeyframe) => {
                 self.waiting = true;
                 Err(Trouble::NeedKeyframe)
@@ -319,6 +344,11 @@ mod tests {
     use std::time::Duration;
 
     const SCREEN: &[u8] = include_bytes!("fixtures/screen-1920x1080.h264");
+
+    /// One frame through `decoder`, its picture asked for.
+    fn shown(decoder: &mut H264, unit: &[u8]) -> Result<Option<Picture>, Trouble> {
+        decoder.decode(unit, true).map(Outcome::picture)
+    }
     const CAMERA: &[u8] = include_bytes!("fixtures/camera-480x480.h264");
 
     /// Decodes every frame through the helper (its own code, on a
@@ -330,7 +360,9 @@ mod tests {
         let mut count = 0;
         let mut size = (0, 0);
         for frame in bitstream::access_units(stream) {
-            let picture = decoder.decode(&frame).expect("decodes").expect("a picture");
+            let picture = shown(&mut decoder, &frame)
+                .expect("decodes")
+                .expect("a picture");
             assert_eq!(picture.source, [picture.yuv.width, picture.yuv.height]);
             assert!(!picture.gpu);
             let yuv = picture.yuv;
@@ -367,21 +399,87 @@ mod tests {
         );
     }
 
+    /// A frame decoded without its picture keeps it in the helper (its
+    /// own code, on a thread): fetched, it is the picture showing the
+    /// frame would have given; it is fetched once, and gone after the
+    /// next frame.
+    #[test]
+    fn pictures_kept_back_are_fetched_as_they_would_have_been_shown() {
+        let frames = bitstream::access_units(CAMERA);
+        let mut every = H264::new(Lane::Cameras);
+        let mut kept = H264::new(Lane::Cameras);
+        every.set_fit(240, 180);
+        kept.set_fit(240, 180);
+        assert_eq!(kept.fetch(), Ok(Outcome::Nothing), "nothing to fetch yet");
+        for (n, frame) in frames.iter().take(12).enumerate() {
+            let expected = shown(&mut every, frame)
+                .expect("decodes")
+                .expect("a picture");
+            assert_eq!(kept.decode(frame, false), Ok(Outcome::Kept));
+            if n % 3 == 0 {
+                let fetched = kept.fetch().expect("fetches").picture();
+                assert_eq!(fetched, Some(expected), "frame {n}");
+                assert_eq!(kept.fetch(), Ok(Outcome::Nothing), "once only");
+            }
+        }
+        // Lost: nothing is fetched until the stream starts again.
+        kept.lost();
+        assert_eq!(kept.fetch(), Ok(Outcome::Nothing));
+    }
+
+    /// The helper's answers for a picture kept back or unchanged reach
+    /// the stream as they are, and change nothing about it.
+    #[test]
+    fn kept_and_unchanged_pictures_leave_the_stream_as_it_was() {
+        let pretend = Pretend::new(|request| match request {
+            Request::Hello { .. } => Act::Reply(welcome()),
+            Request::OpenDecoder { .. } => Act::Reply(Reply::Opened { id: 1 }),
+            Request::Decode { show: false, .. } => Act::Reply(Reply::Kept),
+            Request::Decode { .. } => Act::Reply(Reply::Unchanged),
+            Request::Fetch { .. } => Act::Reply(picture(32, 32, 9)),
+            _ => Act::Reply(Reply::Done),
+        });
+        let helper = Helper::with_timeouts(
+            Arc::new(pretend),
+            Duration::from_secs(5),
+            Duration::from_millis(500),
+        );
+        let frames = bitstream::access_units(CAMERA);
+        let mut decoder = H264::with_helper(Some(helper), Some(true));
+        assert_eq!(decoder.decode(&frames[0], false), Ok(Outcome::Kept));
+        assert_eq!(decoder.decode(&frames[1], true), Ok(Outcome::Unchanged));
+        assert!(!decoder.waiting());
+        let fetched = decoder.fetch().expect("fetches").picture();
+        assert_eq!(fetched.map(|p| p.yuv.y[0]), Some(9));
+    }
+
     #[test]
     fn nothing_decodes_before_a_keyframe_or_after_a_loss_until_the_next() {
         let frames = bitstream::access_units(CAMERA);
         let mut decoder = H264::new(Lane::Cameras);
         // Joined mid-stream: a P frame first.
-        assert_eq!(decoder.decode(&frames[3]), Err(Trouble::NeedKeyframe));
-        assert!(decoder.decode(&frames[0]).expect("a keyframe").is_some());
-        assert!(decoder.decode(&frames[1]).expect("next").is_some());
+        assert_eq!(shown(&mut decoder, &frames[3]), Err(Trouble::NeedKeyframe));
+        assert!(
+            shown(&mut decoder, &frames[0])
+                .expect("a keyframe")
+                .is_some()
+        );
+        assert!(shown(&mut decoder, &frames[1]).expect("next").is_some());
         // A loss: frames 2… are gone.
         decoder.lost();
-        assert_eq!(decoder.decode(&frames[5]), Err(Trouble::NeedKeyframe));
+        assert_eq!(shown(&mut decoder, &frames[5]), Err(Trouble::NeedKeyframe));
         // The second keyframe is frame 44 (a GOP of 44).
         assert!(is_keyframe(&frames[44]) && !is_keyframe(&frames[43]));
-        assert!(decoder.decode(&frames[44]).expect("recovers").is_some());
-        assert!(decoder.decode(&frames[45]).expect("and goes on").is_some());
+        assert!(
+            shown(&mut decoder, &frames[44])
+                .expect("recovers")
+                .is_some()
+        );
+        assert!(
+            shown(&mut decoder, &frames[45])
+                .expect("and goes on")
+                .is_some()
+        );
     }
 
     /// Broken frames are errors in the app, never a panic, and the next
@@ -390,7 +488,7 @@ mod tests {
     fn broken_frames_are_errors_and_the_next_keyframe_recovers() {
         let frames = bitstream::access_units(CAMERA);
         let mut decoder = H264::new(Lane::Cameras);
-        assert!(decoder.decode(&frames[0]).expect("decodes").is_some());
+        assert!(shown(&mut decoder, &frames[0]).expect("decodes").is_some());
         let mut noticed = false;
         for n in 1..40 {
             let mut broken = frames[n].clone();
@@ -398,22 +496,29 @@ mod tests {
             for byte in &mut broken[8..end] {
                 *byte ^= 0x5a;
             }
-            if let Err(Trouble::Broken(_)) = decoder.decode(&broken) {
+            if let Err(Trouble::Broken(_)) = shown(&mut decoder, &broken) {
                 noticed = true;
-                assert_eq!(decoder.decode(&frames[n + 1]), Err(Trouble::NeedKeyframe));
+                assert_eq!(
+                    shown(&mut decoder, &frames[n + 1]),
+                    Err(Trouble::NeedKeyframe)
+                );
                 break;
             }
         }
         assert!(noticed, "some of it must have been noticed");
-        assert!(decoder.decode(&frames[44]).expect("recovers").is_some());
+        assert!(
+            shown(&mut decoder, &frames[44])
+                .expect("recovers")
+                .is_some()
+        );
         // Garbage of every length, and nothing at all.
         for n in [0, 1, 4, 5, 100] {
             let mut junk = vec![0u8, 0, 0, 1, 0x65];
             junk.extend((0..n).map(|i| u8::try_from(i * 37 % 256).unwrap_or(0)));
-            let _ = decoder.decode(&junk);
-            let _ = decoder.decode(&junk[..n.min(junk.len())]);
+            let _ = shown(&mut decoder, &junk);
+            let _ = shown(&mut decoder, &junk[..n.min(junk.len())]);
         }
-        assert!(decoder.decode(&frames[0]).expect("recovers").is_some());
+        assert!(shown(&mut decoder, &frames[0]).expect("recovers").is_some());
     }
 
     /// A pretend helper: its decodes give grey pictures at the size
@@ -481,26 +586,24 @@ mod tests {
         // The helper's third decode crashes it.
         let (helper, launches, opens) = pretend_helper(|n| (n == 2).then_some(Act::Crash));
         let mut decoder = H264::with_helper(Some(helper), Some(true));
-        let first = decoder
-            .decode(&frames[0])
+        let first = shown(&mut decoder, &frames[0])
             .expect("decodes")
             .expect("a picture");
         assert!(first.gpu);
         assert_eq!(first.yuv.y[0], 200, "the helper's picture");
-        assert!(decoder.decode(&frames[1]).expect("decodes").is_some());
+        assert!(shown(&mut decoder, &frames[1]).expect("decodes").is_some());
         // Lost mid-stream: a keyframe is asked for (a PLI goes out).
-        assert_eq!(decoder.decode(&frames[2]), Err(Trouble::NeedKeyframe));
-        assert_eq!(decoder.decode(&frames[3]), Err(Trouble::NeedKeyframe));
+        assert_eq!(shown(&mut decoder, &frames[2]), Err(Trouble::NeedKeyframe));
+        assert_eq!(shown(&mut decoder, &frames[3]), Err(Trouble::NeedKeyframe));
         assert!(!decoder.no_helper(), "it starts again");
         // The keyframe: a new helper, asked for software this time.
-        let picture = decoder
-            .decode(&frames[44])
+        let picture = shown(&mut decoder, &frames[44])
             .expect("decodes")
             .expect("a picture");
         assert!(!picture.gpu);
         assert_eq!(launches.load(Ordering::Relaxed), 2);
         assert_eq!(opened(&opens), [true, false]);
-        assert!(decoder.decode(&frames[45]).expect("goes on").is_some());
+        assert!(shown(&mut decoder, &frames[45]).expect("goes on").is_some());
     }
 
     /// The helper is told the size the pictures are shown at, once and
@@ -512,21 +615,18 @@ mod tests {
         let frames = bitstream::access_units(CAMERA);
         let mut decoder = H264::with_helper(Some(helper), Some(true));
         decoder.set_fit(240, 180);
-        let picture = decoder
-            .decode(&frames[0])
+        let picture = shown(&mut decoder, &frames[0])
             .expect("decodes")
             .expect("a picture");
         assert_eq!((picture.yuv.width, picture.yuv.height), (240, 240));
         assert_eq!(picture.source, [480, 480]);
         decoder.set_fit(160, 120);
-        let picture = decoder
-            .decode(&frames[1])
+        let picture = shown(&mut decoder, &frames[1])
             .expect("decodes")
             .expect("a picture");
         assert_eq!((picture.yuv.width, picture.yuv.height), (160, 160));
         decoder.set_fit(0, 0);
-        let picture = decoder
-            .decode(&frames[2])
+        let picture = shown(&mut decoder, &frames[2])
             .expect("decodes")
             .expect("a picture");
         assert_eq!(
@@ -559,15 +659,17 @@ mod tests {
             })
         });
         let mut decoder = H264::with_helper(Some(helper.clone()), Some(true));
-        let picture = decoder.decode(&frames[0]).expect("decodes").expect("one");
+        let picture = shown(&mut decoder, &frames[0])
+            .expect("decodes")
+            .expect("one");
         assert!(!picture.gpu);
         decoder.lost();
-        assert!(decoder.decode(&frames[44]).expect("decodes").is_some());
+        assert!(shown(&mut decoder, &frames[44]).expect("decodes").is_some());
         assert_eq!(opened(&opens), [true, false], "not the GPU again");
         assert_eq!(launches.load(Ordering::Relaxed), 1);
         assert_eq!(software.load(Ordering::Relaxed), 1);
         let mut off = H264::with_helper(Some(helper), Some(false));
-        assert!(off.decode(&frames[0]).expect("decodes").is_some());
+        assert!(shown(&mut off, &frames[0]).expect("decodes").is_some());
         assert_eq!(opened(&opens), [true, false, false]);
     }
 
@@ -586,11 +688,11 @@ mod tests {
         let frames = bitstream::access_units(CAMERA);
         let mut decoder = H264::with_helper(Some(helper), None);
         assert!(matches!(
-            decoder.decode(&frames[0]),
+            shown(&mut decoder, &frames[0]),
             Err(Trouble::Broken(_))
         ));
         assert!(decoder.waiting());
-        assert_eq!(decoder.decode(&frames[0]), Err(Trouble::NeedKeyframe));
+        assert_eq!(shown(&mut decoder, &frames[0]), Err(Trouble::NeedKeyframe));
         assert_eq!(
             launches.load(Ordering::Relaxed),
             1,
@@ -603,14 +705,14 @@ mod tests {
         let frames = bitstream::access_units(CAMERA);
         let mut decoder = H264::with_helper(None, None);
         assert!(decoder.no_helper(), "said at once");
-        assert_eq!(decoder.decode(&frames[3]), Err(Trouble::NeedKeyframe));
-        assert_eq!(decoder.decode(&frames[0]), Err(Trouble::NoHelper));
+        assert_eq!(shown(&mut decoder, &frames[3]), Err(Trouble::NeedKeyframe));
+        assert_eq!(shown(&mut decoder, &frames[0]), Err(Trouble::NoHelper));
         // One that crashes on every frame is given up after its restarts.
         let (helper, launches, _) = pretend_helper(|_| Some(Act::Crash));
         let mut decoder = H264::with_helper(Some(helper), None);
         let mut troubles = Vec::new();
         for _ in 0..=helper::MAX_RESTARTS {
-            troubles.push(decoder.decode(&frames[0]));
+            troubles.push(shown(&mut decoder, &frames[0]));
         }
         assert!(
             troubles[..troubles.len() - 1]
@@ -620,7 +722,7 @@ mod tests {
         );
         assert_eq!(troubles.last(), Some(&Err(Trouble::NoHelper)));
         assert!(decoder.no_helper());
-        assert_eq!(decoder.decode(&frames[0]), Err(Trouble::NoHelper));
+        assert_eq!(shown(&mut decoder, &frames[0]), Err(Trouble::NoHelper));
         assert_eq!(launches.load(Ordering::Relaxed), helper::MAX_RESTARTS + 1);
     }
 

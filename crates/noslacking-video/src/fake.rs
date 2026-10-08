@@ -45,6 +45,7 @@ impl Backend for Fake {
             fit: (0, 0),
             started: false,
             frames: 0,
+            unread: false,
         }))
     }
 }
@@ -55,10 +56,13 @@ struct FakeDecoder {
     fit: (u32, u32),
     started: bool,
     frames: u8,
+    /// A picture was decoded and not yet taken.
+    unread: bool,
 }
 
 impl Decoder for FakeDecoder {
-    fn decode(&mut self, frame: &[u8], keyframe: bool) -> Result<Option<Decoded>, Failure> {
+    fn decode_frame(&mut self, frame: &[u8], keyframe: bool) -> Result<bool, Failure> {
+        self.unread = false;
         if !frame.starts_with(&[0, 0, 1]) && !frame.starts_with(&[0, 0, 0, 1]) {
             self.started = false;
             return Err(Failure::broken("no start code"));
@@ -69,7 +73,18 @@ impl Decoder for FakeDecoder {
         if !self.started {
             return Err(Failure::need_keyframe("no keyframe yet"));
         }
-        self.frames = self.frames.wrapping_add(1);
+        // A frame of 0x41 0xff… stands for a picture that did not change.
+        if !frame.ends_with(&[0x41, 0xff]) {
+            self.frames = self.frames.wrapping_add(1);
+        }
+        self.unread = true;
+        Ok(true)
+    }
+
+    fn picture(&mut self) -> Result<Option<Decoded>, Failure> {
+        if !std::mem::take(&mut self.unread) {
+            return Ok(None);
+        }
         let (width, height) = output_size((self.width, self.height), self.fit);
         let (cw, ch) = chroma_size(width, height);
         let size = |w: u32, h: u32| usize::try_from(w * h).unwrap_or(0);

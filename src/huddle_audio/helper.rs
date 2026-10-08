@@ -743,6 +743,34 @@ pub struct Picture {
     pub gpu: bool,
 }
 
+/// What a frame, or a fetch, gave.
+#[cfg(feature = "huddle-video")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// A new picture.
+    Picture(Picture),
+    /// Its picture is the one the helper sent last: the window shows
+    /// what it has.
+    Unchanged,
+    /// Decoded, its picture kept back in the helper for a fetch
+    /// ([`RemoteDecoder::fetch`]), as asked.
+    Kept,
+    /// No picture: a frame of parameter sets only, or nothing kept back
+    /// to fetch.
+    Nothing,
+}
+
+#[cfg(feature = "huddle-video")]
+impl Outcome {
+    /// The new picture, if it is one.
+    pub fn picture(self) -> Option<Picture> {
+        match self {
+            Self::Picture(picture) => Some(picture),
+            _ => None,
+        }
+    }
+}
+
 /// One stream's decoder in the helper. Closed when dropped.
 #[derive(Debug)]
 pub struct RemoteDecoder {
@@ -752,18 +780,36 @@ pub struct RemoteDecoder {
 }
 
 impl RemoteDecoder {
-    /// Decodes one frame (an access unit, Annex B).
+    /// Decodes one frame (an access unit, Annex B). Its picture comes
+    /// back if `show`; otherwise the helper keeps it back (it is not
+    /// shrunk, read back from the GPU or sent) for a [`Self::fetch`]
+    /// until the next frame.
     #[cfg(feature = "huddle-video")]
     pub fn decode(
         &mut self,
         unit: &[u8],
         keyframe: bool,
-    ) -> Result<Option<Picture>, HelperTrouble> {
+        show: bool,
+    ) -> Result<Outcome, HelperTrouble> {
         let request = Request::Decode {
             id: self.id,
             keyframe,
+            show,
             data: unit.to_vec(),
         };
+        self.answer(request)
+    }
+
+    /// The picture the helper kept back from the last frame, if it has
+    /// not been sent since: the window can take a picture again.
+    #[cfg(feature = "huddle-video")]
+    pub fn fetch(&mut self) -> Result<Outcome, HelperTrouble> {
+        self.answer(Request::Fetch { id: self.id })
+    }
+
+    /// Sends `request` (a decode or a fetch) and reads its answer.
+    #[cfg(feature = "huddle-video")]
+    fn answer(&mut self, request: Request) -> Result<Outcome, HelperTrouble> {
         match self.helper.call(self.generation, request) {
             Ok(Reply::Picture(decoded)) => {
                 // Checked as it was read: the planes against their size,
@@ -771,7 +817,7 @@ impl RemoteDecoder {
                 // than any picture may be.
                 let size = |n: u32| usize::try_from(n).unwrap_or(0);
                 let planes = decoded.planes;
-                Ok(Some(Picture {
+                Ok(Outcome::Picture(Picture {
                     yuv: Yuv {
                         width: size(planes.width),
                         height: size(planes.height),
@@ -783,7 +829,9 @@ impl RemoteDecoder {
                     gpu: decoded.hardware,
                 }))
             }
-            Ok(Reply::NoPicture) => Ok(None),
+            Ok(Reply::NoPicture) => Ok(Outcome::Nothing),
+            Ok(Reply::Kept) => Ok(Outcome::Kept),
+            Ok(Reply::Unchanged) => Ok(Outcome::Unchanged),
             Ok(Reply::Failed { kind, detail }) => Err(match kind {
                 FailKind::NeedKeyframe => HelperTrouble::NeedKeyframe,
                 FailKind::Broken => HelperTrouble::Broken(detail),
@@ -1046,8 +1094,9 @@ mod tests {
             .open_decoder(Codec::H264, 64, 48, true)
             .expect("opens");
         let picture = decoder
-            .decode(KEYFRAME, true)
+            .decode(KEYFRAME, true, true)
             .expect("decodes")
+            .picture()
             .expect("a picture");
         assert_eq!(
             (picture.yuv.width, picture.yuv.height, picture.yuv.y[0]),
@@ -1077,13 +1126,13 @@ mod tests {
                 .open_decoder(Codec::H264, 64, 48, true)
                 .expect("opens");
             assert!(matches!(
-                decoder.decode(KEYFRAME, true),
+                decoder.decode(KEYFRAME, true, true),
                 Err(HelperTrouble::Lost(_))
             ));
             assert_eq!(launches.load(Ordering::Relaxed), round);
             // The old decoder is gone with its helper.
             assert!(matches!(
-                decoder.decode(KEYFRAME, true),
+                decoder.decode(KEYFRAME, true, true),
                 Err(HelperTrouble::Lost(_))
             ));
         }
@@ -1110,7 +1159,7 @@ mod tests {
             .expect("opens");
         let started = std::time::Instant::now();
         assert!(matches!(
-            decoder.decode(KEYFRAME, true),
+            decoder.decode(KEYFRAME, true, true),
             Err(HelperTrouble::Lost(_))
         ));
         assert!(
@@ -1122,7 +1171,7 @@ mod tests {
         let mut decoder = helper
             .open_decoder(Codec::H264, 64, 48, true)
             .expect("opens again");
-        assert!(decoder.decode(KEYFRAME, true).is_ok());
+        assert!(decoder.decode(KEYFRAME, true, true).is_ok());
         assert_eq!(launches.load(Ordering::Relaxed), 2);
     }
 
@@ -1153,7 +1202,7 @@ mod tests {
         let (lying, _) = helper(pretend);
         let mut decoder = lying.open_decoder(Codec::H264, 4, 4, true).expect("opens");
         assert!(matches!(
-            decoder.decode(KEYFRAME, true),
+            decoder.decode(KEYFRAME, true, true),
             Err(HelperTrouble::Lost(_))
         ));
         // A well-formed picture larger than the stream it says it came
@@ -1175,7 +1224,7 @@ mod tests {
             .open_decoder(Codec::H264, 64, 48, true)
             .expect("opens");
         assert!(matches!(
-            decoder.decode(KEYFRAME, true),
+            decoder.decode(KEYFRAME, true, true),
             Err(HelperTrouble::Lost(_))
         ));
     }
@@ -1226,11 +1275,11 @@ mod tests {
             .open_decoder(Codec::H264, 64, 48, true)
             .expect("opens");
         assert_eq!(
-            decoder.decode(&[0, 0, 1, 0x41], false),
+            decoder.decode(&[0, 0, 1, 0x41], false, true),
             Err(HelperTrouble::NeedKeyframe)
         );
         assert!(matches!(
-            decoder.decode(&[0, 0, 1, 0x65, 0], true),
+            decoder.decode(&[0, 0, 1, 0x65, 0], true, true),
             Err(HelperTrouble::Broken(_))
         ));
         // Neither was the helper's fault: it is still the first.
@@ -1256,8 +1305,9 @@ mod tests {
             .expect("opens");
         decoder.set_output_size(240, 180).expect("told");
         let picture = decoder
-            .decode(&frames[0], true)
+            .decode(&frames[0], true, true)
             .expect("decodes")
+            .picture()
             .expect("a picture");
         assert_eq!(picture.source, [480, 480]);
         assert_eq!((picture.yuv.width, picture.yuv.height), (240, 240));

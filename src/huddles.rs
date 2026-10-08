@@ -214,6 +214,10 @@ pub struct CallPicture {
     /// The demo's call window size (`--demo-size`), to see it narrow.
     #[cfg(feature = "demo")]
     pub size: Option<[f32; 2]>,
+    /// Pixels handed to the textures in the last frame, for the demo's
+    /// frame times (`NOSLACKING_DEMO_FRAME_TIMES`).
+    #[cfg(feature = "demo")]
+    pub uploaded: usize,
 }
 
 #[cfg(feature = "huddle-video")]

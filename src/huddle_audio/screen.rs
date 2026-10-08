@@ -5,11 +5,14 @@
 //! watched share to a [`Decoding`], whose own thread has it decoded by
 //! the video helper (its own process, `helper::Lane::Share`) at the size
 //! the call window shows and turns it into egui's pixels. The newest
-//! picture waits in the [`Screen`] for the window to take; an older one
-//! still waiting is dropped, never queued, and the window is woken only
-//! when it has taken the last one, so at most once a frame. Neither the
-//! runtime nor the interface ever decodes. Without a helper the screen
-//! says there is no video ([`Screen::no_video`]).
+//! picture waits in the [`Screen`] for the window to take, and the
+//! window is woken only when it has taken the last one, so at most once a
+//! frame. Pictures nobody will see are not sent: while the window has not
+//! taken the last picture, or cannot be seen (minimised, covered), every
+//! frame is still decoded but the helper keeps its picture back, and only
+//! the newest is fetched once the window can take it (never a queue).
+//! Neither the runtime nor the interface ever decodes. Without a helper
+//! the screen says there is no video ([`Screen::no_video`]).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -18,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use egui::ColorImage;
 
-use super::decode::{self, H264, Trouble};
+use super::decode::{self, H264, Outcome, Trouble};
 use super::helper::Lane;
 
 /// Frames waiting for the decoder at most: about three seconds of a
@@ -47,6 +50,13 @@ pub struct Screen {
 
 struct Shared {
     newest: Mutex<Option<Picture>>,
+    /// Whether the window showing the share can be seen.
+    visible: AtomicBool,
+    /// The helper kept back a newer picture than the window has: fetched
+    /// once the window can take it.
+    kept: AtomicBool,
+    /// Has the decoder thread fetch the kept picture.
+    fetch: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// The window's size for the share in pixels, width in the high half.
     fit: AtomicU64,
     /// The decoder wants a keyframe: set by it, taken by the session.
@@ -82,6 +92,9 @@ impl Screen {
         Self {
             shared: Arc::new(Shared {
                 newest: Mutex::new(None),
+                visible: AtomicBool::new(true),
+                kept: AtomicBool::new(false),
+                fetch: Mutex::new(None),
                 fit: AtomicU64::new(0),
                 keyframe: AtomicBool::new(false),
                 no_video: AtomicBool::new(false),
@@ -108,14 +121,74 @@ impl Screen {
         }
     }
 
-    /// The newest picture, if one came since the last taken.
+    /// The newest picture, if one came since the last taken. The helper
+    /// is then asked for any picture it kept back meanwhile.
     pub fn take(&self) -> Option<Picture> {
-        self.newest().take()
+        let picture = self.newest().take();
+        if picture.is_some() {
+            self.fetch_kept();
+        }
+        picture
     }
 
-    /// Forgets a picture not taken: the share changed or stopped.
+    /// Forgets a picture not taken, and any kept back: the share changed
+    /// or stopped.
     pub fn clear(&self) {
         self.newest().take();
+        self.shared.kept.store(false, Ordering::Relaxed);
+    }
+
+    /// Whether the next frame's picture should be sent: the window can be
+    /// seen and has taken the last one. Otherwise the helper keeps it
+    /// back ([`Self::keep`]).
+    pub fn wants_picture(&self) -> bool {
+        self.visible() && self.newest().is_none()
+    }
+
+    /// The helper kept a picture back: it is fetched as soon as the
+    /// window can take it, which may be now.
+    pub fn keep(&self) {
+        self.shared.kept.store(true, Ordering::Relaxed);
+        // The window may have taken the last picture since it was asked.
+        self.fetch_kept();
+    }
+
+    /// Asks the decoder thread for the kept picture if the window can take
+    /// one; only one asker wins it.
+    fn fetch_kept(&self) {
+        if self.wants_picture() && self.shared.kept.swap(false, Ordering::Relaxed) {
+            let fetch = self
+                .shared
+                .fetch
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(fetch) = fetch.as_ref() {
+                fetch();
+            }
+        }
+    }
+
+    /// What has the decoder thread fetch a kept picture.
+    fn on_fetch(&self, fetch: impl Fn() + Send + Sync + 'static) {
+        *self
+            .shared
+            .fetch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(fetch));
+    }
+
+    /// Says whether the window showing the share can be seen; when it can
+    /// again, the newest picture kept meanwhile is fetched.
+    pub fn set_visible(&self, visible: bool) {
+        let was = self.shared.visible.swap(visible, Ordering::Relaxed);
+        if visible && !was {
+            self.fetch_kept();
+        }
+    }
+
+    /// Whether the window showing the share can be seen.
+    pub fn visible(&self) -> bool {
+        self.shared.visible.load(Ordering::Relaxed)
     }
 
     /// How many pictures have been put.
@@ -166,6 +239,8 @@ enum Job {
     Start,
     /// The next frame; `contiguous` false after frames were lost.
     Frame { unit: Vec<u8>, contiguous: bool },
+    /// The window can take the picture the helper kept back.
+    Fetch,
     /// Nothing is watched any more.
     Stop,
 }
@@ -199,6 +274,17 @@ impl Decoding {
     /// Starts the thread, idle until [`Self::start`].
     pub fn spawn(screen: Screen) -> std::io::Result<Self> {
         let jobs: Jobs = Arc::default();
+        let fetching = Arc::downgrade(&jobs);
+        screen.on_fetch(move || {
+            if let Some(jobs) = fetching.upgrade() {
+                let mut queue = jobs.0.lock().unwrap_or_else(PoisonError::into_inner);
+                if !queue.jobs.iter().any(|job| matches!(job, Job::Fetch)) {
+                    queue.jobs.push_back(Job::Fetch);
+                }
+                drop(queue);
+                jobs.1.notify_one();
+            }
+        });
         let (thread_jobs, thread_screen) = (jobs.clone(), screen.clone());
         std::thread::Builder::new()
             .name("huddle-video".into())
@@ -286,6 +372,10 @@ struct Timings {
     slowest: Duration,
     converting: Duration,
     errors: u32,
+    /// Frames whose picture the helper kept back, unseen.
+    kept: u32,
+    /// Pictures the same as the last.
+    unchanged: u32,
     size: [usize; 2],
     shown: [usize; 2],
     /// Whether the helper decoded the last picture on the GPU.
@@ -301,13 +391,13 @@ impl Timings {
         if now < since + REPORT_EVERY {
             return;
         }
-        if self.pictures > 0 || self.errors > 0 {
+        if self.pictures > 0 || self.errors > 0 || self.kept > 0 {
             let per =
                 |total: Duration| total.as_secs_f64() * 1000.0 / f64::from(self.pictures.max(1));
             log::info!(
                 "video: decoded {} pictures in {:.0} s ({}x{} shown at {}x{}) in the helper {}: \
-                 {:.1} ms a picture (slowest {:.1} ms), {:.1} ms converting; {} frames did not \
-                 decode",
+                 {:.1} ms a picture (slowest {:.1} ms), {:.1} ms converting; {} kept back unseen, \
+                 {} unchanged; {} frames did not decode",
                 self.pictures,
                 now.duration_since(since).as_secs_f64(),
                 self.size[0],
@@ -322,6 +412,8 @@ impl Timings {
                 per(self.decoding),
                 self.slowest.as_secs_f64() * 1000.0,
                 per(self.converting),
+                self.kept,
+                self.unchanged,
                 self.errors
             );
         }
@@ -330,6 +422,57 @@ impl Timings {
             ..Self::default()
         };
     }
+}
+
+/// What a frame or a fetch gave, into the screen: a picture as egui's
+/// pixels, a kept one noted, a keyframe asked for when one is needed.
+fn show(
+    screen: &Screen,
+    decoded: Result<decode::Outcome, Trouble>,
+    started: Instant,
+    timings: &mut Timings,
+) {
+    let took = started.elapsed();
+    match decoded {
+        Ok(Outcome::Picture(picture)) => {
+            screen.set_no_video(false);
+            timings.decoding += took;
+            timings.slowest = timings.slowest.max(took);
+            timings.gpu = picture.gpu;
+            let started = Instant::now();
+            let source = picture.source;
+            match decode::to_image(&picture.yuv) {
+                Ok(image) => {
+                    timings.pictures += 1;
+                    timings.size = source;
+                    timings.shown = image.size;
+                    timings.converting += started.elapsed();
+                    screen.put(Picture {
+                        image: Arc::new(image),
+                        source,
+                    });
+                }
+                Err(error) => {
+                    timings.errors += 1;
+                    log::debug!("video: {error}");
+                }
+            }
+        }
+        Ok(Outcome::Kept) => {
+            timings.kept += 1;
+            screen.keep();
+        }
+        Ok(Outcome::Unchanged) => timings.unchanged += 1,
+        Ok(Outcome::Nothing) => {}
+        Err(Trouble::NeedKeyframe) => screen.want_keyframe(),
+        Err(Trouble::NoHelper) => screen.set_no_video(true),
+        Err(error) => {
+            timings.errors += 1;
+            log::debug!("video: {error}");
+            screen.want_keyframe();
+        }
+    }
+    timings.log(Instant::now());
 }
 
 /// The decoder thread: decodes what comes, puts the newest picture.
@@ -359,43 +502,17 @@ fn run(jobs: &Jobs, screen: &Screen) {
                 }
                 let started = Instant::now();
                 decoder.set_fit(screen.fit().0, screen.fit().1);
-                let decoded = decoder.decode(&unit);
-                let took = started.elapsed();
-                match decoded {
-                    Ok(Some(picture)) => {
-                        screen.set_no_video(false);
-                        timings.decoding += took;
-                        timings.slowest = timings.slowest.max(took);
-                        timings.gpu = picture.gpu;
-                        let started = Instant::now();
-                        let source = picture.source;
-                        match decode::to_image(&picture.yuv) {
-                            Ok(image) => {
-                                timings.pictures += 1;
-                                timings.size = source;
-                                timings.shown = image.size;
-                                timings.converting += started.elapsed();
-                                screen.put(Picture {
-                                    image: Arc::new(image),
-                                    source,
-                                });
-                            }
-                            Err(error) => {
-                                timings.errors += 1;
-                                log::debug!("video: {error}");
-                            }
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(Trouble::NeedKeyframe) => screen.want_keyframe(),
-                    Err(Trouble::NoHelper) => screen.set_no_video(true),
-                    Err(error) => {
-                        timings.errors += 1;
-                        log::debug!("video: {error}");
-                        screen.want_keyframe();
-                    }
-                }
-                timings.log(Instant::now());
+                let decoded = decoder.decode(&unit, screen.wants_picture());
+                show(screen, decoded, started, &mut timings);
+            }
+            Job::Fetch => {
+                let Some(decoder) = &mut decoder else {
+                    continue;
+                };
+                let started = Instant::now();
+                decoder.set_fit(screen.fit().0, screen.fit().1);
+                let fetched = decoder.fetch();
+                show(screen, fetched, started, &mut timings);
             }
         }
     }
@@ -511,15 +628,46 @@ mod tests {
         for frame in &frames[40..50] {
             decoding.push(frame.clone(), true);
         }
-        let until = Instant::now() + Duration::from_secs(20);
-        while screen.pictures() < 6 && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(screen.pictures(), 6, "frames 44 to 49");
+        let wait_for = |n: usize| {
+            let until = Instant::now() + Duration::from_secs(20);
+            while screen.pictures() < n && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        wait_for(1);
+        // Frames 45 to 49 are decoded, but the window has not taken 44:
+        // their pictures stay in the helper.
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(screen.pictures(), 1, "frame 44 alone");
         assert!(screen.take_keyframe_wish(), "it asked for one");
-        let picture = screen.take().expect("the newest");
+        let picture = screen.take().expect("the first");
         assert_eq!(picture.source, [480, 480]);
         assert_eq!(picture.image.size, [240, 240], "halved: still covers 200");
+        // Taken: the newest kept back (49) comes, and only it.
+        wait_for(2);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(screen.pictures(), 2);
+        let mut reference = H264::new(Lane::Share);
+        reference.set_fit(200, 200);
+        let mut last = None;
+        for frame in &frames[44..50] {
+            if let Ok(Outcome::Picture(picture)) = reference.decode(frame, true) {
+                last = Some(picture);
+            }
+        }
+        let last = decode::to_image(&last.expect("pictures").yuv).expect("converts");
+        assert_eq!(*screen.take().expect("the newest").image, last);
+        // Hidden: decoded, nothing sent; seen again: the newest comes.
+        screen.set_visible(false);
+        for frame in &frames[50..53] {
+            decoding.push(frame.clone(), true);
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(screen.pictures(), 2, "hidden: nothing sent");
+        assert!(screen.take().is_none());
+        screen.set_visible(true);
+        wait_for(3);
+        assert_eq!(screen.take().expect("the newest").image.size, [240, 240]);
         decoding.stop();
         decoding.push(frames[44].clone(), true);
         std::thread::sleep(Duration::from_millis(100));

@@ -88,6 +88,10 @@ impl App {
         });
 
         let picture = &mut self.huddles.picture;
+        #[cfg(feature = "demo")]
+        {
+            picture.uploaded = 0;
+        }
         if picture.of != key {
             // Another share, or none: not the last one's picture.
             picture.texture = None;
@@ -95,6 +99,10 @@ impl App {
             picture.of.clone_from(&key);
         }
         if let Some(new) = screen.as_ref().and_then(huddles::Screen::take) {
+            #[cfg(feature = "demo")]
+            {
+                picture.uploaded += new.image.pixels.len();
+            }
             let options = egui::TextureOptions::LINEAR;
             match &mut picture.texture {
                 Some(texture) => texture.set(new.image, options),
@@ -115,6 +123,10 @@ impl App {
         {
             if !cameras.iter().any(|c| c.tile && c.key == camera) {
                 continue;
+            }
+            #[cfg(feature = "demo")]
+            {
+                picture.uploaded += new.image.pixels.len();
             }
             let options = egui::TextureOptions::LINEAR;
             match picture.tiles.get_mut(&camera) {
@@ -210,11 +222,16 @@ impl App {
                 return false;
             }
             let shown = call_window::show(ui, &palette, &view, &mut actions);
+            // Minimised or covered, as far as the system says: the helper
+            // then sends no pictures until it can be seen again.
+            let visible = ui.input(|i| i.viewport().visible()).unwrap_or(true);
             if let Some(screen) = &screen {
                 screen.set_fit(shown.share[0], shown.share[1]);
+                screen.set_visible(visible);
             }
             if let Some(gallery) = &gallery {
                 gallery.set_fit(shown.tile[0] as usize, shown.tile[1] as usize);
+                gallery.set_visible(visible);
             }
             room = Some((shown.room, shown.tile));
             true

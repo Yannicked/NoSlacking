@@ -198,6 +198,7 @@ fn through_the_helper(helper: &str, hardware: bool, gpu_scale: bool) {
                 let reply = call(Request::Decode {
                     id,
                     keyframe: nal::is_keyframe(frame),
+                    show: true,
                     data: frame.clone(),
                 });
                 let Reply::Picture(decoded) = reply else {
