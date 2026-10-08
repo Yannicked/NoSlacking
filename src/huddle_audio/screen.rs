@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use egui::ColorImage;
 
-use super::decode::{self, H264, Outcome, Trouble};
+use super::decode::{self, H264, Images, Outcome, Trouble};
 use super::helper::Lane;
 
 /// Frames waiting for the decoder at most: about three seconds of a
@@ -430,6 +430,7 @@ fn show(
     screen: &Screen,
     decoded: Result<decode::Outcome, Trouble>,
     started: Instant,
+    images: &mut Images,
     timings: &mut Timings,
 ) {
     let took = started.elapsed();
@@ -441,16 +442,13 @@ fn show(
             timings.gpu = picture.gpu;
             let started = Instant::now();
             let source = picture.source;
-            match decode::to_image(&picture.yuv) {
+            match images.convert(&picture.yuv) {
                 Ok(image) => {
                     timings.pictures += 1;
                     timings.size = source;
                     timings.shown = image.size;
                     timings.converting += started.elapsed();
-                    screen.put(Picture {
-                        image: Arc::new(image),
-                        source,
-                    });
+                    screen.put(Picture { image, source });
                 }
                 Err(error) => {
                     timings.errors += 1;
@@ -479,6 +477,8 @@ fn show(
 fn run(jobs: &Jobs, screen: &Screen) {
     let mut decoder: Option<H264> = None;
     let mut timings = Timings::default();
+    // Kept across streams: a new share is likely the same size.
+    let mut images = Images::default();
     while let Some(job) = next(jobs) {
         match job {
             Job::Start => {
@@ -503,7 +503,7 @@ fn run(jobs: &Jobs, screen: &Screen) {
                 let started = Instant::now();
                 decoder.set_fit(screen.fit().0, screen.fit().1);
                 let decoded = decoder.decode(&unit, screen.wants_picture());
-                show(screen, decoded, started, &mut timings);
+                show(screen, decoded, started, &mut images, &mut timings);
             }
             Job::Fetch => {
                 let Some(decoder) = &mut decoder else {
@@ -512,7 +512,7 @@ fn run(jobs: &Jobs, screen: &Screen) {
                 let started = Instant::now();
                 decoder.set_fit(screen.fit().0, screen.fit().1);
                 let fetched = decoder.fetch();
-                show(screen, fetched, started, &mut timings);
+                show(screen, fetched, started, &mut images, &mut timings);
             }
         }
     }

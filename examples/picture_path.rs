@@ -182,9 +182,19 @@ fn convert(pictures: &[Yuv]) {
         }
     }
     let fresh = per(started.elapsed(), count);
+    // Into images used again, as the decoder threads now do (egui lets go
+    // of each before the next comes here).
+    let mut images = decode::Images::default();
+    let started = Instant::now();
+    for _ in 0..rounds {
+        for picture in pictures {
+            std::hint::black_box(images.convert(picture).expect("converts"));
+        }
+    }
+    let reused = per(started.elapsed(), count);
     println!(
-        "    to RGBA: {whole:.2} ms a picture as the app does it ({fresh:.2} ms of it a fresh \
-         buffer)"
+        "    to RGBA: {whole:.2} ms a picture into a new image ({fresh:.2} ms of it the new \
+         buffer), {reused:.2} ms into one used again"
     );
 }
 
