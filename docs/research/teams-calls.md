@@ -1627,3 +1627,40 @@ started over with `syn`.
 We now write our three extra camera lines as its lines 5–9 are (we send
 nothing on them), list them as receiving in `mediaDescriptions`, and ask
 for one camera on each.
+
+### H.10 Sharing a screen in a meeting (recorded: `teams.live.com11.har` and its data channel log)
+
+No renegotiation is involved.
+- **The share line is open from the start.** The web client's answer has
+  the share line (`applicationsharing-video`, mid 3) `sendrecv`, with
+  SSRCs of its own (`a=ssrc-group:FID`), and lists it as `recvonly` in
+  `mediaDescriptions`. Offered `inactive`, as ours was, the meeting
+  rejected it, and a share renegotiated as in a 1:1 call went nowhere.
+- **Starting** is one `POST {updateMediaDescriptions}`:
+  ```json
+  {"UpdateMediaDescriptions": {"mediaDescriptions": {"descriptions": [
+     {"mid": "2", "direction": "recvonly"}, …,
+     {"mid": "3", "direction": "sendonly", "label": "applicationsharing-video"}],
+   "negotiationTag": "{participantId};ss_1", "requestId": 4}}}
+  ```
+  answered 200.
+- **Stopping** is the same with the share line back to `recvonly` and no
+  `negotiationTag`.
+- **While sharing**, the server pushes `call/controlVideoStreaming` about
+  once a second:
+  `{sequenceNumber, controlInfo: [{control: 0, sourceId: <our share's>,
+  fmtParams: "max-mbps=…;max-fps=1500;profile-level-id=42C02A;max-br=748;…;max-fs=8160"}]}`.
+  These are the limits for what we send. A 200 is the whole answer.
+- **On the data channel**, the client sent
+  `{"type":"ssbwe","BwMessage":[{"streamMsid":2293,"bw":200000}]}` once
+  its share went out. Another message kind appeared there too: header
+  `10 0f 81`, its body JSON without the array, `{"type":0,"message":"{\"action\":…,\"handshakeId\":…}"}`,
+  from another endpoint. It looks like a peer handshake; the client
+  answered with action 10 and terminatedReason 9.
+
+**A full roster.** The web client was let in from the lobby, and right
+after that the meeting pushed one roster with everyone in it, cameras
+included, on the join's roster callback. The roster in the join's own
+answer has only ourselves. When we joined directly (as the meeting's
+organizer, rejoining), no such full roster came, so cameras already on
+went unseen. What makes the meeting send it has not been recorded.

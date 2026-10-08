@@ -512,9 +512,10 @@ pub fn offer(local: &LocalMedia) -> String {
             video_line(&mut out, local, &line, setup_text(local.setup), false);
             continue;
         }
-        // The share line carries our screen while we share.
+        // The share line carries our screen while we share; a meeting's
+        // is open both ways all along.
         if label == SHARE_LABEL
-            && local.sharing
+            && (local.sharing || local.share_open)
             && let Some(ssrc) = local.share_ssrc
         {
             let line = VideoLine {
@@ -525,7 +526,11 @@ pub fn offer(local: &LocalMedia) -> String {
                     rtx: local.share_rtx,
                 },
                 ssrcs: (ssrc, local.share_rtx_ssrc),
-                direction: Direction::SendOnly,
+                direction: if local.share_open {
+                    Direction::SendRecv
+                } else {
+                    Direction::SendOnly
+                },
                 share: true,
             };
             video_line(&mut out, local, &line, setup_text(local.setup), false);
@@ -656,7 +661,7 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
     let share_direction = |theirs: Direction| match role {
         Role::Offer => Direction::SendOnly,
         Role::Answer => {
-            let ours = if local.sharing {
+            let ours = if local.sharing || local.share_open {
                 Direction::SendRecv
             } else {
                 Direction::RecvOnly
@@ -677,7 +682,7 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
                         Role::Offer => local.sharing,
                         // Theirs to share, or ours to.
                         Role::Answer => {
-                            open && (sends(line.direction) || local.sharing)
+                            open && (sends(line.direction) || local.sharing || local.share_open)
                                 && share_direction(line.direction) != Direction::Inactive
                         }
                     }
@@ -1184,6 +1189,7 @@ mod tests {
             share_pt: 108,
             share_rtx: Some(109),
             receive_cameras: Vec::new(),
+            share_open: false,
             sharing: false,
             video_direction: Direction::SendRecv,
             opus_pt: 111,
@@ -1895,6 +1901,35 @@ mod tests {
                 ("5", Direction::SendRecv),
                 ("6", Direction::SendRecv)
             ]
+        );
+    }
+
+    #[test]
+    fn a_meetings_share_line_is_open_both_ways_from_the_start() {
+        let local = LocalMedia {
+            share_ssrc: Some(301),
+            share_rtx_ssrc: Some(302),
+            share_rtx: Some(99),
+            share_open: true,
+            ..local()
+        };
+        let sdp = offer(&local);
+        let share = read(&sdp)
+            .expect("reads")
+            .share()
+            .cloned()
+            .expect("a share line");
+        assert_eq!(share.direction, Direction::SendRecv);
+        assert!(sdp.contains("a=x-ssrc-range:301-301\r\n"));
+        // Not open: inactive, as before.
+        let closed = read(&offer(&LocalMedia {
+            share_open: false,
+            ..local
+        }))
+        .expect("reads");
+        assert_eq!(
+            closed.share().map(|l| l.direction),
+            Some(Direction::Inactive)
         );
     }
 }

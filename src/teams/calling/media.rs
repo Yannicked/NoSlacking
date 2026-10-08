@@ -1211,6 +1211,7 @@ fn local_media(
         share_pt: offer_video_pt(opus_pt),
         share_rtx: None,
         sharing: false,
+        share_open: false,
         receive_cameras: Vec::new(),
         video_direction: Direction::SendRecv,
         // No data channel offered: audio only, the third attempt of §F.3.

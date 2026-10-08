@@ -286,6 +286,10 @@ pub struct LocalMedia {
     /// not share. Not sharing, an offer leaves it `inactive` and an
     /// answer takes only what the far end shares.
     pub sharing: bool,
+    /// A meeting's share line: open both ways from the start (`sendrecv`,
+    /// with our streams), as the web client keeps it, its use changed by
+    /// `mediaDescriptions` rather than renegotiated (recorded).
+    pub share_open: bool,
     /// The SSRC of the data m-line (`m=x-data`), or `None` to leave the
     /// data line out of an offer and reject it in an answer. Nothing
     /// speaks SCTP over it yet; offering it is only to look like the web

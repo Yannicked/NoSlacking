@@ -234,6 +234,7 @@ async fn run_meeting(
         speaker: None,
         syns: 0,
         heard: 0,
+        sharing: false,
     });
     call.relay = relay_for(client).await;
     let ended = call
@@ -490,6 +491,8 @@ struct InMeeting {
     syns: u32,
     /// How many messages came on it since it opened.
     heard: u32,
+    /// Whether we share our screen, as the meeting was last told.
+    sharing: bool,
 }
 
 impl InMeeting {
@@ -622,6 +625,9 @@ impl Call {
                 .await
                 .map_err(media_failure)?;
         self.leg = self.api.ids().media_leg_id.clone();
+        // The share line open both ways from the start, as the web
+        // client's is; sharing is then only told (§H.10).
+        local.share_open = true;
         let offer = sdp::offer(&local);
         if let Some(meeting) = &mut self.meeting {
             meeting.camera_lines = camera_lines(&offer);
@@ -735,6 +741,9 @@ impl Call {
                 },
                 asked = control.recv() => match asked {
                     Some(Control::Mute(muted)) => self.mute(session, muted).await,
+                    Some(Control::Share(on)) if self.meeting.is_some() => {
+                        self.meeting_share(on).await;
+                    }
                     Some(Control::Share(on)) => {
                         self.share.wanted = on;
                         self.share.retried = false;
@@ -1109,9 +1118,12 @@ impl Call {
                     .values()
                     .flat_map(super::types::RosterParticipant::camera_directions)
                     .collect();
-                if !directions.is_empty() {
-                    log::info!("Teams meeting: camera streams in the roster: {directions:?}");
-                }
+                log::info!(
+                    "Teams meeting: a roster of {} ({}, number {}); camera streams {directions:?}",
+                    update.participants.len(),
+                    update.kind,
+                    update.sequence_number
+                );
                 if let Some(meeting) = &mut self.meeting
                     && meeting.people.take(&update, &meeting.me)
                 {
@@ -1277,6 +1289,7 @@ impl Call {
             log::info!("Teams meeting: in the call");
             tell(CallEvent::Admitted);
         }
+        local.share_open = self.meeting.is_some();
         let answer = sdp::answer(local, remote);
         if let Some(meeting) = &mut self.meeting {
             meeting.camera_lines = camera_lines(&answer);
@@ -1445,6 +1458,7 @@ impl Call {
         Some(super::api::descriptions_for(
             sdp,
             meeting.camera_on,
+            meeting.sharing,
             meeting.request,
         ))
     }
@@ -1483,6 +1497,7 @@ impl Call {
             on,
             &more,
             share.as_deref(),
+            meeting.sharing,
             meeting.request,
         );
         let number = meeting.changes;
@@ -1500,9 +1515,10 @@ impl Call {
             log::info!("Teams meeting: no way to say the camera is on");
             return;
         };
+        let tag = format!("v_{number}");
         match self
             .api
-            .update_media_descriptions(&url, descriptions, number)
+            .update_media_descriptions(&url, descriptions, Some(&tag))
             .await
         {
             Ok(()) => log::info!(
@@ -1510,6 +1526,67 @@ impl Call {
                 if on { "on" } else { "off" }
             ),
             Err(error) => log::warn!("Teams meeting: the camera's change not taken: {error:?}"),
+        }
+    }
+
+    /// Starts or stops our screen share in a meeting: its line is open
+    /// all along, so the meeting is only told the line now sends (or
+    /// receives only again), as the web client does (recorded: no
+    /// renegotiation; the start tagged `ss_1`, the stop untagged).
+    async fn meeting_share(&mut self, on: bool) {
+        let Some(remote) = self.last_remote.as_ref() else {
+            return;
+        };
+        let camera = remote.camera().map(|l| l.mid.clone());
+        let Some(share) = remote
+            .share()
+            .filter(|l| l.port != 0)
+            .map(|l| l.mid.clone())
+        else {
+            log::warn!("Teams meeting: the meeting has no share line open; cannot share");
+            return;
+        };
+        let Some(meeting) = self.meeting.as_mut().filter(|m| m.sharing != on) else {
+            return;
+        };
+        meeting.sharing = on;
+        meeting.request += 1;
+        let more: Vec<&str> = meeting
+            .camera_lines
+            .iter()
+            .skip(1)
+            .map(String::as_str)
+            .collect();
+        let descriptions = super::api::media_descriptions(
+            camera.as_deref(),
+            meeting.camera_on,
+            &more,
+            Some(&share),
+            on,
+            meeting.request,
+        );
+        let Some(url) = meeting.update_descriptions.clone() else {
+            log::info!("Teams meeting: no way to say we share");
+            return;
+        };
+        if on {
+            self.share.number = if self.share.number == 0 {
+                1
+            } else {
+                self.share.number + 2
+            };
+        }
+        let tag = on.then(|| format!("ss_{}", self.share.number));
+        match self
+            .api
+            .update_media_descriptions(&url, descriptions, tag.as_deref())
+            .await
+        {
+            Ok(()) => log::info!(
+                "Teams meeting: told we {} sharing our screen",
+                if on { "start" } else { "stop" }
+            ),
+            Err(error) => log::warn!("Teams meeting: the share's change not taken: {error:?}"),
         }
     }
 
