@@ -11,8 +11,9 @@ const BROADCASTS: [(&str, &str); 3] = [
     ("@everyone", "<!everyone>"),
 ];
 
-/// What Slack receives for what you typed: markup characters escaped, and
-/// picked mentions and broadcasts turned into Slack's own forms.
+/// What Slack receives for what you typed: markup characters escaped,
+/// picked mentions and broadcasts turned into Slack's own forms, and web
+/// addresses into links.
 ///
 /// `mentions` pairs the text as typed with the markup it stands for. A
 /// label only counts where it stands alone, so "@Ann" leaves "@Annabel"
@@ -51,7 +52,71 @@ pub fn to_wire(text: &str, mentions: &[(String, String)]) -> String {
             rest = &rest[c.len_utf8()..];
         }
     }
+    link_urls(&out)
+}
+
+/// Wraps the web addresses typed in `wire` as `<…>` links, as Slack's own
+/// composer does: sent as plain text inside the rich text block, an
+/// address shows unlinked to everyone, in every app. Code and markup
+/// already there are left alone.
+fn link_urls(wire: &str) -> String {
+    let shields = mrkdwn::shielded(wire);
+    let shielded = |at: usize| shields.iter().any(|&(start, end)| start <= at && at <= end);
+    let mut out = String::with_capacity(wire.len());
+    let mut copied = 0;
+    let mut at = 0;
+    while at < wire.len() {
+        let rest = &wire[at..];
+        let starts = ["https://", "http://"].iter().any(|scheme| {
+            rest.get(..scheme.len())
+                .is_some_and(|s| s.eq_ignore_ascii_case(scheme))
+        });
+        if starts && is_word_edge(wire[..at].chars().next_back()) && !shielded(at) {
+            let len = url_len(rest);
+            if mrkdwn::is_openable(&mrkdwn::unescape(&rest[..len])) && !shielded(at + len - 1) {
+                out.push_str(&wire[copied..at]);
+                out.push('<');
+                out.push_str(&rest[..len]);
+                out.push('>');
+                at += len;
+                copied = at;
+                continue;
+            }
+        }
+        at += rest.chars().next().map_or(1, char::len_utf8);
+    }
+    out.push_str(&wire[copied..]);
     out
+}
+
+/// How much of `text`, which starts with an address, the address takes:
+/// up to white space or an escaped bracket, less the punctuation that ends
+/// the sentence around it. A closing parenthesis stays when the address
+/// opened one, as in Wikipedia's.
+fn url_len(text: &str) -> usize {
+    let mut end = text
+        .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '`'))
+        .unwrap_or(text.len());
+    for stop in ["&lt;", "&gt;"] {
+        if let Some(found) = text[..end].find(stop) {
+            end = found;
+        }
+    }
+    loop {
+        let url = &text[..end];
+        let Some(last) = url.chars().next_back() else {
+            return end;
+        };
+        let trailing = match last {
+            '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | '*' | '_' | '~' => true,
+            ')' => url.matches('(').count() < url.matches(')').count(),
+            _ => false,
+        };
+        if !trailing {
+            return end;
+        }
+        end -= last.len_utf8();
+    }
 }
 
 /// Whether a typed label may start or end next to `c`.
@@ -342,6 +407,41 @@ mod tests {
             to_wire("hi @Ann Lee & @Ann <3 @here, not @heresy", &mentions),
             "hi <@U2> &amp; <@U1> &lt;3 <!here>, not @heresy"
         );
+    }
+
+    #[test]
+    fn typed_addresses_become_links() {
+        assert_eq!(
+            to_wire("see https://x.y/a?b=1&c=2.", &[]),
+            "see <https://x.y/a?b=1&amp;c=2>."
+        );
+        assert_eq!(
+            to_wire(
+                "(at https://en.wikipedia.org/wiki/Rust_(language)), *http://x.y*",
+                &[]
+            ),
+            "(at <https://en.wikipedia.org/wiki/Rust_(language)>), *<http://x.y>*"
+        );
+        assert_eq!(to_wire("<https://x.y>", &[]), "&lt;<https://x.y>&gt;");
+        // Code, words running into a scheme and bare schemes stay text.
+        assert_eq!(
+            to_wire(
+                "`https://x.y` and\n```\nhttps://x.y\n```\nxhttps://x.y https://",
+                &[]
+            ),
+            "`https://x.y` and\n```\nhttps://x.y\n```\nxhttps://x.y https://"
+        );
+        // Sent as Slack's composer sends it: a link element.
+        let wire = to_wire("look https://x.y ok", &[]);
+        let block = crate::slack::rich_out::rich_text(&wire).expect("block");
+        assert_eq!(
+            block["elements"][0]["elements"][1],
+            serde_json::json!({"type": "link", "url": "https://x.y"})
+        );
+        // Editing it brings back what was typed, and sends the same.
+        let (text, mentions) = to_editable(&wire, names);
+        assert_eq!(text, "look https://x.y ok");
+        assert_eq!(to_wire(&text, &mentions), wire);
     }
 
     #[test]
