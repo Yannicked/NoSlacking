@@ -110,13 +110,8 @@ fn broadcast_description(name: &str) -> std::borrow::Cow<'static, str> {
 
 /// A user group's name and, when known, how many are in it.
 fn group_detail(name: &str, members: Option<usize>) -> String {
-    let count = members.map(|n| {
-        crate::i18n::tn(
-            "{count} member",
-            "{count} members",
-            u32::try_from(n).unwrap_or(u32::MAX),
-        )
-    });
+    let count = members
+        .map(|n| crate::i18n::tn("{count} member", "{count} members", crate::i18n::count(n)));
     match count {
         Some(count) if name.is_empty() => count,
         Some(count) => format!("{name} · {count}"),

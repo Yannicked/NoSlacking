@@ -12,18 +12,14 @@
 //! own) wherever the button shows. Its menu (a right click) chooses
 //! something else to share.
 
-use egui::{Color32, Key, Modifiers, RichText};
+use egui::{Color32, RichText};
 
-use super::call_bar::{LEAVE, Look, control};
+use super::call_bar::{LEAVE, Lit, Look, Toggle, toggle_control};
 use super::people::ACTIVE;
-use super::shortcuts::spell;
+use super::shortcuts::SHARE;
 use crate::huddle_share::{ShareAction, Sharing, Source, SourceKind};
 use crate::i18n::{t, tf};
 use crate::theme::{self, Icon, Palette};
-
-/// The chord that starts and stops sharing, as the shortcut sheet lists
-/// it.
-pub const TOGGLE: &str = "Cmd+Shift+E";
 
 /// What a click or the chord asks in state `sharing`.
 pub fn toggled(sharing: Sharing) -> ShareAction {
@@ -34,11 +30,6 @@ pub fn toggled(sharing: Sharing) -> ShareAction {
     }
 }
 
-/// Whether the chord was pressed in this window's input this frame.
-fn chord(ui: &egui::Ui) -> bool {
-    ui.input_mut(|input| input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::E))
-}
-
 /// Draws the Share button for `sharing` in `look`; returns what was
 /// asked, by a click, its menu or the chord.
 pub fn share_button(
@@ -47,7 +38,7 @@ pub fn share_button(
     sharing: Sharing,
     look: Look,
 ) -> Option<ShareAction> {
-    let shortcut = spell(TOGGLE, cfg!(target_os = "macos"));
+    let shortcut = SHARE.spelled();
     let (icon, label, tip) = match sharing {
         Sharing::Off => (
             Icon::ScreenShare,
@@ -71,14 +62,19 @@ pub fn share_button(
             ),
         ),
     };
-    let (fill, ink, icon_ink) = match sharing {
-        Sharing::On => (ACTIVE, Color32::WHITE, Color32::WHITE),
-        Sharing::Choosing | Sharing::Starting => {
-            (palette.surface_hover, palette.secondary, palette.secondary)
-        }
-        Sharing::Off => (palette.surface_hover, palette.text, palette.text),
+    let lit = match sharing {
+        Sharing::On => Lit::On,
+        Sharing::Choosing | Sharing::Starting => Lit::Pending,
+        Sharing::Off => Lit::Off { red: false },
     };
-    let response = control(ui, look, (icon, icon_ink), &label, ink, fill).on_hover_text(tip);
+    let toggle = Toggle {
+        icon,
+        label: label.into_owned(),
+        tip,
+        lit,
+        chord: SHARE,
+    };
+    let (response, pressed) = toggle_control(ui, palette, look, toggle);
     let mut asked = None;
     response.context_menu(|ui| {
         if ui.button(t("Share something else…")).clicked() {
@@ -93,7 +89,7 @@ pub fn share_button(
     if asked.is_some() {
         return asked;
     }
-    (response.clicked() || chord(ui)).then(|| toggled(sharing))
+    pressed.then(|| toggled(sharing))
 }
 
 /// The row above the buttons while sharing or starting to: what is going
@@ -222,17 +218,20 @@ mod tests {
         // On the sheet, and clashing with no other line of it.
         assert_eq!(
             super::super::shortcuts::keys_of("Share your screen / stop sharing"),
-            Some(TOGGLE)
+            Some(SHARE.text)
         );
         let taken: Vec<&str> = super::super::shortcuts::GROUPS
             .iter()
             .flat_map(|g| g.shortcuts)
             .flat_map(|s| s.keys.iter().chain(s.also))
             .copied()
-            .filter(|k| *k == TOGGLE)
+            .filter(|k| *k == SHARE.text)
             .collect();
-        assert_eq!(taken, [TOGGLE], "one line has the chord");
-        assert_eq!(spell(TOGGLE, false), "Ctrl+Shift+E");
-        assert_eq!(spell(TOGGLE, true), "⇧⌘E");
+        assert_eq!(taken, [SHARE.text], "one line has the chord");
+        assert_eq!(
+            super::super::shortcuts::spell(SHARE.text, false),
+            "Ctrl+Shift+E"
+        );
+        assert_eq!(super::super::shortcuts::spell(SHARE.text, true), "⇧⌘E");
     }
 }

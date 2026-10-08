@@ -1,7 +1,7 @@
 //! Draws parsed mrkdwn: styled runs that wrap like text, clickable links,
 //! mentions and channels, colour and custom emoji, code and quotes.
 
-use egui::{Color32, CornerRadius, RichText, Sense, Stroke, Vec2};
+use egui::{Color32, CornerRadius, RichText, Stroke, Vec2};
 
 use crate::app::WorkspaceState;
 use crate::emoji::Resolved;
@@ -282,9 +282,7 @@ fn show_blocks(
 }
 
 fn clickable(ui: &mut egui::Ui, text: RichText, tooltip: Option<&str>) -> egui::Response {
-    let response = ui
-        .add(egui::Label::new(text).sense(Sense::click()))
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let response = theme::link_label(ui, egui::Label::new(text));
     match tooltip {
         Some(tip) => response.on_hover_text(tip),
         None => response,

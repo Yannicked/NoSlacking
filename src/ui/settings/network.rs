@@ -6,7 +6,7 @@ use super::{group, row};
 use crate::app::App;
 use crate::i18n::t;
 use crate::model::Action;
-use crate::slack::net::{ProxyError, ProxyMode, parse_manual};
+use crate::settings::{ProxyError, ProxyMode, parse_manual};
 use crate::theme::{self, Palette};
 
 /// The proxy choice and, for a manual proxy, its URL. A mode applies at

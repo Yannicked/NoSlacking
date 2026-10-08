@@ -1,5 +1,10 @@
-// Generated from iamcal/emoji-data (emoji.json), MIT licensed: see
-// assets/emoji-data-LICENSE.txt. Slack names its emoji after this table.
+// Generated from iamcal/emoji-data (emoji.json, MIT licensed: see
+// assets/emoji-data-LICENSE.txt) at commit
+// 13ee711e222ea17fe537bfea953c687866f16411
+// by tools/emoji-table-gen. Slack names its emoji after this table.
+// Do not edit; regenerate from the repository root with:
+//
+//   cargo run --manifest-path tools/emoji-table-gen/Cargo.toml > src/emoji_table.rs
 
 /// Every Slack shortcode and its emoji, sorted by name.
 const NAMES: &[(&str, &str)] = &[

@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::app::App;
+use crate::app::{App, Tone};
 use crate::backend;
 use crate::i18n::{t, tf};
 use crate::people::{self, Huddle};
@@ -513,7 +513,10 @@ pub fn handle(app: &mut App, team: &str, event: people::Event) -> Option<people:
                         .find(|w| w.info.team_id == team)
                         .map(|w| w.user_label(&invite.from))
                         .unwrap_or_default();
-                    app.toast(tf("Missed call from {name}", &[("name", &name)]), false);
+                    app.toast(
+                        tf("Missed call from {name}", &[("name", &name)]),
+                        Tone::Info,
+                    );
                 }
             }
             None
@@ -594,7 +597,7 @@ pub fn handle(app: &mut App, team: &str, event: people::Event) -> Option<people:
                         "Could not decline the huddle: {error}",
                         &[("error", &error.message())],
                     ),
-                    true,
+                    Tone::Error,
                 );
             }
             None

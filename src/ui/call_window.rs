@@ -715,7 +715,7 @@ fn header(ui: &mut egui::Ui, palette: &Palette, view: &CallView, actions: &mut V
                 RichText::new(tn(
                     "{count} more camera",
                     "{count} more cameras",
-                    u32::try_from(view.more).unwrap_or(u32::MAX),
+                    crate::i18n::count(view.more),
                 ))
                 .font(theme::regular(12.5))
                 .color(palette.secondary),

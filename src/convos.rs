@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::app::{App, WorkspaceState};
+use crate::app::{App, Tone, WorkspaceState};
 use crate::backend;
 use crate::failure::Failure;
 use crate::i18n::tf;
@@ -1493,7 +1493,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                     }
                 }
             };
-            app.toast(text, true);
+            app.toast(text, Tone::Error);
         }
     }
 }

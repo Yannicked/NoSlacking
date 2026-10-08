@@ -10,18 +10,15 @@
 //! own is the composer's paste without formatting here) wherever the
 //! button shows: the window that has the focus takes it. The preview is mirrored, as a mirror shows you.
 
-use egui::{Color32, CornerRadius, Key, Modifiers, Sense, Vec2};
+use egui::{Color32, CornerRadius, Sense, Vec2};
 
-use super::call_bar::{Look, control};
-use super::people::ACTIVE;
-use super::shortcuts::spell;
+use super::call_bar::{Lit, Look, Toggle, toggle_control};
+use super::shortcuts::CAMERA;
 use crate::app::App;
 use crate::huddle_camera::{Cam, CamAction};
 use crate::i18n::{t, tf};
 use crate::theme::{self, Palette};
 
-/// The chord that toggles the camera, as the shortcut sheet lists it.
-pub const TOGGLE: &str = "Cmd+Shift+O";
 /// The preview's width at most, in points.
 const PREVIEW_WIDTH: f32 = 220.0;
 
@@ -41,7 +38,7 @@ pub fn camera_button(
     cam: Cam,
     look: Look,
 ) -> Option<CamAction> {
-    let shortcut = spell(TOGGLE, cfg!(target_os = "macos"));
+    let shortcut = CAMERA.spelled();
     let (icon, label, tip) = match cam {
         Cam::Off => (
             theme::Icon::VideoOff,
@@ -68,15 +65,20 @@ pub fn camera_button(
             ),
         ),
     };
-    let (fill, ink, icon_ink) = match cam {
-        Cam::On => (ACTIVE, Color32::WHITE, Color32::WHITE),
-        Cam::Opening => (palette.surface_hover, palette.secondary, palette.secondary),
-        Cam::Off => (palette.surface_hover, palette.text, palette.danger),
+    let lit = match cam {
+        Cam::On => Lit::On,
+        Cam::Opening => Lit::Pending,
+        Cam::Off => Lit::Off { red: true },
     };
-    let response = control(ui, look, (icon, icon_ink), &label, ink, fill).on_hover_text(tip);
-    let chord =
-        ui.input_mut(|input| input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::O));
-    (response.clicked() || chord).then(|| toggled(cam))
+    let toggle = Toggle {
+        icon,
+        label: label.into_owned(),
+        tip,
+        lit,
+        chord: CAMERA,
+    };
+    let (_, asked) = toggle_control(ui, palette, look, toggle);
+    asked.then(|| toggled(cam))
 }
 
 /// Where the call bar finds this frame's preview.
@@ -176,7 +178,7 @@ mod tests {
     fn the_chord_is_on_the_sheet() {
         assert_eq!(
             super::super::shortcuts::keys_of("Turn the camera on / off"),
-            Some(TOGGLE)
+            Some(CAMERA.text)
         );
     }
 }

@@ -10,7 +10,7 @@ use crate::dnd::{Dnd, Snooze};
 use crate::model::{ConversationKind, Message};
 use crate::notify::{self, Level, Note, Notifier};
 
-use super::{App, WorkspaceState};
+use super::{App, Tone, WorkspaceState};
 
 /// The desktop's side of the window.
 #[derive(Debug, Default)]
@@ -308,7 +308,7 @@ impl App {
                     "Could not change starting at login: {error}",
                     &[("error", &error.message())],
                 ),
-                true,
+                Tone::Error,
             );
         }
         if let Some(tray) = &mut self.desktop.tray {

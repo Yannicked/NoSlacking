@@ -83,6 +83,12 @@ pub fn tn(singular: &'static str, plural: &'static str, count: u32) -> String {
         .replace("{count}", &count.to_string())
 }
 
+/// A length as [`tn`] counts it. No list on screen comes near four
+/// billion; one that did would read as the largest count, not wrap.
+pub fn count(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
 /// Translates a sentence with named holes, such as "Signed in to {name}.",
 /// and fills each `{key}` from `args`. The whole sentence goes through the
 /// catalog, so a translation can put the words in its own order.
@@ -124,6 +130,12 @@ pub fn fill(pattern: &str, args: &[(&str, &str)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_saturate_instead_of_wrapping() {
+        assert_eq!(count(3), 3);
+        assert_eq!(count(usize::MAX), u32::MAX);
+    }
 
     #[test]
     fn holes_are_filled_once_and_by_name() {
