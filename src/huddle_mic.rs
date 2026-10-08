@@ -7,7 +7,7 @@
 //! worker keeps the rule itself (see
 //! [`crate::huddle_audio::microphone`]); this is only its picture.
 
-use crate::app::App;
+use crate::app::{App, Tone};
 use crate::backend;
 use crate::failure::Failure;
 use crate::i18n::tf;
@@ -106,7 +106,7 @@ pub fn news(app: &mut App, team: &str, channel: &str, news: MicNews) {
         ),
         MicNews::Muted | MicNews::Live => return,
     };
-    app.toast(text, true);
+    app.toast(text, Tone::Error);
 }
 
 #[cfg(test)]

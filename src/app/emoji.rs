@@ -4,7 +4,7 @@
 use std::io::Read as _;
 use std::path::Path;
 
-use super::App;
+use super::{App, Tone};
 use crate::backend::Command;
 use crate::custom_emoji::{Dialog, MAX_BYTES, Picked};
 use crate::failure::Failure;
@@ -135,7 +135,7 @@ impl App {
                 self.backend.send(Command::FetchEmoji {
                     team: team.to_owned(),
                 });
-                self.toast(tf("Added :{name}:", &[("name", &name)]), false);
+                self.toast(tf("Added :{name}:", &[("name", &name)]), Tone::Info);
             }
             Err(error) => {
                 if let Some(dialog) = dialog {
@@ -147,7 +147,7 @@ impl App {
                             "Could not add :{name}:: {error}",
                             &[("name", &name), ("error", &error.message())],
                         ),
-                        true,
+                        Tone::Error,
                     );
                 }
             }

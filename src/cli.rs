@@ -62,7 +62,7 @@ pub struct Cli {
     pub demo_hover: Option<String>,
     /// `--demo-view VIEW`: the view to open before the screenshot.
     #[cfg(feature = "demo")]
-    pub demo_view: Option<String>,
+    pub demo_view: Option<noslacking::demo::View>,
     /// `--demo-light`: the light palette.
     #[cfg(feature = "demo")]
     pub demo_light: bool,
@@ -242,8 +242,10 @@ pub const FLAGS: &[Flag] = &[
     #[cfg(feature = "demo")]
     Flag {
         name: "demo-view",
-        takes: Takes::One("VIEW", |cli, v| text(v).map(|v| cli.demo_view = Some(v))),
-        help: "Open a view before the screenshot: thread, settings, sign-in, switcher, palette, picker, profile, share, upload, drafts, lightbox, media, previews, viewer-sheet, viewer-csv, viewer-zip, viewer-text, compact, held-media, shortcuts, delete-file, add-emoji, listening, talking or (with huddle-video) sharing, call-window or cameras, or (with huddle-camera) camera, and with both camera-window, or (with huddle-share) sharing-self or share-pick, and with huddle-video share-window; --demo-size also sizes the call window",
+        takes: Takes::One("VIEW", |cli, v| {
+            text(v)?.parse().map(|v| cli.demo_view = Some(v))
+        }),
+        help: "Open a view before the screenshot, such as thread, settings, sign-in, dm, listening or call-window; a name it does not know lists them all. --demo-size also sizes the call window",
     },
     #[cfg(feature = "demo")]
     Flag {
@@ -794,7 +796,7 @@ mod tests {
                 assert_eq!(cli.demo_shot, Some(PathBuf::from("out.png")));
                 assert_eq!(cli.demo_size.as_deref(), Some("800x600"));
                 assert_eq!(cli.demo_hover.as_deref(), Some("10,20"));
-                assert_eq!(cli.demo_view.as_deref(), Some("thread"));
+                assert_eq!(cli.demo_view, Some(noslacking::demo::View::Thread));
                 assert_eq!(cli.demo_right_click.as_deref(), Some("30,40"));
                 assert_eq!(cli.demo_click.as_deref(), Some("50,60"));
                 assert_eq!(cli.demo_keys.as_deref(), Some("Shift+ArrowUp,R"));
@@ -824,6 +826,15 @@ mod tests {
             // The joined form takes anything, empty or dashed.
             assert_eq!(run(&["--demo-type="]).demo_type.as_deref(), Some(""));
             assert_eq!(run(&["--demo-type=-x"]).demo_type.as_deref(), Some("-x"));
+        }
+
+        #[test]
+        fn a_mistyped_view_lists_the_views() {
+            let why = error(&["--demo-view", "thraed"]);
+            assert!(
+                why.starts_with("invalid value 'thraed' for '--demo-view <VIEW>': no such view; one of thread, settings,"),
+                "{why}"
+            );
         }
 
         #[test]

@@ -46,11 +46,7 @@ fn section_dialog(app: &mut App, ctx: &egui::Context) {
             } else {
                 t("New section")
             };
-            let heading = ui.label(
-                RichText::new(heading)
-                    .font(theme::bold(17.0))
-                    .color(palette.text),
-            );
+            let heading = theme::dialog_heading(ui, &palette, heading);
             ui.add_space(6.0);
             let field = ui
                 .add(
@@ -971,6 +967,7 @@ fn confirm_delete(app: &mut App, ctx: &egui::Context) {
         "confirm-delete",
         &t("Delete message?"),
         &t("This cannot be undone."),
+        &t("Delete"),
     );
     match answer {
         Some(true) => {
@@ -993,6 +990,7 @@ fn confirm_delete_file(app: &mut App, ctx: &egui::Context) {
         "confirm-delete-file",
         &crate::i18n::tf("Delete {name}?", &[("name", &name)]),
         &t("This removes it for everyone."),
+        &t("Delete"),
     );
     match answer {
         Some(true) => {
@@ -1004,21 +1002,25 @@ fn confirm_delete_file(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-/// A dialog asking whether to delete something: `title`, `body`, Cancel
-/// and a red Delete. Answers once a choice is made; Enter deletes and
-/// Escape or a click outside cancels.
-fn confirm(app: &App, ctx: &egui::Context, id: &str, title: &str, body: &str) -> Option<bool> {
+/// A dialog asking whether to do something that cannot be taken back:
+/// `title`, `body`, Cancel and a red `verb` (Delete, Leave, Remove).
+/// Answers once a choice is made; Enter does it and Escape or a click
+/// outside cancels.
+pub(super) fn confirm(
+    app: &App,
+    ctx: &egui::Context,
+    id: &str,
+    title: &str,
+    body: &str,
+    verb: &str,
+) -> Option<bool> {
     let palette = app.palette;
     let mut answer = None;
     let response = egui::Modal::new(egui::Id::new(id))
         .frame(modal_frame(app))
         .show(ctx, |ui| {
             ui.set_width(360.0);
-            ui.label(
-                RichText::new(title)
-                    .font(theme::bold(17.0))
-                    .color(palette.text),
-            );
+            theme::dialog_heading(ui, &palette, title);
             ui.label(
                 RichText::new(body)
                     .font(theme::regular(14.0))
@@ -1029,14 +1031,7 @@ fn confirm(app: &App, ctx: &egui::Context, id: &str, title: &str, body: &str) ->
                 if theme::secondary_button(ui, &palette, &t("Cancel")).clicked() {
                     answer = Some(false);
                 }
-                let delete = egui::Button::new(
-                    RichText::new(t("Delete"))
-                        .font(theme::medium(14.0))
-                        .color(egui::Color32::WHITE),
-                )
-                .fill(palette.danger)
-                .min_size(Vec2::new(0.0, 32.0));
-                if ui.add(delete).clicked() {
+                if theme::danger_button(ui, &palette, verb).clicked() {
                     answer = Some(true);
                 }
             });
@@ -1083,11 +1078,7 @@ fn confirm_press(app: &mut App, ctx: &egui::Context) {
         .frame(modal_frame(app))
         .show(ctx, |ui| {
             ui.set_width(380.0);
-            ui.label(
-                RichText::new(title)
-                    .font(theme::bold(17.0))
-                    .color(palette.text),
-            );
+            theme::dialog_heading(ui, &palette, title);
             if let Some(text) = &confirm.text
                 && let Some(workspace) = app.active_workspace()
             {
@@ -1152,7 +1143,7 @@ fn toasts(app: &mut App, ctx: &egui::Context) {
             ui.spacing_mut().item_spacing.y = 6.0;
             for toast in app.toasts.iter().rev().take(3) {
                 let response = egui::Frame::new()
-                    .fill(if toast.error {
+                    .fill(if toast.tone == crate::app::Tone::Error {
                         palette.danger
                     } else {
                         palette.overlay
@@ -1169,7 +1160,7 @@ fn toasts(app: &mut App, ctx: &egui::Context) {
                     .show(ui, |ui| {
                         ui.set_max_width(520.0);
                         ui.label(RichText::new(&toast.text).font(theme::medium(13.5)).color(
-                            if toast.error {
+                            if toast.tone == crate::app::Tone::Error {
                                 egui::Color32::WHITE
                             } else {
                                 palette.text

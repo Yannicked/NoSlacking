@@ -9,6 +9,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::i18n::Locale;
+/// The proxy setting's parts, which the Network page edits.
+pub use crate::slack::net::{ProxyError, ProxyMode, ProxySettings, parse_manual};
 use crate::theme::CustomTheme;
 
 /// How the window is coloured.
@@ -125,7 +127,7 @@ pub struct Settings {
     /// Programs to run on new messages; off by default.
     pub hooks: crate::hooks::Hooks,
     /// Which proxy every connection goes through (Settings → Network).
-    pub proxy: crate::slack::net::ProxySettings,
+    pub proxy: ProxySettings,
     /// Spell checking in the composer.
     pub spelling: crate::spell::SpellSettings,
     /// Direct messages closed in the sidebar, by workspace: each one's
@@ -175,7 +177,7 @@ impl Default for Settings {
             density: Density::Comfortable,
             inline_media: true,
             hooks: crate::hooks::Hooks::default(),
-            proxy: crate::slack::net::ProxySettings::default(),
+            proxy: ProxySettings::default(),
             spelling: crate::spell::SpellSettings::default(),
             closed: BTreeMap::new(),
             hardware_video: true,

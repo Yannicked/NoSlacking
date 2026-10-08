@@ -163,7 +163,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     if search.loading {
                         ui.add_space(8.0);
                         ui.vertical_centered(|ui| {
-                            ui.add(egui::Spinner::new().size(18.0).color(palette.dim));
+                            ui.add(theme::spinner(&palette, 18.0));
                         });
                         ui.add_space(8.0);
                     }
@@ -237,7 +237,7 @@ fn status(ui: &mut egui::Ui, palette: &Palette, search: &crate::search::Search) 
         None if search.loading && search.hits.is_empty() => {
             ui.add_space(8.0);
             ui.vertical_centered(|ui| {
-                ui.add(egui::Spinner::new().size(18.0).color(palette.dim));
+                ui.add(theme::spinner(palette, 18.0));
             });
             None
         }
