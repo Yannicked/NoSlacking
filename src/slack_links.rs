@@ -31,9 +31,11 @@
 use std::path::Path;
 #[cfg(any(target_os = "linux", test))]
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
+
+use crate::sync::lock;
 
 /// What a claim replaced, to be put back.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,7 +65,7 @@ const BACKUP: &str = "slack-links.reg";
 const MIME: &str = "x-scheme-handler/slack";
 
 fn held() -> MutexGuard<'static, Option<Claim>> {
-    HELD.lock().unwrap_or_else(PoisonError::into_inner)
+    lock(&HELD)
 }
 
 /// Whether this run holds the `slack://` links now.

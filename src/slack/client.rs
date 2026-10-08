@@ -15,6 +15,7 @@ use tokio::sync::Semaphore;
 
 use super::types;
 use crate::scopes::Scopes;
+use crate::sync::lock;
 
 pub const API: &str = "https://slack.com/api/";
 const MAX_IN_FLIGHT: usize = 6;
@@ -999,12 +1000,6 @@ pub fn token_from(access: types::OauthAccess) -> Option<Token> {
         cookie: None,
         workspace_url: None,
     })
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

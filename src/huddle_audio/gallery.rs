@@ -18,12 +18,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::decode::{self, H264, Outcome, Trouble};
 use super::helper::Lane;
 use super::screen::Picture;
+use crate::sync::{lock, wait};
 
 /// What a new picture calls to be drawn.
 type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -87,12 +88,6 @@ impl PartialEq for Gallery {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
     }
-}
-
-/// Locks, going on with what a panicked holder left: the data is
-/// pictures, never half-written.
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Gallery {
@@ -439,7 +434,7 @@ fn next(jobs: &Jobs) -> Option<Job> {
         if let Some(job) = queue.jobs.pop_front() {
             return Some(job);
         }
-        queue = jobs.1.wait(queue).unwrap_or_else(PoisonError::into_inner);
+        queue = wait(&jobs.1, queue);
     }
 }
 

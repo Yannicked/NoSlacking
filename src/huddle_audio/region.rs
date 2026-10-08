@@ -81,9 +81,7 @@ pub async fn nearest() -> Option<String> {
 }
 
 fn lock() -> std::sync::MutexGuard<'static, Option<String>> {
-    FOUND
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    crate::sync::lock(&FOUND)
 }
 
 /// One lookup, logged when it fails.

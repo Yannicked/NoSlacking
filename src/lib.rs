@@ -60,6 +60,7 @@ pub mod slack;
 pub mod slack_links;
 pub mod slash;
 pub mod spell;
+pub mod sync;
 #[cfg(feature = "teams")]
 pub mod teams;
 pub mod theme;

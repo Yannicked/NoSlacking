@@ -22,6 +22,7 @@ use egui::load::{Bytes, BytesLoadResult, BytesLoader, BytesPoll, LoadError};
 use sha1::{Digest as _, Sha1};
 
 use crate::slack;
+use crate::sync::{lock, read, write};
 
 /// Bytes held in memory at most.
 const HELD_BYTES: usize = 96 * 1024 * 1024;
@@ -305,22 +306,6 @@ impl ImageLoader {
             }
         });
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
-    lock.write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-fn read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
-    lock.read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn cache_name(url: &str) -> String {

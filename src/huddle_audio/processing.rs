@@ -32,6 +32,7 @@ use sonora_common_audio::push_sinc_resampler::PushSincResampler;
 
 use super::jitter::CLOCK;
 use super::uplink::TEN_MS;
+use crate::sync::lock;
 
 /// What the output side adds to the echo path, as a first guess: rodio's
 /// mixer and the device's buffer. AEC3 measures the real delay.
@@ -39,12 +40,6 @@ pub const OUTPUT_GUESS_MS: i32 = 40;
 /// Render frames held for the microphone, at most: half a second. Older
 /// ones are of no use to the echo canceller.
 const RENDER_HELD: usize = 50;
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
 
 /// The tap's state.
 #[derive(Debug, Default)]
