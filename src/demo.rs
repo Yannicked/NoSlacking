@@ -1486,6 +1486,30 @@ pub fn sharing() -> crate::huddles::Listening {
     }
 }
 
+/// In a meeting with your microphone live, its join link known and Lee
+/// waiting in its lobby (`--demo-view meeting`, and `meeting-window`
+/// for its call window): the call bar and window as a Teams meeting has
+/// them.
+pub fn meeting() -> crate::huddles::Listening {
+    #[cfg(feature = "huddle-video")]
+    let mut listening = sharing();
+    #[cfg(not(feature = "huddle-video"))]
+    let mut listening = listening();
+    for person in &mut listening.roster.people {
+        if person.user.as_deref() == Some("U06") {
+            person.waiting = true;
+        }
+    }
+    crate::huddles::Listening {
+        meeting: true,
+        mic: crate::huddle_mic::Mic::Live,
+        invite: Some(crate::meetings::MeetingLink(
+            "https://teams.microsoft.com/l/meetup-join/demo".into(),
+        )),
+        ..listening
+    }
+}
+
 /// Whether the demo pretends the video helper is missing
 /// (`--demo-view devices-no-helper`): the camera picker then says so.
 static NO_HELPER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

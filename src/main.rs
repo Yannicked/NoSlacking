@@ -794,6 +794,36 @@ impl DemoSetup {
                 app.huddles.listening = Some(noslacking::demo::listening());
                 app.actions.push(Action::OpenConversation("C03".into()));
             }
+            // In a Teams-style meeting with your microphone live: the call
+            // bar's meeting title, its join link to copy, and Lee waiting
+            // in the lobby with Admit.
+            Some("meeting") => {
+                app.huddles.listening = Some(noslacking::demo::meeting());
+                app.actions.push(Action::OpenConversation("C03".into()));
+            }
+            // Calling Bob: the call bar ringing.
+            Some("calling") => {
+                app.huddles.listening = Some(noslacking::huddles::Listening {
+                    callee: Some("U02".into()),
+                    phase: noslacking::huddles::Phase::Ringing,
+                    mic: noslacking::huddle_mic::Mic::Live,
+                    ..noslacking::demo::listening()
+                });
+                app.actions.push(Action::OpenConversation("C03".into()));
+            }
+            // The meeting's call window, drawn inside the main one.
+            #[cfg(feature = "huddle-video")]
+            Some("meeting-window") => {
+                app.huddles.listening = Some(noslacking::huddles::Listening {
+                    shares: Vec::new(),
+                    ..noslacking::demo::meeting()
+                });
+                app.huddles.picture.embed = true;
+                app.huddles.picture.size = self.call_size;
+                app.actions.push(Action::OpenConversation("C03".into()));
+                app.actions
+                    .push(Action::Huddle(noslacking::huddles::Action::OpenCall));
+            }
             // The same with your microphone live.
             Some("talking") => {
                 app.huddles.listening = Some(noslacking::huddles::Listening {
