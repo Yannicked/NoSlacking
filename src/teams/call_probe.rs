@@ -150,7 +150,7 @@ async fn probe(options: &Options, handle: tokio::runtime::Handle) -> i32 {
                 }
                 Some(CallEvent::AnsweredElsewhere) => {}
                 Some(CallEvent::Watching(who)) => {
-                    log::info!("teams call probe: watching {}", if who.is_some() { "a camera" } else { "no camera" });
+                    log::info!("teams call probe: watching {} cameras", who.iter().flatten().count());
                 }
                 Some(CallEvent::Lobby) => log::info!("teams call probe: waiting in the meeting's lobby"),
                 Some(CallEvent::Admitted) => log::info!("teams call probe: let in from the lobby"),
@@ -164,7 +164,7 @@ async fn probe(options: &Options, handle: tokio::runtime::Handle) -> i32 {
                 Some(CallEvent::FarEndShare(on)) => {
                     log::info!("teams call probe: the far end's screen share {}", if on { "shows" } else { "stopped" });
                 }
-                Some(CallEvent::FarEndVideo(on)) => {
+                Some(CallEvent::FarEndCamera { on, .. }) => {
                     log::info!("teams call probe: the far end's camera {}", if on { "shows" } else { "stopped" });
                 }
                 Some(CallEvent::FarEndMuted(muted)) => {

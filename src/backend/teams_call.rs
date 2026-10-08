@@ -872,32 +872,43 @@ struct Shown<'a, T: Fn(Listen)> {
     callee: &'a str,
     /// Who else is in the meeting, for a meeting.
     people: Option<Vec<Attendee>>,
-    /// Whose camera a meeting sends us, by MRI.
-    watched: Option<String>,
+    /// Whose camera a meeting sends us on each camera line, by MRI.
+    watched: Vec<Option<String>>,
+    /// The camera lines whose pictures show now.
+    cameras_on: std::collections::BTreeSet<usize>,
     tell: &'a T,
     /// How the call ended, once it has.
     ended: Option<Result<(), Failure>>,
 }
 
 impl<T: Fn(Listen)> Shown<'_, T> {
-    /// The far end's camera started or stopped: its tile comes or goes.
-    fn far_video(&self, on: bool) {
+    /// The camera on camera line `line` started or stopped: its tile
+    /// comes or goes.
+    fn far_video(&mut self, line: usize, on: bool) {
+        if on {
+            self.cameras_on.insert(line);
+        } else {
+            self.cameras_on.remove(&line);
+        }
+        self.tell_cameras();
+    }
+
+    /// Tells the bar every camera showing, a tile each.
+    fn tell_cameras(&self) {
         #[cfg(feature = "huddle-video")]
         {
-            let cameras = if on {
-                vec![crate::huddle_audio::cameras::Camera {
-                    key: crate::teams::calling::video::FAR_CAMERA.to_owned(),
-                    user: self.far_user(),
+            let cameras = self
+                .cameras_on
+                .iter()
+                .map(|&line| crate::huddle_audio::cameras::Camera {
+                    key: crate::teams::calling::video::camera_key(line),
+                    user: self.far_user(line),
                     paused: false,
                     tile: true,
-                }]
-            } else {
-                Vec::new()
-            };
+                })
+                .collect();
             (self.tell)(Listen::Cameras(cameras));
         }
-        #[cfg(not(feature = "huddle-video"))]
-        let _ = on;
     }
 
     /// The far end's screen share started or stopped: the bar offers it
@@ -908,7 +919,11 @@ impl<T: Fn(Listen)> Shown<'_, T> {
             let shares = if on {
                 vec![crate::huddle_audio::video::Share {
                     key: FAR_SHARE.to_owned(),
-                    user: self.far_user(),
+                    user: if self.people.is_some() {
+                        None
+                    } else {
+                        self.far_user(0)
+                    },
                 }]
             } else {
                 Vec::new()
@@ -919,12 +934,12 @@ impl<T: Fn(Listen)> Shown<'_, T> {
         let _ = on;
     }
 
-    /// Whose picture the far end's media is: the one called; in a
-    /// meeting, whoever its media server shows, which it does not say.
+    /// Whose camera camera line `line` shows: the one called; in a
+    /// meeting, the one asked for on it.
     #[cfg(feature = "huddle-video")]
-    fn far_user(&self) -> Option<String> {
+    fn far_user(&self, line: usize) -> Option<String> {
         if self.people.is_some() {
-            return self.watched.as_deref().map(|mri| {
+            return self.watched.get(line)?.as_deref().map(|mri| {
                 crate::backend::teams_translate::clean_teams_user_id(mri)
                     .unwrap_or_else(|| mri.to_owned())
             });
@@ -957,13 +972,17 @@ impl<T: Fn(Listen)> Shown<'_, T> {
             CallEvent::Live => (self.tell)(Listen::Live),
             CallEvent::AudioFlowing => {}
             CallEvent::FarEndMuted(muted) => self.change(|far| far.muted = muted),
-            CallEvent::FarEndVideo(on) => self.far_video(on),
+            CallEvent::FarEndCamera { line, on } => self.far_video(line, on),
             CallEvent::FarEndShare(on) => self.far_share(on),
             // Only an incoming call's ringing says this, and that is over.
             CallEvent::AnsweredElsewhere => {}
             CallEvent::Lobby => (self.tell)(Listen::Lobby),
             CallEvent::Admitted => (self.tell)(Listen::Admitted),
-            CallEvent::Watching(who) => self.watched = who,
+            CallEvent::Watching(who) => {
+                self.watched = who;
+                // The tiles' names follow.
+                self.tell_cameras();
+            }
             CallEvent::People(people) => {
                 self.people = Some(people);
                 (self.tell)(Listen::Roster(self.roster()));
@@ -986,7 +1005,8 @@ async fn follow(
         far: FarEnd::default(),
         callee,
         people: None,
-        watched: None,
+        watched: Vec::new(),
+        cameras_on: std::collections::BTreeSet::new(),
         tell,
         ended: None,
     };

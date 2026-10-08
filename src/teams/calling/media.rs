@@ -184,6 +184,9 @@ pub struct MediaConfig {
     /// data channel on it ([`super::channel`]): a meeting asks for
     /// video there.
     pub data: bool,
+    /// More camera lines, receive-only: a meeting shows one more
+    /// participant's camera on each.
+    pub cameras: Vec<VideoLine>,
 }
 
 /// The camera's m-line, as a media session is started with it.
@@ -238,6 +241,7 @@ impl MediaConfig {
                 rtx: Some(offer_video_pt(OPUS_PT) + 1),
             }),
             data: false,
+            cameras: Vec::new(),
         }
     }
 
@@ -252,10 +256,17 @@ impl MediaConfig {
             pt: MEETING_VIDEO_PT,
             rtx: Some(MEETING_VIDEO_RTX),
         };
+        // After the data line's mid, 3.
+        let cameras = if HAS_VIDEO {
+            ["4", "5", "6"].into_iter().map(line).collect()
+        } else {
+            Vec::new()
+        };
         Self {
             video: HAS_VIDEO.then(|| line(VIDEO_MID)),
             share: HAS_VIDEO.then(|| line(SHARE_MID)),
             data: true,
+            cameras,
             ..Self::offer(relay)
         }
     }
@@ -290,9 +301,37 @@ impl MediaConfig {
                     rtx: codec.rtx,
                 }),
             data: false,
+            cameras: Vec::new(),
+        }
+    }
+
+    /// A meeting's answer to its media server's `offer`: as
+    /// [`Self::answer`]'s, with the data channel and as many more of its
+    /// camera lines as a meeting offer of ours has.
+    pub fn meeting_answer(relay: Option<Relay>, offer: &RemoteMedia) -> Self {
+        let cameras = match offer.video.filter(|_| HAS_VIDEO) {
+            Some(codec) => offer
+                .other_cameras()
+                .into_iter()
+                .take(MORE_CAMERAS)
+                .map(|line| VideoLine {
+                    mid: line.mid.clone(),
+                    pt: codec.pt,
+                    rtx: codec.rtx,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        Self {
+            data: true,
+            cameras,
+            ..Self::answer(relay, offer)
         }
     }
 }
+
+/// How many more cameras than one a meeting shows.
+pub const MORE_CAMERAS: usize = 3;
 
 /// Where the sound goes and comes from.
 #[derive(Debug, Default)]
@@ -318,6 +357,8 @@ pub struct Held {
     uplink: Option<Uplink>,
     camera: super::video::Ends,
     share: super::video::Ends,
+    /// More camera lines' ends.
+    more: Vec<super::video::Ends>,
 }
 
 impl std::fmt::Debug for Held {
@@ -342,6 +383,7 @@ impl From<Audio> for Held {
             uplink,
             camera,
             share,
+            more: Vec::new(),
         }
     }
 }
@@ -421,8 +463,10 @@ pub enum MediaEvent {
     Connected,
     /// Audio has gone out and come in: the call can be heard both ways.
     AudioFlowing,
-    /// The far end's camera started (`true`) or stopped showing.
-    FarVideo(bool),
+    /// The far end's camera on camera line `line` started (`on`) or
+    /// stopped showing: the far end's own on line 0; in a meeting, one
+    /// participant's on each line.
+    FarCamera { line: usize, on: bool },
     /// The far end's screen share started (`true`) or stopped showing.
     FarShare(bool),
     /// The meeting's data channel opened.
@@ -508,6 +552,19 @@ struct Plan {
     /// The SSRCs the far end sends each on, as its lines say.
     video_ssrcs: Option<(u32, u32)>,
     share_ssrcs: Option<(u32, u32)>,
+    /// Every video line's mid, what flows on it, and its SSRCs: for more
+    /// camera lines.
+    lines: Vec<LineFlows>,
+}
+
+/// What flows on one video line of the far end's description, and the
+/// SSRCs it sends there.
+#[derive(Clone, Debug)]
+struct LineFlows {
+    mid: String,
+    /// Whether we send, and whether we receive.
+    flows: (bool, bool),
+    ssrcs: Option<(u32, u32)>,
 }
 
 impl std::fmt::Debug for Plan {
@@ -890,6 +947,23 @@ fn plan(remote: &RemoteMedia, opus_pt: u8) -> Result<Plan, String> {
         .filter(|line| line.port != 0 && remote.share_video.is_some())
         .map(|line| flows(line.direction));
     let video_ssrcs = remote.camera().and_then(|line| line.ssrc_range);
+    let lines = remote
+        .lines
+        .iter()
+        .filter(|l| l.kind == super::LineKind::Video)
+        .map(|l| {
+            let flows = if l.port == 0 {
+                (false, false)
+            } else {
+                flows(l.direction)
+            };
+            LineFlows {
+                mid: l.mid.clone(),
+                flows,
+                ssrcs: l.ssrc_range,
+            }
+        })
+        .collect();
     let share_ssrcs = remote.share().and_then(|line| line.ssrc_range);
     Ok(Plan {
         creds: IceCreds {
@@ -906,6 +980,7 @@ fn plan(remote: &RemoteMedia, opus_pt: u8) -> Result<Plan, String> {
         share,
         video_ssrcs,
         share_ssrcs,
+        lines,
     })
 }
 
@@ -1117,6 +1192,7 @@ fn local_media(
         share_pt: offer_video_pt(opus_pt),
         share_rtx: None,
         sharing: false,
+        receive_cameras: Vec::new(),
         video_direction: Direction::SendRecv,
         // No data channel offered: audio only, the third attempt of §F.3.
         data_ssrc: None,
@@ -1245,6 +1321,8 @@ struct Session {
     data_ssrc: Option<u32>,
     /// The meeting's data channel, once SCTP is started.
     channel: Option<str0m::channel::ChannelId>,
+    /// More camera lines, in a meeting.
+    more: Vec<super::video::CallVideo>,
 }
 
 impl Session {
@@ -1280,7 +1358,18 @@ impl Session {
             uplink,
             camera: camera_ends,
             share: share_ends,
+            more: mut more_ends,
         } = held;
+        // A tile each for more cameras, in the camera's gallery.
+        let more_ends: Vec<super::video::Ends> = (0..config.cameras.len())
+            .map(|i| {
+                if more_ends.is_empty() {
+                    camera_ends.more(i + 1)
+                } else {
+                    more_ends.remove(0)
+                }
+            })
+            .collect();
         let fresh_ssrc = || loop {
             let candidate = rand::random::<u32>().max(1);
             if candidate != ssrc {
@@ -1302,6 +1391,17 @@ impl Session {
         };
         let video = line(super::video::Which::Camera, &config.video, camera_ends);
         let share = line(super::video::Which::Share, &config.share, share_ends);
+        let more: Vec<super::video::CallVideo> = config
+            .cameras
+            .iter()
+            .zip(more_ends)
+            .enumerate()
+            .filter_map(|(i, (spec, ends))| {
+                let mut camera = line(super::video::Which::Camera, &Some(spec.clone()), ends)?;
+                camera.set_line(i + 1);
+                Some(camera)
+            })
+            .collect();
         let data_ssrc = config.data.then(fresh_ssrc);
         let mut candidates = Vec::new();
         let host = config
@@ -1392,6 +1492,7 @@ impl Session {
             release: None,
             data_ssrc,
             channel: None,
+            more,
         })
     }
 
@@ -1493,6 +1594,7 @@ impl Session {
             local.share_rtx_ssrc = share.rtx_ssrc();
         }
         local.data_ssrc = self.data_ssrc;
+        local.receive_cameras = self.more.iter().map(|m| m.mid().to_string()).collect();
         log::info!(
             "gather: done after {:?}: {}",
             self.since(),
@@ -1645,7 +1747,12 @@ impl Session {
         bump(&self.counters.packets_in, 1);
         bump(&self.counters.bytes_in, data.len());
         expect_remote(&mut self.rtc, self.mid, self.opus_pt, &mut self.seen, data);
-        for line in [&mut self.video, &mut self.share].into_iter().flatten() {
+        for line in self
+            .video
+            .iter_mut()
+            .chain(self.share.iter_mut())
+            .chain(self.more.iter_mut())
+        {
             line.learn(&mut self.rtc, data);
         }
         let Ok(receive) = Receive::new(Protocol::Udp, source, destination, data) else {
@@ -1800,7 +1907,12 @@ impl Session {
                 self.check_flowing();
             }
             RtcEvent::MediaData(data) => {
-                for line in [&mut self.video, &mut self.share].into_iter().flatten() {
+                for line in self
+                    .video
+                    .iter_mut()
+                    .chain(self.share.iter_mut())
+                    .chain(self.more.iter_mut())
+                {
                     if line.is(data.mid) {
                         line.data(&data, Instant::now());
                         self.rtc_timeout = Some(Instant::now());
@@ -1808,7 +1920,12 @@ impl Session {
                 }
             }
             RtcEvent::KeyframeRequest(request) => {
-                for line in [&mut self.video, &mut self.share].into_iter().flatten() {
+                for line in self
+                    .video
+                    .iter_mut()
+                    .chain(self.share.iter_mut())
+                    .chain(self.more.iter_mut())
+                {
                     line.keyframe_request(&request);
                 }
             }
@@ -1919,6 +2036,16 @@ impl Session {
         self.receive = plan.receive;
         if let (Some(video), Some((send, receive))) = (&mut self.video, plan.video) {
             video.set_flows(send, receive, plan.video_ssrcs);
+        }
+        for more in &mut self.more {
+            let mid = more.mid();
+            let (flows, ssrcs) = plan
+                .lines
+                .iter()
+                .find(|l| Mid::from(l.mid.as_str()) == mid)
+                .map_or(((false, false), None), |l| (l.flows, l.ssrcs));
+            // Receive-only: nothing of ours goes on it.
+            more.set_flows(false, flows.1, ssrcs);
         }
         if let Some(share) = &mut self.share {
             // A description without the share line in use shares nothing.
@@ -2040,7 +2167,12 @@ impl Session {
         if !self.connected && self.flight.due(now) {
             self.resend_flight(now).await;
         }
-        for line in [&mut self.video, &mut self.share].into_iter().flatten() {
+        for line in self
+            .video
+            .iter_mut()
+            .chain(self.share.iter_mut())
+            .chain(self.more.iter_mut())
+        {
             line.on_time(&mut self.rtc, now);
         }
         if self.connect_deadline.is_some_and(|at| at <= now) {
@@ -2110,6 +2242,7 @@ impl Session {
                 uplink: uplink.map(|(frames, muted)| Uplink { frames, muted }),
                 camera: self.video.take().map(|v| v.into_ends()).unwrap_or_default(),
                 share: self.share.take().map(|v| v.into_ends()).unwrap_or_default(),
+                more: self.more.drain(..).map(|v| v.into_ends()).collect(),
             });
         }
         if let Some(gathered) = self.gathered.take() {
@@ -2333,7 +2466,7 @@ mod tests {
                     ssrc_range: None,
                 },
             ],
-            camera_stream: None,
+            video_streams: Vec::new(),
         }
     }
 
@@ -2676,7 +2809,7 @@ mod tests {
                 video: None,
                 share_video: None,
                 lines: vec![audio_line(Direction::SendRecv)],
-                camera_stream: None,
+                video_streams: Vec::new(),
             }
         }
 
@@ -2852,6 +2985,12 @@ mod tests {
             assert_eq!(config.video.as_ref().map(|v| v.mid.as_str()), Some("2"));
             assert_eq!(config.share.as_ref().map(|v| v.mid.as_str()), Some("3"));
         }
+        let meeting = MediaConfig::meeting_answer(None, &remote);
+        assert!(meeting.data);
+        if HAS_VIDEO {
+            let mids: Vec<&str> = meeting.cameras.iter().map(|c| c.mid.as_str()).collect();
+            assert_eq!(mids, ["5", "6", "7"]);
+        }
         let plan = plan(&remote, config.opus_pt).expect("a usable offer");
         // No `a=setup`: we are the DTLS client, as the web client was.
         assert!(plan.active);
@@ -2862,8 +3001,13 @@ mod tests {
     fn a_meeting_is_offered_h264_at_its_media_servers_number() {
         let config = MediaConfig::meeting(None);
         assert!(config.controlling);
-        // With the data line, for the meeting's data channel.
+        // With the data line, for the meeting's data channel, and more
+        // cameras to receive after it.
         assert!(config.data);
+        if HAS_VIDEO {
+            let mids: Vec<&str> = config.cameras.iter().map(|c| c.mid.as_str()).collect();
+            assert_eq!(mids, ["4", "5", "6"]);
+        }
         assert!(!MediaConfig::offer(None).data);
         assert_eq!(config.opus_pt, OPUS_PT);
         if HAS_VIDEO {

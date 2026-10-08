@@ -120,10 +120,10 @@ pub struct RemoteMedia {
     pub share_video: Option<VideoCodec>,
     /// Every m-line, in order.
     pub lines: Vec<Line>,
-    /// The meeting's id for the stream it sends us on the camera's line
-    /// (`a=x-source-streamid`): where a source request asks for someone's
-    /// video to come.
-    pub camera_stream: Option<u32>,
+    /// A meeting's id for the stream it sends us on each video line, by
+    /// mid (`a=x-source-streamid`): where a source request asks for
+    /// someone's video to come.
+    pub video_streams: Vec<(String, u32)>,
 }
 
 impl RemoteMedia {
@@ -139,6 +139,29 @@ impl RemoteMedia {
         video()
             .find(|l| l.label.as_deref() == Some(CAMERA_LABEL))
             .or_else(|| video().find(|l| l.label.is_none()))
+    }
+
+    /// The meeting's stream id for the video line `mid`.
+    pub fn stream_of(&self, mid: &str) -> Option<u32> {
+        self.video_streams
+            .iter()
+            .find(|(m, _)| m == mid)
+            .map(|(_, stream)| *stream)
+    }
+
+    /// The `main-video` lines other than the camera's that are open, in
+    /// order: where more cameras can come in a meeting.
+    pub fn other_cameras(&self) -> Vec<&Line> {
+        let camera = self.camera().map(|l| l.mid.as_str());
+        self.lines
+            .iter()
+            .filter(|l| {
+                l.kind == LineKind::Video
+                    && l.port != 0
+                    && l.label.as_deref() == Some(CAMERA_LABEL)
+                    && Some(l.mid.as_str()) != camera
+            })
+            .collect()
     }
 
     /// What its lines are, for the log: each line's mid, kind, label and
@@ -241,6 +264,10 @@ pub struct LocalMedia {
     /// The share line's H.264 and retransmission payload types.
     pub share_pt: u8,
     pub share_rtx: Option<u8>,
+    /// More camera lines, receive-only, by mid: in a meeting each shows
+    /// one more participant's camera. In an offer they follow the data
+    /// line; in an answer they are those of the far end's lines kept.
+    pub receive_cameras: Vec<String>,
     /// Whether we share our screen now: the share line is `sendonly` in
     /// our offers, and kept in our answers even to a far end that does
     /// not share. Not sharing, an offer leaves it `inactive` and an

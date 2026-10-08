@@ -37,6 +37,17 @@ use super::media::MediaEvent;
 /// The far end's camera's key in the [`Gallery`].
 pub const FAR_CAMERA: &str = "far";
 
+/// The [`Gallery`] key of the camera shown on camera line `line`: the
+/// far end's ([`FAR_CAMERA`]) on the first, and in a meeting one more
+/// participant's on each line after.
+pub fn camera_key(line: usize) -> String {
+    if line == 0 {
+        FAR_CAMERA.to_owned()
+    } else {
+        format!("{FAR_CAMERA}-{line}")
+    }
+}
+
 /// No picture from the far end for this long: its camera is off (the
 /// native client stops sending without a renegotiation).
 const FAR_STOPPED: Duration = Duration::from_secs(3);
@@ -102,7 +113,8 @@ impl Video {
     pub(super) fn split(self) -> (Ends, Ends) {
         #[cfg(feature = "huddle-video")]
         let (tile, screen) = (
-            self.gallery.map(Shown::tile),
+            self.gallery
+                .map(|gallery| Shown::tile(gallery, camera_key(0))),
             self.screen.map(Shown::screen),
         );
         let camera = Ends {
@@ -125,22 +137,49 @@ impl Video {
     }
 }
 
+impl Ends {
+    /// The ends of one more camera line, `line`: a tile of its own in the
+    /// gallery these show in. No camera of ours goes on it.
+    pub(super) fn more(&self, line: usize) -> Ends {
+        #[cfg(not(feature = "huddle-video"))]
+        let _ = (self, line);
+        Ends {
+            #[cfg(feature = "huddle-video")]
+            shown: self
+                .shown
+                .as_ref()
+                .and_then(Shown::gallery)
+                .and_then(|gallery| Shown::tile(gallery, camera_key(line))),
+            #[cfg(feature = "huddle-camera")]
+            feed: None,
+        }
+    }
+}
+
 /// Where the far end's pictures on a line are decoded and shown.
 #[cfg(feature = "huddle-video")]
 enum Shown {
-    /// A tile in the call window's gallery, under [`FAR_CAMERA`].
-    Tile(CameraDecoding, Gallery),
+    /// A tile in the call window's gallery, under its key.
+    Tile(CameraDecoding, Gallery, String),
     /// The call window's shared screen.
     Screen(screen::Decoding, Screen),
 }
 
 #[cfg(feature = "huddle-video")]
 impl Shown {
-    fn tile(gallery: Gallery) -> Option<Self> {
+    fn tile(gallery: Gallery, key: String) -> Option<Self> {
         CameraDecoding::spawn(gallery.clone())
             .map_err(|error| log::warn!("video: no decoding thread: {error}"))
             .ok()
-            .map(|decoding| Self::Tile(decoding, gallery))
+            .map(|decoding| Self::Tile(decoding, gallery, key))
+    }
+
+    /// The gallery a tile shows in.
+    fn gallery(&self) -> Option<Gallery> {
+        match self {
+            Self::Tile(_, gallery, _) => Some(gallery.clone()),
+            Self::Screen(..) => None,
+        }
     }
 
     fn screen(screen: Screen) -> Option<Self> {
@@ -152,28 +191,28 @@ impl Shown {
 
     fn start(&mut self) {
         match self {
-            Self::Tile(decoding, _) => decoding.start(FAR_CAMERA),
+            Self::Tile(decoding, _, key) => decoding.start(key),
             Self::Screen(decoding, _) => decoding.start(),
         }
     }
 
     fn stop(&mut self) {
         match self {
-            Self::Tile(decoding, _) => decoding.stop(FAR_CAMERA),
+            Self::Tile(decoding, _, key) => decoding.stop(key),
             Self::Screen(decoding, _) => decoding.stop(),
         }
     }
 
     fn push(&mut self, unit: Vec<u8>, contiguous: bool) {
         match self {
-            Self::Tile(decoding, _) => decoding.push(FAR_CAMERA, unit, contiguous),
+            Self::Tile(decoding, _, key) => decoding.push(key, unit, contiguous),
             Self::Screen(decoding, _) => decoding.push(unit, contiguous),
         }
     }
 
     fn waiting(&self) -> usize {
         match self {
-            Self::Tile(decoding, _) => decoding.waiting(FAR_CAMERA),
+            Self::Tile(decoding, _, key) => decoding.waiting(key),
             Self::Screen(decoding, _) => decoding.waiting(),
         }
     }
@@ -181,7 +220,7 @@ impl Shown {
     /// Whether the decoder asked for a keyframe since last asked.
     fn take_keyframe_wish(&self) -> bool {
         match self {
-            Self::Tile(_, gallery) => gallery.take_keyframe_wish(FAR_CAMERA),
+            Self::Tile(_, gallery, key) => gallery.take_keyframe_wish(key),
             Self::Screen(_, screen) => screen.take_keyframe_wish(),
         }
     }
@@ -308,6 +347,8 @@ struct Report {
 /// One video line of a call: the camera's or the share's.
 pub(super) struct CallVideo {
     which: Which,
+    /// Which camera line this is: 0, or one more in a meeting.
+    line: usize,
     mid: Mid,
     /// Our camera's SSRC, and its resends', which str0m must have
     /// whenever the codec has a retransmission payload type (it panics
@@ -399,6 +440,7 @@ impl CallVideo {
         log::info!("video: {which:?} line {mid}, H.264 at {pt}, our SSRC {ssrc}");
         Self {
             which,
+            line: 0,
             mid,
             ssrc,
             rtx_ssrc,
@@ -735,9 +777,22 @@ impl CallVideo {
     /// starting (`true`) or stopping.
     fn event(&self, on: bool) -> MediaEvent {
         match self.which {
-            Which::Camera => MediaEvent::FarVideo(on),
+            Which::Camera => MediaEvent::FarCamera {
+                line: self.line,
+                on,
+            },
             Which::Share => MediaEvent::FarShare(on),
         }
+    }
+
+    /// Makes this camera line number `line`.
+    pub(super) fn set_line(&mut self, line: usize) {
+        self.line = line;
+    }
+
+    /// Its mid.
+    pub(super) fn mid(&self) -> Mid {
+        self.mid
     }
 
     /// What the camera has next: never, without one.

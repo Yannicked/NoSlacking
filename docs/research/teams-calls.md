@@ -1566,3 +1566,19 @@ We do the same:
   on, on our camera line's stream;
 - ask again whenever the roster changes who that is, and `-1` when no
   one's is on.
+
+**Several cameras.** The meeting sends one participant's camera per
+receiving video line, so the web client offers ten video lines (six
+`sendrecv` and four `recvonly`) and lists them in `mediaDescriptions`. We
+offer three more receive-only `main-video` lines after the data line
+(mids 4–6), or keep three more of the media server's camera lines in our
+answer to it. We list them in `mediaDescriptions`, and send one `sr` per
+line, each with that line's `x-source-streamid`. A camera keeps its line
+while it stays on; newcomers take free lines in roster order. So up to
+four cameras show, each in a tile of its own.
+
+**Keyframes without parameter sets.** The media server does not repeat
+the SPS and PPS with every keyframe. After one frame failed to decode,
+our decoder waited for a keyframe that could start it again, and none
+could: frozen, with a keyframe asked for every second. Every keyframe now
+carries the parameter sets last seen.

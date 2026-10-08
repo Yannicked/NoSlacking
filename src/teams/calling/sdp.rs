@@ -180,9 +180,15 @@ pub fn read(sdp: &str) -> Result<RemoteMedia, SdpError> {
                 .find(|l| l.media == "video" && l.port != 0 && l.attr("label").is_none())
         });
     let video = camera.and_then(h264_of);
-    let camera_stream = camera
-        .and_then(|l| l.attr("x-source-streamid"))
-        .and_then(|id| id.trim().parse().ok());
+    let video_streams = raw
+        .iter()
+        .zip(&mids)
+        .filter(|(l, _)| l.media == "video")
+        .filter_map(|(l, mid)| {
+            let stream = l.attr("x-source-streamid")?.trim().parse().ok()?;
+            Some((mid.clone(), stream))
+        })
+        .collect();
     let share_video = raw
         .iter()
         .find(|l| l.media == "video" && l.port != 0 && l.attr("label") == Some(SHARE_LABEL))
@@ -223,7 +229,7 @@ pub fn read(sdp: &str) -> Result<RemoteMedia, SdpError> {
         video,
         share_video,
         lines,
-        camera_stream,
+        video_streams,
     })
 }
 
@@ -428,6 +434,7 @@ pub fn offer(local: &LocalMedia) -> String {
     if local.data_ssrc.is_some() {
         mids.push("3");
     }
+    mids.extend(local.receive_cameras.iter().map(String::as_str));
 
     let mut out = String::new();
     session_part(&mut out, local, &mids);
@@ -553,7 +560,23 @@ pub fn offer(local: &LocalMedia) -> String {
     if let Some(ssrc) = local.data_ssrc {
         data_line(&mut out, local, "3", ssrc, setup_text(local.setup), false);
     }
+    for mid in &local.receive_cameras {
+        let line = receiving_camera(mid, local.video_pt, local.video_rtx);
+        video_line(&mut out, local, &line, setup_text(local.setup), false);
+    }
     out
+}
+
+/// One more camera's line, receive-only: it names no stream of ours.
+fn receiving_camera(mid: &str, pt: u8, rtx: Option<u8>) -> VideoLine<'_> {
+    VideoLine {
+        mid,
+        label: CAMERA_LABEL,
+        codec: VideoCodec { pt, rtx },
+        ssrcs: (0, None),
+        direction: Direction::RecvOnly,
+        share: false,
+    }
 }
 
 /// Writes our answer to the far end's offer or renegotiation offer, in
@@ -652,6 +675,9 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
                         }
                     }
             }
+            LineKind::Video if local.receive_cameras.contains(&line.mid) => {
+                open && remote.video.is_some()
+            }
             LineKind::Video => {
                 open && Some(line.mid.as_str()) == camera_mid
                     && local.video_ssrc.is_some()
@@ -722,6 +748,14 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
                         direction: share_direction(line.direction),
                         share: true,
                     };
+                    video_line(&mut out, local, &line_spec, setup, first);
+                }
+            }
+            (LineKind::Video, _, _) if local.receive_cameras.contains(&line.mid) => {
+                if let Some(offered) = remote.video {
+                    let rtx = offered.rtx.filter(|_| local.video_rtx.is_some());
+                    let mut line_spec = receiving_camera(&line.mid, offered.pt, rtx);
+                    line_spec.direction = direction(Direction::RecvOnly);
                     video_line(&mut out, local, &line_spec, setup, first);
                 }
             }
@@ -1138,6 +1172,7 @@ mod tests {
             share_rtx_ssrc: None,
             share_pt: 108,
             share_rtx: Some(109),
+            receive_cameras: Vec::new(),
             sharing: false,
             video_direction: Direction::SendRecv,
             opus_pt: 111,
@@ -1727,7 +1762,14 @@ mod tests {
         assert_eq!(remote.camera().map(|l| l.mid.as_str()), Some("2"));
         assert_eq!(remote.share().map(|l| l.mid.as_str()), Some("3"));
         assert_eq!(remote.video.map(|v| v.pt), Some(107));
-        assert_eq!(remote.camera_stream, Some(415));
+        assert_eq!(remote.stream_of("2"), Some(415));
+        assert_eq!(remote.stream_of("5"), Some(416));
+        let others: Vec<&str> = remote
+            .other_cameras()
+            .iter()
+            .map(|l| l.mid.as_str())
+            .collect();
+        assert_eq!(others[..3], ["5", "6", "7"]);
         assert!(
             remote
                 .candidates
@@ -1773,5 +1815,55 @@ mod tests {
             .find(|l| l.starts_with("a=group:BUNDLE"))
             .expect("a bundle");
         assert!(bundle.starts_with("a=group:BUNDLE 1"), "{bundle}");
+    }
+
+    #[test]
+    fn a_meeting_is_offered_and_answered_more_cameras_to_receive() {
+        let local = LocalMedia {
+            video_ssrc: Some(77),
+            data_ssrc: Some(99),
+            receive_cameras: vec!["4".into(), "5".into()],
+            ..local()
+        };
+        let sdp = offer(&local);
+        assert!(sdp.contains("a=group:BUNDLE 0 1 2 3 4 5\r\n"), "{sdp}");
+        let offered = read(&sdp).expect("our offer reads back");
+        let extra: Vec<(&str, Direction)> = offered
+            .lines
+            .iter()
+            .filter(|l| l.mid == "4" || l.mid == "5")
+            .map(|l| (l.mid.as_str(), l.direction))
+            .collect();
+        assert_eq!(
+            extra,
+            [("4", Direction::RecvOnly), ("5", Direction::RecvOnly)]
+        );
+        assert_eq!(offered.camera().map(|l| l.mid.as_str()), Some("1"));
+
+        // To the meeting's media server's offer: its camera line, and the
+        // lines asked for, receiving; its other video lines rejected.
+        let remote = read(MEETING_RETARGET).expect("reads");
+        let ours = LocalMedia {
+            video_ssrc: Some(77),
+            data_ssrc: Some(99),
+            opus_pt: 102,
+            receive_cameras: vec!["5".into(), "6".into()],
+            ..local
+        };
+        let answered = read(&answer(&ours, &remote)).expect("our answer reads back");
+        let open: Vec<(&str, Direction)> = answered
+            .lines
+            .iter()
+            .filter(|l| l.kind == LineKind::Video && l.port != 0)
+            .map(|l| (l.mid.as_str(), l.direction))
+            .collect();
+        assert_eq!(
+            open,
+            [
+                ("2", Direction::SendRecv),
+                ("5", Direction::RecvOnly),
+                ("6", Direction::RecvOnly)
+            ]
+        );
     }
 }

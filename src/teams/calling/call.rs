@@ -64,8 +64,10 @@ pub enum CallEvent {
     AudioFlowing,
     /// The one called muted (`true`) or unmuted their microphone.
     FarEndMuted(bool),
-    /// The far end's camera started (`true`) or stopped showing.
-    FarEndVideo(bool),
+    /// The camera on camera line `line` started (`on`) or stopped
+    /// showing: the far end's on line 0; in a meeting, one participant's
+    /// on each line.
+    FarEndCamera { line: usize, on: bool },
     /// The far end's screen share started (`true`) or stopped showing.
     FarEndShare(bool),
     /// A meeting keeps you in its lobby until someone lets you in.
@@ -75,9 +77,9 @@ pub enum CallEvent {
     Admitted,
     /// Who else is in the meeting, or waits in its lobby, now.
     People(Vec<Attendee>),
-    /// Whose camera the meeting is asked to send us (by MRI), or no
-    /// one's.
-    Watching(Option<String>),
+    /// Whose camera the meeting is asked to send us on each camera line
+    /// (by MRI), or no one's.
+    Watching(Vec<Option<String>>),
     /// An incoming call stopped ringing because another device of yours
     /// (or another delivery of the same call here) picked it up: not a
     /// missed call.
@@ -224,7 +226,8 @@ async fn run_meeting(
         update_descriptions: None,
         camera_capabilities: None,
         channel: super::channel::Channel::default(),
-        watching: None,
+        camera_lines: Vec::new(),
+        watching: Vec::new(),
     });
     call.relay = relay_for(client).await;
     let ended = call
@@ -470,9 +473,11 @@ struct InMeeting {
     camera_capabilities: Option<String>,
     /// The meeting's data channel, where video is asked for.
     channel: super::channel::Channel,
-    /// Whose camera was last asked for (by MRI and source id), if any
-    /// request went.
-    watching: Option<Option<(String, i64)>>,
+    /// Our camera lines' mids, in order: the camera's, then more.
+    camera_lines: Vec<String>,
+    /// Whose camera was last asked for on each camera line, by MRI and
+    /// source id.
+    watching: Vec<Option<(String, i64)>>,
 }
 
 impl InMeeting {
@@ -593,6 +598,9 @@ impl Call {
                 .map_err(media_failure)?;
         self.leg = self.api.ids().media_leg_id.clone();
         let offer = sdp::offer(&local);
+        if let Some(meeting) = &mut self.meeting {
+            meeting.camera_lines = camera_lines(&offer);
+        }
         let joined = match self.api.join_meeting(&preheated, &offer).await {
             Ok(joined) => joined,
             Err(error) => {
@@ -673,12 +681,14 @@ impl Call {
                             tell(CallEvent::Live);
                         }
                     }
-                    Some(MediaEvent::FarVideo(on)) => tell(CallEvent::FarEndVideo(on)),
+                    Some(MediaEvent::FarCamera { line, on }) => {
+                        tell(CallEvent::FarEndCamera { line, on });
+                    }
                     Some(MediaEvent::FarShare(on)) => tell(CallEvent::FarEndShare(on)),
                     Some(MediaEvent::ChannelOpen) => {
                         if let Some(meeting) = &mut self.meeting {
                             meeting.channel = super::channel::Channel::default();
-                            meeting.watching = None;
+                            meeting.watching = vec![None; meeting.camera_lines.len()];
                             session.send_data(meeting.channel.syn());
                         }
                     }
@@ -1183,10 +1193,10 @@ impl Call {
         };
         // Without them (the session had ended) the call goes on silent.
         let held = session.release().await.unwrap_or_default();
-        let config = MediaConfig {
-            // The meeting's data channel, on the new server too.
-            data: self.meeting.is_some(),
-            ..MediaConfig::answer(self.relay.clone(), remote)
+        let config = if self.meeting.is_some() {
+            MediaConfig::meeting_answer(self.relay.clone(), remote)
+        } else {
+            MediaConfig::answer(self.relay.clone(), remote)
         };
         let started = MediaSession::resume(config, held).await;
         let (fresh, fresh_local) = match started {
@@ -1216,6 +1226,10 @@ impl Call {
             tell(CallEvent::Admitted);
         }
         let answer = sdp::answer(local, remote);
+        if let Some(meeting) = &mut self.meeting {
+            meeting.camera_lines = camera_lines(&answer);
+            meeting.watching = vec![None; meeting.camera_lines.len()];
+        }
         let descriptions = self.next_descriptions(&answer);
         match self
             .api
@@ -1258,48 +1272,63 @@ impl Call {
         }
     }
 
-    /// Asks the meeting for the camera to show, if that changed: the
-    /// first one on of those in the call, on our camera's line; none
-    /// once no one's is on.
+    /// Asks the meeting for the cameras to show, where that changed: one
+    /// camera on of those in the call per camera line, each kept on its
+    /// line while it stays on; none on a line once no one is left for it.
     fn ask_for_video(&mut self, session: &MediaSession, tell: &(impl Fn(CallEvent) + Send)) {
-        let stream = self.last_remote.as_ref().and_then(|r| r.camera_stream);
-        let Some(meeting) = &mut self.meeting else {
+        let Some(remote) = self.last_remote.as_ref() else {
             return;
         };
-        let Some(stream) = stream else {
-            log::info!("Teams meeting: no stream to show a camera on");
+        let Some(meeting) = &mut self.meeting else {
             return;
         };
         if !meeting.channel.ready() {
             return;
         }
-        let wanted = meeting
+        let on: Vec<(String, i64)> = meeting
             .people
             .list()
             .into_iter()
-            .find(|a| !a.waiting && a.camera.is_some())
-            .and_then(|a| Some((a.mri, a.camera?)));
-        let asked = meeting.watching.clone();
-        if asked.as_ref() == Some(&wanted) || (asked.is_none() && wanted.is_none()) {
-            return;
-        }
-        let source = wanted.as_ref().map(|(_, source)| *source);
-        let Some(request) = meeting.channel.request_video(source, stream) else {
-            return;
-        };
-        session.send_data(request);
-        log::info!(
-            "Teams meeting: asked for {}",
-            if wanted.is_some() {
-                "a camera"
-            } else {
-                "no camera"
+            .filter(|a| !a.waiting)
+            .filter_map(|a| Some((a.mri, a.camera?)))
+            .collect();
+        let lines = meeting.camera_lines.len();
+        meeting.watching.resize(lines, None);
+        let wanted = assign(lines, &meeting.watching, &on);
+        let mut changed = false;
+        for (line, want) in wanted.iter().enumerate() {
+            if meeting.watching[line] == *want {
+                continue;
             }
-        );
-        tell(CallEvent::Watching(
-            wanted.as_ref().map(|(mri, _)| mri.clone()),
-        ));
-        meeting.watching = Some(wanted);
+            let Some(stream) = remote.stream_of(&meeting.camera_lines[line]) else {
+                log::info!("Teams meeting: camera line {line} has no stream to show on");
+                continue;
+            };
+            let source = want.as_ref().map(|(_, source)| *source);
+            let Some(request) = meeting.channel.request_video(source, stream) else {
+                return;
+            };
+            session.send_data(request);
+            log::info!(
+                "Teams meeting: asked for {} on camera line {line}",
+                if want.is_some() {
+                    "a camera"
+                } else {
+                    "no camera"
+                }
+            );
+            meeting.watching[line] = want.clone();
+            changed = true;
+        }
+        if changed {
+            tell(CallEvent::Watching(
+                meeting
+                    .watching
+                    .iter()
+                    .map(|w| w.as_ref().map(|(mri, _)| mri.clone()))
+                    .collect(),
+            ));
+        }
     }
 
     /// The next `mediaDescriptions` of a meeting, for our SDP `sdp`;
@@ -1336,9 +1365,20 @@ impl Call {
         };
         meeting.camera_on = on;
         meeting.request += 1;
+        let more: Vec<&str> = meeting
+            .camera_lines
+            .iter()
+            .skip(1)
+            .map(String::as_str)
+            .collect();
         meeting.changes += 1;
-        let descriptions =
-            super::api::media_descriptions(Some(&mid), on, share.as_deref(), meeting.request);
+        let descriptions = super::api::media_descriptions(
+            Some(&mid),
+            on,
+            &more,
+            share.as_deref(),
+            meeting.request,
+        );
         let number = meeting.changes;
         let (update, capabilities) = (
             meeting.update_descriptions.clone(),
@@ -1406,6 +1446,46 @@ impl Call {
             Err(_) => log::info!("Teams call: leave took too long"),
         }
     }
+}
+
+/// Our camera lines' mids in our SDP `ours`, in order: the camera's,
+/// then the receive-only ones after it.
+fn camera_lines(ours: &str) -> Vec<String> {
+    let Ok(read) = sdp::read(ours) else {
+        return Vec::new();
+    };
+    read.camera()
+        .filter(|l| l.port != 0)
+        .into_iter()
+        .chain(read.other_cameras())
+        .map(|l| l.mid.clone())
+        .collect()
+}
+
+/// Which camera goes on which of `lines` camera lines, from those whose
+/// camera is `on` (MRI and source id, in roster order) and what each line
+/// shows now: one kept on its line while their camera stays on, the rest
+/// on free lines in order; a line without anyone left shows none.
+fn assign(
+    lines: usize,
+    now: &[Option<(String, i64)>],
+    on: &[(String, i64)],
+) -> Vec<Option<(String, i64)>> {
+    let mut wanted: Vec<Option<(String, i64)>> = (0..lines)
+        .map(|line| {
+            let (mri, _) = now.get(line)?.as_ref()?;
+            on.iter().find(|(m, _)| m == mri).cloned()
+        })
+        .collect();
+    for camera in on {
+        if wanted.iter().flatten().any(|(mri, _)| *mri == camera.0) {
+            continue;
+        }
+        if let Some(free) = wanted.iter_mut().find(|w| w.is_none()) {
+            *free = Some(camera.clone());
+        }
+    }
+    wanted
 }
 
 /// Whether the far end's `remote` description comes from another media
@@ -1581,5 +1661,35 @@ mod tests {
             Some("8:teamsvisitor:a1b2c3")
         );
         assert_eq!(people.mri_of("someone"), None);
+    }
+
+    #[test]
+    fn cameras_keep_their_lines_and_newcomers_take_free_ones() {
+        let cam = |mri: &str, source| (mri.to_owned(), source);
+        // Two on, four lines: in roster order.
+        let first = assign(4, &[], &[cam("a", 202), cam("b", 302)]);
+        assert_eq!(
+            first,
+            [Some(cam("a", 202)), Some(cam("b", 302)), None, None]
+        );
+        // A's camera goes off, c's comes on: b stays where it was.
+        let next = assign(4, &first, &[cam("b", 302), cam("c", 402)]);
+        assert_eq!(next, [Some(cam("c", 402)), Some(cam("b", 302)), None, None]);
+        // More cameras than lines: the first ones shown.
+        let full = assign(1, &[], &[cam("a", 202), cam("b", 302)]);
+        assert_eq!(full, [Some(cam("a", 202))]);
+        // No one left.
+        assert_eq!(assign(2, &next, &[]), [None, None]);
+    }
+
+    #[test]
+    fn our_camera_lines_are_the_cameras_then_the_receiving_ones() {
+        let local = LocalMedia {
+            video_ssrc: Some(77),
+            receive_cameras: vec!["4".into(), "5".into()],
+            ..LocalMedia::default()
+        };
+        assert_eq!(camera_lines(&sdp::offer(&local)), ["1", "4", "5"]);
+        assert!(camera_lines("not sdp").is_empty());
     }
 }
