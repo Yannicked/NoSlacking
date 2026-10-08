@@ -12,7 +12,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::app::App;
+use crate::app::{App, Tone};
 use crate::backend;
 use crate::failure::Failure;
 use crate::i18n::{t, tf};
@@ -635,7 +635,7 @@ pub fn heard(app: &mut App, team: &str, channel: &str, state: Listen) {
                     listening.watching = None;
                     tell_wish(app, None);
                 }
-                app.toast(t("The screen share ended"), false);
+                app.toast(t("The screen share ended"), Tone::Info);
             }
         }
         #[cfg(feature = "huddle-video")]
@@ -656,7 +656,7 @@ pub fn heard(app: &mut App, team: &str, channel: &str, state: Listen) {
                 t("The huddle ended")
             };
             app.huddles.listening = None;
-            app.toast(ended, false);
+            app.toast(ended, Tone::Info);
         }
         Listen::Ended(Err(error)) => {
             listening.phase = Phase::Failed { error, at: now };
@@ -717,7 +717,7 @@ pub fn frame(app: &mut App, now: Instant) {
     // huddle is left for being alone in.
     if !listening.is_call() && leave_alone(listening.alone_since, now) {
         leave(app);
-        app.toast(t("Everyone else left the huddle"), false);
+        app.toast(t("Everyone else left the huddle"), Tone::Info);
     } else if let Some(since) = listening.alone_since {
         app.waker
             .wake_after((since + ALONE_FOR).saturating_duration_since(now));

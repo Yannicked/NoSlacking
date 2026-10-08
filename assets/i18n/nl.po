@@ -629,14 +629,14 @@ msgid_plural "{count} days ago"
 msgstr[0] "{count} dag geleden"
 msgstr[1] "{count} dagen geleden"
 
-msgid "Could not change the reaction"
-msgstr "De reactie kon niet worden gewijzigd"
+msgid "Could not change the reaction: {error}"
+msgstr "De reactie kon niet worden gewijzigd: {error}"
 
-msgid "Could not delete the message"
-msgstr "Het bericht kon niet worden verwijderd"
+msgid "Could not delete the message: {error}"
+msgstr "Het bericht kon niet worden verwijderd: {error}"
 
-msgid "Could not edit the message"
-msgstr "Het bericht kon niet worden bewerkt"
+msgid "Could not edit the message: {error}"
+msgstr "Het bericht kon niet worden bewerkt: {error}"
 
 msgid "Sign in with the link"
 msgstr "Inloggen met de link"

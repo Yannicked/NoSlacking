@@ -30,7 +30,7 @@
 //! picker shows the remembered one as "not connected", so plugging it
 //! back in brings it back.
 
-use crate::app::App;
+use crate::app::{App, Tone};
 use crate::backend;
 use crate::failure::Failure;
 use crate::i18n::{t, tf};
@@ -406,7 +406,7 @@ pub fn handle(app: &mut App, event: Event) {
                     &[("error", &error)],
                 ),
             };
-            app.toast(text, true);
+            app.toast(text, Tone::Error);
         }
     }
 }

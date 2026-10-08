@@ -5,6 +5,7 @@
 //! event changes in one workspace lives in [`super::workspace`]; this
 //! side adds what needs the backend: fetching, toasts and scrolling.
 
+use super::Tone;
 use super::workspace::{Arrived, SendOutcome};
 use super::{App, Page, WorkspaceState};
 use crate::backend::{Change, Command, Event, SignIn, Socket};
@@ -25,13 +26,16 @@ impl App {
             // The account: the app, the keyring, sign-in and the socket.
             Event::AppLoaded(app) => self.app_loaded(app),
             Event::KeyringError(error) => {
-                self.toast(tf("Keyring: {error}", &[("error", &error.message())]), true);
+                self.toast(
+                    tf("Keyring: {error}", &[("error", &error.message())]),
+                    Tone::Error,
+                );
                 self.keyring_error = Some(error);
             }
             Event::OlderApp => {
                 self.settings.older_app = true;
                 self.settings_changed();
-                self.toast(t("Your Slack app was made from an older manifest, so it is asked only for the permissions it has. Update it to unlock Do Not Disturb, @group mentions and bookmark editing.").into_owned(), false);
+                self.toast(t("Your Slack app was made from an older manifest, so it is asked only for the permissions it has. Update it to unlock Do Not Disturb, @group mentions and bookmark editing.").into_owned(), Tone::Info);
             }
             Event::SignIn(state) => self.sign_in_changed(state),
             // A closed viewer, or one since opened on another file, drops
@@ -47,7 +51,9 @@ impl App {
             Event::WorkspaceReady(info) => self.workspace_ready(info),
             Event::SignedOut { team, reason } => self.signed_out(&team, reason),
             Event::Socket(socket) => self.socket_changed(socket),
-            Event::Error(problem) => self.toast(problem.message(), problem.is_error()),
+            Event::Error(problem) => {
+                self.toast(problem.message(), Tone::error_if(problem.is_error()))
+            }
             Event::UploadProgress { id, sent, total } => {
                 if let Some(upload) = self.transfers.iter_mut().find(|u| u.id == id) {
                     upload.sent = sent;
@@ -66,7 +72,7 @@ impl App {
             // toast never claims a cancel for a file that was posted.
             Event::UploadCancelled { id } => {
                 if self.upload_done(id, false) {
-                    self.toast(t("Upload cancelled").into_owned(), false);
+                    self.toast(t("Upload cancelled").into_owned(), Tone::Info);
                 }
             }
             Event::Slash {
@@ -106,16 +112,16 @@ impl App {
                             &[("choice", &label), ("error", &error)],
                         )
                     };
-                    self.toast(message, true);
+                    self.toast(message, Tone::Error);
                 }
             }
-            Event::Notice(notice) => self.toast(notice.message(), false),
+            Event::Notice(notice) => self.toast(notice.message(), Tone::Info),
             Event::AudioFetched { id, result } => self.audio_fetched(id, result),
             Event::Dnd { team, dnd } => self.dnd_arrived(&team, dnd),
             Event::SlackPrefs { team, prefs } => self.prefs_arrived(&team, prefs),
             Event::DeepLink(link) => {
                 if !self.follow(&link) {
-                    self.toast(t("That conversation is not open to you here"), true);
+                    self.toast(t("That conversation is not open to you here"), Tone::Error);
                 }
             }
             // A workspace's conversations, people, apps and sidebar.
@@ -237,7 +243,7 @@ impl App {
                         "Could not load messages: {error}",
                         &[("error", &error.message())],
                     ),
-                    true,
+                    Tone::Error,
                 );
             }
             Event::Around {
@@ -380,15 +386,17 @@ impl App {
     /// undone on screen, and you are told.
     fn settled(&mut self, team: &str, channel: &str, change: Change, result: Result<(), Failure>) {
         let Err(error) = result else { return };
-        let what = match &change {
-            Change::Edit { .. } => t("Could not edit the message"),
-            Change::Delete { .. } => t("Could not delete the message"),
-            Change::React { .. } => t("Could not change the reaction"),
+        let error = error.message();
+        let args = [("error", error.as_str())];
+        let text = match &change {
+            Change::Edit { .. } => tf("Could not edit the message: {error}", &args),
+            Change::Delete { .. } => tf("Could not delete the message: {error}", &args),
+            Change::React { .. } => tf("Could not change the reaction: {error}", &args),
         };
         if let Some(workspace) = self.workspace_mut(team) {
             workspace.undo(channel, change);
         }
-        self.toast(format!("{what}: {}", error.message()), true);
+        self.toast(text, Tone::Error);
     }
 
     /// Slack answered the deletion of your file; a refused one shows
@@ -409,7 +417,7 @@ impl App {
                     "Could not delete {name}: {error}",
                     &[("name", name), ("error", &error.message())],
                 ),
-                true,
+                Tone::Error,
             );
         }
     }
@@ -426,7 +434,7 @@ impl App {
 
     fn sign_in_changed(&mut self, state: SignIn) {
         if let SignIn::Done(name) = &state {
-            self.toast(tf("Signed in to {name}.", &[("name", name)]), false);
+            self.toast(tf("Signed in to {name}.", &[("name", name)]), Tone::Info);
             self.page = Page::Main;
             self.setup.user_token.clear();
         }
@@ -541,7 +549,7 @@ impl App {
                     "Slack refused the app-level token ({reason})",
                     &[("reason", &reason.message())],
                 ),
-                true,
+                Tone::Error,
             );
         }
         self.socket = socket;
@@ -717,7 +725,7 @@ impl App {
         if let Err(error) = result {
             self.toast(
                 tf("Message not sent: {error}", &[("error", &error.message())]),
-                true,
+                Tone::Error,
             );
         }
     }

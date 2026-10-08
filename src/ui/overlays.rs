@@ -1152,7 +1152,7 @@ fn toasts(app: &mut App, ctx: &egui::Context) {
             ui.spacing_mut().item_spacing.y = 6.0;
             for toast in app.toasts.iter().rev().take(3) {
                 let response = egui::Frame::new()
-                    .fill(if toast.error {
+                    .fill(if toast.tone == crate::app::Tone::Error {
                         palette.danger
                     } else {
                         palette.overlay
@@ -1169,7 +1169,7 @@ fn toasts(app: &mut App, ctx: &egui::Context) {
                     .show(ui, |ui| {
                         ui.set_max_width(520.0);
                         ui.label(RichText::new(&toast.text).font(theme::medium(13.5)).color(
-                            if toast.error {
+                            if toast.tone == crate::app::Tone::Error {
                                 egui::Color32::WHITE
                             } else {
                                 palette.text

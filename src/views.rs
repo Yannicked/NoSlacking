@@ -15,7 +15,7 @@ pub mod schedule;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::app::{App, LentDraft, WorkspaceState};
+use crate::app::{App, LentDraft, Tone, WorkspaceState};
 use crate::backend;
 use crate::failure::Failure;
 use crate::i18n::{t, tf};
@@ -853,7 +853,7 @@ pub fn apply(app: &mut App, action: Action) {
                 } else {
                     t("Removed from Later")
                 },
-                false,
+                Tone::Info,
             );
             send(app, &team, Command::Save { channel, ts, save });
         }
@@ -1034,7 +1034,7 @@ fn schedule_draft(
         return;
     }
     if crate::slash::parse(&draft.text).is_some() {
-        app.toast(t("A slash command cannot be scheduled."), true);
+        app.toast(t("A slash command cannot be scheduled."), Tone::Error);
         return;
     }
     let wire = crate::app::to_wire(&draft.text, &draft.mentions);
@@ -1070,7 +1070,7 @@ fn remind(app: &mut App, team: &str, channel: &str, ts: &Ts, thread: Option<&Ts>
         return;
     };
     let Some(link) = crate::links::permalink(&workspace.info.domain, channel, ts, thread) else {
-        app.toast(t("This message has no link yet"), true);
+        app.toast(t("This message has no link yet"), Tone::Error);
         return;
     };
     let plain = workspace
@@ -1182,7 +1182,7 @@ fn scheduled(
                 list.push(message);
                 list.sort_by_key(|s| s.post_at);
             }
-            app.toast(tf("Scheduled for {when}", &[("when", &when)]), false);
+            app.toast(tf("Scheduled for {when}", &[("when", &when)]), Tone::Info);
         }
         Err(error) => {
             if let Some(dialog) = app.views.dialog.as_mut() {
@@ -1200,7 +1200,7 @@ fn scheduled(
                     "Could not schedule the message: {error}",
                     &[("error", &error.message())],
                 ),
-                true,
+                Tone::Error,
             );
         }
     }
@@ -1413,7 +1413,10 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
         Event::Reminded { time, result } => match result {
             Ok(()) => {
                 let when = crate::ui::moment_label(time);
-                app.toast(tf("I will remind you {when}", &[("when", &when)]), false);
+                app.toast(
+                    tf("I will remind you {when}", &[("when", &when)]),
+                    Tone::Info,
+                );
                 // The Later view lists reminders: it shows the new one.
                 let views = app.views.team_mut(team);
                 if views.reminders.value.is_some() || views.reminders.loading {
@@ -1421,7 +1424,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                     send(app, team, Command::Reminders);
                 }
             }
-            Err(error) => app.toast(remind_failure(&error), true),
+            Err(error) => app.toast(remind_failure(&error), Tone::Error),
         },
         Event::Followed {
             channel,
@@ -1454,7 +1457,7 @@ fn failed(app: &mut App, team: &str, what: Doing, error: &Failure) {
                     &[("error", &error.message())],
                 )
             };
-            app.toast(text, true);
+            app.toast(text, Tone::Error);
         }
         Doing::CompleteReminder { id } => {
             log::debug!("reminder {id} was not completed");
@@ -1463,7 +1466,7 @@ fn failed(app: &mut App, team: &str, what: Doing, error: &Failure) {
                     "Could not complete the reminder: {error}",
                     &[("error", &error.message())],
                 ),
-                true,
+                Tone::Error,
             );
             app.views.team_mut(team).reminders.start();
             send(app, team, Command::Reminders);
@@ -1474,7 +1477,7 @@ fn failed(app: &mut App, team: &str, what: Doing, error: &Failure) {
                     "Could not cancel the scheduled message: {error}",
                     &[("error", &error.message())],
                 ),
-                true,
+                Tone::Error,
             );
             app.views.team_mut(team).scheduled.start();
             send(app, team, Command::Scheduled);
@@ -1494,7 +1497,7 @@ fn failed(app: &mut App, team: &str, what: Doing, error: &Failure) {
                     &[("error", &error)],
                 )
             };
-            app.toast(text, true);
+            app.toast(text, Tone::Error);
         }
     }
 }
