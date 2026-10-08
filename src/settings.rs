@@ -40,6 +40,11 @@ pub enum Density {
     Compact,
 }
 
+impl Density {
+    /// Both densities, as the settings list them.
+    pub const ALL: [Self; 2] = [Self::Comfortable, Self::Compact];
+}
+
 /// How Slack sends the browser back after sign-in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

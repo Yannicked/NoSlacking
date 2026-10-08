@@ -26,6 +26,11 @@ pub enum Sort {
     Recent,
 }
 
+impl Sort {
+    /// Every order, as the settings list them.
+    pub const ALL: [Self; 2] = [Self::Name, Self::Recent];
+}
+
 /// When the sidebar tucks away a conversation that has gone quiet, as
 /// Slack's own client tidies its sidebar.
 #[derive(
@@ -45,6 +50,10 @@ pub enum HideInactive {
 }
 
 impl HideInactive {
+    /// Every choice, shortest wait last but Off first, as the settings
+    /// list them.
+    pub const ALL: [Self; 4] = [Self::Off, Self::Week, Self::Month, Self::ThreeMonths];
+
     /// What the settings call the choice.
     pub fn label(self) -> String {
         use crate::i18n::t;

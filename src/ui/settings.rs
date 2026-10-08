@@ -11,6 +11,7 @@ use crate::model::Action;
 use crate::model::Socket;
 use crate::scopes::Feature;
 use crate::settings::{Appearance, Density, Redirect};
+use crate::sidebar::{HideInactive, Sort};
 use crate::theme::{self, Palette};
 
 mod network;
@@ -76,6 +77,46 @@ pub(super) fn row(
     });
 }
 
+/// A setting that is on or off: a [`row`] with a checkbox. Returns the
+/// value as the checkbox left it.
+pub(super) fn toggle(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    label: &str,
+    detail: &str,
+    mut on: bool,
+) -> bool {
+    row(ui, palette, label, detail, |ui, name| {
+        ui.checkbox(&mut on, "").labelled_by(name);
+    });
+    on
+}
+
+/// A drop-down of `options`, each worded by `label`, `width` points
+/// wide and named by `name` for screen readers. Returns the one picked,
+/// or `current` if none was.
+pub(super) fn choice<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    id: &str,
+    width: f32,
+    name: egui::Id,
+    (current, options): (T, &[T]),
+    label: impl Fn(T) -> String,
+) -> T {
+    let mut picked = current;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(label(current))
+        .width(width)
+        .show_ui(ui, |ui| {
+            for option in options {
+                ui.selectable_value(&mut picked, *option, label(*option));
+            }
+        })
+        .response
+        .labelled_by(name);
+    picked
+}
+
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     egui::CentralPanel::default()
@@ -113,6 +154,36 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         });
     });
 
+    appearance(app, ui, palette);
+    messages(app, ui, palette);
+
+    super::desktop::settings_group(app, ui, palette);
+    super::desktop::window_group(app, ui, palette);
+    super::hooks::settings_group(app, ui, palette);
+
+    workspaces(app, ui, palette);
+
+    slack_app(app, ui, palette);
+    spelling::show(app, ui, palette);
+    network::show(app, ui, palette);
+
+    group(ui, palette, &t("Calls and huddles"), |ui| {
+        devices(app, ui, palette);
+        #[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
+        hardware_video(app, ui, palette);
+    });
+
+    files(app, ui, palette);
+    ui.add_space(12.0);
+    ui.label(
+        RichText::new(format!("NoSlacking {}", env!("CARGO_PKG_VERSION")))
+            .font(theme::regular(12.0))
+            .color(palette.dim),
+    );
+}
+
+/// Theme, zoom and language.
+fn appearance(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     group(ui, palette, &t("Appearance"), |ui| {
         let current = app.settings.appearance.clone();
         let mut choice = current.clone();
@@ -147,7 +218,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 .labelled_by(name);
         });
         if choice != current {
-            app.set_appearance(choice);
+            app.actions.push(Action::SetAppearance(choice));
         }
         ui.horizontal(|ui| {
             ui.label(
@@ -170,10 +241,7 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             )
             .labelled_by(name);
         });
-        if (zoom - app.settings.zoom).abs() > f32::EPSILON {
-            app.settings.zoom = zoom;
-            app.settings_changed();
-        }
+        app.update_setting(|s| &mut s.zoom, zoom);
         let current = crate::i18n::locale();
         let mut locale = current;
         row(ui, palette, &t("Language"), "", |ui, name| {
@@ -192,10 +260,12 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             app.set_language(locale);
         }
     });
+}
 
+/// How messages are written, shown and listed in the sidebar.
+fn messages(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     group(ui, palette, &t("Messages"), |ui| {
-        let mut enter = app.settings.enter_sends;
-        row(
+        let enter = toggle(
             ui,
             palette,
             &t("Enter sends"),
@@ -203,14 +273,9 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 "Off: {shortcut} sends and Enter starts a new line.",
                 &[("shortcut", &super::keys::command("Enter"))],
             ),
-            |ui, name| {
-                ui.checkbox(&mut enter, "").labelled_by(name);
-            },
+            app.settings.enter_sends,
         );
-        if enter != app.settings.enter_sends {
-            app.settings.enter_sends = enter;
-            app.settings_changed();
-        }
+        app.update_setting(|s| &mut s.enter_sends, enter);
         row(
             ui,
             palette,
@@ -235,40 +300,25 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             &t("Message density"),
             &t("Compact puts the time, name and text of each message on one line."),
             |ui, name| {
-                let label = |density: Density| match density {
-                    Density::Comfortable => t("Comfortable"),
-                    Density::Compact => t("Compact"),
+                let label = |density: Density| {
+                    match density {
+                        Density::Comfortable => t("Comfortable"),
+                        Density::Compact => t("Compact"),
+                    }
+                    .into_owned()
                 };
-                egui::ComboBox::from_id_salt("density")
-                    .selected_text(label(density))
-                    .width(200.0)
-                    .show_ui(ui, |ui| {
-                        for option in [Density::Comfortable, Density::Compact] {
-                            ui.selectable_value(&mut density, option, label(option));
-                        }
-                    })
-                    .response
-                    .labelled_by(name);
+                density = choice(ui, "density", 200.0, name, (density, &Density::ALL), label);
             },
         );
-        if density != app.settings.density {
-            app.settings.density = density;
-            app.settings_changed();
-        }
-        let mut inline = app.settings.inline_media;
-        row(
+        app.update_setting(|s| &mut s.density, density);
+        let inline = toggle(
             ui,
             palette,
             &t("Show images and previews inline"),
             &t("Off: pictures and link previews wait for a click, and are not fetched before."),
-            |ui, name| {
-                ui.checkbox(&mut inline, "").labelled_by(name);
-            },
+            app.settings.inline_media,
         );
-        if inline != app.settings.inline_media {
-            app.settings.inline_media = inline;
-            app.settings_changed();
-        }
+        app.update_setting(|s| &mut s.inline_media, inline);
         let mut sort = app.settings.sidebar_sort;
         row(
             ui,
@@ -276,77 +326,51 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             &t("Sort channels"),
             &t("Within each sidebar section. Direct messages are always newest first."),
             |ui, name| {
-                egui::ComboBox::from_id_salt("sidebar-sort")
-                    .selected_text(match sort {
-                        crate::sidebar::Sort::Name => t("By name"),
-                        crate::sidebar::Sort::Recent => t("By recent activity"),
-                    })
-                    .width(200.0)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut sort, crate::sidebar::Sort::Name, t("By name"));
-                        ui.selectable_value(
-                            &mut sort,
-                            crate::sidebar::Sort::Recent,
-                            t("By recent activity"),
-                        );
-                    })
-                    .response
-                    .labelled_by(name);
+                let label = |sort: Sort| {
+                    match sort {
+                        Sort::Name => t("By name"),
+                        Sort::Recent => t("By recent activity"),
+                    }
+                    .into_owned()
+                };
+                sort = choice(ui, "sidebar-sort", 200.0, name, (sort, &Sort::ALL), label);
             },
         );
-        if sort != app.settings.sidebar_sort {
-            app.settings.sidebar_sort = sort;
-            app.settings_changed();
-        }
-        let mut unread_first = app.settings.unread_first;
-        row(
+        app.update_setting(|s| &mut s.sidebar_sort, sort);
+        let unread_first = toggle(
             ui,
             palette,
             &t("Unread conversations first"),
             &t("At the top of each sidebar section, mentions and direct messages before the rest."),
-            |ui, name| {
-                ui.checkbox(&mut unread_first, "").labelled_by(name);
-            },
+            app.settings.unread_first,
         );
-        if unread_first != app.settings.unread_first {
-            app.settings.unread_first = unread_first;
-            app.settings_changed();
-        }
+        app.update_setting(|s| &mut s.unread_first, unread_first);
         let mut hide = app.settings.hide_inactive;
-        let label = crate::sidebar::HideInactive::label;
         row(
             ui,
             palette,
             &t("Hide inactive conversations"),
             &t("Under “more” in their section. Unread, starred and open ones stay."),
             |ui, name| {
-                egui::ComboBox::from_id_salt("hide-inactive")
-                    .selected_text(label(hide))
-                    .width(200.0)
-                    .show_ui(ui, |ui| {
-                        for choice in [
-                            crate::sidebar::HideInactive::Off,
-                            crate::sidebar::HideInactive::Week,
-                            crate::sidebar::HideInactive::Month,
-                            crate::sidebar::HideInactive::ThreeMonths,
-                        ] {
-                            ui.selectable_value(&mut hide, choice, label(choice));
-                        }
-                    })
-                    .response
-                    .labelled_by(name);
+                let all = &HideInactive::ALL;
+                hide = choice(
+                    ui,
+                    "hide-inactive",
+                    200.0,
+                    name,
+                    (hide, all),
+                    HideInactive::label,
+                );
             },
         );
         if hide != app.settings.hide_inactive {
-            app.settings.hide_inactive = hide;
-            app.settings_changed();
+            app.actions.push(Action::HideInactive(hide));
         }
     });
+}
 
-    super::desktop::settings_group(app, ui, palette);
-    super::desktop::window_group(app, ui, palette);
-    super::hooks::settings_group(app, ui, palette);
-
+/// The signed-in workspaces, a way to sign out of each and to add one.
+fn workspaces(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     group(ui, palette, &t("Workspaces"), |ui| {
         type Row = (
             String,
@@ -382,7 +406,10 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             app.actions.push(Action::AddWorkspace);
         }
     });
+}
 
+/// The Slack app NoSlacking signs in with, and its live connection.
+fn slack_app(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     // A setup of Microsoft Teams workspaces only has no Slack app to
     // speak of.
     let slack = app.workspaces.is_empty() || app.workspaces.iter().any(|w| !w.info.is_teams());
@@ -437,34 +464,19 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             });
             ui.separator();
             let mut redirect = app.settings.redirect;
+            let port = app.settings.loopback_port;
             row(
                 ui,
                 palette,
                 &t("Sign-in redirect"),
                 &t("Must be one of the app's redirect URLs under OAuth & Permissions."),
                 |ui, name| {
-                    egui::ComboBox::from_id_salt("redirect")
-                        .selected_text(match redirect {
-                            Redirect::Scheme => crate::auth::SCHEME_REDIRECT.to_owned(),
-                            Redirect::Loopback => {
-                                crate::auth::loopback_redirect(app.settings.loopback_port)
-                            }
-                        })
-                        .width(280.0)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut redirect,
-                                Redirect::Scheme,
-                                crate::auth::SCHEME_REDIRECT,
-                            );
-                            ui.selectable_value(
-                                &mut redirect,
-                                Redirect::Loopback,
-                                crate::auth::loopback_redirect(app.settings.loopback_port),
-                            );
-                        })
-                        .response
-                        .labelled_by(name);
+                    let label = |redirect: Redirect| match redirect {
+                        Redirect::Scheme => crate::auth::SCHEME_REDIRECT.to_owned(),
+                        Redirect::Loopback => crate::auth::loopback_redirect(port),
+                    };
+                    let all = &[Redirect::Scheme, Redirect::Loopback];
+                    redirect = choice(ui, "redirect", 280.0, name, (redirect, all), label);
                 },
             );
             // Under the row: next to the menu it would run beneath it.
@@ -473,33 +485,21 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 .font(theme::regular(12.5))
                 .color(palette.dim),
         );
-            if redirect != app.settings.redirect {
-                app.settings.redirect = redirect;
-                app.settings_changed();
-            }
+            app.update_setting(|s| &mut s.redirect, redirect);
             if app.settings.redirect == Redirect::Loopback {
                 let mut port = app.settings.loopback_port;
                 row(ui, palette, &t("Loopback port"), "", |ui, name| {
                     ui.add(egui::DragValue::new(&mut port).range(1024..=65535))
                         .labelled_by(name);
                 });
-                if port != app.settings.loopback_port {
-                    app.settings.loopback_port = port;
-                    app.settings_changed();
-                }
+                app.update_setting(|s| &mut s.loopback_port, port);
             }
         });
     }
+}
 
-    spelling::show(app, ui, palette);
-    network::show(app, ui, palette);
-
-    group(ui, palette, &t("Calls and huddles"), |ui| {
-        devices(app, ui, palette);
-        #[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
-        hardware_video(app, ui, palette);
-    });
-
+/// Where NoSlacking keeps its files.
+fn files(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     group(ui, palette, &t("Files"), |ui| {
         let folders = [
             (t("Settings and themes"), app.dirs.config.clone()),
@@ -514,12 +514,6 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             });
         }
     });
-    ui.add_space(12.0);
-    ui.label(
-        RichText::new(format!("NoSlacking {}", env!("CARGO_PKG_VERSION")))
-            .font(theme::regular(12.0))
-            .color(palette.dim),
-    );
 }
 
 /// The camera, microphone and speaker huddles use: a picker each (see
@@ -562,24 +556,19 @@ fn devices(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
 /// Settings → Huddles → Use the graphics card for video.
 #[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
 fn hardware_video(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
-    let mut hardware = app.settings.hardware_video;
-    row(
+    let hardware = toggle(
         ui,
         palette,
         &t("Use the graphics card for video"),
         &t(
             "When it can: shared screens and cameras in, your camera out. Off: all on the processor.",
         ),
-        |ui, name| {
-            ui.checkbox(&mut hardware, "").labelled_by(name);
-        },
+        app.settings.hardware_video,
     );
-    if hardware != app.settings.hardware_video {
-        app.settings.hardware_video = hardware;
+    if app.update_setting(|s| &mut s.hardware_video, hardware) {
         // Streams (and a camera turned on) from now on; one playing
         // keeps its decoder until its next keyframe after a loss, and our
         // camera its encoder until its size changes.
         crate::huddle_audio::helper::set_gpu(hardware);
-        app.settings_changed();
     }
 }
