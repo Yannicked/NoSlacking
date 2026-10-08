@@ -1262,7 +1262,7 @@ pub fn new_client_msg_id() -> String {
     // The version and variant bits that make it a version 4 UUID.
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let hex = crate::text::hex(&bytes);
     format!(
         "{}-{}-{}-{}-{}",
         &hex[..8],

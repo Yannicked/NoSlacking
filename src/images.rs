@@ -309,8 +309,7 @@ impl ImageLoader {
 }
 
 fn cache_name(url: &str) -> String {
-    let digest = Sha1::digest(url.as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    crate::text::hex(&Sha1::digest(url.as_bytes()))
 }
 
 impl Inner {

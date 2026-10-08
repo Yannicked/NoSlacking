@@ -18,9 +18,27 @@ pub fn xml_escape(text: &str) -> String {
     out
 }
 
+/// `bytes` as lowercase hex, two digits each: how digests and random ids
+/// are written down.
+pub fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        out.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_is_lowercase_and_padded() {
+        assert_eq!(hex(&[]), "");
+        assert_eq!(hex(&[0x00, 0x0f, 0xa0, 0xff]), "000fa0ff");
+    }
 
     #[test]
     fn xml_escape_covers_markup_and_quotes() {

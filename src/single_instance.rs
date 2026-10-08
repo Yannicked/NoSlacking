@@ -32,6 +32,8 @@ use std::time::{Duration, Instant};
 use rand::Rng as _;
 use sha2::Digest as _;
 
+use crate::text::hex;
+
 /// What a later launch asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
@@ -229,10 +231,6 @@ fn random_hex() -> String {
     let mut bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut bytes);
     hex(&bytes)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The longest line either side sends: a challenge, a proof, or a sign-in

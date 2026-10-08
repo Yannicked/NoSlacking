@@ -373,7 +373,7 @@ mod tests {
             hash.update(&yuv.v);
             count += 1;
         }
-        let hex: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let hex = crate::text::hex(&hash.finalize());
         (count, size, hex)
     }
 
