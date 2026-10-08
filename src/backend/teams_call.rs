@@ -75,6 +75,9 @@ impl Speech {
 #[derive(Debug)]
 struct Running {
     team: String,
+    /// The devices chosen, as the call's microphone and camera follow
+    /// them.
+    devices: watch::Sender<crate::devices::Chosen>,
     /// The call's id, for one answered here: a second delivery of it
     /// must not ring.
     call_id: Option<String>,
@@ -114,12 +117,16 @@ enum Decision {
 pub struct Caller {
     running: Option<Running>,
     ringing: Option<Ringing>,
+    /// The devices chosen, for this call and the next, as a huddle's.
+    chosen: crate::devices::Chosen,
 }
 
 /// What a call's devices are steered by: the microphone and the camera
 /// as the interface wants them.
 struct Wanted {
     microphone: watch::Receiver<bool>,
+    /// The devices chosen.
+    chosen: watch::Receiver<crate::devices::Chosen>,
     #[cfg(feature = "huddle-camera")]
     camera: watch::Receiver<bool>,
     /// The screen share's requests, and where the share task tells the
@@ -133,8 +140,11 @@ struct Wanted {
 
 /// A call's controls: for the caller to keep, and for the call's task
 /// (hang-up and mute for the call, and what its devices should do).
-fn controls() -> (Running, mpsc::UnboundedReceiver<Control>, Wanted) {
+fn controls(
+    chosen: &crate::devices::Chosen,
+) -> (Running, mpsc::UnboundedReceiver<Control>, Wanted) {
     let (control, controls) = mpsc::unbounded_channel();
+    let (devices, chosen) = watch::channel(chosen.clone());
     let (muted, microphone) = watch::channel(true);
     // Unmuted from the start: the microphone task opens it on this.
     let _ = muted.send(false);
@@ -147,6 +157,7 @@ fn controls() -> (Running, mpsc::UnboundedReceiver<Control>, Wanted) {
     let share = (share_requests, control.clone());
     let running = Running {
         team: String::new(),
+        devices,
         call_id: None,
         control,
         muted,
@@ -157,6 +168,7 @@ fn controls() -> (Running, mpsc::UnboundedReceiver<Control>, Wanted) {
     };
     let wanted = Wanted {
         microphone,
+        chosen,
         #[cfg(feature = "huddle-camera")]
         camera,
         #[cfg(feature = "huddle-share")]
@@ -177,7 +189,7 @@ impl Caller {
         sink: Sink,
     ) {
         self.stop();
-        let (mut running, controls, wanted) = controls();
+        let (mut running, controls, wanted) = controls(&self.chosen);
         running.team.clone_from(&team);
         tokio::spawn(run(
             client,
@@ -209,7 +221,7 @@ impl Caller {
         if let Some(old) = self.ringing.take() {
             let _ = old.decide.send(Decision::Decline);
         }
-        let (mut running, controls, wanted) = controls();
+        let (mut running, controls, wanted) = controls(&self.chosen);
         running.team.clone_from(&team);
         let (decide, decisions) = oneshot::channel();
         let call_id = call.call_id.clone();
@@ -272,6 +284,14 @@ impl Caller {
         if let Some(running) = &self.running {
             let _ = running.share.send(request);
         }
+    }
+
+    /// Uses the devices `chosen` from now on, in the call going on too.
+    pub fn use_devices(&mut self, chosen: crate::devices::Chosen) {
+        if let Some(running) = &self.running {
+            let _ = running.devices.send(chosen.clone());
+        }
+        self.chosen = chosen;
     }
 
     /// Hangs up; the call says when it has ended.
@@ -382,6 +402,7 @@ impl Devices {
     ) -> Result<(Self, Audio), Failure> {
         let Wanted {
             microphone: wanted,
+            chosen,
             #[cfg(feature = "huddle-camera")]
                 camera: camera_wanted,
             #[cfg(feature = "huddle-share")]
@@ -389,18 +410,22 @@ impl Devices {
         } = wanted;
         let tap = RenderTap::default();
         let speaker_tap = tap.clone();
-        let (speaker, feed) =
-            match tokio::task::spawn_blocking(move || Speaker::open(Some(speaker_tap))).await {
-                Ok(Ok(opened)) => opened,
-                Ok(Err(why)) => {
-                    log::warn!("Teams call: {why}");
-                    return Err(Failure::Huddle(HuddleTrouble::NoSound));
-                }
-                Err(error) => {
-                    log::warn!("Teams call: the device thread failed: {error}");
-                    return Err(Failure::Huddle(HuddleTrouble::NoSound));
-                }
-            };
+        let speaker_choice = chosen.borrow().speaker.clone();
+        let ((speaker, fell_back), feed) = match tokio::task::spawn_blocking(move || {
+            Speaker::open(Some(speaker_tap), speaker_choice)
+        })
+        .await
+        {
+            Ok(Ok(opened)) => opened,
+            Ok(Err(why)) => {
+                log::warn!("Teams call: {why}");
+                return Err(Failure::Huddle(HuddleTrouble::NoSound));
+            }
+            Err(error) => {
+                log::warn!("Teams call: the device thread failed: {error}");
+                return Err(Failure::Huddle(HuddleTrouble::NoSound));
+            }
+        };
         let (frames, mut spoken) = mpsc::channel::<Outgoing>(25);
         let (to_call, frames_in) = mpsc::channel(25);
         // The microphone's frames pass by on the way to the call, saying
@@ -421,8 +446,12 @@ impl Devices {
         let (close_mic, mic_done) = oneshot::channel();
         let mic_sink = sink.clone();
         let (mic_team, mic_channel) = (place.team.clone(), place.channel.clone());
+        if let Some(why) = fell_back {
+            log::info!("Teams call: the chosen speaker gave way to the default: {why}");
+        }
         let mic = tokio::spawn(microphone(
             wanted,
+            chosen.clone(),
             effective,
             Wiring {
                 frames,
@@ -448,7 +477,7 @@ impl Devices {
             gallery
         };
         #[cfg(feature = "huddle-camera")]
-        let (camera, camera_feed) = camera_task(place, camera_wanted, sink, tell);
+        let (camera, camera_feed) = camera_task(place, camera_wanted, chosen.clone(), sink, tell);
         // The far end's screen share.
         #[cfg(feature = "huddle-video")]
         let screen = {
@@ -525,6 +554,7 @@ impl Devices {
 fn camera_task(
     place: &Place,
     wanted: watch::Receiver<bool>,
+    chosen: watch::Receiver<crate::devices::Chosen>,
     sink: &Sink,
     tell: &impl Fn(Listen),
 ) -> (CameraTask, crate::teams::calling::video::CameraFeed) {
@@ -542,6 +572,7 @@ fn camera_task(
     let (team, channel) = (place.team.clone(), place.channel.clone());
     let task = tokio::spawn(super::listen::camera(
         wanted,
+        chosen,
         on,
         super::listen::CameraWiring {
             frames,

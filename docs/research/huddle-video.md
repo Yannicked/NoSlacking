@@ -1735,6 +1735,24 @@ camera task end to end (off until on, frames and self-views, off, view
 only). **Not tested here:** nokhwa on macOS and Windows (built in CI
 only), and a camera in a real call.
 
+**Choosing the camera (2026-10-08, `feat/device-pickers`).** Settings →
+Huddles and the arrow beside Video list the helper's cameras
+(`ListCameras` on the camera lane, which opens none) and remember the
+choice as the camera's id *and* name (`crate::devices::Choice`). The
+helper's ids say where a camera is plugged in now, not which camera it
+is: `/dev/videoN` follows the order devices appear in (plug two cameras
+in the other way round, or reboot, and the numbers swap), and nokhwa's
+`native:N` is an index. So the camera is found again by its name (the
+V4L2 card name, the system's camera name), the id telling two cameras of
+one model apart while they stay where they were (`devices::find`,
+`camera_send::camera_choice`). Starting it asks `ListCameras` first and
+starts `Device(id)` by its present id, or `First` while it is not
+connected (the picker then shows it "not connected"). Choosing another
+while it is on closes the capture and starts the new one, which begins
+with a keyframe. Not done: `/dev/v4l/by-id/` links (USB serials) would
+tell twins apart across replugging too; the helper could list those as
+ids.
+
 ## Sources
 - amazon-chime-sdk-js @ dea69d268c623ab2006169d3899981fea766fa8a (Apache-2.0), files as cited.
 - HuddleFM (AGPL, read only): `src_native-media_chime-link.ts`, `src_native-media_rtp.ts`, `src_native-media_signaling.ts`, `src_slack-huddle.ts`.

@@ -5,8 +5,10 @@
 //! they mute or leave. [`MicControl`] is that rule as a state machine over
 //! any [`Microphone`], so tests can hold it to it with a pretend device.
 //!
-//! The real one, [`Cpal`], opens the default input device through cpal
-//! (rodio's) on a thread of its own, which also runs the pipeline:
+//! The real one, [`Cpal`], opens the chosen input device (the system's
+//! default unless one is chosen, or while the chosen one is not
+//! connected; see [`crate::devices`]) through cpal (rodio's) on a thread
+//! of its own, which also runs the pipeline:
 //! the device's samples to 48 kHz mono ([`ToMono48k`]), 10 ms at a time
 //! through echo cancellation and the rest ([`Processor`]), joined into
 //! 20 ms ([`Framer`]), encoded ([`Encoder`]), thinned by DTX ([`Dtx`]) and
@@ -70,6 +72,19 @@ impl<M: Microphone> MicControl<M> {
     /// Whether the device is open.
     pub fn is_open(&self) -> bool {
         self.open.is_some()
+    }
+
+    /// Changes the device with `change` (another one chosen): an open
+    /// microphone is closed and opened again on it, a closed one stays
+    /// closed. A failed open leaves it closed: muted.
+    pub fn switch(&mut self, change: impl FnOnce(&mut M)) -> Result<(), MicError> {
+        change(&mut self.mic);
+        if self.open.take().is_some() {
+            // The old one goes first: it may be the same device under
+            // another name, which would not open twice.
+            self.open = Some(self.mic.open()?);
+        }
+        Ok(())
     }
 
     /// Mutes (closing the device) or unmutes (opening it). A failed open
@@ -251,16 +266,24 @@ struct Chunk {
     latency: Option<Duration>,
 }
 
-/// The default input device, through cpal.
+/// The chosen input device, through cpal.
 #[derive(Debug)]
 pub struct Cpal {
     wiring: Wiring,
+    /// The device chosen; none for the system's default.
+    choice: Option<crate::devices::Choice>,
 }
 
 impl Cpal {
-    /// The default input device, its frames going to `wiring`.
-    pub fn new(wiring: Wiring) -> Self {
-        Self { wiring }
+    /// The input device `choice` names (none: the system's default), its
+    /// frames going to `wiring`.
+    pub fn new(wiring: Wiring, choice: Option<crate::devices::Choice>) -> Self {
+        Self { wiring, choice }
+    }
+
+    /// Opens `choice` from the next open on.
+    pub fn choose(&mut self, choice: Option<crate::devices::Choice>) {
+        self.choice = choice;
     }
 }
 
@@ -271,10 +294,11 @@ impl Microphone for Cpal {
         let stop = Arc::new(AtomicBool::new(false));
         let (opened, result) = std::sync::mpsc::channel();
         let wiring = self.wiring.clone();
+        let choice = self.choice.clone();
         let thread_stop = stop.clone();
         let thread = std::thread::Builder::new()
             .name("noslacking-huddle-mic".into())
-            .spawn(move || capture(&wiring, &thread_stop, &opened))
+            .spawn(move || capture(&wiring, choice.as_ref(), &thread_stop, &opened))
             .map_err(|e| MicError::Open(format!("no thread: {e}")))?;
         let running = Running {
             stop,
@@ -288,16 +312,25 @@ impl Microphone for Cpal {
     }
 }
 
-/// Builds the input stream on the default device in the format it
-/// prefers, converting each callback's samples to f32.
+/// Builds the input stream on the device `choice` names (the default
+/// without one, or while it is not connected) in the format it prefers,
+/// converting each callback's samples to f32.
 fn open_stream(
     chunks: std::sync::mpsc::SyncSender<Chunk>,
+    choice: Option<&crate::devices::Choice>,
 ) -> Result<(rodio::cpal::Stream, u32, u16), MicError> {
     use rodio::cpal::traits::{DeviceTrait as _, HostTrait as _, StreamTrait as _};
     use rodio::cpal::{InputCallbackInfo, SampleFormat, SizedSample};
 
-    let host = rodio::cpal::default_host();
-    let device = host.default_input_device().ok_or(MicError::NoDevice)?;
+    let device = match super::devices::chosen(crate::devices::Kind::Microphone, choice) {
+        Some((device, name)) => {
+            log::info!("huddle microphone: opening {name:?}");
+            device
+        }
+        None => rodio::cpal::default_host()
+            .default_input_device()
+            .ok_or(MicError::NoDevice)?,
+    };
     let supported = device
         .default_input_config()
         .map_err(|e| MicError::Open(e.to_string()))?;
@@ -365,12 +398,13 @@ fn open_stream(
 /// runs the pipeline until told to stop, and closes the device.
 fn capture(
     wiring: &Wiring,
+    choice: Option<&crate::devices::Choice>,
     stop: &AtomicBool,
     opened: &std::sync::mpsc::Sender<Result<(), MicError>>,
 ) {
     // A second of chunks, whatever the device's period.
     let (chunks, incoming) = std::sync::mpsc::sync_channel(100);
-    let (stream, rate, channels) = match open_stream(chunks) {
+    let (stream, rate, channels) = match open_stream(chunks, choice) {
         Ok(opened) => opened,
         Err(error) => {
             let _ = opened.send(Err(error));
@@ -503,6 +537,9 @@ mod tests {
         open: Arc<AtomicUsize>,
         opened: Arc<AtomicUsize>,
         refuse: Arc<AtomicBool>,
+        /// The device chosen, and the one each open opened.
+        which: Option<&'static str>,
+        log: Arc<std::sync::Mutex<Vec<Option<&'static str>>>>,
     }
 
     struct PretendOpen(Arc<AtomicUsize>);
@@ -520,8 +557,11 @@ mod tests {
             if self.refuse.load(Ordering::SeqCst) {
                 return Err(MicError::Open("denied".into()));
             }
+            // One device at a time: the last is closed before the next.
+            assert_eq!(self.open.load(Ordering::SeqCst), 0, "two open");
             self.opened.fetch_add(1, Ordering::SeqCst);
             self.open.fetch_add(1, Ordering::SeqCst);
+            self.log.lock().expect("a lock").push(self.which);
             Ok(PretendOpen(self.open.clone()))
         }
     }
@@ -564,6 +604,43 @@ mod tests {
         );
         assert!(!control.is_open());
         assert_eq!(device.open.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn switching_reopens_an_open_microphone_on_the_new_device() {
+        let device = Pretend::default();
+        let mut control = MicControl::new(device.clone());
+        // Muted: the choice is noted, nothing opens.
+        control
+            .switch(|mic| mic.which = Some("headset"))
+            .expect("switched");
+        assert_eq!(device.opened.load(Ordering::SeqCst), 0);
+        control.set_muted(false).expect("unmuted");
+        // Live: closed, then opened on the next one, at once.
+        control
+            .switch(|mic| mic.which = Some("desk"))
+            .expect("switched");
+        assert!(control.is_open());
+        assert_eq!(device.open.load(Ordering::SeqCst), 1);
+        // Back to the system's default.
+        control.switch(|mic| mic.which = None).expect("switched");
+        assert_eq!(
+            *device.log.lock().expect("a lock"),
+            [Some("headset"), Some("desk"), None]
+        );
+    }
+
+    #[test]
+    fn a_device_that_will_not_open_on_switching_leaves_it_muted() {
+        let device = Pretend::default();
+        let mut control = MicControl::new(device.clone());
+        control.set_muted(false).expect("unmuted");
+        assert_eq!(
+            control.switch(|mic| mic.refuse.store(true, Ordering::SeqCst)),
+            Err(MicError::Open("denied".into()))
+        );
+        assert!(!control.is_open());
+        assert_eq!(device.open.load(Ordering::SeqCst), 0, "the old one closed");
     }
 
     /// An encoder that says which frame it was given.

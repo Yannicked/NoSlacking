@@ -11,6 +11,7 @@ mod context;
 mod conversation;
 mod desktop;
 mod details;
+mod devices;
 mod format;
 mod hooks;
 #[cfg(feature = "huddle-camera")]
@@ -105,6 +106,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 &app.palette,
                 app.huddles.listening.as_ref(),
                 &app.workspaces,
+                devices::Pickers {
+                    chosen: &app.settings.devices,
+                    lists: &app.devices,
+                },
                 true,
                 &mut app.actions,
             );

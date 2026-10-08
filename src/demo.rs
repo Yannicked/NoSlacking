@@ -1484,6 +1484,66 @@ pub fn sharing() -> crate::huddles::Listening {
     }
 }
 
+/// Whether the demo pretends the video helper is missing
+/// (`--demo-view devices-no-helper`): the camera picker then says so.
+static NO_HELPER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Pretends the video helper is missing, for the camera picker's
+/// screenshot.
+pub fn pretend_no_helper() {
+    NO_HELPER.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The demo's pretend devices, as the worker would list them: names
+/// only, nothing is opened. The cameras need the helper, as in the app.
+pub fn devices(
+    kind: crate::devices::Kind,
+) -> Result<Vec<crate::devices::Device>, crate::failure::Failure> {
+    use crate::devices::{Device, Kind};
+    let device = |id: &str, name: &str| Device {
+        id: id.to_owned(),
+        name: name.to_owned(),
+    };
+    Ok(match kind {
+        Kind::Microphone => vec![
+            device("demo:mic:builtin", "Built-in Microphone"),
+            device("demo:mic:jabra", "Jabra Evolve2 65"),
+            device("demo:mic:mv7", "Shure MV7"),
+        ],
+        Kind::Speaker => vec![
+            device("demo:out:builtin", "Built-in Speakers"),
+            device("demo:out:jabra", "Jabra Evolve2 65"),
+            device("demo:out:hdmi", "DELL U2723QE"),
+        ],
+        Kind::Camera if NO_HELPER.load(std::sync::atomic::Ordering::Relaxed) => {
+            return Err(crate::failure::Failure::Huddle(
+                crate::failure::HuddleTrouble::CameraNeedsHelper,
+            ));
+        }
+        Kind::Camera => vec![
+            device("demo:camera:0", "Integrated Camera"),
+            device("demo:camera:2", "Logitech BRIO"),
+        ],
+    })
+}
+
+/// What the demo's settings choose: the headset's microphone, AirPods
+/// that are not connected (the picker says so) and the BRIO.
+pub fn chosen() -> crate::devices::Chosen {
+    use crate::devices::Choice;
+    let choice = |id: &str, name: &str| {
+        Some(Choice {
+            id: id.to_owned(),
+            name: name.to_owned(),
+        })
+    };
+    crate::devices::Chosen {
+        microphone: choice("demo:mic:jabra", "Jabra Evolve2 65"),
+        speaker: choice("demo:out:airpods", "AirPods Pro"),
+        camera: choice("demo:camera:2", "Logitech BRIO"),
+    }
+}
+
 /// Listening to the huddle in #design for 2 min 14 s: Ana speaking,
 /// Carla muted, and you, for the call bar's screenshot
 /// (`--demo-view listening`).
@@ -1923,6 +1983,17 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                 for event in crate::backend::people::demo(&team, command) {
                     sink.send(event);
                 }
+            }
+            // A moment late, as the system would be.
+            Command::Devices(crate::devices::Command::List(kind)) => {
+                let sink = sink.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(LATENCY).await;
+                    sink.send(Event::Devices(crate::devices::Event::Listed {
+                        kind,
+                        result: devices(kind),
+                    }));
+                });
             }
             Command::Views { team, command } => {
                 for event in views::answer(&team, command) {

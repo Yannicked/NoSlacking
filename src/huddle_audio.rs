@@ -54,6 +54,7 @@ pub mod cameras;
 pub mod chime;
 #[cfg(feature = "huddle-video")]
 pub mod decode;
+pub mod devices;
 pub mod dtls;
 pub mod encoder;
 #[cfg(feature = "huddle-video")]

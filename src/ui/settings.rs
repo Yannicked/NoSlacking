@@ -6,6 +6,7 @@ use egui::{CornerRadius, Margin, RichText, Stroke};
 use crate::app::App;
 use crate::backend::Socket;
 use crate::credentials::AppCredentials;
+use crate::devices::Kind;
 use crate::i18n::{Locale, t, tf};
 use crate::model::Action;
 use crate::scopes::Feature;
@@ -493,28 +494,10 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     spelling::show(app, ui, palette);
     network::show(app, ui, palette);
 
-    #[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
     group(ui, palette, &t("Calls and huddles"), |ui| {
-        let mut hardware = app.settings.hardware_video;
-        row(
-            ui,
-            palette,
-            &t("Use the graphics card for video"),
-            &t(
-                "When it can: shared screens and cameras in, your camera out. Off: all on the processor.",
-            ),
-            |ui, name| {
-                ui.checkbox(&mut hardware, "").labelled_by(name);
-            },
-        );
-        if hardware != app.settings.hardware_video {
-            app.settings.hardware_video = hardware;
-            // Streams (and a camera turned on) from now on; one playing
-            // keeps its decoder until its next keyframe after a loss,
-            // and our camera its encoder until its size changes.
-            crate::huddle_audio::helper::set_gpu(hardware);
-            app.settings_changed();
-        }
+        devices(app, ui, palette);
+        #[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
+        hardware_video(app, ui, palette);
     });
 
     group(ui, palette, &t("Files"), |ui| {
@@ -537,4 +520,66 @@ fn content(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             .font(theme::regular(12.0))
             .color(palette.dim),
     );
+}
+
+/// The camera, microphone and speaker huddles use: a picker each (see
+/// [`super::devices`]), and why the cameras cannot be listed, if so.
+fn devices(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
+    let pickers = super::devices::Pickers {
+        chosen: &app.settings.devices,
+        lists: &app.devices,
+    };
+    let mut actions = Vec::new();
+    for kind in [Kind::Camera, Kind::Microphone, Kind::Speaker] {
+        if !Kind::all().contains(&kind) {
+            continue;
+        }
+        let detail = match kind {
+            Kind::Camera => t("What the others see when you turn on video."),
+            Kind::Microphone => t("What the others hear when you unmute."),
+            Kind::Speaker => t("Where the huddle plays: speakers or headphones."),
+        };
+        row(
+            ui,
+            palette,
+            &super::devices::kind_label(kind),
+            &detail,
+            |ui, name| super::devices::picker(ui, palette, kind, pickers, name, &mut actions),
+        );
+        // Under the row, where there is room for it: no helper, no
+        // cameras to list (as turning the camera on says).
+        if let Some(failure) = pickers.lists.listing(kind).failure() {
+            ui.label(
+                RichText::new(failure.sentence())
+                    .font(theme::regular(12.5))
+                    .color(palette.dim),
+            );
+        }
+    }
+    app.actions.append(&mut actions);
+}
+
+/// Settings → Huddles → Use the graphics card for video.
+#[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
+fn hardware_video(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
+    let mut hardware = app.settings.hardware_video;
+    row(
+        ui,
+        palette,
+        &t("Use the graphics card for video"),
+        &t(
+            "When it can: shared screens and cameras in, your camera out. Off: all on the processor.",
+        ),
+        |ui, name| {
+            ui.checkbox(&mut hardware, "").labelled_by(name);
+        },
+    );
+    if hardware != app.settings.hardware_video {
+        app.settings.hardware_video = hardware;
+        // Streams (and a camera turned on) from now on; one playing
+        // keeps its decoder until its next keyframe after a loss, and our
+        // camera its encoder until its size changes.
+        crate::huddle_audio::helper::set_gpu(hardware);
+        app.settings_changed();
+    }
 }

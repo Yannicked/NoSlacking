@@ -23,6 +23,16 @@
 //! (`Listen::Gallery`); the interface says what its call window wants,
 //! and only that is received, nothing while it is closed.
 //!
+//! The devices are the ones chosen ([`crate::devices`], told by
+//! [`Listener::use_devices`] at start and on each change), the system's
+//! default for any not chosen or not connected. A change while in the
+//! huddle takes effect at once: an open microphone is closed and opened
+//! on the new one (one that will not open leaves you muted, saying so);
+//! the speaker is opened anew on the same feed and the same echo
+//! canceller's tap (one that will not open gives way to the default,
+//! saying so); a camera that is on is started again on the new one,
+//! beginning with a keyframe.
+//!
 //! With `huddle-camera`, joined with the camera off. The camera opens
 //! only when the interface turns it on and closes when it turns it off,
 //! when Chime takes no video from us, or when the huddle is left, as the
@@ -40,6 +50,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{Event, Sink};
+use crate::devices::{Chosen, Kind};
 use crate::failure::{Failure, HuddleTrouble};
 use crate::huddle_audio::cameras::Camera;
 #[cfg(feature = "huddle-video")]
@@ -80,6 +91,8 @@ struct Running {
     stop: watch::Sender<bool>,
     /// Whether the interface wants the microphone muted.
     muted: watch::Sender<bool>,
+    /// The devices chosen.
+    devices: watch::Sender<Chosen>,
     /// What the call window wants.
     #[cfg(feature = "huddle-video")]
     wish: watch::Sender<Wish>,
@@ -95,6 +108,8 @@ struct Running {
 #[derive(Debug, Default)]
 pub struct Listener {
     running: Option<Running>,
+    /// The devices chosen, for this huddle and the next.
+    chosen: Chosen,
 }
 
 impl Listener {
@@ -104,6 +119,7 @@ impl Listener {
         self.stop();
         let (stop, stopped) = watch::channel(false);
         let (muted, wanted) = watch::channel(true);
+        let (devices, chosen) = watch::channel(self.chosen.clone());
         #[cfg(feature = "huddle-video")]
         let (wish, wishes) = watch::channel(Wish::closed());
         // Joined with the camera off.
@@ -115,6 +131,7 @@ impl Listener {
         let controls = Controls {
             stopped,
             wanted,
+            chosen,
             #[cfg(feature = "huddle-video")]
             wishes,
             #[cfg(feature = "huddle-camera")]
@@ -127,6 +144,7 @@ impl Listener {
             team,
             stop,
             muted,
+            devices,
             #[cfg(feature = "huddle-video")]
             wish,
             #[cfg(feature = "huddle-camera")]
@@ -161,6 +179,14 @@ impl Listener {
         if let Some(running) = &self.running {
             let _ = running.wish.send(wish);
         }
+    }
+
+    /// Uses `chosen` from now on: in the huddle going on, at once.
+    pub fn use_devices(&mut self, chosen: Chosen) {
+        if let Some(running) = &self.running {
+            let _ = running.devices.send(chosen.clone());
+        }
+        self.chosen = chosen;
     }
 
     /// Mutes or unmutes the microphone in the huddle, if there is one.
@@ -206,27 +232,98 @@ fn join_failure(error: &JoinFailure) -> Failure {
     }
 }
 
-/// Opens and closes the microphone as `wanted` says, until `done`,
-/// telling the session through `effective` and the interface through
-/// `tell`; closes it at the end whatever happened.
+/// The next change of the device chosen for `kind` from `current`, or
+/// never once the interface has let go (`chosen` then none).
+async fn next_choice(
+    chosen: &mut Option<watch::Receiver<Chosen>>,
+    kind: Kind,
+    current: &Option<crate::devices::Choice>,
+) -> Option<crate::devices::Choice> {
+    loop {
+        let Some(receiver) = chosen.as_mut() else {
+            return std::future::pending().await;
+        };
+        if receiver.changed().await.is_err() {
+            *chosen = None;
+            continue;
+        }
+        let now = receiver.borrow_and_update().get(kind).cloned();
+        if now != *current {
+            return now;
+        }
+    }
+}
+
+/// Opens and closes the microphone as `wanted` says, on the device
+/// `chosen` says, until `done`, telling the session through `effective`
+/// and the interface through `tell`; closes it at the end whatever
+/// happened.
 pub(super) async fn microphone(
     mut wanted: watch::Receiver<bool>,
+    chosen: watch::Receiver<Chosen>,
     effective: watch::Sender<bool>,
     wiring: Wiring,
     mut done: oneshot::Receiver<()>,
     tell: impl Fn(MicNews),
 ) {
-    let mut control = Some(MicControl::new(Cpal::new(wiring)));
+    /// What the task was told.
+    enum Told {
+        Muted(bool),
+        Device(Option<crate::devices::Choice>),
+    }
+    let mut device = chosen.borrow().microphone.clone();
+    let mut chosen = Some(chosen);
+    let mut control = Some(MicControl::new(Cpal::new(wiring, device.clone())));
     loop {
-        tokio::select! {
+        let told = tokio::select! {
             _ = &mut done => break,
-            changed = wanted.changed() => if changed.is_err() {
-                break;
-            },
-        }
-        let muted = *wanted.borrow_and_update();
+            changed = wanted.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                Told::Muted(*wanted.borrow_and_update())
+            }
+            choice = next_choice(&mut chosen, Kind::Microphone, &device) => Told::Device(choice),
+        };
         let Some(mut held) = control.take() else {
             break;
+        };
+        let muted = match told {
+            Told::Muted(muted) => muted,
+            Told::Device(choice) => {
+                device.clone_from(&choice);
+                // Closing and opening wait on the device's thread.
+                let switched = tokio::task::spawn_blocking(move || {
+                    let result = held.switch(|mic| mic.choose(choice));
+                    (held, result)
+                })
+                .await;
+                let (held, result) = match switched {
+                    Ok(done) => done,
+                    Err(error) => {
+                        log::warn!("huddle microphone: the device thread failed: {error}");
+                        let _ = effective.send(true);
+                        tell(MicNews::SwitchFailed(Failure::Huddle(
+                            HuddleTrouble::Microphone,
+                        )));
+                        return;
+                    }
+                };
+                let open = held.is_open();
+                control = Some(held);
+                match result {
+                    Err(error) => {
+                        log::warn!("huddle microphone: the new device: {error}");
+                        let _ = effective.send(true);
+                        tell(MicNews::SwitchFailed(Failure::Huddle(
+                            HuddleTrouble::Microphone,
+                        )));
+                    }
+                    Ok(()) if open => log::info!("huddle microphone: switched while live"),
+                    Ok(()) => {}
+                }
+                continue;
+            }
         };
         // Opening and closing wait on the device's thread: not on this one.
         let (held, result) = match tokio::task::spawn_blocking(move || {
@@ -279,21 +376,22 @@ struct CameraOn {
     ended: watch::Receiver<Option<crate::huddle_audio::camera_send::Ending>>,
 }
 
-/// What starts our camera in `helper`: the system's first camera,
-/// encoded on the GPU if the setting allows, at the rate the session
-/// aims at now, with a self-view for the call bar. Also what starts it
-/// again in a fresh helper after one fails: a camera has no dialog, so
-/// it can come back by itself.
+/// What starts our camera in `helper`: `choice` (the chosen camera as
+/// found now, or the system's first), encoded on the GPU if the setting
+/// allows, at the rate the session aims at now, with a self-view for the
+/// call bar. Also what starts it again in a fresh helper after one
+/// fails: a camera has no dialog, so it can come back by itself.
 #[cfg(feature = "huddle-camera")]
 fn camera_starter(
     helper: &crate::huddle_audio::helper::Helper,
     control: &crate::huddle_audio::camera_send::SendControl,
+    choice: noslacking_video_ipc::CameraChoice,
 ) -> crate::huddle_audio::camera_send::Restart {
     use crate::huddle_audio::camera_send::{PREVIEW_WIDTH, step};
     let (helper, control) = (helper.clone(), control.clone());
     Box::new(move || {
         helper.start_camera(
-            noslacking_video_ipc::CameraChoice::First,
+            choice.clone(),
             crate::huddle_audio::helper::gpu(),
             control.limits().bitrate(step(control.bitrate())),
             PREVIEW_WIDTH,
@@ -301,18 +399,40 @@ fn camera_starter(
     })
 }
 
-/// Opens the camera in the video helper and starts sending it, or why
+/// Opens the camera `chosen` names (the first while it is not connected,
+/// or none is chosen) in the video helper and starts sending it, or why
 /// not. Blocks: the helper may have to start, and macOS may ask the
 /// user.
 #[cfg(feature = "huddle-camera")]
-fn camera_on(wiring: &CameraWiring) -> Result<CameraOn, Failure> {
-    use crate::huddle_audio::camera_send::{Encoding, Options, Pace, camera_failure};
+fn camera_on(
+    wiring: &CameraWiring,
+    chosen: Option<&crate::devices::Choice>,
+) -> Result<CameraOn, Failure> {
+    use crate::huddle_audio::camera_send::{
+        Encoding, Options, Pace, camera_choice, camera_failure,
+    };
     use crate::huddle_audio::helper::{self, Lane};
     let Some(helper) = helper::shared(Lane::Camera).filter(|h| !h.given_up()) else {
         log::warn!("huddle camera: no video helper: no camera");
         return Err(Failure::Huddle(HuddleTrouble::CameraNeedsHelper));
     };
-    let mut start = camera_starter(&helper, &wiring.control);
+    // The chosen camera is looked for among those there are now: its
+    // id is only where it was plugged in (see `crate::devices`).
+    let choice = match chosen {
+        None => noslacking_video_ipc::CameraChoice::First,
+        Some(chosen) => match helper.cameras() {
+            Ok(cameras) => camera_choice(chosen, &cameras),
+            Err(trouble) => {
+                log::warn!("huddle camera: no list of cameras ({trouble:?}); the first");
+                noslacking_video_ipc::CameraChoice::First
+            }
+        },
+    };
+    log::info!("huddle camera: starting {choice:?}");
+    // A new capture starts with a keyframe; ask for one all the same, as
+    // the receivers lose the old camera's pictures.
+    wiring.control.want_keyframe();
+    let mut start = camera_starter(&helper, &wiring.control, choice);
     let camera = start().map_err(|trouble| {
         log::warn!("huddle camera: it did not start: {trouble:?}");
         camera_failure(&trouble, helper.given_up())
@@ -383,6 +503,7 @@ async fn camera_off(live: Option<CameraOn>) {
 #[cfg(feature = "huddle-camera")]
 pub(super) async fn camera(
     mut wanted: watch::Receiver<bool>,
+    chosen: watch::Receiver<Chosen>,
     on: watch::Sender<bool>,
     wiring: CameraWiring,
     mut refusals: mpsc::Receiver<()>,
@@ -394,15 +515,19 @@ pub(super) async fn camera(
     /// What the camera's task was told.
     enum Told {
         Want(bool),
+        Device(Option<crate::devices::Choice>),
         Refused,
         Stopped(Failure),
     }
 
     let wiring = std::sync::Arc::new(wiring);
     let mut live: Option<CameraOn> = None;
+    let mut device = chosen.borrow().camera.clone();
+    let mut chosen = Some(chosen);
     loop {
         let told = tokio::select! {
             _ = &mut done => break,
+            choice = next_choice(&mut chosen, Kind::Camera, &device) => Told::Device(choice),
             changed = wanted.changed() => {
                 if changed.is_err() {
                     break;
@@ -417,11 +542,24 @@ pub(super) async fn camera(
         };
         let news = match told {
             Told::Want(true) if live.is_some() => CamNews::On,
-            Told::Want(true) => {
+            // Another camera while it is off: the next one turned on.
+            Told::Device(choice) if live.is_none() => {
+                device = choice;
+                continue;
+            }
+            Told::Want(true) | Told::Device(_) => {
+                if let Told::Device(choice) = told {
+                    // On: the old camera closes, the new one opens.
+                    log::info!("huddle camera: another camera chosen; switching");
+                    device = choice;
+                    camera_off(live.take()).await;
+                }
                 let wiring = std::sync::Arc::clone(&wiring);
+                let device = device.clone();
                 // Opening waits on the helper and maybe the user: not on
                 // this thread.
-                match tokio::task::spawn_blocking(move || camera_on(&wiring)).await {
+                match tokio::task::spawn_blocking(move || camera_on(&wiring, device.as_ref())).await
+                {
                     Ok(Ok(started)) => {
                         live = Some(started);
                         CamNews::On
@@ -459,17 +597,36 @@ pub(super) async fn camera(
     wiring.preview.clear();
 }
 
-/// Lets go of a speaker that stopped and opens the device again for the
-/// same feed, off this thread: both wait on the device's.
-async fn reopen(old: Speaker, feed: Feed, tap: RenderTap) -> Result<Speaker, String> {
+/// Lets go of a speaker (one that stopped, or another chosen) and opens
+/// the device `choice` names for the same feed and tap, off this thread:
+/// both wait on the device's. The speaker, and why the chosen device
+/// gave way to the default if it did.
+async fn reopen(
+    old: Speaker,
+    feed: Feed,
+    tap: RenderTap,
+    choice: Option<crate::devices::Choice>,
+) -> Result<crate::huddle_audio::speaker::Opened, String> {
     let reopened = tokio::task::spawn_blocking(move || {
         drop(old);
-        Speaker::reopen(&feed, Some(tap))
+        Speaker::reopen(&feed, Some(tap), choice)
     })
     .await;
     match reopened {
         Ok(result) => result,
         Err(error) => Err(format!("the device thread failed: {error}")),
+    }
+}
+
+/// Tells the interface that the chosen speaker gave way to the default,
+/// if it did (`why`, for the log).
+fn fell_back(sink: &Sink, why: Option<String>) {
+    if let Some(why) = why {
+        log::warn!("huddle audio: {why}");
+        sink.send(Event::Devices(crate::devices::Event::FellBack {
+            kind: Kind::Speaker,
+            failure: Failure::Huddle(HuddleTrouble::NoSound),
+        }));
     }
 }
 
@@ -500,6 +657,8 @@ struct Controls {
     stopped: watch::Receiver<bool>,
     /// Whether the microphone should be muted.
     wanted: watch::Receiver<bool>,
+    /// The devices chosen.
+    chosen: watch::Receiver<Chosen>,
     /// What the call window wants.
     #[cfg(feature = "huddle-video")]
     wishes: watch::Receiver<Wish>,
@@ -542,6 +701,7 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
     let Controls {
         mut stopped,
         wanted,
+        chosen,
         #[cfg(feature = "huddle-video")]
         wishes,
         #[cfg(feature = "huddle-camera")]
@@ -562,8 +722,12 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
     let tap = RenderTap::default();
     let speaker_tap = tap.clone();
     let reopen_tap = tap.clone();
-    let (speaker, feed) =
-        match tokio::task::spawn_blocking(move || Speaker::open(Some(speaker_tap))).await {
+    let mut speaker_choice = chosen.borrow().speaker.clone();
+    let open_choice = speaker_choice.clone();
+    let ((speaker, why), feed) =
+        match tokio::task::spawn_blocking(move || Speaker::open(Some(speaker_tap), open_choice))
+            .await
+        {
             Ok(Ok(opened)) => opened,
             Ok(Err(why)) => {
                 log::warn!("huddle audio: {why}");
@@ -576,6 +740,7 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
                 return;
             }
         };
+    fell_back(&sink, why);
     let region = crate::huddle_audio::region::for_join(None).await;
     let joined = match join::join(&client, &channel, &region).await {
         Ok(joined) => joined,
@@ -592,6 +757,7 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
     let (mic_team, mic_channel) = (team.clone(), channel.clone());
     let mic = tokio::spawn(microphone(
         wanted,
+        chosen.clone(),
         effective,
         Wiring {
             frames,
@@ -621,6 +787,7 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
     let mut speaker = Some(speaker);
     let mut reopened = 0;
     let mut sound_stopped = false;
+    let mut speaker_chosen = Some(chosen.clone());
     let mut checks = tokio::time::interval(SPEAKER_CHECK);
     checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Who shares and who has a camera on, for the call bar, and where the
@@ -663,6 +830,7 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
         let (camera_team, camera_channel) = (team.clone(), channel.clone());
         let task = tokio::spawn(camera(
             camera_wanted,
+            chosen.clone(),
             on,
             CameraWiring {
                 frames,
@@ -762,8 +930,11 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
                 if reopened < SPEAKER_REOPENS {
                     reopened += 1;
                     log::warn!("huddle audio: the speaker stopped playing; opening it again ({reopened})");
-                    match reopen(old, feed.clone(), reopen_tap.clone()).await {
-                        Ok(fresh) => speaker = Some(fresh),
+                    match reopen(old, feed.clone(), reopen_tap.clone(), speaker_choice.clone()).await {
+                        Ok((fresh, why)) => {
+                            fell_back(&sink, why);
+                            speaker = Some(fresh);
+                        }
                         Err(why) => {
                             log::warn!("huddle audio: {why}");
                             sound_stopped = true;
@@ -775,6 +946,26 @@ async fn run(client: Client, team: String, channel: String, controls: Controls, 
                     let _ = tokio::task::spawn_blocking(move || drop(old)).await;
                     sound_stopped = true;
                     let _ = halt.send(true);
+                }
+            }
+            // Another speaker chosen: the same feed and tap, so the echo
+            // canceller hears on, on the new device.
+            choice = next_choice(&mut speaker_chosen, Kind::Speaker, &speaker_choice), if speaker.is_some() => {
+                speaker_choice = choice;
+                let Some(old) = speaker.take() else {
+                    continue;
+                };
+                log::info!("huddle audio: another speaker chosen; switching");
+                match reopen(old, feed.clone(), reopen_tap.clone(), speaker_choice.clone()).await {
+                    Ok((fresh, why)) => {
+                        fell_back(&sink, why);
+                        speaker = Some(fresh);
+                    }
+                    Err(why) => {
+                        log::warn!("huddle audio: {why}");
+                        sound_stopped = true;
+                        let _ = halt.send(true);
+                    }
                 }
             }
             up = async {
@@ -893,6 +1084,163 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn each_task_hears_only_of_its_own_device() {
+        use crate::devices::Choice;
+        let headset = Choice {
+            id: "alsa:sysdefault:CARD=Headset".into(),
+            name: "Headset".into(),
+        };
+        let (devices, chosen) = watch::channel(Chosen::default());
+        let mut chosen = Some(chosen);
+        let mut current = None;
+        // The speaker changes: the microphone's task goes on waiting.
+        devices.send_modify(|c| c.speaker = Some(headset.clone()));
+        let waited = tokio::time::timeout(
+            Duration::from_millis(50),
+            next_choice(&mut chosen, Kind::Microphone, &current),
+        )
+        .await;
+        assert!(waited.is_err(), "not the microphone");
+        // The microphone changes: told at once, with the new one.
+        devices.send_modify(|c| c.microphone = Some(headset.clone()));
+        let told = next_choice(&mut chosen, Kind::Microphone, &current).await;
+        assert_eq!(told.as_ref(), Some(&headset));
+        current = told;
+        // The same again tells nothing; back to the default does.
+        devices.send_modify(|c| c.microphone = Some(headset.clone()));
+        devices.send_modify(|c| c.microphone = None);
+        assert_eq!(
+            next_choice(&mut chosen, Kind::Microphone, &current).await,
+            None
+        );
+        // Once the interface lets go, never again.
+        drop(devices);
+        let waited = tokio::time::timeout(
+            Duration::from_millis(50),
+            next_choice(&mut chosen, Kind::Microphone, &None),
+        )
+        .await;
+        assert!(waited.is_err());
+        assert!(chosen.is_none());
+    }
+
+    #[test]
+    fn the_session_hears_of_devices_chosen_before_and_during_it() {
+        use crate::devices::Choice;
+        let brio = Choice {
+            id: "v4l2:/dev/video2".into(),
+            name: "Logitech BRIO".into(),
+        };
+        let mut listener = Listener::default();
+        let mut chosen = Chosen {
+            camera: Some(brio),
+            ..Chosen::default()
+        };
+        // Before any huddle: kept for the next.
+        listener.use_devices(chosen.clone());
+        assert_eq!(listener.chosen, chosen);
+        // In one: passed on at once.
+        let (stop, _stopped) = watch::channel(false);
+        let (muted, _wanted) = watch::channel(true);
+        let (devices, mut heard) = watch::channel(listener.chosen.clone());
+        #[cfg(feature = "huddle-video")]
+        let (wish, _wishes) = watch::channel(Wish::closed());
+        #[cfg(feature = "huddle-camera")]
+        let (camera, _camera_wanted) = watch::channel(false);
+        #[cfg(feature = "huddle-share")]
+        let (share, _share_requests) = mpsc::channel(1);
+        listener.running = Some(Running {
+            team: "T1".into(),
+            stop,
+            muted,
+            devices,
+            #[cfg(feature = "huddle-video")]
+            wish,
+            #[cfg(feature = "huddle-camera")]
+            camera,
+            #[cfg(feature = "huddle-share")]
+            share,
+        });
+        chosen.camera = None;
+        listener.use_devices(chosen.clone());
+        assert!(heard.has_changed().expect("open"));
+        assert_eq!(*heard.borrow_and_update(), chosen);
+    }
+
+    /// The camera's task switching cameras while on, against the
+    /// helper's own code on a thread: the old one closes, the chosen one
+    /// opens and its first frame is a keyframe; off, a new choice waits
+    /// for the camera to be turned on.
+    #[cfg(feature = "huddle-camera")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_camera_task_switches_cameras_while_on() {
+        use crate::devices::Choice;
+        use crate::huddle_audio::camera_send::{QUEUE, SendControl};
+        use crate::huddle_camera::{CamNews, Preview};
+        use std::sync::Mutex;
+        let (frames, mut frames_in) = mpsc::channel(QUEUE);
+        let (want, wanted) = watch::channel(false);
+        let (devices, chosen) = watch::channel(Chosen::default());
+        let (on, mut on_rx) = watch::channel(false);
+        let (_refused, refusals) = mpsc::channel(1);
+        let (close, done) = oneshot::channel();
+        let news = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let heard = std::sync::Arc::clone(&news);
+        let task = tokio::spawn(camera(
+            wanted,
+            chosen,
+            on,
+            CameraWiring {
+                frames,
+                control: SendControl::default(),
+                preview: Preview::new(|| {}),
+            },
+            refusals,
+            done,
+            move |news| heard.lock().expect("a lock").push(news),
+        ));
+        // Off: choosing opens nothing and says nothing.
+        let pretend = Choice {
+            id: "pretend:camera".into(),
+            name: "A pretend camera".into(),
+        };
+        devices.send_modify(|c| c.camera = Some(pretend.clone()));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(news.lock().expect("a lock").is_empty());
+        want.send(true).expect("sent");
+        on_rx.changed().await.expect("told");
+        let first = tokio::time::timeout(Duration::from_secs(10), frames_in.recv())
+            .await
+            .expect("in time")
+            .expect("a frame");
+        assert!(first.keyframe);
+        // On: another camera (not connected: the first) starts at once.
+        devices.send_modify(|c| {
+            c.camera = Some(Choice {
+                id: "pretend:9".into(),
+                name: "Gone".into(),
+            });
+        });
+        on_rx.changed().await.expect("told");
+        // What the old one queued, then the new one's first: a keyframe.
+        let mut keyframe = false;
+        for _ in 0..QUEUE + 10 {
+            let frame = tokio::time::timeout(Duration::from_secs(10), frames_in.recv())
+                .await
+                .expect("in time")
+                .expect("a frame");
+            if frame.keyframe {
+                keyframe = true;
+                break;
+            }
+        }
+        assert!(keyframe, "the new camera starts with a keyframe");
+        let _ = close.send(());
+        task.await.expect("the task ends");
+        assert_eq!(*news.lock().expect("a lock"), [CamNews::On, CamNews::On]);
+    }
+
     /// The camera's task against the helper's own code on a thread (its
     /// pretend camera is the test camera): off until turned on, then
     /// frames for the session and pictures for the bar; off again when
@@ -911,8 +1259,10 @@ mod tests {
         let (close, done) = oneshot::channel();
         let news = std::sync::Arc::new(Mutex::new(Vec::new()));
         let heard = std::sync::Arc::clone(&news);
+        let (_devices, chosen) = watch::channel(Chosen::default());
         let task = tokio::spawn(camera(
             wanted,
+            chosen,
             on,
             CameraWiring {
                 frames,

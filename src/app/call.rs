@@ -59,7 +59,12 @@ impl App {
         let gallery = listening.gallery.clone();
         let faces = huddles::faces(&listening.roster);
         let cameras: Vec<huddles::Camera> = listening.cameras.clone();
-        let controls = controls(listening, workspace, std::time::Instant::now());
+        let controls = controls(
+            listening,
+            workspace,
+            (&self.settings.devices, &self.devices),
+            std::time::Instant::now(),
+        );
         // Your own camera, while it is on: one more tile, never received,
         // its picture the call bar's self-preview.
         #[cfg(feature = "huddle-camera")]
@@ -238,6 +243,7 @@ impl App {
 fn controls(
     listening: &huddles::Listening,
     workspace: Option<&super::WorkspaceState>,
+    devices: (&crate::devices::Chosen, &crate::devices::State),
     now: std::time::Instant,
 ) -> call_window::Controls {
     let conversation = workspace.and_then(|w| {
@@ -266,5 +272,7 @@ fn controls(
         camera: listening.camera,
         #[cfg(feature = "huddle-share")]
         sharing: listening.sharing,
+        chosen: devices.0.clone(),
+        lists: devices.1.clone(),
     }
 }

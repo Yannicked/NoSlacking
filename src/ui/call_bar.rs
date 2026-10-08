@@ -13,6 +13,10 @@
 //! it (see [`super::call_window`]), and one saying how many have a camera
 //! on ("2 cameras on") with Video, which opens it on their tiles.
 //!
+//! Beside Mute, a small arrow opens a menu of microphones and speakers;
+//! beside Video, one of cameras (see [`super::devices`]): switching
+//! there takes effect at once, and is remembered as Settings would.
+//!
 //! With `huddle-camera`, the camera's button beside the microphone's and,
 //! while it is on, your self-preview above the buttons (see
 //! [`super::huddle_camera`]).
@@ -24,6 +28,7 @@
 
 use egui::{Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke, Vec2};
 
+use super::devices::Pickers;
 use super::people::ACTIVE;
 use crate::app::WorkspaceState;
 use crate::huddles::{self, Listening, Phase, Place};
@@ -35,8 +40,12 @@ use crate::theme::{self, Icon, Palette};
 const FACE: f32 = 26.0;
 const FACE_GAP: f32 = 5.0;
 /// The room left beside Leave, in points, under which Mute, Video and
-/// Share drop their words.
-const COMPACT_BELOW: f32 = 290.0;
+/// Share drop their words (their arrows included).
+const COMPACT_BELOW: f32 = 330.0;
+/// The same without Share: Mute and Video with their arrows.
+const COMPACT_BELOW_NO_SHARE: f32 = 250.0;
+/// Between a control and its arrow, in points.
+pub const ARROW_GAP: f32 = 2.0;
 /// Leave's red: deep enough for white text on both themes (the dark
 /// palette's own red is too light for it).
 pub const LEAVE: Color32 = Color32::from_rgb(0xcc, 0x2e, 0x45);
@@ -173,12 +182,14 @@ fn gather(
 /// The bar at the foot of a panel, when a huddle is being listened to.
 /// `settings` says the settings page is open, which the title's click
 /// leaves for the conversation.
+#[allow(clippy::too_many_arguments, reason = "each is one thing the bar shows")]
 pub fn panel(
     ui: &mut egui::Ui,
     id: &str,
     palette: &Palette,
     listening: Option<&Listening>,
     workspaces: &[WorkspaceState],
+    pickers: Pickers<'_>,
     settings: bool,
     actions: &mut Vec<Action>,
 ) {
@@ -192,16 +203,22 @@ pub fn panel(
         .show(ui, |ui| {
             // Not wider than the sidebar would make it.
             ui.set_max_width(ui.available_width().min(360.0));
-            bar(ui, palette, listening, workspaces, settings, actions);
+            bar(
+                ui, id, palette, listening, workspaces, pickers, settings, actions,
+            );
         });
 }
 
-/// The bar itself, as wide as `ui`.
+/// The bar itself, as wide as `ui`; `id` tells its menus from the other
+/// bar's.
+#[allow(clippy::too_many_arguments, reason = "each is one thing the bar shows")]
 fn bar(
     ui: &mut egui::Ui,
+    id: &str,
     palette: &Palette,
     listening: &Listening,
     workspaces: &[WorkspaceState],
+    pickers: Pickers<'_>,
     settings: bool,
     actions: &mut Vec<Action>,
 ) {
@@ -286,11 +303,16 @@ fn bar(
                         // the microphone, the camera and Share then show
                         // their icons alone (their words in the tooltip and
                         // for a screen reader); Leave keeps its word.
+                        let room = if cfg!(feature = "huddle-share") {
+                            COMPACT_BELOW
+                        } else {
+                            COMPACT_BELOW_NO_SHARE
+                        };
                         let compact = Look {
-                            labelled: !cfg!(feature = "huddle-share")
-                                || ui.available_width() >= COMPACT_BELOW,
+                            labelled: ui.available_width() >= room,
                             ..Look::BAR
                         };
+                        let live = matches!(listening.phase, Phase::Live { .. });
                         #[cfg(feature = "huddle-share")]
                         if matches!(listening.phase, Phase::Live { .. })
                             && let Some(action) = super::huddle_share::share_button(
@@ -302,22 +324,53 @@ fn bar(
                         {
                             actions.push(Action::Huddle(huddles::Action::Share(action)));
                         }
+                        // Each with its arrow on its right, close by:
+                        // right to left, the arrow first.
                         #[cfg(feature = "huddle-camera")]
-                        if matches!(listening.phase, Phase::Live { .. })
-                            && let Some(action) = super::huddle_camera::camera_button(
-                                ui,
-                                palette,
-                                listening.camera,
-                                compact,
-                            )
-                        {
-                            actions.push(Action::Huddle(huddles::Action::Camera(action)));
+                        if live {
+                            ui.scope(|ui| {
+                                ui.spacing_mut().item_spacing.x = ARROW_GAP;
+                                super::devices::menu_button(
+                                    ui,
+                                    palette,
+                                    compact,
+                                    id,
+                                    &super::devices::CAMERA_MENU,
+                                    pickers,
+                                    actions,
+                                );
+                                if let Some(action) = super::huddle_camera::camera_button(
+                                    ui,
+                                    palette,
+                                    listening.camera,
+                                    compact,
+                                ) {
+                                    actions.push(Action::Huddle(huddles::Action::Camera(action)));
+                                }
+                            });
                         }
-                        if matches!(listening.phase, Phase::Live { .. })
-                            && let Some(action) =
-                                super::huddle_mic::mute_button(ui, palette, listening.mic, compact)
-                        {
-                            actions.push(Action::Huddle(huddles::Action::Microphone(action)));
+                        if live {
+                            ui.scope(|ui| {
+                                ui.spacing_mut().item_spacing.x = ARROW_GAP;
+                                super::devices::menu_button(
+                                    ui,
+                                    palette,
+                                    compact,
+                                    id,
+                                    &super::devices::MIC_MENU,
+                                    pickers,
+                                    actions,
+                                );
+                                if let Some(action) = super::huddle_mic::mute_button(
+                                    ui,
+                                    palette,
+                                    listening.mic,
+                                    compact,
+                                ) {
+                                    actions
+                                        .push(Action::Huddle(huddles::Action::Microphone(action)));
+                                }
+                            });
                         }
                     }
                 });

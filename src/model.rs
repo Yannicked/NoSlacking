@@ -1776,6 +1776,8 @@ pub enum Action {
     People(crate::people::Action),
     /// Answers a huddle invitation (see [`crate::huddles`]).
     Huddle(crate::huddles::Action),
+    /// Lists or chooses a camera, microphone or speaker for huddles.
+    Devices(crate::devices::Action),
     /// Opens or works a view at the top of the sidebar (see
     /// [`crate::views`]).
     Views(crate::views::Action),

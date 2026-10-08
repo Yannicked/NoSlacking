@@ -2844,6 +2844,63 @@ msgstr "De videokaart voor video gebruiken"
 msgid "When it can: shared screens and cameras in, your camera out. Off: all on the processor."
 msgstr "Waar dat kan: gedeelde schermen en camera's binnen, je camera naar buiten. Uit: alles op de processor."
 
+# Settings → Huddles and the call controls: choosing the devices.
+msgid "Camera"
+msgstr "Camera"
+
+msgid "Microphone"
+msgstr "Microfoon"
+
+msgid "Speaker"
+msgstr "Luidspreker"
+
+msgid "What the others see when you turn on video."
+msgstr "Wat de anderen zien als je video aanzet."
+
+msgid "What the others hear when you unmute."
+msgstr "Wat de anderen horen als je het dempen opheft."
+
+msgid "Where the huddle plays: speakers or headphones."
+msgstr "Waar de huddle klinkt: luidsprekers of koptelefoon."
+
+# A device picker's first line: the device the system picks.
+msgid "System default"
+msgstr "Standaard van het systeem"
+
+msgid "First camera"
+msgstr "Eerste camera"
+
+# A remembered device that is unplugged now.
+msgid "{name} (not connected)"
+msgstr "{name} (niet aangesloten)"
+
+msgid "Not connected now: the system default is used until it is back"
+msgstr "Nu niet aangesloten: de standaard van het systeem wordt gebruikt tot het er weer is"
+
+msgid "Looking for devices…"
+msgstr "Apparaten zoeken…"
+
+msgid "Choose your camera"
+msgstr "Kies je camera"
+
+msgid "Choose your microphone and speaker"
+msgstr "Kies je microfoon en luidspreker"
+
+msgid "Device settings…"
+msgstr "Apparaatinstellingen…"
+
+msgid "Your chosen speaker could not be used ({error}); playing on the system default"
+msgstr "Je gekozen luidspreker kon niet worden gebruikt ({error}); het geluid komt nu uit de standaard van het systeem"
+
+msgid "The device you chose could not be used ({error}); using the default"
+msgstr "Het gekozen apparaat kon niet worden gebruikt ({error}); de standaard wordt gebruikt"
+
+msgid "Your microphone is muted: the one you chose could not be opened ({error})"
+msgstr "Je microfoon is gedempt: de gekozen microfoon kon niet worden geopend ({error})"
+
+msgid "the sound devices could not be listed"
+msgstr "de geluidsapparaten konden niet worden opgevraagd"
+
 # Huddles: sharing your screen.
 msgid "Share your screen / stop sharing"
 msgstr "Je scherm delen / stoppen met delen"

@@ -23,7 +23,9 @@ first, or the call window says there is no video.
 Your camera (the `huddle-camera` feature) and screen sharing (the
 `huddle-share` feature) are captured and encoded by the same helper; the
 app itself has no capture or encoding dependency, and without the helper
-there is no camera and no sharing. The helper reaches cameras through
+there is no camera and no sharing (Settings → Huddles then says so under
+the camera's picker; the microphone and speaker pickers work without it).
+The helper reaches cameras through
 V4L2 on Linux (its own few calls, nothing to install) and nokhwa on macOS
 and Windows. On X11 (and
 on macOS and Windows) the helper needs nothing more. To share under

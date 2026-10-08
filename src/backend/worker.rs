@@ -915,6 +915,14 @@ impl Worker {
     /// network: each handler starts a task and returns.
     fn command(&mut self, command: Command) {
         match command {
+            Command::Devices(crate::devices::Command::List(kind)) => {
+                tokio::spawn(super::devices::list(kind, self.sink.clone()));
+            }
+            Command::Devices(crate::devices::Command::Use(chosen)) => {
+                #[cfg(feature = "teams")]
+                self.teams_call.use_devices(chosen.clone());
+                self.huddle_audio.use_devices(chosen);
+            }
             Command::SaveApp(app) => self.save_app(app),
             Command::StartSignIn {
                 redirect,
