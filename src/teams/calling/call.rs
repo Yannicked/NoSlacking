@@ -297,6 +297,9 @@ struct ShareState {
     offered: Option<bool>,
     /// Whether a refused offer was sent again already.
     retried: bool,
+    /// The number of the share started last, for the offers' tag: odd,
+    /// rising by two per share, as the web client's (`ss_1`, `ss_3`).
+    number: u32,
 }
 
 /// The call leg's keep-alive: its link, and when it is next due.
@@ -699,12 +702,11 @@ impl Call {
                     Ok(()) => log::info!("Teams call: renegotiation answered"),
                     Err(error) => log::warn!("Teams call: renegotiation not answered: {error:?}"),
                 }
-                // Ours, crossed by this one, is refused: sent again once.
-                if self.share.offered.is_some() && !self.share.retried {
-                    self.share.offered = None;
-                    self.share.retried = true;
-                    self.offer_share(local).await;
-                }
+                // Microsoft answers the start of our share and then offers
+                // again at once, raising its limits (recorded): answered
+                // above, sending. Crossing an offer of ours, this one is
+                // answered all the same; ours, if refused, says so on its
+                // rejection link.
             }
             Push::MediaAcknowledgement(ack) => {
                 if let Err(error) = codes::acknowledgement(&ack) {
@@ -779,10 +781,21 @@ impl Call {
             log::warn!("Teams call: no way to renegotiate the screen share yet");
             return;
         };
+        if self.share.wanted {
+            self.share.number = if self.share.number == 0 {
+                1
+            } else {
+                self.share.number + 2
+            };
+        }
         local.sharing = self.share.wanted;
         local.session_version += 1;
         let offer = sdp::reoffer(local, last);
-        match self.api.renegotiate(&url, &offer, &self.leg).await {
+        match self
+            .api
+            .renegotiate(&url, &offer, &self.leg, self.share.number)
+            .await
+        {
             Ok(()) => {
                 log::info!(
                     "Teams call: asked to {} sharing our screen",

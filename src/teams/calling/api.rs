@@ -471,6 +471,11 @@ impl CallApi {
                     .header("ms-teams-ring", "general");
                 match &body {
                     Some(body) => request.json(body),
+                    // An empty JSON request, as the web client sends an
+                    // acknowledgement (recorded).
+                    None if method != reqwest::Method::GET => request
+                        .header(reqwest::header::CONTENT_TYPE, "application/json")
+                        .header(reqwest::header::CONTENT_LENGTH, "0"),
                     None => request,
                 }
             })
@@ -526,14 +531,27 @@ impl CallApi {
     /// as the web client's `StartRenegotiation` does. Its answer comes as
     /// a `call/mediaAnswer` push to the link given here, a refusal to
     /// `call/rejection`; the HTTP answer says nothing.
+    ///
+    /// `share` numbers the screen share it starts or stops, as the web
+    /// client tags its offers (`{participant id};ss_{n}`, the same `n` for
+    /// a share's start and its stop; recorded).
     pub async fn renegotiate(
         &self,
         url: &str,
         offer: &str,
         media_leg_id: &str,
+        share: u32,
     ) -> Result<(), Failure> {
         let mut media_content = MediaContent::ours(offer.to_owned(), media_leg_id.to_owned());
         media_content.client_location = Some("NL".to_owned());
+        media_content.required_features = Some("nonByPass".to_owned());
+        let mut media_content =
+            serde_json::to_value(media_content).map_err(|e| Failure::Unexpected(e.to_string()))?;
+        media_content["negotiationTag"] = format!(
+            "{};ss_{share}",
+            self.me.participant_id.as_deref().unwrap_or_default()
+        )
+        .into();
         let body = serde_json::json!({
             "mediaNegotiation": {
                 "callModalities": crate::teams::calling::sdp::modalities(offer),
@@ -551,17 +569,12 @@ impl CallApi {
     }
 
     /// Acknowledges the far end's answer to a renegotiation of ours, at
-    /// its `mediaAcknowledgement` link, as the web client does (an empty
-    /// body).
+    /// its `mediaAcknowledgement` link, as the web client does: an empty
+    /// body (recorded).
     pub async fn acknowledge_answer(&self, url: &str) -> Result<(), Failure> {
-        self.send(
-            reqwest::Method::POST,
-            url,
-            Some(serde_json::Value::Null),
-            "acknowledge an answer",
-        )
-        .await
-        .map(drop)
+        self.send(reqwest::Method::POST, url, None, "acknowledge an answer")
+            .await
+            .map(drop)
     }
 
     /// Acknowledges the far end picking up, at the acceptance's

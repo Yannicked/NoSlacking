@@ -203,6 +203,10 @@ pub fn read(sdp: &str) -> Result<RemoteMedia, SdpError> {
                     .or(session_direction)
                     .unwrap_or(Direction::SendRecv)
             },
+            ssrc_range: l.attr("x-ssrc-range").and_then(|range| {
+                let (first, last) = range.trim().split_once('-')?;
+                Some((first.parse().ok()?, last.parse().ok()?))
+            }),
         })
         .collect();
 
@@ -598,6 +602,18 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
         .position(|l| l.kind == LineKind::Audio && l.port != 0);
     let camera_mid = remote.camera().map(|l| l.mid.as_str());
     let share_mid = remote.share().map(|l| l.mid.as_str());
+    // A share line brought back after being dropped takes a mid of its
+    // own, one past every number used, as the web client gives it
+    // (recorded: mids 0, 4, 3 and a dropped share line; the share came
+    // back as 5).
+    let fresh_share_mid = (role == Role::Offer && remote.share().is_some_and(|l| l.port == 0))
+        .then(|| fresh_mid(remote));
+    let mid_of = |line: &Line| -> String {
+        match &fresh_share_mid {
+            Some(fresh) if Some(line.mid.as_str()) == share_mid => fresh.clone(),
+            _ => line.mid.clone(),
+        }
+    };
     // The share line's H.264: its own, or, re-enabling a line that was
     // dropped, the camera's (one codec, one number in a bundle).
     let share_codec = remote.share_video.or(remote.video);
@@ -640,13 +656,14 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
             LineKind::Other => false,
         }
     };
-    let kept: Vec<&str> = remote
+    let kept: Vec<String> = remote
         .lines
         .iter()
         .enumerate()
         .filter(|(i, l)| accepted(*i, l))
-        .map(|(_, l)| l.mid.as_str())
+        .map(|(_, l)| mid_of(l))
         .collect();
+    let kept: Vec<&str> = kept.iter().map(String::as_str).collect();
 
     let mut out = String::new();
     session_part(&mut out, local, &kept);
@@ -689,8 +706,9 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
             (LineKind::Video, _, _) if Some(line.mid.as_str()) == share_mid => {
                 // `accepted` keeps the share line only with both.
                 if let (Some(offered), Some(ssrc)) = (share_codec, local.share_ssrc) {
+                    let mid = mid_of(line);
                     let line_spec = VideoLine {
-                        mid: &line.mid,
+                        mid: &mid,
                         label: SHARE_LABEL,
                         codec: VideoCodec {
                             pt: offered.pt,
@@ -726,6 +744,29 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
         }
     }
     out
+}
+
+/// A mid no line of `remote` uses: one past the highest number in any
+/// of them (`5` after `0`, `4`, `3`; `3` after `audio_0`, `video_2`).
+fn fresh_mid(remote: &RemoteMedia) -> String {
+    let highest = remote
+        .lines
+        .iter()
+        .filter_map(|l| {
+            let digits: String = l
+                .mid
+                .chars()
+                .rev()
+                .take_while(char::is_ascii_digit)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            digits.parse::<u32>().ok()
+        })
+        .max()
+        .unwrap_or(0);
+    (highest + 1).to_string()
 }
 
 /// The call's modalities, as a request says them (`callModalities`), from
@@ -812,7 +853,12 @@ fn video_line(
     push(out, &format!("m=video {port} RTP/SAVP {payloads}"));
     push(out, &connection(address));
     push(out, "a=x-signaling-fb:* x-message app send:src recv:src,vc");
-    push(out, &ssrc_range(ssrc));
+    // A line we only receive on names no stream of ours, as the web
+    // client writes it (recorded).
+    let sending = matches!(line.direction, Direction::SendRecv | Direction::SendOnly);
+    if sending {
+        push(out, &ssrc_range(ssrc));
+    }
     push(out, &format!("a=rtpmap:{pt} H264/90000"));
     let limits = if line.share {
         ";max-fs=8160;max-mbps=135000;max-fps=1500"
@@ -838,7 +884,7 @@ fn video_line(
     push(out, "a=rtcp-fb:* nack pli");
     // Our resends' stream, paired with the line's, as the web client
     // writes it.
-    if let (Some(_), Some(rtx_ssrc)) = (rtx, rtx_ssrc) {
+    if let (true, Some(_), Some(rtx_ssrc)) = (sending, rtx, rtx_ssrc) {
         for one in [ssrc, rtx_ssrc] {
             push(out, &format!("a=ssrc:{one} cname:{CNAME}"));
         }
@@ -1558,6 +1604,12 @@ mod tests {
         assert_eq!(read(&stop).expect("reads").share().map(|l| l.port), Some(0));
         assert!(!modalities(&stop).iter().any(|m| m.starts_with("Screen")));
 
+        // Sharing again: the line comes back with a mid of its own.
+        let again = reoffer(&sharing, &read(&stop).expect("reads"));
+        let mid = read(&again).expect("reads").share().map(|l| l.mid.clone());
+        assert_eq!(mid.as_deref(), Some("4"), "{again}");
+        assert!(again.contains("a=group:BUNDLE 0 1 4 3"), "{again}");
+
         // The far end shares: we take it, receiving.
         let theirs = read(&start).expect("reads");
         let answered = answer(&ours, &theirs);
@@ -1568,6 +1620,8 @@ mod tests {
             .expect("kept");
         assert_eq!(share.direction, Direction::RecvOnly);
         assert!(modalities(&answered).contains(&"ScreenViewer".to_owned()));
+        // Receiving only, the line names no stream of ours.
+        assert!(!answered.contains("a=x-ssrc-range:88-88"), "{answered}");
     }
 
     #[test]

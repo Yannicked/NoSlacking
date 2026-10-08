@@ -803,7 +803,22 @@ a normal end.
 followed by a `conversation/conversationEnd` push. Either way, close the
 media locally at once: a hang-up must never wait on the network.
 
-### C.6 Screen sharing (from the web client's code; not yet captured)
+### C.6 Screen sharing (recorded: `teams.live.com4.har`, the web client sharing twice, then the phone)
+
+Recorded, and differing from what the code suggested: the offer's
+`mediaContent` also carries `requiredFeatures: "nonByPass"` and
+`negotiationTag: "{our participant id};ss_{n}"` (the same `n` for a
+share's start and stop, rising by two per share); the acknowledgement of
+the answer is an empty body; a stop drops the share line with port 0
+(`m=video 0 RTP/SAVP 34` and its label), never inactive; sharing again
+brings the line back at a new mid (one past the highest); about a second
+after answering a start Microsoft offers again, raising the share's
+limits, which the sharer answers `sendonly` with `ScreenSharer`; a line
+only received on names no SSRC of ours; and the phone's share arrives at a
+new mid with ICE of its own (answered bundled), at the camera's payload
+type (told apart by `x-ssrc-range`), and its stop is never signalled.
+
+What the code says, all of which held:
 
 A share in a 1:1 call is a renegotiation by the sharer, nothing else: no
 content-sharing session, no conversation modality, no data-channel

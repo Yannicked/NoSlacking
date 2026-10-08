@@ -72,6 +72,10 @@ pub struct Line {
     /// The m-line's port; 0 for a rejected line.
     pub port: u16,
     pub direction: Direction,
+    /// The SSRCs the far end sends this line's media on
+    /// (`a=x-ssrc-range:first-last`): how its streams are told apart when
+    /// two lines share a payload type, as the camera and the share do.
+    pub ssrc_range: Option<(u32, u32)>,
 }
 
 /// What kind of address an ICE candidate is.

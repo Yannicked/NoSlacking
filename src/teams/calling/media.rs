@@ -433,6 +433,9 @@ struct Plan {
     /// Whether to send our screen and show the far end's, if the
     /// description has the share line in use.
     share: Option<(bool, bool)>,
+    /// The SSRCs the far end sends each on, as its lines say.
+    video_ssrcs: Option<(u32, u32)>,
+    share_ssrcs: Option<(u32, u32)>,
 }
 
 impl std::fmt::Debug for Plan {
@@ -787,6 +790,8 @@ fn plan(remote: &RemoteMedia, opus_pt: u8) -> Result<Plan, String> {
         .share()
         .filter(|line| line.port != 0 && remote.share_video.is_some())
         .map(|line| flows(line.direction));
+    let video_ssrcs = remote.camera().and_then(|line| line.ssrc_range);
+    let share_ssrcs = remote.share().and_then(|line| line.ssrc_range);
     Ok(Plan {
         creds: IceCreds {
             ufrag: remote.ice_ufrag.clone(),
@@ -800,6 +805,8 @@ fn plan(remote: &RemoteMedia, opus_pt: u8) -> Result<Plan, String> {
         receive,
         video,
         share,
+        video_ssrcs,
+        share_ssrcs,
     })
 }
 
@@ -1780,12 +1787,12 @@ impl Session {
         self.send = plan.send;
         self.receive = plan.receive;
         if let (Some(video), Some((send, receive))) = (&mut self.video, plan.video) {
-            video.set_flows(send, receive);
+            video.set_flows(send, receive, plan.video_ssrcs);
         }
         if let Some(share) = &mut self.share {
             // A description without the share line in use shares nothing.
             let (send, receive) = plan.share.unwrap_or((false, false));
-            share.set_flows(send, receive);
+            share.set_flows(send, receive, plan.share_ssrcs);
         }
         for ip in &plan.permits {
             if !self.permits.contains(ip) {
@@ -2128,6 +2135,7 @@ mod tests {
             label: Some("main-audio".into()),
             port: 3478,
             direction,
+            ssrc_range: None,
         }
     }
 
@@ -2165,6 +2173,7 @@ mod tests {
                     label: Some("main-video".into()),
                     port: 0,
                     direction: Direction::Inactive,
+                    ssrc_range: None,
                 },
             ],
         }

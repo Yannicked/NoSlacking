@@ -40,6 +40,9 @@ pub const FAR_CAMERA: &str = "far";
 /// No picture from the far end for this long: its camera is off (the
 /// native client stops sending without a renegotiation).
 const FAR_STOPPED: Duration = Duration::from_secs(3);
+/// The same for its screen share, which it also stops without a word
+/// (recorded) but which may send a still screen rarely.
+const SHARE_STOPPED: Duration = Duration::from_secs(8);
 /// The fewest seconds between two keyframe requests of ours.
 const PLI_EVERY: Duration = Duration::from_secs(1);
 /// How many of the far end's frames may wait in the decoder's queue;
@@ -256,6 +259,9 @@ pub(super) struct CallVideo {
     /// Whether the far end takes our camera, and sends its own.
     send: bool,
     receive: bool,
+    /// The SSRCs the far end sends this line's media on, when its SDP
+    /// says: the camera and the share may share a payload type.
+    ssrcs: Option<(u32, u32)>,
     tell: mpsc::UnboundedSender<MediaEvent>,
     /// When the far end's last picture came, and whether it is shown.
     last_picture: Option<Instant>,
@@ -332,6 +338,7 @@ impl CallVideo {
             report: Report::default(),
             send: true,
             receive: true,
+            ssrcs: None,
             tell,
             last_picture: None,
             showing: false,
@@ -375,7 +382,8 @@ impl CallVideo {
     }
 
     /// What the far end's latest description says of the line.
-    pub(super) fn set_flows(&mut self, send: bool, receive: bool) {
+    pub(super) fn set_flows(&mut self, send: bool, receive: bool, ssrcs: Option<(u32, u32)>) {
+        self.ssrcs = ssrcs;
         if send != self.send || receive != self.receive {
             log::info!(
                 "video: {}sending, {}receiving",
@@ -398,7 +406,13 @@ impl CallVideo {
     /// carries, if it is RTP at the line's payload type on an SSRC not
     /// seen before.
     pub(super) fn learn(&mut self, rtc: &mut Rtc, data: &[u8]) {
+        // Only a line that receives, and only its own streams: the far
+        // end sends its camera and its share at one payload type.
+        let (receive, ssrcs) = (self.receive, self.ssrcs);
+        let ours =
+            |ssrc: u32| receive && ssrcs.is_none_or(|(first, last)| (first..=last).contains(&ssrc));
         if let Some(ssrc) = super::media::rtp_ssrc(data, self.pt)
+            && ours(ssrc)
             && self.seen.insert(ssrc)
         {
             log::info!("video: the far end's camera comes on SSRC {ssrc}");
@@ -408,6 +422,7 @@ impl CallVideo {
         }
         if let Some(rtx) = self.rtx
             && let Some(ssrc) = super::media::rtp_ssrc(data, rtx)
+            && ours(ssrc)
             && self.seen_rtx.insert(ssrc)
         {
             log::info!("video: the far end resends lost packets on SSRC {ssrc}");
@@ -527,13 +542,10 @@ impl CallVideo {
     /// What is due at `now`: a keyframe request, the far end's camera
     /// gone quiet.
     pub(super) fn on_time(&mut self, rtc: &mut Rtc, now: Instant) {
-        // A still shared screen may send rarely: a share stops when it is
-        // renegotiated off.
         if self.showing
-            && self.which == Which::Camera
             && self
                 .last_picture
-                .is_some_and(|at| now.saturating_duration_since(at) >= FAR_STOPPED)
+                .is_some_and(|at| now.saturating_duration_since(at) >= self.stopped_after())
         {
             log::info!("video: no picture from the far end for a while; its camera is off");
             self.far_stopped();
@@ -593,8 +605,8 @@ impl CallVideo {
     pub(super) fn deadline(&self) -> Option<Instant> {
         let quiet = self
             .last_picture
-            .filter(|_| self.showing && self.which == Which::Camera)
-            .map(|at| at + FAR_STOPPED);
+            .filter(|_| self.showing)
+            .map(|at| at + self.stopped_after());
         let pli = (self.want_pli && self.showing)
             .then(|| self.last_pli.map_or_else(Instant::now, |at| at + PLI_EVERY));
         let report = self
@@ -620,6 +632,14 @@ impl CallVideo {
             shown.stop();
         }
         let _ = self.tell.send(self.event(false));
+    }
+
+    /// How long without a picture counts as the far end's having stopped.
+    fn stopped_after(&self) -> Duration {
+        match self.which {
+            Which::Camera => FAR_STOPPED,
+            Which::Share => SHARE_STOPPED,
+        }
     }
 
     /// What the media tells of the far end's pictures on this line
