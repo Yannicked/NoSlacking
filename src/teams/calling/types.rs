@@ -493,7 +493,7 @@ impl RosterParticipant {
     /// `lobby` where one in the call has `call`).
     pub fn is_waiting(&self) -> bool {
         self.is_active()
-            && self.endpoints.values().any(|e| e.lobby.is_some())
+            && self.endpoints.values().any(RosterEndpoint::waits)
             && !self.endpoints.values().any(|e| e.call.is_some())
     }
 }
@@ -508,6 +508,24 @@ pub struct RosterEndpoint {
     pub call: Option<serde_json::Value>,
     /// Its media in a meeting's lobby, while it waits there.
     pub lobby: Option<serde_json::Value>,
+    /// Where it has been: `Lobby` while waiting, `Lobby,Call` once let
+    /// in, `Call` for one never kept waiting (recorded).
+    #[serde(deserialize_with = "nullable")]
+    pub modality_joined: String,
+}
+
+impl RosterEndpoint {
+    /// Whether this device waits in the lobby: it is there, it has never
+    /// been in the call, and it is not in it now. One let in and gone
+    /// again can still show its lobby media.
+    pub fn waits(&self) -> bool {
+        self.lobby.is_some()
+            && self.call.is_none()
+            && !self
+                .modality_joined
+                .split(',')
+                .any(|m| m.trim().eq_ignore_ascii_case("call"))
+    }
 }
 
 // ---------------------------------------------------------------- meetings
@@ -1128,6 +1146,13 @@ mod tests {
         assert_eq!(who("8:live:waiting").role, "guest");
         assert!(!who("8:live:gone").is_active());
         assert!(!who("8:live:gone").is_waiting());
+        // Let in, then gone from the call: its lobby media left behind
+        // does not make it wait again.
+        let mut left = who("8:live:waiting").clone();
+        for endpoint in left.endpoints.values_mut() {
+            endpoint.modality_joined = "Lobby,Call".into();
+        }
+        assert!(!left.is_waiting());
     }
 
     #[test]

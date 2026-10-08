@@ -1032,7 +1032,13 @@ impl Call {
                 if let Some(meeting) = &mut self.meeting
                     && meeting.people.take(&update, &meeting.me)
                 {
-                    tell(CallEvent::People(meeting.people.list()));
+                    let people = meeting.people.list();
+                    let waiting = people.iter().filter(|p| p.waiting).count();
+                    log::info!(
+                        "Teams meeting: {} others in, {waiting} waiting",
+                        people.len() - waiting
+                    );
+                    tell(CallEvent::People(people));
                 }
             }
             Push::RosterUpdate(update) => {
