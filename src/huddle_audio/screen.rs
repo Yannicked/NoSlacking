@@ -511,6 +511,7 @@ fn run(jobs: &Jobs, screen: &Screen) {
     while let Some(job) = next(jobs) {
         match job {
             Job::Start => {
+                log::info!("video: the share's decoder starts over");
                 let fresh = H264::new(Lane::Share);
                 screen.set_no_video(fresh.no_helper());
                 decoder = Some(fresh);
@@ -531,7 +532,22 @@ fn run(jobs: &Jobs, screen: &Screen) {
                 }
                 let started = Instant::now();
                 decoder.set_fit(screen.fit().0, screen.fit().1);
+                let keyframe = decode::is_keyframe(&unit);
                 let decoded = decoder.decode(&unit, screen.wants_picture());
+                if keyframe {
+                    log::info!(
+                        "video: the share's decoder on a keyframe ({} bytes, NAL units {:?}): {}",
+                        unit.len(),
+                        super::bitstream::nal_types(&unit),
+                        match &decoded {
+                            Ok(decode::Outcome::Picture(_)) => "a picture".to_owned(),
+                            Ok(decode::Outcome::Kept) => "kept back".to_owned(),
+                            Ok(decode::Outcome::Unchanged) => "unchanged".to_owned(),
+                            Ok(decode::Outcome::Nothing) => "nothing".to_owned(),
+                            Err(trouble) => format!("{trouble}"),
+                        }
+                    );
+                }
                 show(screen, decoded, started, &mut timings);
             }
             Job::Fetch => {
