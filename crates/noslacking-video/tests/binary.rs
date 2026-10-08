@@ -55,6 +55,7 @@ fn the_helper_answers_over_its_pipes_and_ends_when_they_close() {
         Request::Decode {
             id,
             keyframe: true,
+            show: true,
             data: vec![0, 0, 0, 1, 0x65, 0x88],
         },
     );
@@ -78,6 +79,7 @@ fn the_helper_answers_over_its_pipes_and_ends_when_they_close() {
         Request::Decode {
             id,
             keyframe: false,
+            show: true,
             data: vec![0, 0, 0, 1, 0x41, 0x88],
         },
     );
@@ -132,6 +134,7 @@ fn without_hardware_the_welcome_lists_nothing_and_software_decodes() {
             Request::Decode {
                 id,
                 keyframe: noslacking_video::nal::is_keyframe(frame),
+                show: true,
                 data: frame.clone(),
             },
         );
@@ -151,7 +154,7 @@ fn the_helper_says_its_version_and_probes() {
         .output()
         .expect("runs");
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("protocol 5"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("protocol 6"));
     let output = Command::new(env!("CARGO_BIN_EXE_noslacking-video"))
         .arg("--probe")
         .env("NOSLACKING_VIDEO_BACKEND", "none")

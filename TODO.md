@@ -1241,6 +1241,34 @@ engineering, as for the rest of the session sign-in.
         libclang; its video threads do a fraction of what they did, and
         a missing or failing helper means no video, said so, never a
         crash.
+  - [x] **A cheaper way for decoded pictures to the screen** (2026-10-08,
+        `feat/picture-path`, research doc §6.12). Measured first: the
+        app's own part of a full-size 1080p picture is about 1 ms of CPU
+        (the pipe 0.25, RGBA 0.4–1.0), a tenth of that for anything shown
+        smaller. Protocol 6: a picture is read back and sent only when
+        the call window has drawn the last one and can be seen
+        (backpressure and `ViewportInfo::visible`), the newest kept in
+        the helper and fetched once it can (never a queue); a picture
+        identical to the last is answered `Unchanged`. A hidden window
+        now costs about 0.05 ms of CPU a frame on the GPU instead of
+        2 ms. Tried and not kept: reusing the pipe's plane vectors (no
+        gain), reusing RGBA images (the main thread paid more than the
+        decoder threads saved, under llvmpipe), `glTexSubImage2D` uploads
+        (no difference). RGBA from the helper and shared memory: the
+        numbers do not justify them; the pipe stays.
+        - [ ] Pace the call window's video repaints (every picture is a
+              whole frame now: about 36–60 frames a second with four
+              cameras and a share, 10 % of a core on the main thread
+              here): say at most 30 a second, at up to 33 ms more delay
+              for a picture. The user's call.
+        - [ ] A hidden call window could also SUBSCRIBE to fewer or
+              smaller layers, so nothing is received or decoded.
+        - [ ] Measure upload and drawing on a real GPU (this machine's
+              numbers are llvmpipe under Xvfb), and try the RGBA image
+              pool and `set_partial` again there.
+        - [ ] Check minimising and covering the call window on GNOME
+              and KDE (Wayland, X11): does winit report it
+              (`minimized`/`occluded`), so the helper stops sending?
   - [ ] **Hardware video decoding (and maybe encoding), in a separate
         process.** Pure Rust in software costs little today (about 0.4 ms
         per 480×480 camera frame, 3–5 ms per 1080p share frame, 4 ms to

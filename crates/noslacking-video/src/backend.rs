@@ -89,10 +89,30 @@ pub trait Backend {
 }
 
 /// One stream's decoder.
+///
+/// Decoding a frame and taking its picture are two steps, so a picture
+/// the app will not show (it has not drawn the last one, or its window
+/// is hidden) is never shrunk, read back from the GPU or sent: every
+/// frame must be decoded, as the frames after it refer to it, but only
+/// the pictures wanted cost more.
 pub trait Decoder {
-    /// Decodes one frame: its picture, or none for a frame of parameter
-    /// sets only. Shrunk to cover the output box, if one was set.
-    fn decode(&mut self, frame: &[u8], keyframe: bool) -> Result<Option<Decoded>, Failure>;
+    /// Decodes one frame: whether it gave a picture (none for a frame of
+    /// parameter sets only). The picture waits, as decoded, for
+    /// [`Decoder::picture`] until the next frame.
+    fn decode_frame(&mut self, frame: &[u8], keyframe: bool) -> Result<bool, Failure>;
+    /// The last frame's picture, shrunk to cover the output box (as it is
+    /// now) and read back; none if the last frame gave none or it was
+    /// taken already.
+    fn picture(&mut self) -> Result<Option<Decoded>, Failure>;
+    /// Decodes one frame and takes its picture: the picture, or none for a
+    /// frame of parameter sets only.
+    fn decode(&mut self, frame: &[u8], keyframe: bool) -> Result<Option<Decoded>, Failure> {
+        if self.decode_frame(frame, keyframe)? {
+            self.picture()
+        } else {
+            Ok(None)
+        }
+    }
     /// The box pictures from now on should cover
     /// (`noslacking_video_ipc::output_size`); 0×0 for their own size.
     fn set_output_size(&mut self, width: u32, height: u32);
@@ -149,10 +169,24 @@ struct Fallback {
     fit: (u32, u32),
 }
 
+impl Fallback {
+    /// Gives up on the GPU after `failure`: software from here on.
+    fn give_up_gpu(&mut self, failure: &Failure) {
+        eprintln!(
+            "noslacking-video: the GPU failed ({:?}: {}): software from here on",
+            failure.kind, failure.detail
+        );
+        self.gpu = None;
+        let mut software = Software::new();
+        software.set_output_size(self.fit.0, self.fit.1);
+        self.software = Some(software);
+    }
+}
+
 impl Decoder for Fallback {
-    fn decode(&mut self, frame: &[u8], keyframe: bool) -> Result<Option<Decoded>, Failure> {
+    fn decode_frame(&mut self, frame: &[u8], keyframe: bool) -> Result<bool, Failure> {
         if let Some(gpu) = &mut self.gpu {
-            let failure = match gpu.decode(frame, keyframe) {
+            let failure = match gpu.decode_frame(frame, keyframe) {
                 Ok(decoded) => return Ok(decoded),
                 Err(failure) => failure,
             };
@@ -167,21 +201,32 @@ impl Decoder for Fallback {
             if stay {
                 return Err(failure);
             }
-            eprintln!(
-                "noslacking-video: the GPU failed ({:?}: {}): software from here on",
-                failure.kind, failure.detail
-            );
-            self.gpu = None;
-            let mut software = Software::new();
-            software.set_output_size(self.fit.0, self.fit.1);
-            self.software = Some(software);
+            self.give_up_gpu(&failure);
             if !keyframe {
                 return Err(Failure::need_keyframe("software takes over at a keyframe"));
             }
         }
         match &mut self.software {
-            Some(software) => software.decode(frame, keyframe),
+            Some(software) => software.decode_frame(frame, keyframe),
             None => Err(Failure::device("no decoder")),
+        }
+    }
+
+    fn picture(&mut self) -> Result<Option<Decoded>, Failure> {
+        if let Some(gpu) = &mut self.gpu {
+            return match gpu.picture() {
+                Ok(picture) => Ok(picture),
+                Err(failure) if failure.kind == FailKind::Device => {
+                    // The frame is gone: software starts at a keyframe.
+                    self.give_up_gpu(&failure);
+                    Err(Failure::need_keyframe("software takes over at a keyframe"))
+                }
+                Err(failure) => Err(failure),
+            };
+        }
+        match &mut self.software {
+            Some(software) => software.picture(),
+            None => Ok(None),
         }
     }
 

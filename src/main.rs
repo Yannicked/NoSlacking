@@ -381,6 +381,10 @@ impl eframe::App for Window {
         #[cfg(feature = "demo")]
         self.demo.before_frame(&mut self.app);
         self.app.frame_ui(ui);
+        #[cfg(all(feature = "demo", feature = "huddle-video"))]
+        if let Some(times) = &mut self.demo.frame_times {
+            times.note(_frame.info().cpu_usage, self.app.huddles.picture.uploaded);
+        }
         #[cfg(feature = "demo")]
         self.demo.after_frame(ui.ctx(), &mut self.app);
     }
@@ -483,12 +487,88 @@ struct DemoSetup {
     /// A device picker or menu to open once the page has settled (and
     /// scrolled), to show its devices.
     open_popup: Option<egui::Id>,
+    /// With `NOSLACKING_DEMO_FRAME_TIMES` set: how long frames took with
+    /// and without new video pictures, in the log every ten seconds.
+    #[cfg(feature = "huddle-video")]
+    frame_times: Option<FrameTimes>,
+}
+
+/// How long the demo's frames took, those that uploaded video pictures
+/// apart from the rest, so a picture's upload can be told from drawing.
+#[cfg(all(feature = "demo", feature = "huddle-video"))]
+#[derive(Clone, Default)]
+struct FrameTimes {
+    since: Option<(std::time::Instant, f64)>,
+    /// Pixels the last frame handed to textures: the next frame's time
+    /// (eframe's, which covers painting) is that frame's.
+    last: usize,
+    /// Frames that uploaded pictures: how many, seconds, pixels.
+    with: (u32, f64, usize),
+    /// Frames that uploaded none: how many, seconds.
+    without: (u32, f64),
+}
+
+#[cfg(all(feature = "demo", feature = "huddle-video"))]
+impl FrameTimes {
+    /// The main thread's CPU time so far, in seconds, from /proc (Linux
+    /// only; 0 elsewhere).
+    fn cpu() -> f64 {
+        let Ok(stat) = std::fs::read_to_string("/proc/thread-self/stat") else {
+            return 0.0;
+        };
+        let Some(close) = stat.rfind(')') else {
+            return 0.0;
+        };
+        let fields: Vec<&str> = stat[close + 2..].split(' ').collect();
+        let tick = |n: usize| fields.get(n).and_then(|f| f.parse::<f64>().ok());
+        (tick(11).unwrap_or(0.0) + tick(12).unwrap_or(0.0)) / 100.0
+    }
+
+    /// Notes the last frame's time `took`, and `uploaded`, the pixels this
+    /// frame hands to textures.
+    fn note(&mut self, took: Option<f32>, uploaded: usize) {
+        let now = std::time::Instant::now();
+        let (since, cpu) = *self.since.get_or_insert((now, Self::cpu()));
+        if let Some(took) = took {
+            if self.last > 0 {
+                self.with.0 += 1;
+                self.with.1 += f64::from(took);
+                self.with.2 += self.last;
+            } else {
+                self.without.0 += 1;
+                self.without.1 += f64::from(took);
+            }
+        }
+        self.last = uploaded;
+        let seconds = now.duration_since(since).as_secs_f64();
+        if seconds < 10.0 {
+            return;
+        }
+        let mean = |n: u32, total: f64| total * 1000.0 / f64::from(n.max(1));
+        log::info!(
+            "demo frames in {seconds:.0} s: {} with pictures ({:.2} ms, {:.2} Mpixel each), {} \
+             without ({:.2} ms); main thread {:.1} % of a core",
+            self.with.0,
+            mean(self.with.0, self.with.1),
+            self.with.2 as f64 / 1e6 / f64::from(self.with.0.max(1)),
+            self.without.0,
+            mean(self.without.0, self.without.1),
+            (Self::cpu() - cpu) * 100.0 / seconds
+        );
+        *self = Self {
+            last: self.last,
+            ..Self::default()
+        };
+    }
 }
 
 #[cfg(feature = "demo")]
 impl DemoSetup {
     fn from(cli: &Cli) -> Self {
         Self {
+            #[cfg(feature = "huddle-video")]
+            frame_times: std::env::var_os("NOSLACKING_DEMO_FRAME_TIMES")
+                .map(|_| FrameTimes::default()),
             due: Some(
                 std::time::Instant::now() + std::time::Duration::from_millis(cli.demo_shot_delay),
             ),

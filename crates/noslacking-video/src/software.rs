@@ -26,6 +26,8 @@ pub struct Software {
     waiting: bool,
     /// The box pictures should cover; 0×0 for their own size.
     fit: (u32, u32),
+    /// The last frame's picture at its own size, until taken.
+    last: Option<Planes>,
 }
 
 impl std::fmt::Debug for Software {
@@ -50,12 +52,14 @@ impl Software {
             decoder: rusty_h264_decoder::Decoder::new(),
             waiting: true,
             fit: (0, 0),
+            last: None,
         }
     }
 }
 
 impl Decoder for Software {
-    fn decode(&mut self, frame: &[u8], keyframe: bool) -> Result<Option<Decoded>, Failure> {
+    fn decode_frame(&mut self, frame: &[u8], keyframe: bool) -> Result<bool, Failure> {
+        self.last = None;
         if self.waiting {
             if !keyframe {
                 return Err(Failure::need_keyframe("waiting for a keyframe"));
@@ -64,7 +68,7 @@ impl Decoder for Software {
         }
         let picture = match self.decoder.decode(frame) {
             Ok(Some(picture)) => picture,
-            Ok(None) => return Ok(None),
+            Ok(None) => return Ok(false),
             Err(error) => {
                 // It refuses everything after an error: a new one, for
                 // the next keyframe.
@@ -89,10 +93,16 @@ impl Decoder for Software {
                 planes.width, planes.height
             )));
         }
-        let source = (planes.width, planes.height);
-        Ok(Some(Decoded {
+        // Kept as decoded (the decoder hands over its own planes): shrunk
+        // only if it is taken.
+        self.last = Some(planes);
+        Ok(true)
+    }
+
+    fn picture(&mut self) -> Result<Option<Decoded>, Failure> {
+        Ok(self.last.take().map(|planes| Decoded {
+            source: (planes.width, planes.height),
             planes: shrink::shrink(planes, self.fit),
-            source,
             hardware: false,
         }))
     }
