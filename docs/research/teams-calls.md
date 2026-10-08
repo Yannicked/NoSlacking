@@ -1506,3 +1506,9 @@ recorded yet.
 
 A guest who is not signed in has a `8:teamsvisitor:…` MRI. Admitting
 someone sends the MRI the roster listed them by.
+
+The meeting's media server answers the camera line with H.264 at payload
+type 107 (resends 99) whatever was offered: we offered 108 and it
+answered 107, so its video came at a number our line did not know, and
+ours went at one it did not take. We now offer 107 and 99 when joining a
+meeting; 1:1 calls keep 108.

@@ -575,7 +575,7 @@ impl Call {
             })?;
         log::info!("Teams meeting: found");
         let (mut session, mut local) =
-            MediaSession::start(MediaConfig::offer(self.relay.clone()), audio)
+            MediaSession::start(MediaConfig::meeting(self.relay.clone()), audio)
                 .await
                 .map_err(media_failure)?;
         self.leg = self.api.ids().media_leg_id.clone();

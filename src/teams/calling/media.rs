@@ -195,6 +195,11 @@ pub struct VideoLine {
 /// Whether this build shows or sends video at all.
 const HAS_VIDEO: bool = cfg!(any(feature = "huddle-video", feature = "huddle-camera"));
 
+/// The H.264 payload type of a meeting's media server, and of its
+/// resends (recorded).
+pub const MEETING_VIDEO_PT: u8 = 107;
+pub const MEETING_VIDEO_RTX: u8 = 99;
+
 /// The H.264 payload type of our offer's camera line: the web client's
 /// constrained baseline number, moved aside if Opus has it (in a bundle a
 /// payload type must not mean two codecs).
@@ -228,6 +233,24 @@ impl MediaConfig {
                 pt: offer_video_pt(OPUS_PT),
                 rtx: Some(offer_video_pt(OPUS_PT) + 1),
             }),
+        }
+    }
+
+    /// A configuration for joining a meeting: an offer as
+    /// [`Self::offer`]'s, but with H.264 at [`MEETING_VIDEO_PT`]. A
+    /// meeting's media server answers the camera at that number whatever
+    /// was offered (recorded: offered 108, answered 107), and video at a
+    /// number the line does not know would go unseen both ways.
+    pub fn meeting(relay: Option<Relay>) -> Self {
+        let line = |mid: &str| VideoLine {
+            mid: mid.to_owned(),
+            pt: MEETING_VIDEO_PT,
+            rtx: Some(MEETING_VIDEO_RTX),
+        };
+        Self {
+            video: HAS_VIDEO.then(|| line(VIDEO_MID)),
+            share: HAS_VIDEO.then(|| line(SHARE_MID)),
+            ..Self::offer(relay)
         }
     }
 
@@ -2772,5 +2795,20 @@ mod tests {
         // No `a=setup`: we are the DTLS client, as the web client was.
         assert!(plan.active);
         assert!(!plan.candidates.is_empty());
+    }
+
+    #[test]
+    fn a_meeting_is_offered_h264_at_its_media_servers_number() {
+        let config = MediaConfig::meeting(None);
+        assert!(config.controlling);
+        assert_eq!(config.opus_pt, OPUS_PT);
+        if HAS_VIDEO {
+            for line in [&config.video, &config.share] {
+                let line = line.as_ref().expect("a video line");
+                assert_eq!((line.pt, line.rtx), (107, Some(99)));
+            }
+            assert_ne!(MEETING_VIDEO_PT, OPUS_PT);
+            assert_ne!(MEETING_VIDEO_RTX, OPUS_PT);
+        }
     }
 }
