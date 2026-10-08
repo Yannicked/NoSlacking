@@ -459,7 +459,7 @@ fn show(
             Ok(decode::Outcome::Nothing) => "nothing".to_owned(),
             Err(trouble) => format!("{trouble}"),
         };
-        log::info!("video: the share's decoder: {what}");
+        log::debug!("video: the share's decoder: {what}");
     }
     let took = started.elapsed();
     match decoded {
@@ -535,7 +535,7 @@ fn run(jobs: &Jobs, screen: &Screen) {
                 let keyframe = decode::is_keyframe(&unit);
                 let decoded = decoder.decode(&unit, screen.wants_picture());
                 if keyframe {
-                    log::info!(
+                    log::debug!(
                         "video: the share's decoder on a keyframe ({} bytes, NAL units {:?}): {}",
                         unit.len(),
                         super::bitstream::nal_types(&unit),
