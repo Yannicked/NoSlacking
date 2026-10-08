@@ -73,7 +73,23 @@ One small window for all your workspaces. No Electron, no browser engine.
 - Join, start, listen and talk in huddles right in the app, with echo
   cancellation and noise suppression, a call bar showing who is talking,
   and Leave and mute on keyboard shortcuts.
+- Watch screen shares and cameras in a call window of its own, turn on
+  your camera, and share your screen (through the desktop's own screen
+  picker on Wayland).
+- Choose the microphone, speaker and camera in Settings → Huddles, or
+  switch them mid-call from the arrows beside Mute and Video.
 - Huddle invitations as a card and a desktop notification.
+
+**Microsoft Teams** (also in the same window)
+- Chats, and your teams' channels as posts with replies, with mentions and
+  formatting.
+- Calls, and meetings joined by link or ID or started with Meet now, with
+  cameras, screen sharing and admitting people from the lobby.
+- Add a Teams account (work, school or personal) from the sign-in screen.
+  NoSlacking signs in as Microsoft's own Teams app, so your organisation's
+  app approval does not apply to it and an administrator may block it; see
+  [the research note](docs/research/microsoft-teams.md#2-the-route-third-party-clients-take-not-pursued) before
+  using it at work.
 
 **Writing**
 - `@mention`, `@group`, `#channel` and `:emoji:` autocomplete, slash
@@ -81,6 +97,7 @@ One small window for all your workspaces. No Electron, no browser engine.
   checking.
 - Drafts kept across restarts, Send later, and pasting images or files to
   upload them.
+- Web addresses you type become links, for everyone reading them.
 
 **Staying in the loop**
 - Notifications for DMs, mentions and your own keywords, with mute,
@@ -147,13 +164,17 @@ file, and never written to the log.
 ## Building from source
 
 ```
+cargo build --release
 cargo run --release
 ```
 
 You need a Rust toolchain, the egui build dependencies and, for huddles,
 OpenSSL's headers on Linux or Perl on macOS and Windows; see
-[`CONTRIBUTING.md`](CONTRIBUTING.md). To try the interface without a Slack
-account, run the demo:
+[`CONTRIBUTING.md`](CONTRIBUTING.md). Video in huddles and calls comes from
+a small helper program, `noslacking-video`, that ships beside the app:
+`cargo build --release` builds both. It uses the GPU on Linux (VA-API) and
+works in software on macOS and Windows. To try the interface without a
+Slack account, run the demo:
 
 ```
 cargo run --features demo

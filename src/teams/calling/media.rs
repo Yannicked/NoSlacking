@@ -72,6 +72,21 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// media counts as lost: a peer on Wi-Fi drops checks for a moment.
 const RECONNECT_GRACE: Duration = Duration::from_secs(10);
 const STATS_EVERY: Duration = Duration::from_secs(5);
+/// What str0m's bandwidth estimate starts from, in kbit/s, before the
+/// far end's feedback says more.
+const BWE_START_KBPS: u64 = 700;
+/// Of the estimate, what the audio is left (Opus, with headroom).
+#[cfg(feature = "huddle-camera")]
+const AUDIO_BPS: u64 = 80_000;
+/// Video sent this long with no estimate means the far end sends no
+/// feedback we read: the share then goes at [`UNESTIMATED_SHARE_BPS`].
+#[cfg(feature = "huddle-camera")]
+const NO_ESTIMATE_AFTER: Duration = Duration::from_secs(10);
+/// A share's bitrate when nothing estimates the link: enough for a
+/// screen's text at 1080p and 15 a second, which the camera's 600 kbit/s
+/// start is not.
+#[cfg(feature = "huddle-camera")]
+const UNESTIMATED_SHARE_BPS: u32 = 1_500_000;
 const AUDIO_TICK: Duration = Duration::from_millis(20);
 /// The audio m-line's mid in our offer (§D.1).
 pub const AUDIO_MID: &str = "0";
@@ -597,10 +612,10 @@ enum Command {
     /// Send this on the meeting's data channel.
     Data(Vec<u8>),
     /// Keep what the camera's (or, `share`, the share's) line sends
-    /// within this many bit/s.
+    /// within what a meeting allows.
     Limit {
         share: bool,
-        bitrate: u32,
+        limit: super::types::VideoLimit,
     },
 }
 
@@ -686,9 +701,9 @@ impl MediaSession {
     }
 
     /// Keeps what our camera (or, `share`, our screen share) sends within
-    /// `bitrate` bit/s, as a meeting asks.
-    pub fn limit(&self, share: bool, bitrate: u32) {
-        let _ = self.commands.send(Command::Limit { share, bitrate });
+    /// `limit`, as a meeting asks.
+    pub fn limit(&self, share: bool, limit: super::types::VideoLimit) {
+        let _ = self.commands.send(Command::Limit { share, limit });
     }
 
     /// Sends `message` on the meeting's data channel, once it is open.
@@ -1070,6 +1085,12 @@ fn new_rtc(opus_pt: u8, video: &[(u8, Option<u8>)], controlling: bool, now: Inst
         .set_crypto_provider(Arc::new(dtls::provider()))
         // Brings the far end's RTCP receiver reports on what we send.
         .set_stats_interval(Some(STATS_EVERY));
+    // With video, str0m's send-side estimate from the far end's
+    // transport-cc feedback (or REMB) sets what our camera and share
+    // send: the extension is the offer's number 3, str0m's own.
+    if !video.is_empty() {
+        config = config.enable_bwe(Some(str0m::bwe::Bitrate::kbps(BWE_START_KBPS)));
+    }
     config.codec_config().add_config(
         Pt::from(opus_pt),
         None,
@@ -1109,6 +1130,25 @@ fn new_rtc(opus_pt: u8, video: &[(u8, Option<u8>)], controlling: bool, now: Inst
     let mut rtc = config.build(now);
     rtc.direct_api().set_ice_controlling(controlling);
     rtc
+}
+
+/// What each of `shares` screen shares and `cameras` cameras of ours may
+/// send, in bit/s, of a send bandwidth estimate of `bps`: what is left
+/// after the audio, two thirds of it to the shares when cameras go too
+/// (a screen's text wants it more than a face), shared evenly among each
+/// kind.
+#[cfg(feature = "huddle-camera")]
+fn split_estimate(bps: u64, shares: usize, cameras: usize) -> (u32, u32) {
+    let left = bps.saturating_sub(AUDIO_BPS);
+    let for_shares = match (shares, cameras) {
+        (0, _) => 0,
+        (_, 0) => left,
+        _ => left * 2 / 3,
+    };
+    let each = |part: u64, count: usize| {
+        u32::try_from(part / u64::try_from(count.max(1)).unwrap_or(1)).unwrap_or(u32::MAX)
+    };
+    (each(for_shares, shares), each(left - for_shares, cameras))
 }
 
 /// Declares the audio m-line, sending on `ssrc`.
@@ -1355,6 +1395,14 @@ struct Session {
     channel: Option<str0m::channel::ChannelId>,
     /// More camera lines, in a meeting.
     more: Vec<super::video::CallVideo>,
+    /// The last send bandwidth estimate, in bit/s, once there is one.
+    estimate: Option<u64>,
+    /// Since when we have sent video, and whether its rates were fixed
+    /// for want of an estimate.
+    #[cfg(feature = "huddle-camera")]
+    video_since: Option<Instant>,
+    #[cfg(feature = "huddle-camera")]
+    unestimated: bool,
 }
 
 impl Session {
@@ -1525,6 +1573,11 @@ impl Session {
             data_ssrc,
             channel: None,
             more,
+            estimate: None,
+            #[cfg(feature = "huddle-camera")]
+            video_since: None,
+            #[cfg(feature = "huddle-camera")]
+            unestimated: false,
         })
     }
 
@@ -1968,6 +2021,7 @@ impl Session {
                     }
                 }
             }
+            RtcEvent::EgressBitrateEstimate(estimate) => self.bitrate_estimate(&estimate),
             RtcEvent::KeyframeRequest(request) => {
                 for line in self
                     .video
@@ -2130,14 +2184,14 @@ impl Session {
                 log::info!("media: stopping");
                 self.over.get_or_insert(Ok(()));
             }
-            Some(Command::Limit { share, bitrate }) => {
+            Some(Command::Limit { share, limit }) => {
                 let line = if share {
                     &mut self.share
                 } else {
                     &mut self.video
                 };
                 if let Some(line) = line {
-                    line.limit(bitrate);
+                    line.limit(limit, self.estimate.is_some());
                 }
             }
             Some(Command::Data(message)) => {
@@ -2259,10 +2313,81 @@ impl Session {
         if self.next_stats <= now {
             if self.connected {
                 self.stats();
+                self.pace_video(now);
             }
             self.next_stats = now + STATS_EVERY;
         }
     }
+
+    /// Our senders now, each with whether it is the share.
+    #[cfg(feature = "huddle-camera")]
+    fn senders(&self) -> Vec<(bool, crate::huddle_audio::camera_send::SendControl)> {
+        self.video
+            .iter()
+            .chain(self.share.iter())
+            .chain(self.more.iter())
+            .filter_map(|line| Some((line.is_share(), line.sending()?.clone())))
+            .collect()
+    }
+
+    /// The bandwidth estimate, less the audio's, to what we send: the
+    /// share two thirds when the camera goes too, each sender within its
+    /// own limits and a meeting's ceiling.
+    fn bitrate_estimate(&mut self, estimate: &str0m::bwe::BweKind) {
+        let bps = match estimate {
+            str0m::bwe::BweKind::Twcc { estimate, .. } => estimate.as_u64(),
+            str0m::bwe::BweKind::Remb { estimate, .. } => estimate.as_u64(),
+            _ => return,
+        };
+        if self.estimate.is_none_or(|was| was.abs_diff(bps) > was / 5) {
+            log::info!("media: send bandwidth estimate {} kbit/s", bps / 1000);
+        }
+        self.estimate = Some(bps);
+        #[cfg(feature = "huddle-camera")]
+        {
+            let senders = self.senders();
+            let shares = senders.iter().filter(|(share, _)| *share).count();
+            let (share, camera) = split_estimate(bps, shares, senders.len() - shares);
+            for (is_share, control) in &senders {
+                control.set_bitrate(if *is_share { share } else { camera });
+            }
+        }
+    }
+
+    /// Every few seconds while we send video: tells the estimate what we
+    /// would send at most, so it probes that far, and with no estimate
+    /// after [`NO_ESTIMATE_AFTER`] sends the share at a fixed rate.
+    #[cfg(feature = "huddle-camera")]
+    fn pace_video(&mut self, now: Instant) {
+        let senders = self.senders();
+        if senders.is_empty() {
+            self.video_since = None;
+            return;
+        }
+        let desired: u64 = senders
+            .iter()
+            .map(|(_, control)| u64::from(control.limits().max_bitrate))
+            .sum::<u64>()
+            + AUDIO_BPS;
+        self.rtc
+            .bwe()
+            .set_desired_bitrate(str0m::bwe::Bitrate::bps(desired));
+        let since = *self.video_since.get_or_insert(now);
+        if self.estimate.is_none() && !self.unestimated && now >= since + NO_ESTIMATE_AFTER {
+            self.unestimated = true;
+            log::info!(
+                "media: no send bandwidth estimate (the far end's feedback did not come); \
+                 a share goes at {} kbit/s",
+                UNESTIMATED_SHARE_BPS / 1000
+            );
+            for (_, control) in senders.iter().filter(|(share, _)| *share) {
+                control.set_bitrate(UNESTIMATED_SHARE_BPS);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "huddle-camera"))]
+    fn pace_video(&mut self, _now: Instant) {}
 
     /// Sends our unanswered DTLS flight again, each datagram the way it
     /// went first.
@@ -2460,6 +2585,19 @@ async fn run(mut session: Session, mut commands: mpsc::UnboundedReceiver<Command
 mod tests {
     use super::super::{Line, LineKind};
     use super::*;
+
+    #[cfg(feature = "huddle-camera")]
+    #[test]
+    fn the_estimate_goes_mostly_to_the_share() {
+        // 2 Mbit/s: 1.92 after the audio, two thirds of it to the share.
+        assert_eq!(split_estimate(2_000_000, 1, 1), (1_280_000, 640_000));
+        // One sender takes it all; two cameras share theirs evenly.
+        assert_eq!(split_estimate(2_000_000, 1, 0), (1_920_000, 0));
+        assert_eq!(split_estimate(2_000_000, 0, 2), (0, 960_000));
+        // Less than the audio's leaves nothing (each sender's own least
+        // still holds).
+        assert_eq!(split_estimate(50_000, 1, 1), (0, 0));
+    }
 
     fn addr(text: &str) -> SocketAddr {
         text.parse().expect("an address")

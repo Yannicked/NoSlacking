@@ -154,7 +154,8 @@ fn the_helper_says_its_version_and_probes() {
         .output()
         .expect("runs");
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("protocol 6"));
+    let protocol = format!("protocol {}", noslacking_video_ipc::VERSION);
+    assert!(String::from_utf8_lossy(&output.stdout).contains(&protocol));
     let output = Command::new(env!("CARGO_BIN_EXE_noslacking-video"))
         .arg("--probe")
         .env("NOSLACKING_VIDEO_BACKEND", "none")

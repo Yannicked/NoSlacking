@@ -1,5 +1,26 @@
 # Brief: send within a Teams meeting's frame rate and picture size
 
+**Done (2026-10-08)**, as suggested below: `SendControl::set_max_fps` and
+`set_max_size`, the `Gate` paced by the lower rate, the helper's
+`Request::SetMaxSize` (protocol 7; a new size starts with a keyframe, and
+a still screen's held picture is put in again so it changes size too),
+and `StreamControl::limit` reading `max-br`, `max-fps`, `max-fs` (a 16:9
+box, `frame_box`) and `max-mbps`. The log says "Teams meeting: our screen
+share to send at most 825 kbit/s, 15 a second, 1920x1080", then the
+sender's "pictures at most …" and "… pictures a second" when they change.
+Not yet seen against a real meeting.
+
+**Also (2026-10-08): the bandwidth estimate in Teams calls.** Calls with
+video turn on str0m's send-side estimate (`enable_bwe`) from the far
+end's transport-cc feedback (or REMB); each estimate, less 80 kbit/s
+for the audio, goes to what we send, two thirds to the share when the
+camera goes too (`media::split_estimate`). A meeting's `max-br` is now
+a ceiling over the estimate (`SendControl::set_max_bitrate`), and the
+target too until an estimate comes. With no estimate 10 s into sending
+video, a share goes at a fixed 1.5 Mbit/s (it stayed at the 600 kbit/s
+start before). The log says "media: send bandwidth estimate N kbit/s",
+or "no send bandwidth estimate" once.
+
 For whoever picks this up. It needs changes to the sending side of the
 video pipeline (`src/huddle_audio/camera_send.rs`, `share_send.rs`, the
 helper's protocol in `crates/video-ipc` and the helper in

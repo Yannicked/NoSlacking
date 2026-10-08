@@ -89,12 +89,15 @@ nokhwa = { version = "0.10.11", default-features = false, features = ["input-nat
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGWindow"] }
 
 [features]
+# The ScreenCast portal and PipeWire on by default, so a plain `cargo
+# build` shares the screen under Wayland as releases do. It needs
+# PipeWire's headers and libclang to build on Linux; elsewhere its
+# dependencies are not there and it does nothing.
+default = ["pipewire"]
 # The ScreenCast portal and PipeWire, for sharing the screen under
-# Wayland and in the Flatpak. Off by default since it needs PipeWire's
-# headers and libclang to build; releases that ship screen sharing turn
-# it on (`--features noslacking-video/pipewire`). Without it the helper
-# shares only X11 screens on Linux, and says it cannot capture under
-# Wayland.
+# Wayland and in the Flatpak. Without it (`--no-default-features`) the
+# helper shares only X11 screens on Linux, and says it cannot capture
+# under Wayland.
 pipewire = ["dep:ashpd", "dep:pipewire", "dep:futures-lite"]
 
 [dev-dependencies]

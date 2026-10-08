@@ -19,7 +19,7 @@ use super::codes::{self, Ending};
 use super::media::{self, Audio, MediaConfig, MediaEvent, MediaSession, Relay};
 use super::types::{
     CpconvAnswer, IncomingInvitation, IncomingNotification, MediaContent, MediaNegotiation,
-    Participant, Push, RosterUpdate,
+    Participant, Push, RosterUpdate, VideoLimit,
 };
 use super::{LocalMedia, RemoteMedia, sdp};
 use crate::failure::Failure;
@@ -555,8 +555,8 @@ struct InMeeting {
     /// lists them: what the meeting names in what it wants of them.
     own_camera: Option<i64>,
     own_share: Option<i64>,
-    /// The bitrates last asked of our camera and our share, in bit/s.
-    limits: (Option<u32>, Option<u32>),
+    /// What our camera and our share were last let send.
+    limits: (Option<VideoLimit>, Option<VideoLimit>),
 }
 
 impl InMeeting {
@@ -1203,9 +1203,10 @@ impl Call {
                     return None;
                 };
                 for stream in &control.control_info {
-                    let Some(bitrate) = stream.max_bitrate() else {
+                    let limit = stream.limit();
+                    if limit.is_empty() {
                         continue;
-                    };
+                    }
                     let share = if Some(stream.source_id) == meeting.own_share {
                         true
                     } else if Some(stream.source_id) == meeting.own_camera {
@@ -1219,14 +1220,14 @@ impl Call {
                     } else {
                         &mut meeting.limits.0
                     };
-                    if last.replace(bitrate) == Some(bitrate) {
+                    if last.replace(limit) == Some(limit) {
                         continue;
                     }
-                    session.limit(share, bitrate);
+                    session.limit(share, limit);
                     log::info!(
-                        "Teams meeting: our {} to send at most {} kbit/s",
+                        "Teams meeting: our {} to send at most {}",
                         if share { "screen share" } else { "camera" },
-                        bitrate / 1000
+                        describe_limit(&limit)
                     );
                 }
             }
@@ -1896,6 +1897,21 @@ fn apply(session: &MediaSession, blob: &str) -> Option<RemoteMedia> {
 /// another device says so in `acceptedElsewhereBy`; a second delivery of
 /// the call to this same connection (it is registered for chat and for
 /// calls) only says so in words.
+/// A meeting's limit for the log: "825 kbit/s, 15 a second, 1920x1080".
+fn describe_limit(limit: &VideoLimit) -> String {
+    let mut parts = Vec::new();
+    if let Some(bitrate) = limit.bitrate {
+        parts.push(format!("{} kbit/s", bitrate / 1000));
+    }
+    if let Some(fps) = limit.fps {
+        parts.push(format!("{fps} a second"));
+    }
+    if let Some((w, h)) = limit.size {
+        parts.push(format!("{w}x{h}"));
+    }
+    parts.join(", ")
+}
+
 fn answered_elsewhere(end: &super::types::Outcome) -> bool {
     end.accepted_elsewhere_by.is_some() || end.phrase.contains("accepted by another")
 }

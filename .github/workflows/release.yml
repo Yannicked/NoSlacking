@@ -55,14 +55,13 @@ jobs:
       - name: Build dependencies and packaging validators
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake desktop-file-utils appstream dpkg-dev
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake desktop-file-utils appstream dpkg-dev libpipewire-0.3-dev libclang-dev
       # The app and its video helper (crates/noslacking-video), which
-      # decodes all huddle video and, once releases turn the camera on,
-      # captures and encodes it (V4L2: nothing more to install). Releases
-      # do not share screens yet
-      # (`huddle-share` is off); when they do, only the helper needs
-      # `--features noslacking-video/pipewire`, and this job (and the
-      # Flatpak) libpipewire-0.3-dev and libclang-dev to build it.
+      # decodes all huddle video, captures and encodes the camera (V4L2:
+      # nothing more to install) and the screen. Under Wayland the screen
+      # comes through the portal and PipeWire: the helper's `pipewire`
+      # feature, on by default, built with libpipewire-0.3-dev and
+      # libclang-dev.
       - name: Build
         run: cargo build --locked --release -p noslacking -p noslacking-video
       - name: Package
@@ -117,7 +116,8 @@ jobs:
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y --noninteractive flathub \
             org.freedesktop.Platform//26.08 org.freedesktop.Sdk//26.08 \
-            org.freedesktop.Sdk.Extension.rust-stable//26.08
+            org.freedesktop.Sdk.Extension.rust-stable//26.08 \
+            org.freedesktop.Sdk.Extension.llvm22//26.08
       - name: Crate sources
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"

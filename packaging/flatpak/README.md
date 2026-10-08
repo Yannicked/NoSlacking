@@ -1,7 +1,8 @@
 # Flatpak
 
 `cloud.yannick.NoSlacking.yml` builds NoSlacking on the freedesktop 26.08
-runtime with its Rust SDK extension. The release workflow builds it on every
+runtime with its Rust and LLVM SDK extensions (LLVM for libclang, which the
+video helper's PipeWire bindings are generated with). The release workflow builds it on every
 tag and attaches a `.flatpak` bundle to the release.
 
 Flatpak builds without network, so every crate is listed with its checksum in
@@ -13,10 +14,11 @@ git; make it again whenever `Cargo.lock` changes.
 From the repository root:
 
 ```sh
-# Once: the builder, the SDK and its Rust extension.
+# Once: the builder, the SDK and its Rust and LLVM extensions.
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 flatpak install --user flathub org.flatpak.Builder \
-    org.freedesktop.Sdk//26.08 org.freedesktop.Sdk.Extension.rust-stable//26.08
+    org.freedesktop.Sdk//26.08 org.freedesktop.Sdk.Extension.rust-stable//26.08 \
+    org.freedesktop.Sdk.Extension.llvm22//26.08
 
 # The crate list, with flatpak-builder-tools' generator (it needs aiohttp and
 # tomlkit; the workflow pins the commit and the versions).
@@ -40,3 +42,8 @@ flatpak run cloud.yannick.NoSlacking
   instead.
 - Spell checking uses the runtime's Hunspell dictionaries (the freedesktop
   runtime ships about 160, English and Dutch among them).
+- Huddles: the microphone and speaker through the PulseAudio socket, video
+  decoded on the GPU (`--device=dri`), and your screen shared through the
+  ScreenCast portal. Your camera does not work yet: the helper opens it
+  through V4L2, which would take `--device=all`, so the camera list is
+  empty until it uses the Camera portal instead.

@@ -238,6 +238,13 @@ impl Server<'_> {
                 }
                 None => failed(FailKind::UnknownId, "no such capture"),
             },
+            Request::SetMaxSize { id, width, height } => match self.captures.get(&id) {
+                Some(capture) => {
+                    capture.set_max_size((width > 0 && height > 0).then_some((width, height)));
+                    Reply::Done
+                }
+                None => failed(FailKind::UnknownId, "no such capture"),
+            },
             Request::SetOutputSize { id, width, height } => {
                 let Some(stream) = self.decoders.get_mut(&id) else {
                     return failed(FailKind::UnknownId, "no such decoder");
@@ -578,6 +585,18 @@ mod tests {
                     bitrate: 250_000,
                 }
                 .encode(),
+                Request::SetMaxSize {
+                    id: 1,
+                    width: 320,
+                    height: 180,
+                }
+                .encode(),
+                Request::SetMaxSize {
+                    id: 9,
+                    width: 320,
+                    height: 180,
+                }
+                .encode(),
                 Request::Close { id: 1 }.encode(),
                 start(CameraChoice::Device("pretend:7".into())),
             ],
@@ -607,9 +626,21 @@ mod tests {
             assert_eq!((preview.width, preview.height), (320, 240));
         }
         assert_eq!(replies[5], Reply::Done);
-        assert_eq!(replies[6], Reply::Done);
+        assert_eq!(replies[6], Reply::Done, "a box for the camera");
+        assert!(
+            matches!(
+                &replies[7],
+                Reply::Failed {
+                    kind: FailKind::UnknownId,
+                    ..
+                }
+            ),
+            "a box for no capture: {:?}",
+            replies[7]
+        );
+        assert_eq!(replies[8], Reply::Done);
         assert!(matches!(
-            replies[7],
+            replies[9],
             Reply::Problem {
                 problem: CaptureProblem::Gone,
                 ..

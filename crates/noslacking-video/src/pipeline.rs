@@ -190,6 +190,9 @@ pub enum Ask {
     },
     /// A new bit rate.
     Bitrate(u32),
+    /// Pictures from now on fit within this box too (none: only the
+    /// profile's own limits).
+    MaxSize(Option<(u32, u32)>),
     /// A captured picture, taken at `at`.
     Picture {
         /// The picture.
@@ -268,6 +271,12 @@ impl Capture {
     pub fn set_bitrate(&self, bitrate: u32) {
         (self.send)(Ask::Bitrate(bitrate));
     }
+
+    /// A box the pictures fit within from now on (see
+    /// [`Ask::MaxSize`]).
+    pub fn set_max_size(&self, max: Option<(u32, u32)>) {
+        (self.send)(Ask::MaxSize(max));
+    }
 }
 
 impl Drop for Capture {
@@ -331,6 +340,16 @@ impl Held {
         }
     }
 
+    /// As a frame to put in on the GPU again: none when it is only there
+    /// already.
+    fn frame(&self) -> Option<Frame<'_>> {
+        match self {
+            Self::Packed { .. } => self.packed().map(Frame::Packed),
+            Self::I420(planes) => Some(Frame::I420(planes)),
+            Self::Gpu => None,
+        }
+    }
+
     /// As the software encoder takes it, at most `max`.
     fn for_software(&self, max: (u32, u32)) -> Option<Planes> {
         match self {
@@ -342,6 +361,11 @@ impl Held {
             Self::Gpu => None,
         }
     }
+}
+
+/// The largest box within both `limit` and `max` (none: `limit`).
+fn within(limit: (u32, u32), max: Option<(u32, u32)>) -> (u32, u32) {
+    max.map_or(limit, |(w, h)| (limit.0.min(w), limit.1.min(h)))
 }
 
 /// `frame`'s self-view, at most `width` wide: none for a dma-buf, which
@@ -387,6 +411,12 @@ pub struct Pipeline {
     /// The capture's size the GPU was opened for, and the size it
     /// encodes.
     gpu_shape: Option<((u32, u32), (u32, u32))>,
+    /// A box the pictures fit within as well as the profile's limits,
+    /// as the app asks ([`Ask::MaxSize`]).
+    max_box: Option<(u32, u32)>,
+    /// The box changed since the GPU was opened: open it again, at the
+    /// new size, with the next picture put in.
+    reshape: bool,
     /// The GPU holds the last picture.
     gpu_loaded: bool,
     software: Option<SoftwareEncoder>,
@@ -457,6 +487,8 @@ impl Pipeline {
                 .clamp(profile.bitrates.0, profile.bitrates.1),
             gpu,
             gpu_shape: None,
+            max_box: None,
+            reshape: false,
             gpu_loaded: false,
             software: None,
             software_made: None,
@@ -628,10 +660,10 @@ impl Pipeline {
             return false;
         };
         let source = frame.size();
-        if self.gpu_shape.is_none_or(|(was, _)| was != source) {
+        if self.reshape || self.gpu_shape.is_none_or(|(was, _)| was != source) {
             let max = gpu.max_size();
             let wanted = self.profile.max_size;
-            let limit = (max.0.min(wanted.0), max.1.min(wanted.1));
+            let limit = within((max.0.min(wanted.0), max.1.min(wanted.1)), self.max_box);
             let Some(size) = convert::fit(source.0, source.1, limit) else {
                 self.counts.unusable += 1;
                 return false;
@@ -645,6 +677,7 @@ impl Pipeline {
                 self.profile.what, source.0, source.1, size.0, size.1
             );
             self.gpu_shape = Some((source, size));
+            self.reshape = false;
         }
         match gpu.load(frame) {
             Ok(()) => {
@@ -728,7 +761,7 @@ impl Pipeline {
             }
         }
         if self.software_picture.is_none() {
-            let max = self.profile.software_max;
+            let max = within(self.profile.software_max, self.max_box);
             self.software_picture = self.held.as_ref().and_then(|held| held.for_software(max));
         }
         let picture = self.software_picture.as_ref()?;
@@ -837,10 +870,39 @@ impl Pipeline {
                     self.drop_gpu(&failure);
                 }
             }
+            Ask::MaxSize(max) => self.set_max_size(max),
             Ask::Picture { picture, at } => self.put_picture(picture, at),
             Ask::Ended(trouble) => self.end(trouble),
             // The capture's loop stops on it.
             Ask::Stop => {}
+        }
+    }
+
+    /// Keeps pictures within `max` from now on. The picture held is put
+    /// in again at the new size, so a still screen changes size too
+    /// (one only on the GPU, a dma-buf, waits for the next); either
+    /// encoder starts the new size with a keyframe.
+    fn set_max_size(&mut self, max: Option<(u32, u32)>) {
+        let max = max.filter(|&(w, h)| w > 0 && h > 0);
+        if max == self.max_box {
+            return;
+        }
+        eprintln!(
+            "noslacking-video: {}: pictures at most {}",
+            self.profile.what,
+            max.map_or_else(
+                || "as large as before".to_owned(),
+                |(w, h)| format!("{w}x{h}")
+            )
+        );
+        self.max_box = max;
+        self.reshape = true;
+        self.software_picture = None;
+        if let Some(held) = self.held.take() {
+            if let Some(frame) = held.frame() {
+                self.load_on_gpu(&frame);
+            }
+            self.held = Some(held);
         }
     }
 
@@ -1035,6 +1097,8 @@ mod tests {
             (4096, 4096)
         }
         fn open(&mut self, size: (u32, u32), fps: u32, bitrate: u32) -> Result<(), Failure> {
+            // As a real one: the first picture after opening is an IDR.
+            self.encoded = 0;
             self.log
                 .lock()
                 .expect("a lock")
@@ -1106,6 +1170,72 @@ mod tests {
             *log.lock().expect("a lock"),
             ["open 1920x1080 15 1000000", "load 2560x1440", "rate 600000"]
         );
+    }
+
+    #[test]
+    fn a_box_resizes_the_gpus_pictures_even_on_a_still_screen() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&log);
+        let mut pipeline = Pipeline::new(settings(Some(fake(move || FakeGpu {
+            log: Arc::clone(&seen),
+            ..FakeGpu::default()
+        }))));
+        let screen = bgrx(1728, 1080, 50);
+        pipeline.put(&packed(1728, 1080, &screen), Instant::now());
+        let first = next(&mut pipeline, false, false)
+            .expect("fine")
+            .expect("a frame");
+        assert_eq!((first.width, first.height), (1728, 1080));
+        // Asked to fit 1280×720, with nothing new captured: the picture
+        // held goes in again, smaller, and starts with a keyframe.
+        pipeline.ask(Ask::MaxSize(Some((1280, 720))));
+        let smaller = next(&mut pipeline, false, true)
+            .expect("fine")
+            .expect("a frame");
+        assert_eq!((smaller.width, smaller.height), (1152, 720));
+        assert!(smaller.hardware && smaller.keyframe);
+        // The same box again changes nothing; no box is the full size.
+        pipeline.ask(Ask::MaxSize(Some((1280, 720))));
+        pipeline.ask(Ask::MaxSize(None));
+        let full = next(&mut pipeline, false, true)
+            .expect("fine")
+            .expect("a frame");
+        assert_eq!((full.width, full.height), (1728, 1080));
+        assert!(full.keyframe);
+        assert_eq!(
+            *log.lock().expect("a lock"),
+            [
+                "open 1728x1080 15 1000000",
+                "load 1728x1080",
+                "open 1152x720 15 1000000",
+                "load 1728x1080",
+                "open 1728x1080 15 1000000",
+                "load 1728x1080",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_box_shrinks_software_pictures_too() {
+        let mut pipeline = Pipeline::new(settings(None));
+        let picture = pattern(1280, 720, 0, Duration::ZERO);
+        pipeline.put(&Frame::I420(&picture), Instant::now());
+        let first = next(&mut pipeline, false, false)
+            .expect("fine")
+            .expect("a frame");
+        assert_eq!((first.width, first.height), (1280, 720));
+        pipeline.ask(Ask::MaxSize(Some((640, 360))));
+        let smaller = next(&mut pipeline, false, true)
+            .expect("fine")
+            .expect("a frame");
+        assert_eq!((smaller.width, smaller.height), (640, 360));
+        assert!(!smaller.hardware && smaller.keyframe);
+        // A box larger than software's own limit leaves that limit.
+        pipeline.ask(Ask::MaxSize(Some((1920, 1080))));
+        let back = next(&mut pipeline, false, true)
+            .expect("fine")
+            .expect("a frame");
+        assert_eq!((back.width, back.height), (1280, 720));
     }
 
     #[test]

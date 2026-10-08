@@ -591,6 +591,22 @@ impl CallVideo {
         mid == self.mid
     }
 
+    /// Whether this is the screen share's line.
+    #[cfg(feature = "huddle-camera")]
+    pub(super) fn is_share(&self) -> bool {
+        matches!(self.which, Which::Share)
+    }
+
+    /// Our sender's controls while it sends on this line: on, and taken
+    /// by the far end.
+    #[cfg(feature = "huddle-camera")]
+    pub(super) fn sending(&self) -> Option<&crate::huddle_audio::camera_send::SendControl> {
+        if !(self.send && self.camera_on) {
+            return None;
+        }
+        self.camera.as_ref().map(|camera| &camera.control)
+    }
+
     /// One picture from the far end, as str0m put it together.
     pub(super) fn data(&mut self, data: &MediaData, now: Instant) {
         if !self.receive {
@@ -808,20 +824,32 @@ impl CallVideo {
         }
     }
 
-    /// Keeps what this line sends within `bitrate` bit/s, as a meeting
-    /// asks (its encoder's own limits still hold).
-    pub(super) fn limit(&mut self, bitrate: u32) {
+    /// Keeps what this line sends within `limit`, as a meeting asks:
+    /// its bitrate, pictures a second and picture size (its encoder's
+    /// own limits still hold); a part the meeting leaves out lifts that
+    /// ceiling. The bitrate is a ceiling over the bandwidth estimate;
+    /// until there is one (`estimated` false), it is also what is aimed
+    /// at, as the meeting's media server knows the link.
+    pub(super) fn limit(&mut self, limit: super::types::VideoLimit, estimated: bool) {
         #[cfg(feature = "huddle-camera")]
         if let Some(camera) = &self.camera {
-            camera.control.set_bitrate(bitrate);
+            let control = &camera.control;
+            control.set_max_bitrate(limit.bitrate);
+            if let (Some(bitrate), false) = (limit.bitrate, estimated) {
+                control.set_bitrate(bitrate);
+            }
+            control.set_max_fps(limit.fps);
+            control.set_max_size(limit.size);
             log::debug!(
-                "video: {}: sending at most {} kbit/s",
+                "video: {}: sending at most {} kbit/s, {:?} a second, {:?}",
                 self.name(),
-                camera.control.bitrate() / 1000
+                control.bitrate() / 1000,
+                control.max_fps(),
+                control.max_size()
             );
         }
         #[cfg(not(feature = "huddle-camera"))]
-        let _ = bitrate;
+        let _ = (limit, estimated);
     }
 
     /// Makes this camera line number `line`.
@@ -858,7 +886,12 @@ impl CallVideo {
             Input::Frame(frame) => self.send_frame(rtc, frame, connected),
             #[cfg(feature = "huddle-camera")]
             Input::On(on) => {
-                log::info!("video: our camera is {}", if on { "on" } else { "off" });
+                // The share's line comes through here too: name the line.
+                log::info!(
+                    "video: {:?} line: ours is {}",
+                    self.which,
+                    if on { "on" } else { "off" }
+                );
                 self.camera_on = on;
                 if on {
                     self.awaiting_keyframe = true;
@@ -905,7 +938,7 @@ impl CallVideo {
             Ok(()) => {
                 self.pictures_out += 1;
                 if self.pictures_out == 1 {
-                    log::info!("video: our camera's first picture sent");
+                    log::info!("video: {:?} line: our first picture sent", self.which);
                 }
             }
             Err(error) => log::debug!("video: could not send a picture: {error}"),

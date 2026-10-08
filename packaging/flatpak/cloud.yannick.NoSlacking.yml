@@ -7,6 +7,9 @@ runtime-version: '26.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
+  # libclang, for the PipeWire bindings the video helper makes at build
+  # time (the SDK has PipeWire's headers but no libclang).
+  - org.freedesktop.Sdk.Extension.llvm22
 command: noslacking
 finish-args:
   # The window, on Wayland or else X11, drawn with the GPU.
@@ -14,9 +17,11 @@ finish-args:
   - --socket=fallback-x11
   - --share=ipc
   - --device=dri
-  # No camera: the video helper opens cameras through V4L2, which here
-  # would take --device=all. Builds with `huddle-camera` wait for the
-  # helper to use the Camera portal and PipeWire instead (TODO.md).
+  # No camera yet: the video helper opens cameras through V4L2, which
+  # here would take --device=all, so the camera list stays empty until
+  # the helper uses the Camera portal and PipeWire instead (TODO.md).
+  # Sharing the screen needs nothing more: the ScreenCast portal hands
+  # the helper its PipeWire stream.
   # Slack itself.
   - --share=network
   # Voice clips and sound files played in the app (through the runtime's
@@ -35,6 +40,7 @@ finish-args:
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:
+    LIBCLANG_PATH: /usr/lib/sdk/llvm22/lib
     CARGO_HOME: /run/build/noslacking/cargo
     CARGO_NET_OFFLINE: 'true'
 modules:
@@ -44,7 +50,8 @@ modules:
       - cargo --offline fetch --manifest-path Cargo.toml --verbose
       # The app and its video helper. The runtime has libva and
       # its GL extension Mesa's VA-API drivers; --device=dri lets the
-      # helper reach the GPU.
+      # helper reach the GPU. The helper's `pipewire` feature, on by
+      # default, shares the screen through the portal, as Wayland wants.
       - cargo --offline build --release --locked -p noslacking -p noslacking-video
       - install -Dm755 target/release/noslacking /app/bin/noslacking
       - install -Dm755 target/release/noslacking-video /app/bin/noslacking-video
