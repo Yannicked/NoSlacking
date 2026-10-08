@@ -206,6 +206,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         socket,
         views,
         huddles,
+        devices,
         ..
     } = app;
     let Some(workspace) = crate::app::active_in(workspaces, settings) else {
@@ -317,6 +318,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 &palette,
                 huddles.listening.as_ref(),
                 workspaces,
+                super::devices::Pickers {
+                    chosen: &settings.devices,
+                    lists: devices,
+                },
                 false,
                 actions,
             );

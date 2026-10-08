@@ -16,6 +16,7 @@ pub mod custom_emoji;
 #[cfg(feature = "demo")]
 pub mod demo;
 pub mod desktop;
+pub mod devices;
 pub mod dnd;
 pub mod drafts;
 pub mod emoji;

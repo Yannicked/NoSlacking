@@ -138,6 +138,10 @@ pub struct Settings {
     /// whenever the GPU cannot. The key keeps its first name, from when it
     /// was decoding only.
     pub hardware_video: bool,
+    /// The camera, microphone and speaker chosen for huddles (Settings →
+    /// Huddles, or the menus beside Mute and Video in a call); each the
+    /// system's default until chosen. See [`crate::devices`].
+    pub devices: crate::devices::Chosen,
     /// Whether your Slack app is known to be made from an older manifest,
     /// which Slack would not authorize with the newer scopes: sign-ins
     /// then ask for the older set only (see [`crate::scopes::Request`]).
@@ -173,6 +177,7 @@ impl Default for Settings {
             spelling: crate::spell::SpellSettings::default(),
             closed: BTreeMap::new(),
             hardware_video: true,
+            devices: crate::devices::Chosen::default(),
             older_app: false,
         }
     }
@@ -275,6 +280,7 @@ impl Settings {
             spelling,
             closed,
             hardware_video,
+            devices,
             older_app,
         );
         // One damaged workspace must not sign you out of the others, so
@@ -694,6 +700,37 @@ mod tests {
         let again: Settings =
             serde_json::from_slice(&off.encode().expect("encodes")).expect("parses");
         assert!(!again.hardware_video);
+    }
+
+    #[test]
+    fn chosen_devices_round_trip_and_default_to_the_systems() {
+        use crate::devices::{Choice, Kind};
+        let old: Settings = serde_json::from_str("{}").expect("parses");
+        assert_eq!(
+            old.devices,
+            crate::devices::Chosen::default(),
+            "older files"
+        );
+        let file = r#"{"devices":{"speaker":{"id":"alsa:sysdefault:CARD=Audio","name":"USB Audio"},
+            "camera":{"id":"v4l2:/dev/video2","name":"Logitech BRIO"}}}"#;
+        let settings: Settings = serde_json::from_str(file).expect("parses");
+        assert_eq!(settings.devices.get(Kind::Microphone), None);
+        assert_eq!(
+            settings.devices.get(Kind::Speaker),
+            Some(&Choice {
+                id: "alsa:sysdefault:CARD=Audio".into(),
+                name: "USB Audio".into(),
+            })
+        );
+        let again: Settings =
+            serde_json::from_slice(&settings.encode().expect("encodes")).expect("parses");
+        assert_eq!(again.devices, settings.devices);
+        // A damaged choice falls back to the defaults, keeping the rest.
+        let (bad, problems) =
+            Settings::from_json(serde_json::json!({"devices": {"camera": 3}, "zoom": 1.5}));
+        assert_eq!(bad.devices, crate::devices::Chosen::default());
+        assert_eq!(bad.zoom, 1.5);
+        assert_eq!(problems.len(), 1);
     }
 
     #[test]

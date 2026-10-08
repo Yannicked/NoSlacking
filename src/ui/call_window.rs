@@ -15,7 +15,8 @@
 //! name and how long it has run on the left, and in the middle the same
 //! Mute, camera and Leave the call bar has (the same widgets, pushing the
 //! same actions), worded in a wide window and icons alone in a narrow
-//! one. Their chords work here too while this window has the focus: it
+//! one, with the same arrows beside Mute and the camera to switch the
+//! microphone, the speaker or the camera ([`super::devices`]). Their chords work here too while this window has the focus: it
 //! has input of its own, and the buttons and [`super::keys::leave_chord`]
 //! take them from it. Leaving ends the huddle and so closes the window.
 //!
@@ -50,6 +51,8 @@ pub const CONTROLS_HEIGHT: f32 = 60.0;
 const WORDED: f32 = 116.0;
 /// The room an icon control takes, its gap included.
 const ICON: f32 = 48.0;
+/// The room an arrow beside Mute or the camera takes, its gap included.
+const ARROW: f32 = 28.0;
 /// The room the huddle's name and time want on each side of the
 /// controls, which stay in the middle.
 const INFO: f32 = 170.0;
@@ -127,6 +130,10 @@ pub struct Controls {
     /// Your screen share.
     #[cfg(feature = "huddle-share")]
     pub sharing: crate::huddle_share::Sharing,
+    /// The devices chosen, for the arrows' menus.
+    pub chosen: crate::devices::Chosen,
+    /// The devices there are, as last listed.
+    pub lists: crate::devices::State,
 }
 
 impl Controls {
@@ -137,6 +144,16 @@ impl Controls {
         let share = cfg!(feature = "huddle-share");
         1 + if self.live {
             1 + usize::from(camera) + usize::from(share)
+        } else {
+            0
+        }
+    }
+
+    /// How many arrows the buttons have: Mute's and the camera's, while
+    /// live.
+    pub fn arrows(&self) -> usize {
+        if self.live {
+            1 + usize::from(cfg!(feature = "huddle-camera"))
         } else {
             0
         }
@@ -153,11 +170,11 @@ pub struct Fit {
 }
 
 /// What a control bar `width` points wide has room for, with `buttons`
-/// buttons kept in the middle: the words while they fit, the name and
-/// time while there is room for them on both sides too (so the buttons
-/// stay centred).
-pub fn fit(width: f32, buttons: usize) -> Fit {
-    let worded = buttons as f32 * WORDED + 2.0 * SIDE;
+/// buttons and `arrows` arrows beside them kept in the middle: the words
+/// while they fit, the name and time while there is room for them on
+/// both sides too (so the buttons stay centred).
+pub fn fit(width: f32, buttons: usize, arrows: usize) -> Fit {
+    let worded = buttons as f32 * WORDED + arrows as f32 * ARROW + 2.0 * SIDE;
     Fit {
         labelled: width >= worded,
         info: width >= worded + 2.0 * INFO,
@@ -456,14 +473,15 @@ fn control_bar(
     actions: &mut Vec<Action>,
 ) {
     let area = ui.max_rect();
-    let fit = fit(area.width(), controls.buttons());
+    let fit = fit(area.width(), controls.buttons(), controls.arrows());
     let look = Look {
         labelled: fit.labelled,
         ..LOOK
     };
     // The buttons' width, measured last frame: the first guesses.
     let id = ui.id().with("call-controls-width");
-    let guess = controls.buttons() as f32 * if fit.labelled { WORDED } else { ICON };
+    let guess = controls.buttons() as f32 * if fit.labelled { WORDED } else { ICON }
+        + controls.arrows() as f32 * ARROW;
     let width = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(guess);
     let middle = Rect::from_center_size(area.center(), Vec2::new(width, look.height));
     let mut row = ui.new_child(
@@ -476,16 +494,44 @@ fn control_bar(
     row.spacing_mut().item_spacing.x = 10.0;
     let start = row.cursor().left();
     if controls.live {
-        if let Some(action) = super::huddle_mic::mute_button(&mut row, palette, controls.mic, look)
-        {
-            actions.push(Action::Huddle(huddles::Action::Microphone(action)));
-        }
+        let pickers = super::devices::Pickers {
+            chosen: &controls.chosen,
+            lists: &controls.lists,
+        };
+        // Each with its arrow close on its right.
+        row.scope(|row| {
+            row.spacing_mut().item_spacing.x = call_bar::ARROW_GAP;
+            if let Some(action) = super::huddle_mic::mute_button(row, palette, controls.mic, look) {
+                actions.push(Action::Huddle(huddles::Action::Microphone(action)));
+            }
+            super::devices::menu_button(
+                row,
+                palette,
+                look,
+                "window",
+                &super::devices::MIC_MENU,
+                pickers,
+                actions,
+            );
+        });
         #[cfg(feature = "huddle-camera")]
-        if let Some(action) =
-            super::huddle_camera::camera_button(&mut row, palette, controls.camera, look)
-        {
-            actions.push(Action::Huddle(huddles::Action::Camera(action)));
-        }
+        row.scope(|row| {
+            row.spacing_mut().item_spacing.x = call_bar::ARROW_GAP;
+            if let Some(action) =
+                super::huddle_camera::camera_button(row, palette, controls.camera, look)
+            {
+                actions.push(Action::Huddle(huddles::Action::Camera(action)));
+            }
+            super::devices::menu_button(
+                row,
+                palette,
+                look,
+                "window",
+                &super::devices::CAMERA_MENU,
+                pickers,
+                actions,
+            );
+        });
         #[cfg(feature = "huddle-share")]
         if let Some(action) =
             super::huddle_share::share_button(&mut row, palette, controls.sharing, look)
@@ -860,21 +906,21 @@ mod tests {
         // Three buttons: wide, the lot; middling, the words alone; narrow,
         // icons.
         assert_eq!(
-            fit(1280.0, 3),
+            fit(1280.0, 3, 2),
             Fit {
                 labelled: true,
                 info: true
             }
         );
         assert_eq!(
-            fit(560.0, 3),
+            fit(560.0, 3, 0),
             Fit {
                 labelled: true,
                 info: false
             }
         );
         assert_eq!(
-            fit(360.0, 3),
+            fit(360.0, 3, 0),
             Fit {
                 labelled: false,
                 info: false
@@ -882,13 +928,16 @@ mod tests {
         );
         // The edges: just room is room.
         let worded = 3.0 * WORDED + 2.0 * SIDE;
-        assert!(fit(worded, 3).labelled);
-        assert!(!fit(worded - 1.0, 3).labelled);
-        assert!(fit(worded + 2.0 * INFO, 3).info);
-        assert!(!fit(worded + 2.0 * INFO - 1.0, 3).info);
+        assert!(fit(worded, 3, 0).labelled);
+        assert!(!fit(worded - 1.0, 3, 0).labelled);
+        assert!(fit(worded + 2.0 * INFO, 3, 0).info);
+        assert!(!fit(worded + 2.0 * INFO - 1.0, 3, 0).info);
+        // The arrows beside Mute and the camera take room too.
+        assert!(!fit(worded, 3, 2).labelled);
+        assert!(fit(worded + 2.0 * ARROW, 3, 2).labelled);
         // Fewer buttons (joining: Leave alone) fit in less.
         assert_eq!(
-            fit(560.0, 1),
+            fit(560.0, 1, 0),
             Fit {
                 labelled: true,
                 info: true
@@ -896,7 +945,7 @@ mod tests {
         );
         // Never the name without the words.
         for width in (0..2000).step_by(10) {
-            let fit = fit(width as f32, 3);
+            let fit = fit(width as f32, 3, 2);
             assert!(fit.labelled || !fit.info, "{width}: {fit:?}");
         }
     }
@@ -920,6 +969,8 @@ mod tests {
                 camera: crate::huddle_camera::Cam::Off,
                 #[cfg(feature = "huddle-share")]
                 sharing: crate::huddle_share::Sharing::Off,
+                chosen: crate::devices::Chosen::default(),
+                lists: crate::devices::State::default(),
             },
         }
     }

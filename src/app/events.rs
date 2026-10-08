@@ -21,6 +21,7 @@ const POLLED_NOTES: usize = 3;
 impl App {
     pub(super) fn handle(&mut self, event: Event) {
         match event {
+            Event::Devices(event) => crate::devices::handle(self, event),
             // The account: the app, the keyring, sign-in and the socket.
             Event::AppLoaded(app) => self.app_loaded(app),
             Event::KeyringError(error) => {

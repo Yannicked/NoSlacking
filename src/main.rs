@@ -465,6 +465,9 @@ struct DemoSetup {
     /// Whether to open the rollout bot's select in #deploys once it has
     /// arrived, to show its choices.
     open_select: bool,
+    /// A device picker or menu to open once the page has settled (and
+    /// scrolled), to show its devices.
+    open_popup: Option<egui::Id>,
 }
 
 #[cfg(feature = "demo")]
@@ -518,6 +521,7 @@ impl DemoSetup {
             commented: false,
             approve: false,
             open_select: false,
+            open_popup: None,
         }
     }
 
@@ -795,6 +799,69 @@ impl DemoSetup {
                 app.actions
                     .push(Action::Huddle(noslacking::huddles::Action::Watch(first)));
             }
+            // Settings → Huddles: the camera, microphone and speaker
+            // pickers, the speaker a pair of AirPods not connected, and
+            // the call bar at the foot. `devices-pick` opens the
+            // speaker's; `devices-no-helper` has no video helper.
+            Some(view @ ("devices" | "devices-pick" | "devices-no-helper")) => {
+                use noslacking::devices::{Kind, popup_id};
+                if view == "devices-no-helper" {
+                    noslacking::demo::pretend_no_helper();
+                }
+                app.settings.devices = noslacking::demo::chosen();
+                app.huddles.listening = Some(noslacking::huddles::Listening {
+                    mic: noslacking::huddle_mic::Mic::Live,
+                    ..noslacking::demo::listening()
+                });
+                app.actions.push(Action::ShowSettings);
+                // Down to Huddles, at the page's foot.
+                self.wheel.get_or_insert(-80.0);
+                self.hover.get_or_insert(egui::pos2(900.0, 300.0));
+                if view == "devices-pick" {
+                    self.open_popup = Some(popup_id("settings", Kind::Speaker));
+                }
+            }
+            // Talking in #design: the call bar's menu beside Mute open on
+            // the microphones and speakers; `camera-menu` beside Video,
+            // with the camera on.
+            Some(view @ ("device-menu" | "camera-menu")) => {
+                use noslacking::devices::{Kind, menu_id};
+                app.settings.devices = noslacking::demo::chosen();
+                let kind = if view == "camera-menu" {
+                    #[cfg(feature = "huddle-camera")]
+                    {
+                        noslacking::demo::camera(true);
+                        app.huddles.listening = Some(noslacking::demo::camera_on());
+                    }
+                    Kind::Camera
+                } else {
+                    app.huddles.listening = Some(noslacking::huddles::Listening {
+                        mic: noslacking::huddle_mic::Mic::Live,
+                        ..noslacking::demo::listening()
+                    });
+                    Kind::Microphone
+                };
+                app.actions.push(Action::OpenConversation("C03".into()));
+                self.open_popup = Some(menu_id("sidebar-call-bar", kind));
+            }
+            // The call window's controls with the menu beside Mute open,
+            // drawn inside the main window.
+            #[cfg(feature = "huddle-video")]
+            Some("device-window") => {
+                use noslacking::devices::{Kind, menu_id};
+                app.settings.devices = noslacking::demo::chosen();
+                app.huddles.listening = Some(noslacking::huddles::Listening {
+                    mic: noslacking::huddle_mic::Mic::Live,
+                    shares: Vec::new(),
+                    ..noslacking::demo::sharing()
+                });
+                app.huddles.picture.embed = true;
+                app.huddles.picture.size = self.call_size;
+                app.actions.push(Action::OpenConversation("C02".into()));
+                app.actions
+                    .push(Action::Huddle(noslacking::huddles::Action::OpenCall));
+                self.open_popup = Some(menu_id("window", Kind::Microphone));
+            }
             Some("deploys") => app.actions.push(Action::OpenConversation("C05".into())),
             // The deploy bot's Approve button pressed: its question.
             Some("approve") => {
@@ -1015,6 +1082,14 @@ impl DemoSetup {
 
     fn after_frame(&mut self, ctx: &egui::Context, app: &mut App) {
         self.film(ctx, app);
+        // Once the page has settled and scrolled; the devices are asked
+        // for again as it opens.
+        if let Some(id) = self.open_popup
+            && self.started.elapsed() > std::time::Duration::from_millis(3000)
+        {
+            egui::Popup::open_id(ctx, id);
+            self.open_popup = None;
+        }
         if self.open_select
             && let Some(workspace) = app.active_workspace()
             && let Some(message) = workspace.find_message(
