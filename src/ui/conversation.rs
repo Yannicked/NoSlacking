@@ -4,6 +4,7 @@
 use egui::{Align, CornerRadius, Margin, RichText, Stroke, Vec2};
 
 use super::composer::{self, Composer};
+use super::jump::Steer;
 use super::message::{self, Lead, Row};
 use super::rows;
 use crate::app::App;
@@ -350,15 +351,7 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
                 channel_name: None,
                 uploads: transfers,
             };
-            let before = taken.draft.text.clone();
-            composer::show(ui, &composer, &mut taken.draft, actions);
-            if crate::people::is_typing(&before, &taken.draft.text) {
-                actions.push(Action::People(crate::people::Action::Typing {
-                    channel: channel.to_owned(),
-                    thread: None,
-                }));
-            }
-            super::people::typing(ui, &palette, workspace, channel, None);
+            composer::with_typing(ui, &composer, channel, &mut taken.draft, actions);
         });
     app.drafts.put_back(key, taken);
 }
@@ -390,9 +383,8 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     let timeline = workspace.timelines.get(channel);
     // A message being brought into view here: it steers the list, so the
     // end of the list must not pull the view down meanwhile.
-    let now = std::time::Instant::now();
-    let jump = jumps.iter().find(|j| j.list == scroll_key).cloned();
-    let steering = jump.as_ref().is_some_and(crate::jump::Jump::steering);
+    let steer = Steer::of(jumps, &scroll_key);
+    let steering = steer.steering();
     let to_bottom = to_bottom && !steering;
     // A list of older history has no end to hold on to.
     let detached = timeline.is_some_and(|t| t.has_newer);
@@ -418,14 +410,10 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         .as_ref()
         .filter(|line| line.list == scroll_key)
         .and_then(|line| line.read.clone());
-    // Heights of the rows as last drawn: only the rows in and near the
-    // view are laid out, the rest are placed by these.
+    // Only the rows in and near the view are laid out; the rest are
+    // placed by the heights they were last drawn at.
     let heights_id = egui::Id::new(("row-heights", &scroll_key, window));
-    let mut heights: rows::Heights = ui
-        .data_mut(|d| d.remove_temp(heights_id))
-        .unwrap_or_default();
     let look = message::Look::of(settings);
-    heights.for_layout(look.key());
     let mut moved = 0.0;
     let output = area.show_viewport(ui, |ui, viewport| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -487,31 +475,12 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
             .iter()
             .map(|item| item.entry(timeline.has_more, look))
             .collect();
-        let plan = rows::plan(
-            entries.iter().map(|entry| heights.planned(entry)),
-            viewport.min.y,
-            viewport.max.y,
-            MARGIN,
-        );
-        heights.sweep();
-        unread_top = items
-            .iter()
-            .position(|item| matches!(item, Item::Message { unread: true, .. }))
-            .map(|index| plan.tops[index]);
-        if let Some(jump) = &jump {
-            target = items
-                .iter()
-                .position(
-                    |item| matches!(item, Item::Message { message, .. } if message.ts == jump.ts),
-                )
-                .map(|index| (plan.tops[index], plan.tops[index + 1]));
-        }
-        let light = jump.as_ref().map_or(0.0, |j| j.light(now));
-        moved = rows::show(
+        let drawn = rows::virtual_list(
             ui,
-            &mut heights,
+            heights_id,
+            look.key(),
+            viewport,
             &entries,
-            &plan,
             |ui, index| match &items[index] {
                 Item::Top => top(ui, workspace, conversation, timeline, &palette, actions),
                 Item::Bottom => bottom_row(ui, timeline, &palette, actions),
@@ -530,12 +499,24 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
                     let background = ui.painter().add(egui::Shape::Noop);
                     let top = ui.cursor().top();
                     message::show(ui, &row, message, *lead, editing, actions);
-                    if light > 0.0 && jump.as_ref().is_some_and(|j| j.ts == message.ts) {
+                    let light = steer.light(&message.ts);
+                    if light > 0.0 {
                         paint_light(ui, background, top, &palette, light);
                     }
                 }
             },
         );
+        moved = drawn.moved;
+        unread_top = items
+            .iter()
+            .position(|item| matches!(item, Item::Message { unread: true, .. }))
+            .map(|index| drawn.tops[index]);
+        if let Some(ts) = steer.ts() {
+            target = items
+                .iter()
+                .position(|item| matches!(item, Item::Message { message, .. } if message.ts == *ts))
+                .map(|index| (drawn.tops[index], drawn.tops[index + 1]));
+        }
         ui.add_space(12.0);
         if to_bottom {
             // Jump, don't glide; the pin below keeps it there as the content
@@ -597,18 +578,9 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
             }
         }
     }
-    if let Some(index) = jumps.iter().position(|j| j.list == scroll_key) {
-        let loading = timeline.is_none_or(|t| t.loading || !t.loaded || t.around.is_some());
-        let view = output.inner_rect.height();
-        let jump = &mut jumps[index];
-        if let Some(wanted) = jump.steer(target, offset, view, bottom, loading, now) {
-            ui.data_mut(|d| d.insert_temp(offset_id, wanted));
-        }
-        if jump.done(now) {
-            jumps.remove(index);
-        } else {
-            ui.ctx().request_repaint();
-        }
+    let loading = timeline.is_none_or(|t| t.loading || !t.loaded || t.around.is_some());
+    if let Some(wanted) = steer.drive(jumps, &scroll_key, target, loading, &output, ui.ctx()) {
+        ui.data_mut(|d| d.insert_temp(offset_id, wanted));
     }
     if steering {
         // The jump moved the view; nothing else may this frame.
@@ -630,7 +602,6 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         ui.data_mut(|d| d.insert_temp(offset_id, kept));
         ui.ctx().request_repaint();
     }
-    ui.data_mut(|d| d.insert_temp(heights_id, heights));
     ui.data_mut(|d| {
         d.insert_temp(pin_id, (pinned, content));
         d.insert_temp(height_id, content);
@@ -660,10 +631,6 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         actions.push(Action::LoadNewer);
     }
 }
-
-/// How far beyond the view rows are still drawn, so they are measured
-/// before they scroll in.
-const MARGIN: f32 = 400.0;
 
 /// A row of the message list.
 enum Item<'a> {

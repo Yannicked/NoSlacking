@@ -30,7 +30,7 @@ pub mod worker;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 
 pub use fastframe_shell::Waker;
 pub use files::UploadGate;
@@ -42,6 +42,7 @@ use crate::model::{Bot, Conversation, Message, SidebarSection, Ts, User, UserGro
 use crate::paths::AppDirs;
 use crate::settings::{Redirect, WorkspaceMeta};
 use crate::sidebar::SidebarCall;
+use crate::sync::lock;
 
 /// What the interface asks the worker to do.
 pub enum Command {
@@ -1013,7 +1014,7 @@ impl Sink {
             Some(gate) => {
                 // The lock is held across the send, so once `close` has
                 // returned no event from this sink can still arrive.
-                let open = gate.lock().unwrap_or_else(PoisonError::into_inner);
+                let open = lock(gate);
                 if !*open {
                     return;
                 }
@@ -1060,7 +1061,7 @@ impl Gate {
     /// Drops every later event from the gated sinks. Events already sent
     /// stay sent.
     pub fn close(&self) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = false;
+        *lock(&self.0) = false;
     }
 }
 

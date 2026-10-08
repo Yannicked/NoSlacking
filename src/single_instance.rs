@@ -29,8 +29,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use rand::Rng as _;
-use sha2::Digest as _;
+use sha2::Sha256;
+
+use crate::text::hex;
 
 /// What a later launch asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,7 +91,7 @@ pub fn acquire(
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let port = listener.local_addr()?.port();
     let secret: Arc<str> = random_hex().into();
-    write_private(file, &format!("{port}\n{secret}\n"))?;
+    crate::paths::write_private(file, format!("{port}\n{secret}\n").as_bytes())?;
     let handle: Arc<dyn Fn(Request) + Send + Sync> = Arc::new(handle);
     let serving = Arc::new(AtomicUsize::new(0));
     std::thread::Builder::new()
@@ -159,7 +162,7 @@ fn serve(mut stream: TcpStream, secret: &str) -> Option<Request> {
     let answer = format!("{} {ours}\n", proof(secret, Role::Listener, &theirs, ""));
     stream.write_all(answer.as_bytes()).ok()?;
     let proved = read_line(&mut stream, deadline)?;
-    if !same(&proved, &proof(secret, Role::Launch, &ours, &theirs)) {
+    if !proves(&proved, secret, Role::Launch, &ours, &theirs) {
         return None;
     }
     let request = read_line(&mut stream, deadline).and_then(|l| decode(&l))?;
@@ -175,48 +178,34 @@ enum Role {
     Launch,
 }
 
-/// Proof of knowing `secret` for these challenges: HMAC-SHA256 over the
-/// role and the challenges, in hex.
-fn proof(secret: &str, role: Role, challenge: &str, other: &str) -> String {
+/// HMAC-SHA256 keyed with `secret` over the role and the challenges.
+/// `None` only if the key were refused, which HMAC never does.
+fn mac(secret: &str, role: Role, challenge: &str, other: &str) -> Option<Hmac<Sha256>> {
     let role = match role {
         Role::Listener => "listener",
         Role::Launch => "launch",
     };
-    hex(&hmac_sha256(
-        secret.as_bytes(),
-        format!("noslacking-instance {role} {challenge} {other}").as_bytes(),
-    ))
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).ok()?;
+    mac.update(format!("noslacking-instance {role} {challenge} {other}").as_bytes());
+    Some(mac)
 }
 
-/// HMAC-SHA256 (RFC 2104), built on the SHA-256 the app already links.
-fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
-    const BLOCK: usize = 64;
-    let mut block = [0u8; BLOCK];
-    if key.len() > BLOCK {
-        block[..32].copy_from_slice(&sha2::Sha256::digest(key));
-    } else {
-        block[..key.len()].copy_from_slice(key);
-    }
-    let pad = |byte: u8| block.map(|b| b ^ byte);
-    let inner = sha2::Sha256::new()
-        .chain_update(pad(0x36))
-        .chain_update(message)
-        .finalize();
-    sha2::Sha256::new()
-        .chain_update(pad(0x5c))
-        .chain_update(inner)
-        .finalize()
-        .into()
+/// Proof of knowing `secret` for these challenges, in hex. Empty, and so
+/// never accepted, if no proof could be made.
+fn proof(secret: &str, role: Role, challenge: &str, other: &str) -> String {
+    mac(secret, role, challenge, other)
+        .map(|mac| hex(&mac.finalize().into_bytes()))
+        .unwrap_or_default()
 }
 
-/// Whether two proofs match, taking as long whichever byte differs, so
-/// timing cannot tell a guess how close it came.
-fn same(a: &str, b: &str) -> bool {
-    a.len() == b.len()
-        && a.bytes()
-            .zip(b.bytes())
-            .fold(0u8, |diff, (x, y)| diff | (x ^ y))
-            == 0
+/// Whether `proved` is the proof for these challenges. The comparison
+/// takes as long whichever byte differs, so timing cannot tell a guess how
+/// close it came.
+fn proves(proved: &str, secret: &str, role: Role, challenge: &str, other: &str) -> bool {
+    let Some(bytes) = crate::text::unhex(proved) else {
+        return false;
+    };
+    mac(secret, role, challenge, other).is_some_and(|mac| mac.verify_slice(&bytes).is_ok())
 }
 
 /// Whether `line` looks like a challenge [`random_hex`] makes.
@@ -229,10 +218,6 @@ fn random_hex() -> String {
     let mut bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut bytes);
     hex(&bytes)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The longest line either side sends: a challenge, a proof, or a sign-in
@@ -285,7 +270,7 @@ fn forward(file: &Path, request: &Request) -> std::io::Result<()> {
     let (proved, theirs) = answer.split_once(' ').ok_or_else(refused)?;
     // Whatever listens there now may not be NoSlacking (the file outlives
     // a crash); it hears nothing more unless it knows the secret.
-    if !is_challenge(theirs) || !same(proved, &proof(secret, Role::Listener, &ours, "")) {
+    if !is_challenge(theirs) || !proves(proved, secret, Role::Listener, &ours, "") {
         return Err(refused());
     }
     let proof = proof(secret, Role::Launch, theirs, &ours);
@@ -294,28 +279,6 @@ fn forward(file: &Path, request: &Request) -> std::io::Result<()> {
         Some(answer) if answer == "ok" => Ok(()),
         _ => Err(refused()),
     }
-}
-
-fn write_private(file: &Path, contents: &str) -> std::io::Result<()> {
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut opened = options.open(file)?;
-    // `mode` applies only when the file is created; tighten a file left
-    // by an older version or another tool too.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        opened.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    opened.write_all(contents.as_bytes())
 }
 
 #[cfg(test)]
@@ -337,15 +300,20 @@ mod tests {
     #[test]
     fn hmac_matches_the_rfc_vectors() {
         // RFC 4231, test cases 2 and 6 (a key longer than a block).
+        let hmac = |key: &[u8], message: &[u8]| {
+            let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("any key length");
+            mac.update(message);
+            hex(&mac.finalize().into_bytes())
+        };
         assert_eq!(
-            hex(&hmac_sha256(b"Jefe", b"what do ya want for nothing?")),
+            hmac(b"Jefe", b"what do ya want for nothing?"),
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
         );
         assert_eq!(
-            hex(&hmac_sha256(
+            hmac(
                 &[0xaa; 131],
                 b"Test Using Larger Than Block-Size Key - Hash Key First"
-            )),
+            ),
             "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
         );
     }
@@ -356,24 +324,25 @@ mod tests {
         assert!(is_challenge(&challenge));
         assert_ne!(challenge, random_hex());
         let listener = proof("s3cret", Role::Listener, &challenge, "");
-        assert!(same(
+        assert!(proves(&listener, "s3cret", Role::Listener, &challenge, ""));
+        assert!(!proves(&listener, "other", Role::Listener, &challenge, ""));
+        assert!(!proves(
             &listener,
-            &proof("s3cret", Role::Listener, &challenge, "")
-        ));
-        assert!(!same(
-            &listener,
-            &proof("other", Role::Listener, &challenge, "")
-        ));
-        assert!(!same(
-            &listener,
-            &proof("s3cret", Role::Listener, &random_hex(), "")
+            "s3cret",
+            Role::Listener,
+            &random_hex(),
+            ""
         ));
         // The listener's answer to a challenge never passes as a launch's.
-        assert!(!same(
-            &listener,
-            &proof("s3cret", Role::Launch, &challenge, "")
+        assert!(!proves(&listener, "s3cret", Role::Launch, &challenge, ""));
+        assert!(!proves(
+            &listener[2..],
+            "s3cret",
+            Role::Listener,
+            &challenge,
+            ""
         ));
-        assert!(!same(&listener, &listener[1..]));
+        assert!(!proves("", "s3cret", Role::Listener, &challenge, ""));
         assert!(!is_challenge("show"));
         assert!(!is_challenge(&"g".repeat(32)));
     }
@@ -398,7 +367,8 @@ mod tests {
         let impostor = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
         let port = impostor.local_addr().expect("port").port();
         let stale = dir.0.join("stale");
-        write_private(&stale, &format!("{port}\n{}\n", random_hex())).expect("file");
+        crate::paths::write_private(&stale, format!("{port}\n{}\n", random_hex()).as_bytes())
+            .expect("file");
         let seen = std::thread::spawn(move || {
             let (mut stream, _) = impostor.accept().expect("accept");
             let deadline = Instant::now() + Duration::from_secs(5);

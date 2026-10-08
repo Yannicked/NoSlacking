@@ -693,10 +693,7 @@ fn pins(
                 if open.clicked() {
                     actions.push(Action::OpenThread {
                         channel: conversation.id.clone(),
-                        ts: message
-                            .thread_ts
-                            .clone()
-                            .unwrap_or_else(|| message.ts.clone()),
+                        ts: message.thread_root().clone(),
                     });
                 }
                 ui.add_space(6.0);

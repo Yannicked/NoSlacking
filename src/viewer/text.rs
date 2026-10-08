@@ -78,25 +78,11 @@ fn decode(bytes: &[u8], notes: &mut Vec<Note>) -> Result<String, Failure> {
     }
 }
 
-/// A line as shown: tabs as four spaces, at most [`MAX_LINE_CHARS`]
-/// characters. True when it was cut.
+/// A line as shown: at most [`MAX_LINE_CHARS`] characters and an ellipsis
+/// (a tab counting as one), then tabs as four spaces. True when it was cut.
 fn shown_line(line: &str) -> (String, bool) {
-    let mut out = String::with_capacity(line.len().min(MAX_LINE_CHARS));
-    let mut count = 0;
-    for c in line.chars() {
-        if count >= MAX_LINE_CHARS {
-            out.push('…');
-            return (out, true);
-        }
-        if c == '\t' {
-            out.push_str("    ");
-            count += 4;
-        } else {
-            out.push(c);
-            count += 1;
-        }
-    }
-    (out, false)
+    let (line, cut) = crate::text::ellipsize(line, MAX_LINE_CHARS + 1);
+    (line.replace('\t', "    "), cut)
 }
 
 #[cfg(test)]

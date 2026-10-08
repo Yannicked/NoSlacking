@@ -256,7 +256,7 @@ mod tests {
             "free_willy": {"meeting": {}}
         });
         assert_eq!(
-            super::super::people::translate(&event),
+            super::super::people::huddle_event(&event),
             Some(people::Event::HuddleInvite {
                 channel: "C1".into(),
                 room: "R1".into(),
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn joins_and_leaves_known_by_their_room() {
-        let translate = super::super::people::translate;
+        let translate = super::super::people::huddle_event;
         assert_eq!(
             translate(&json!({"type": "sh_room_join", "user": "U3", "call_id": "R1"})),
             Some(people::Event::HuddleRoom {
@@ -313,7 +313,7 @@ mod tests {
         let event: Value = serde_json::from_str(include_str!("fixtures/sh_room_update.json"))
             .expect("the fixture is JSON");
         assert_eq!(
-            super::super::people::translate(&event),
+            super::super::people::huddle_event(&event),
             Some(people::Event::Huddles {
                 changes: vec![(
                     "C0123ABCDEF".into(),
@@ -330,7 +330,7 @@ mod tests {
             room.remove("channels");
         }
         assert_eq!(
-            super::super::people::translate(&short),
+            super::super::people::huddle_event(&short),
             Some(people::Event::HuddleRoom {
                 room: "R0123ABCDEF".into(),
                 change: RoomChange::Participants(vec!["U0999ZZZZZZ".into(), "U0123ABCDEF".into()]),
@@ -342,12 +342,12 @@ mod tests {
             "type": "sh_room_update",
             "room": {"id": "R1", "channels": ["C1"], "name": "standup"}
         });
-        assert_eq!(super::super::people::translate(&partial), None);
+        assert_eq!(super::super::people::huddle_event(&partial), None);
     }
 
     #[test]
     fn a_cancelled_invitation_names_its_huddle_however_it_can() {
-        let translate = super::super::people::translate;
+        let translate = super::super::people::huddle_event;
         assert_eq!(
             translate(
                 &json!({"type": "huddle_invite_cancel", "channel_id": "C1", "call_id": "R1"})

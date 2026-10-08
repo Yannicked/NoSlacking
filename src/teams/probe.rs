@@ -601,7 +601,7 @@ async fn names(
 ) {
     log::info!("names: a group chat's list entry: {}", shape(group));
     let id = group.get("id").and_then(Value::as_str).unwrap_or("");
-    let id = percent_encoding::utf8_percent_encode(id, percent_encoding::NON_ALPHANUMERIC);
+    let id = crate::percent::encode_strict(id);
     let url = format!("{host}/v1/threads/{id}?view=msnp24Equivalent");
     let members: Vec<String> = match get_skype(http, &url, &skype.token).await {
         Ok(thread) => {
@@ -707,7 +707,7 @@ async fn messages(
     chat: &str,
     skype: &str,
 ) -> Result<Vec<(String, String)>, String> {
-    let chat = percent_encoding::utf8_percent_encode(chat, percent_encoding::NON_ALPHANUMERIC);
+    let chat = crate::percent::encode_strict(chat);
     let url = format!("{host}/v1/users/ME/conversations/{chat}/messages?pageSize=20");
     let body = get_skype(http, &url, skype).await?;
     let text = |m: &Value, key: &str| m.get(key).and_then(Value::as_str).unwrap_or("").to_owned();

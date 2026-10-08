@@ -53,9 +53,7 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 });
             });
         }
-        if settings != app.settings.spelling {
-            app.settings.spelling = settings;
-            app.settings_changed();
+        if app.update_setting(|s| &mut s.spelling, settings) {
             app.actions.push(Action::ApplySpelling);
         }
     });

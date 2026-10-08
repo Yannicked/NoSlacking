@@ -16,13 +16,14 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use egui::ColorImage;
 
 use super::decode::{self, H264, Outcome, Trouble};
 use super::helper::Lane;
+use crate::sync::{lock, wait};
 
 /// What a new picture calls to be drawn.
 type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -110,32 +111,19 @@ impl Screen {
     }
 
     fn newest(&self) -> std::sync::MutexGuard<'_, Option<Picture>> {
-        self.shared
-            .newest
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        lock(&self.shared.newest)
     }
 
     /// Has a new picture call `wake` from now on in place of what it
     /// called: the call window has new pictures repaint only itself, not
     /// the main window behind it.
     pub fn set_wake(&self, wake: impl Fn() + Send + Sync + 'static) {
-        *self
-            .shared
-            .wake
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Arc::new(wake);
+        *lock(&self.shared.wake) = Arc::new(wake);
     }
 
     /// Calls the wake, not holding its lock while it runs.
     fn wake(&self) {
-        let wake = Arc::clone(
-            &self
-                .shared
-                .wake
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        );
+        let wake = Arc::clone(&lock(&self.shared.wake));
         wake();
     }
 
@@ -185,11 +173,7 @@ impl Screen {
     /// one; only one asker wins it.
     fn fetch_kept(&self) {
         if self.wants_picture() && self.shared.kept.swap(false, Ordering::Relaxed) {
-            let fetch = self
-                .shared
-                .fetch
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let fetch = lock(&self.shared.fetch);
             if let Some(fetch) = fetch.as_ref() {
                 fetch();
             }
@@ -198,11 +182,7 @@ impl Screen {
 
     /// What has the decoder thread fetch a kept picture.
     fn on_fetch(&self, fetch: impl Fn() + Send + Sync + 'static) {
-        *self
-            .shared
-            .fetch
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(fetch));
+        *lock(&self.shared.fetch) = Some(Box::new(fetch));
     }
 
     /// Says whether the window showing the share can be seen; when it can
@@ -305,7 +285,7 @@ impl Decoding {
         let fetching = Arc::downgrade(&jobs);
         screen.on_fetch(move || {
             if let Some(jobs) = fetching.upgrade() {
-                let mut queue = jobs.0.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut queue = lock(&jobs.0);
                 if !queue.jobs.iter().any(|job| matches!(job, Job::Fetch)) {
                     queue.jobs.push_back(Job::Fetch);
                 }
@@ -325,7 +305,7 @@ impl Decoding {
     }
 
     fn queue(&self) -> std::sync::MutexGuard<'_, Queue> {
-        self.jobs.0.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.jobs.0)
     }
 
     /// Hands the thread `job`, dropping whatever frames still wait if
@@ -390,7 +370,7 @@ impl Drop for Decoding {
 
 /// The next job, or none once the queue is closed.
 fn next(jobs: &Jobs) -> Option<Job> {
-    let mut queue = jobs.0.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut queue = lock(&jobs.0);
     loop {
         if queue.closed {
             return None;
@@ -398,7 +378,7 @@ fn next(jobs: &Jobs) -> Option<Job> {
         if let Some(job) = queue.jobs.pop_front() {
             return Some(job);
         }
-        queue = jobs.1.wait(queue).unwrap_or_else(PoisonError::into_inner);
+        queue = wait(&jobs.1, queue);
     }
 }
 

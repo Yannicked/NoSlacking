@@ -15,6 +15,7 @@ use tokio::sync::Semaphore;
 
 use super::types;
 use crate::scopes::Scopes;
+use crate::sync::lock;
 
 pub const API: &str = "https://slack.com/api/";
 const MAX_IN_FLIGHT: usize = 6;
@@ -203,7 +204,7 @@ struct RefreshFailure {
 /// refreshes in a row.
 fn refresh_wait(failures: u32) -> Duration {
     let doublings = failures.saturating_sub(1).min(10);
-    (REFRESH_RETRY_FIRST * 2u32.pow(doublings)).min(REFRESH_RETRY_MAX)
+    crate::retry::backoff(REFRESH_RETRY_FIRST, REFRESH_RETRY_MAX, doublings)
 }
 
 /// Everything about a workspace's sign-in that changes as it is used, kept
@@ -898,8 +899,10 @@ fn fallback(token: &Token, error: SlackError, now: i64) -> Result<String, SlackE
     }
 }
 
+/// The wait before retrying a request for the `attempt`-th time: from
+/// half a second, doubling, up to 16 seconds.
 fn backoff(attempt: u32) -> Duration {
-    Duration::from_millis(500 * 2u64.pow(attempt.min(5)))
+    crate::retry::backoff(Duration::from_millis(500), Duration::from_secs(16), attempt)
 }
 
 /// The hosts that serve private files and may see the token.
@@ -1020,12 +1023,6 @@ pub fn token_from(access: types::OauthAccess) -> Option<Token> {
         cookie: None,
         workspace_url: None,
     })
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

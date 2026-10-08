@@ -407,21 +407,8 @@ pub fn column_name(index: usize) -> String {
 /// `text` as one line of at most [`MAX_CELL_CHARS`] characters: line ends
 /// become spaces. True when it was cut.
 fn cell_text(text: &str) -> (String, bool) {
-    let mut out = String::with_capacity(text.len().min(MAX_CELL_CHARS));
-    let mut cut = false;
-    for (count, c) in text.chars().enumerate() {
-        if count == MAX_CELL_CHARS {
-            cut = true;
-            out.push('…');
-            break;
-        }
-        out.push(if c == '\n' || c == '\r' || c == '\t' {
-            ' '
-        } else {
-            c
-        });
-    }
-    (out, cut)
+    let (text, cut) = crate::text::ellipsize(text, MAX_CELL_CHARS + 1);
+    (text.replace(['\n', '\r', '\t'], " "), cut)
 }
 
 /// A table filled cell by cell, within the caps: what is past them is

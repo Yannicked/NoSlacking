@@ -17,6 +17,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::{Event, Sink};
 use crate::people::{self, Command, Presence};
+use crate::slack::types::RtEvent;
 use crate::slack::{Client, SlackError};
 
 /// How long a polled presence counts as fresh. Polling is the fallback
@@ -424,32 +425,43 @@ pub fn huddle_in_history(
     })
 }
 
-/// Reads a real-time event about people, if it is one.
-pub fn translate(event: &Value) -> Option<people::Event> {
-    let kind = event.get("type").and_then(Value::as_str)?;
-    match kind {
+/// Reads a real-time event about people read from its fields: presence
+/// and typing.
+pub fn from_rt(event: &RtEvent) -> Option<people::Event> {
+    match event {
         // One person (`user`), or several at once (`users`) on a socket
         // opened with `batch_presence_aware`.
-        "presence_change" => {
-            let presence = Presence::parse(event.get("presence")?.as_str()?)?;
-            let mut users: Vec<String> = event
-                .get("users")
-                .and_then(Value::as_array)
-                .map(|users| {
-                    users
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default();
-            if let Some(user) = event.get("user").and_then(Value::as_str) {
-                users.push(user.to_owned());
-            }
+        RtEvent::PresenceChange(change) => {
+            let presence = Presence::parse(change.presence.as_deref()?)?;
+            let mut users = change.users.clone().unwrap_or_default();
+            users.extend(change.user.clone());
             (!users.is_empty()).then(|| people::Event::Presence {
                 users: users.into_iter().map(|u| (u, presence)).collect(),
             })
         }
+        // You set yourself away or active, here or in another client.
+        RtEvent::ManualPresenceChange(change) => Some(people::Event::ManualPresence {
+            away: change.presence.as_deref()? == "away",
+        }),
+        // Someone typing, over RTM. Socket Mode never sends these.
+        RtEvent::UserTyping(typing) => Some(people::Event::Typing {
+            channel: typing.id()?.to_owned(),
+            thread: typing
+                .thread_ts
+                .as_deref()
+                .filter(|ts| !ts.is_empty())
+                .map(crate::model::Ts::new),
+            user: typing.user.clone()?,
+        }),
+        _ => None,
+    }
+}
+
+/// Reads a real-time event about huddles, if it is one; their shapes vary
+/// too much to read field by field.
+pub fn huddle_event(event: &Value) -> Option<people::Event> {
+    let kind = event.get("type").and_then(Value::as_str)?;
+    match kind {
         // A huddle started, someone joined or left, or it ended (browser
         // sessions, over RTM). Without the conversations, only the room
         // is known.
@@ -474,20 +486,6 @@ pub fn translate(event: &Value) -> Option<people::Event> {
         // Someone rings you into a huddle (browser sessions), or stopped.
         "huddle_invite" => super::huddles::invite(event),
         "huddle_invite_cancel" => super::huddles::invite_cancel(event),
-        // You set yourself away or active, here or in another client.
-        "manual_presence_change" => Some(people::Event::ManualPresence {
-            away: event.get("presence")?.as_str()? == "away",
-        }),
-        // Someone typing, over RTM. Socket Mode never sends these.
-        "user_typing" => Some(people::Event::Typing {
-            channel: event.get("channel")?.as_str()?.to_owned(),
-            thread: event
-                .get("thread_ts")
-                .and_then(Value::as_str)
-                .filter(|ts| !ts.is_empty())
-                .map(crate::model::Ts::new),
-            user: event.get("user")?.as_str()?.to_owned(),
-        }),
         _ => None,
     }
 }
@@ -677,6 +675,14 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real-time event about people, as `backend::translate` reads it.
+    fn translate(event: &Value) -> Option<people::Event> {
+        match RtEvent::deserialize(event).ok()? {
+            RtEvent::Other => huddle_event(event),
+            typed => from_rt(&typed),
+        }
+    }
 
     fn ids(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()

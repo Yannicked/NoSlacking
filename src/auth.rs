@@ -380,8 +380,8 @@ async fn accept_either(
 /// Safe to run at every start: the scheme is NoSlacking's own. `slack://`
 /// links are only borrowed for a browser sign-in, and kept while one is
 /// (see [`crate::slack_links`]).
-pub fn register_scheme() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+pub fn register_scheme() -> Result<(), Failure> {
+    let exe = std::env::current_exe().map_err(|e| Failure::io(&e))?;
     if crate::slack_links::claimed() {
         register_scheme_for(&exe, &[SCHEME, SLACK_SCHEME])
     } else {
@@ -393,14 +393,14 @@ pub fn register_scheme() -> Result<(), String> {
 /// default for them. Listing `slack` only while it is claimed keeps
 /// desktops from offering NoSlacking for those links the rest of the time.
 #[cfg(target_os = "linux")]
-pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Result<(), String> {
+pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Result<(), Failure> {
     use crate::paths::APP_ID;
     // A Flatpak or distro package installs its own desktop file.
     if std::env::var_os("FLATPAK_ID").is_some() {
         return Ok(());
     }
     let data = directories::BaseDirs::new()
-        .ok_or("no home directory")?
+        .ok_or(Failure::NoHomeFolder)?
         .data_local_dir()
         .to_owned();
     // The desktop file names its icon; without one installed, the taskbar
@@ -409,13 +409,11 @@ pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Re
         log::warn!("could not install the app icon: {error}");
     }
     let applications = data.join("applications");
-    std::fs::create_dir_all(&applications).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&applications).map_err(|e| Failure::io(&e))?;
     let file = applications.join(format!("{APP_ID}.desktop"));
-    let exec = crate::autostart::exec_quote(&exe.display().to_string());
     let entry = format!(
-        "[Desktop Entry]\nType=Application\nName=NoSlacking\nComment=A native Slack client\n\
-         Exec={exec} %u\nIcon={APP_ID}\nTerminal=false\nCategories=Network;InstantMessaging;Chat;\n\
-         MimeType={mime}\nStartupWMClass={APP_ID}\n",
+        "{head}Categories=Network;InstantMessaging;Chat;\nMimeType={mime}\nStartupWMClass={APP_ID}\n",
+        head = crate::autostart::desktop_entry_head(exe, "%u"),
         mime = schemes
             .iter()
             .map(|scheme| format!("x-scheme-handler/{scheme};"))
@@ -424,7 +422,7 @@ pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Re
     let current = std::fs::read_to_string(&file).unwrap_or_default();
     let unchanged = current == entry;
     if !unchanged {
-        std::fs::write(&file, entry).map_err(|e| e.to_string())?;
+        crate::paths::write_atomic(&file, entry.as_bytes()).map_err(|e| Failure::io(&e))?;
         let _ = quietly(std::process::Command::new("update-desktop-database").arg(&applications));
     }
     // Every start would otherwise run xdg-mime, which on KDE Plasma 6 prints
@@ -448,15 +446,13 @@ pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Re
             .iter()
             .map(|scheme| format!("x-scheme-handler/{scheme}")),
     );
-    quietly(std::process::Command::new("xdg-mime").args(&args))
-        .map_err(|e| format!("xdg-mime: {e}"))
-        .and_then(|status| {
-            if status.success() {
-                Ok(())
-            } else {
-                Err("xdg-mime could not register the link handler".into())
-            }
-        })
+    let status =
+        quietly(std::process::Command::new("xdg-mime").args(&args)).map_err(|e| Failure::io(&e))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Failure::ToolFailed("xdg-mime".into()))
+    }
 }
 
 /// Runs a desktop tool with what it prints kept out of the terminal: its
@@ -507,10 +503,7 @@ fn install_icons(data: &std::path::Path) -> Result<(), String> {
         if std::fs::read(&path).is_ok_and(|current| current == bytes) {
             continue;
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        crate::paths::write_atomic(&path, bytes).map_err(|e| e.to_string())?;
         wrote = true;
     }
     if wrote {
@@ -527,7 +520,7 @@ fn install_icons(data: &std::path::Path) -> Result<(), String> {
 
 /// Writes the per-user URL protocol keys for `schemes`.
 #[cfg(windows)]
-pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Result<(), String> {
+pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Result<(), Failure> {
     let command = format!("\"{}\" \"%1\"", exe.display());
     for scheme in schemes {
         let key = format!(r"HKCU\Software\Classes\{scheme}");
@@ -545,25 +538,25 @@ pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Re
 
 /// Runs `reg.exe` with `args`, failing when it does.
 #[cfg(windows)]
-pub(crate) fn run_reg(args: &[&str]) -> Result<(), String> {
+pub(crate) fn run_reg(args: &[&str]) -> Result<(), Failure> {
     let status = std::process::Command::new("reg")
         .args(args)
         .status()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Failure::io(&e))?;
     if status.success() {
         Ok(())
     } else {
-        Err("reg.exe failed".into())
+        Err(Failure::ToolFailed("reg.exe".into()))
     }
 }
 
 /// Nowhere to register: the bundle declares the scheme.
 #[cfg(not(any(target_os = "linux", windows)))]
-pub(crate) fn register_scheme_for(_exe: &std::path::Path, _schemes: &[&str]) -> Result<(), String> {
-    Err(
-        "this platform does not hand noslacking:// links to the app yet; use the loopback redirect"
-            .into(),
-    )
+pub(crate) fn register_scheme_for(
+    _exe: &std::path::Path,
+    _schemes: &[&str],
+) -> Result<(), Failure> {
+    Err(Failure::NoLinkHandler)
 }
 
 #[cfg(test)]

@@ -49,6 +49,7 @@ pub mod people;
 pub mod percent;
 pub mod quotes;
 pub mod redact;
+pub mod retry;
 pub mod revision;
 pub mod scopes;
 pub mod search;
@@ -60,8 +61,10 @@ pub mod slack;
 pub mod slack_links;
 pub mod slash;
 pub mod spell;
+pub mod sync;
 #[cfg(feature = "teams")]
 pub mod teams;
+pub mod text;
 pub mod theme;
 pub mod tray;
 mod ui;

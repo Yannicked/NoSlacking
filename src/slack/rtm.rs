@@ -161,7 +161,7 @@ pub async fn run(
             _ = tokio::time::sleep(backoff) => {}
             _ = stop.changed() => return,
         }
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+        backoff = crate::retry::backoff(backoff, MAX_BACKOFF, 1);
     }
 }
 

@@ -138,6 +138,17 @@ pub enum Failure {
     Unsupported,
     /// The manual proxy's URL cannot be used.
     BadProxy,
+    /// The system names no home folder for the user.
+    NoHomeFolder,
+    /// Inside Flatpak the app cannot add itself to the startup apps.
+    AutostartInFlatpak,
+    /// This system has no way to start the app at login.
+    NoAutostart,
+    /// This system cannot hand links to the app yet.
+    NoLinkHandler,
+    /// A system tool, by its name (`reg.exe`, `xdg-mime`), ran but
+    /// reported failure.
+    ToolFailed(String),
     /// The person called declined the call, or was busy.
     CallDeclined,
     /// Nobody answered the call.
@@ -301,6 +312,15 @@ impl Failure {
             Self::NoInvitee => t("name someone to invite with @"),
             Self::Unsupported => t("Microsoft Teams workspaces cannot do that here yet"),
             Self::BadProxy => t("the proxy URL cannot be used; check it in Settings"),
+            Self::NoHomeFolder => t("there is no home folder"),
+            Self::AutostartInFlatpak => {
+                t("inside Flatpak, add NoSlacking to your desktop's startup apps")
+            }
+            Self::NoAutostart => t("this system cannot start apps at login"),
+            Self::NoLinkHandler => t("this system cannot hand links to NoSlacking yet"),
+            Self::ToolFailed(tool) => {
+                return fill(&t("{tool} did not succeed"), &[("tool", tool)]);
+            }
             Self::CallDeclined => t("the call was declined"),
             Self::CallNotAnswered => t("nobody answered the call"),
             Self::MeetingNotFound => t("no meeting has that link, or that ID and passcode"),
@@ -678,6 +698,11 @@ mod tests {
             Failure::NoInvitee,
             Failure::Unsupported,
             Failure::BadProxy,
+            Failure::NoHomeFolder,
+            Failure::AutostartInFlatpak,
+            Failure::NoAutostart,
+            Failure::NoLinkHandler,
+            Failure::ToolFailed("reg.exe".into()),
             Failure::CallDeclined,
             Failure::CallNotAnswered,
             Failure::CallFailed("ServiceUnavailable".into()),
