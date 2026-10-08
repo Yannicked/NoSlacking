@@ -221,6 +221,76 @@ fn is_keyframe(unit: &[u8]) -> bool {
     nal_units(unit).iter().any(|nal| nal_type(nal) == Some(5))
 }
 
+/// The far end's parameter sets, kept so every keyframe can start a
+/// decoder. A meeting's media server sends them once, or in a frame of
+/// their own when it switches layers, not with each keyframe; a decoder
+/// started over (after one frame did not decode) on a keyframe without
+/// them never gets going again (seen: frozen, a keyframe every second).
+#[derive(Debug, Default)]
+struct ParameterSets {
+    sps: Option<Vec<u8>>,
+    pps: Option<Vec<u8>>,
+    /// A frame of parameter sets alone, held for the picture after it.
+    held: Vec<u8>,
+}
+
+/// An Annex B start code.
+const START: [u8; 4] = [0, 0, 0, 1];
+
+impl ParameterSets {
+    /// The frame to decode for `unit`: with the parameter sets a keyframe
+    /// lacks, and any frame of them alone before it. `None` for a frame
+    /// of parameter sets alone, held until the next.
+    fn complete(&mut self, unit: &[u8]) -> Option<Vec<u8>> {
+        use crate::huddle_audio::bitstream::{nal_type, nal_units, parse_sps};
+        let nals = nal_units(unit);
+        let mut has = (false, false);
+        for nal in &nals {
+            match nal_type(nal) {
+                Some(7) => {
+                    has.0 = true;
+                    if self.sps.as_deref() != Some(*nal) {
+                        if let Some(sps) = parse_sps(nal) {
+                            log::info!(
+                                "video: the far end's stream is {}x{}, {} level {}",
+                                sps.width,
+                                sps.height,
+                                sps.profile(),
+                                f32::from(sps.level_idc) / 10.0
+                            );
+                        }
+                        self.sps = Some(nal.to_vec());
+                    }
+                }
+                Some(8) => {
+                    has.1 = true;
+                    self.pps = Some(nal.to_vec());
+                }
+                _ => {}
+            }
+        }
+        let picture = nals.iter().any(|n| matches!(nal_type(n), Some(1 | 5)));
+        if !picture {
+            self.held.extend_from_slice(unit);
+            return None;
+        }
+        let keyframe = nals.iter().any(|n| nal_type(n) == Some(5));
+        let mut out = std::mem::take(&mut self.held);
+        if keyframe {
+            for (have, set) in [(has.0, &self.sps), (has.1, &self.pps)] {
+                if let (false, Some(set)) = (have, set)
+                    && !out.windows(set.len()).any(|w| w == set.as_slice())
+                {
+                    out.extend_from_slice(&START);
+                    out.extend_from_slice(set);
+                }
+            }
+        }
+        out.extend_from_slice(unit);
+        Some(out)
+    }
+}
+
 /// What the far end's video did over a while, for the log.
 #[derive(Debug, Default)]
 struct Report {
@@ -289,6 +359,8 @@ pub(super) struct CallVideo {
     awaiting_keyframe: bool,
     #[cfg(feature = "huddle-camera")]
     pictures_out: u64,
+    /// The far end's parameter sets.
+    parameters: ParameterSets,
 }
 
 impl CallVideo {
@@ -358,6 +430,7 @@ impl CallVideo {
             awaiting_keyframe: true,
             #[cfg(feature = "huddle-camera")]
             pictures_out: 0,
+            parameters: ParameterSets::default(),
         }
     }
 
@@ -509,7 +582,10 @@ impl CallVideo {
         if self.shown.as_ref().is_some_and(Shown::take_keyframe_wish) {
             self.want_pli = true;
         }
-        self.backlog.push_back(data.data.to_vec());
+        let Some(unit) = self.parameters.complete(&data.data) else {
+            return;
+        };
+        self.backlog.push_back(unit);
         if self.backlog.len() > BACKLOG_MAX {
             log::info!(
                 "video: {} of the far end's frames waited for the decoder; dropped, a keyframe asked for",
@@ -757,5 +833,27 @@ mod tests {
         // A slice of a picture that refers to others.
         assert!(!is_keyframe(&[0, 0, 0, 1, 0x41, 0x9a]));
         assert!(!is_keyframe(&[]));
+    }
+
+    #[test]
+    fn every_keyframe_carries_the_parameter_sets_last_seen() {
+        let nal = |bytes: &[u8]| [&START[..], bytes].concat();
+        // An SPS of a 16x16 baseline stream, a PPS, an IDR, a P slice.
+        let sps = [0x67, 0x42, 0xc0, 0x0a, 0xf4, 0x00, 0x00, 0x03, 0x00, 0x01];
+        let pps = [0x68, 0xce, 0x3c, 0x80];
+        let idr = [0x65, 0x88, 0x84];
+        let p = [0x41, 0x9a, 0x02];
+        let mut sets = ParameterSets::default();
+        // The first keyframe brings them: as it came.
+        let first = [nal(&sps), nal(&pps), nal(&idr)].concat();
+        assert_eq!(sets.complete(&first).as_deref(), Some(&first[..]));
+        assert_eq!(sets.complete(&nal(&p)), Some(nal(&p)));
+        // A later keyframe without them gets them.
+        let bare = nal(&idr);
+        assert_eq!(sets.complete(&bare), Some(first.clone()));
+        // Parameter sets in a frame of their own wait for the picture.
+        let alone = [nal(&sps), nal(&pps)].concat();
+        assert_eq!(sets.complete(&alone), None);
+        assert_eq!(sets.complete(&bare), Some(first));
     }
 }
