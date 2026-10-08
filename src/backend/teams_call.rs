@@ -872,6 +872,8 @@ struct Shown<'a, T: Fn(Listen)> {
     callee: &'a str,
     /// Who else is in the meeting, for a meeting.
     people: Option<Vec<Attendee>>,
+    /// Whose camera a meeting sends us, by MRI.
+    watched: Option<String>,
     tell: &'a T,
     /// How the call ended, once it has.
     ended: Option<Result<(), Failure>>,
@@ -921,7 +923,13 @@ impl<T: Fn(Listen)> Shown<'_, T> {
     /// meeting, whoever its media server shows, which it does not say.
     #[cfg(feature = "huddle-video")]
     fn far_user(&self) -> Option<String> {
-        (self.people.is_none() && !self.callee.is_empty()).then(|| self.callee.to_owned())
+        if self.people.is_some() {
+            return self.watched.as_deref().map(|mri| {
+                crate::backend::teams_translate::clean_teams_user_id(mri)
+                    .unwrap_or_else(|| mri.to_owned())
+            });
+        }
+        (!self.callee.is_empty()).then(|| self.callee.to_owned())
     }
 
     /// Who is in the call, as the bar shows it.
@@ -955,6 +963,7 @@ impl<T: Fn(Listen)> Shown<'_, T> {
             CallEvent::AnsweredElsewhere => {}
             CallEvent::Lobby => (self.tell)(Listen::Lobby),
             CallEvent::Admitted => (self.tell)(Listen::Admitted),
+            CallEvent::Watching(who) => self.watched = who,
             CallEvent::People(people) => {
                 self.people = Some(people);
                 (self.tell)(Listen::Roster(self.roster()));
@@ -977,6 +986,7 @@ async fn follow(
         far: FarEnd::default(),
         callee,
         people: None,
+        watched: None,
         tell,
         ended: None,
     };

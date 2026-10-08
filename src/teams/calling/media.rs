@@ -180,6 +180,10 @@ pub struct MediaConfig {
     pub video: Option<VideoLine>,
     /// The screen share's line, likewise.
     pub share: Option<VideoLine>,
+    /// Whether to offer (or answer) the data line and open the meeting's
+    /// data channel on it ([`super::channel`]): a meeting asks for
+    /// video there.
+    pub data: bool,
 }
 
 /// The camera's m-line, as a media session is started with it.
@@ -233,6 +237,7 @@ impl MediaConfig {
                 pt: offer_video_pt(OPUS_PT),
                 rtx: Some(offer_video_pt(OPUS_PT) + 1),
             }),
+            data: false,
         }
     }
 
@@ -250,6 +255,7 @@ impl MediaConfig {
         Self {
             video: HAS_VIDEO.then(|| line(VIDEO_MID)),
             share: HAS_VIDEO.then(|| line(SHARE_MID)),
+            data: true,
             ..Self::offer(relay)
         }
     }
@@ -283,6 +289,7 @@ impl MediaConfig {
                     pt: codec.pt,
                     rtx: codec.rtx,
                 }),
+            data: false,
         }
     }
 }
@@ -418,6 +425,10 @@ pub enum MediaEvent {
     FarVideo(bool),
     /// The far end's screen share started (`true`) or stopped showing.
     FarShare(bool),
+    /// The meeting's data channel opened.
+    ChannelOpen,
+    /// A message on the meeting's data channel.
+    ChannelData(Vec<u8>),
     /// The media broke; nothing more comes.
     Failed(Failure),
     /// Stopped as asked.
@@ -520,6 +531,8 @@ enum Command {
     Stop,
     /// Stop, and hand back the sound and pictures.
     Release(oneshot::Sender<Held>),
+    /// Send this on the meeting's data channel.
+    Data(Vec<u8>),
 }
 
 /// A running media session. Dropping it stops the session too, without
@@ -601,6 +614,11 @@ impl MediaSession {
     /// Asks the session to stop; [`MediaEvent::Stopped`] follows.
     pub fn stop(&self) {
         let _ = self.commands.send(Command::Stop);
+    }
+
+    /// Sends `message` on the meeting's data channel, once it is open.
+    pub fn send_data(&self, message: Vec<u8>) {
+        let _ = self.commands.send(Command::Data(message));
     }
 
     /// Stops the session and waits for its sound and pictures, for
@@ -1223,6 +1241,10 @@ struct Session {
     over: Option<Result<(), Failure>>,
     /// Where the sound and pictures go back once stopped, if asked.
     release: Option<oneshot::Sender<Held>>,
+    /// The data line's SSRC, when there is one.
+    data_ssrc: Option<u32>,
+    /// The meeting's data channel, once SCTP is started.
+    channel: Option<str0m::channel::ChannelId>,
 }
 
 impl Session {
@@ -1280,6 +1302,7 @@ impl Session {
         };
         let video = line(super::video::Which::Camera, &config.video, camera_ends);
         let share = line(super::video::Which::Share, &config.share, share_ends);
+        let data_ssrc = config.data.then(fresh_ssrc);
         let mut candidates = Vec::new();
         let host = config
             .host
@@ -1367,6 +1390,8 @@ impl Session {
             flowing: false,
             over: None,
             release: None,
+            data_ssrc,
+            channel: None,
         })
     }
 
@@ -1467,6 +1492,7 @@ impl Session {
             local.share_rtx = share.rtx();
             local.share_rtx_ssrc = share.rtx_ssrc();
         }
+        local.data_ssrc = self.data_ssrc;
         log::info!(
             "gather: done after {:?}: {}",
             self.since(),
@@ -1786,6 +1812,16 @@ impl Session {
                     line.keyframe_request(&request);
                 }
             }
+            RtcEvent::ChannelOpen(id, _) if Some(id) == self.channel => {
+                log::info!("media: the meeting's data channel is open");
+                let _ = self.tell.send(MediaEvent::ChannelOpen);
+            }
+            RtcEvent::ChannelData(data) if Some(data.id) == self.channel => {
+                let _ = self.tell.send(MediaEvent::ChannelData(data.data));
+            }
+            RtcEvent::ChannelClose(id) if Some(id) == self.channel => {
+                log::info!("media: the meeting's data channel closed");
+            }
             _ => {}
         }
     }
@@ -1868,6 +1904,17 @@ impl Session {
                 return;
             }
         }
+        // SCTP over the DTLS just started, as a browser's data channels
+        // go: the DTLS client starts the association too.
+        if self.data_ssrc.is_some() && self.channel.is_none() && self.applied.dtls {
+            let mut api = self.rtc.direct_api();
+            api.start_sctp(plan.active);
+            self.channel = Some(api.create_data_channel(str0m::channel::ChannelConfig {
+                label: super::channel::LABEL.to_owned(),
+                ..Default::default()
+            }));
+            log::info!("media: the meeting's data channel is opening");
+        }
         self.send = plan.send;
         self.receive = plan.receive;
         if let (Some(video), Some((send, receive))) = (&mut self.video, plan.video) {
@@ -1906,6 +1953,18 @@ impl Session {
             Some(Command::Stop) | None => {
                 log::info!("media: stopping");
                 self.over.get_or_insert(Ok(()));
+            }
+            Some(Command::Data(message)) => {
+                let written = self
+                    .channel
+                    .and_then(|id| self.rtc.channel(id))
+                    .map(|mut channel| channel.write(true, &message));
+                match written {
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => log::warn!("media: data channel: {error}"),
+                    None => log::info!("media: the data channel is not open; message dropped"),
+                }
+                self.rtc_timeout = Some(Instant::now());
             }
             Some(Command::Release(give)) => {
                 log::info!("media: stopping, the sound and pictures handed on");
@@ -2274,6 +2333,7 @@ mod tests {
                     ssrc_range: None,
                 },
             ],
+            camera_stream: None,
         }
     }
 
@@ -2616,6 +2676,7 @@ mod tests {
                 video: None,
                 share_video: None,
                 lines: vec![audio_line(Direction::SendRecv)],
+                camera_stream: None,
             }
         }
 
@@ -2801,6 +2862,9 @@ mod tests {
     fn a_meeting_is_offered_h264_at_its_media_servers_number() {
         let config = MediaConfig::meeting(None);
         assert!(config.controlling);
+        // With the data line, for the meeting's data channel.
+        assert!(config.data);
+        assert!(!MediaConfig::offer(None).data);
         assert_eq!(config.opus_pt, OPUS_PT);
         if HAS_VIDEO {
             for line in [&config.video, &config.share] {

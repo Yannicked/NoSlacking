@@ -180,6 +180,9 @@ pub fn read(sdp: &str) -> Result<RemoteMedia, SdpError> {
                 .find(|l| l.media == "video" && l.port != 0 && l.attr("label").is_none())
         });
     let video = camera.and_then(h264_of);
+    let camera_stream = camera
+        .and_then(|l| l.attr("x-source-streamid"))
+        .and_then(|id| id.trim().parse().ok());
     let share_video = raw
         .iter()
         .find(|l| l.media == "video" && l.port != 0 && l.attr("label") == Some(SHARE_LABEL))
@@ -220,6 +223,7 @@ pub fn read(sdp: &str) -> Result<RemoteMedia, SdpError> {
         video,
         share_video,
         lines,
+        camera_stream,
     })
 }
 
@@ -1723,6 +1727,7 @@ mod tests {
         assert_eq!(remote.camera().map(|l| l.mid.as_str()), Some("2"));
         assert_eq!(remote.share().map(|l| l.mid.as_str()), Some("3"));
         assert_eq!(remote.video.map(|v| v.pt), Some(107));
+        assert_eq!(remote.camera_stream, Some(415));
         assert!(
             remote
                 .candidates

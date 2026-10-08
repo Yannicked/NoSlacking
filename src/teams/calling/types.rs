@@ -488,6 +488,22 @@ impl RosterParticipant {
         self.state == "active"
     }
 
+    /// Their camera's source id, while it is on: the `sourceId` of a
+    /// `main-video` stream sending from a device in the call (recorded:
+    /// it turns `sendrecv` when the camera goes on).
+    pub fn camera_source(&self) -> Option<i64> {
+        self.endpoints
+            .values()
+            .filter_map(|e| e.call.as_ref()?.get("mediaStreams")?.as_array())
+            .flatten()
+            .find(|s| {
+                s.get("type").and_then(|t| t.as_str()) == Some("video")
+                    && s.get("label").and_then(|l| l.as_str()) == Some("main-video")
+                    && s.get("direction").and_then(|d| d.as_str()) == Some("sendrecv")
+            })
+            .and_then(|s| s.get("sourceId")?.as_i64())
+    }
+
     /// Whether they wait in a meeting's lobby: a device of theirs is
     /// there and none is in the call (recorded: a waiting endpoint has
     /// `lobby` where one in the call has `call`).
@@ -1141,6 +1157,9 @@ mod tests {
         let who = |mri: &str| &roster.participants[mri];
         assert!(!who("8:live:organizer").is_waiting());
         assert!(who("8:live:organizer").is_muted());
+        // The organizer's camera is off: its video stream receives only.
+        assert_eq!(who("8:live:organizer").camera_source(), None);
+        assert_eq!(who("8:live:waiting").camera_source(), None);
         assert!(who("8:live:waiting").is_waiting());
         assert_eq!(who("8:live:waiting").name(), Some("Wim Waiting"));
         assert_eq!(who("8:live:waiting").role, "guest");

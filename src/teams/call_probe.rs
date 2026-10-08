@@ -149,6 +149,9 @@ async fn probe(options: &Options, handle: tokio::runtime::Handle) -> i32 {
                     log::info!("teams call probe: audio flows both ways");
                 }
                 Some(CallEvent::AnsweredElsewhere) => {}
+                Some(CallEvent::Watching(who)) => {
+                    log::info!("teams call probe: watching {}", if who.is_some() { "a camera" } else { "no camera" });
+                }
                 Some(CallEvent::Lobby) => log::info!("teams call probe: waiting in the meeting's lobby"),
                 Some(CallEvent::Admitted) => log::info!("teams call probe: let in from the lobby"),
                 Some(CallEvent::People(people)) => {

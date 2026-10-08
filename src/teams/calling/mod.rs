@@ -14,6 +14,7 @@
 
 pub mod api;
 pub mod call;
+pub mod channel;
 pub mod codes;
 pub mod links;
 pub mod media;
@@ -119,6 +120,10 @@ pub struct RemoteMedia {
     pub share_video: Option<VideoCodec>,
     /// Every m-line, in order.
     pub lines: Vec<Line>,
+    /// The meeting's id for the stream it sends us on the camera's line
+    /// (`a=x-source-streamid`): where a source request asks for someone's
+    /// video to come.
+    pub camera_stream: Option<u32>,
 }
 
 impl RemoteMedia {

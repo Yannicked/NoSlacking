@@ -1526,3 +1526,43 @@ data channel in the bundle (`m=x-data … RTP/SAVP 127 126`,
 `a=max-message-size:262144`, label `data`), offered `actpass` and
 answered `active`. What it carries is not in a HAR; the next step is a
 log of its messages.
+
+### H.9 The meeting's data channel (recorded: a log of its messages)
+
+The web client creates one data channel, `main-channel` (ordered,
+reliable, negotiated in-band), on the data line. Each message is a
+16-byte header and a JSON array:
+
+```
+10 0f 92 00 | seq (u16, little-endian, each way from 0) |
+from (i32, big-endian) 01 | to (i32, big-endian) 01 | [ {...} ]
+```
+
+The server is -4. The client is -2 until the server's `ack` arrives; the
+`ack` is addressed to the id the client then sends from (415 in the log).
+
+| who | message |
+|---|---|
+| client | `{"type":"syn","client_capabilities":["dsh","bwe","sr","ssbwe"]}` |
+| server | `{"type":"ack","receive_capabilities":["sr","ssbwe","leave","heartbeat"],"send_capabilities":["bwe","dsh","sr_res","heartbeat","vdclc"]}` |
+| server, every second | `{"type":"bwe","bw":613464,"video_bw":493317}` |
+| server | `{"type":"dsh","history":[403]}`: who spoke, by audio source id |
+| client | `{"type":"sr","controlVideoStreaming":{"sequenceNumber":1,"controlInfo":{"sourceId":202,"streamMsid":404,"fmtParams":[{"max-fs":8160,"max-mbps":244800,"max-fps":3000,"profile-level-id":"64001f"}]}}}` |
+| server | `{"type":"sr_res","result":"ok","sequenceNumber":1}` |
+
+- An `sr` (source request) asks for one participant's video.
+  - `sourceId` is the roster `sourceId` of their `main-video` stream.
+    That stream turns `sendrecv` when their camera goes on.
+  - `streamMsid` is the `x-source-streamid` the meeting's SDP gives the
+    receiving video line.
+  - `sourceId: -1` asks for none.
+- Each `sr` has an odd `sequenceNumber`, two above the last; the client
+  sent 1, 3, 5 and 7 as the other camera went on, off and on again.
+- Nothing about video goes over HTTP.
+
+We do the same:
+- open the channel on the data line in meetings, and send `syn`;
+- once the `ack` is in, ask for the first participant whose camera is
+  on, on our camera line's stream;
+- ask again whenever the roster changes who that is, and `-1` when no
+  one's is on.

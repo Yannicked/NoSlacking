@@ -75,6 +75,9 @@ pub enum CallEvent {
     Admitted,
     /// Who else is in the meeting, or waits in its lobby, now.
     People(Vec<Attendee>),
+    /// Whose camera the meeting is asked to send us (by MRI), or no
+    /// one's.
+    Watching(Option<String>),
     /// An incoming call stopped ringing because another device of yours
     /// (or another delivery of the same call here) picked it up: not a
     /// missed call.
@@ -97,6 +100,8 @@ pub struct Attendee {
     /// Waiting in the lobby, not yet in the call.
     pub waiting: bool,
     pub muted: bool,
+    /// Their camera's source id, while it is on.
+    pub camera: Option<i64>,
 }
 
 /// Who is in a meeting, from its roster's deltas.
@@ -131,6 +136,7 @@ impl People {
                 name: them.name().map(str::to_owned),
                 waiting: them.is_waiting(),
                 muted: them.is_muted(),
+                camera: them.camera_source(),
             };
             let was = self
                 .by_mri
@@ -217,6 +223,8 @@ async fn run_meeting(
         changes: 0,
         update_descriptions: None,
         camera_capabilities: None,
+        channel: super::channel::Channel::default(),
+        watching: None,
     });
     call.relay = relay_for(client).await;
     let ended = call
@@ -460,6 +468,11 @@ struct InMeeting {
     /// what our camera sends.
     update_descriptions: Option<String>,
     camera_capabilities: Option<String>,
+    /// The meeting's data channel, where video is asked for.
+    channel: super::channel::Channel,
+    /// Whose camera was last asked for (by MRI and source id), if any
+    /// request went.
+    watching: Option<Option<(String, i64)>>,
 }
 
 impl InMeeting {
@@ -662,6 +675,14 @@ impl Call {
                     }
                     Some(MediaEvent::FarVideo(on)) => tell(CallEvent::FarEndVideo(on)),
                     Some(MediaEvent::FarShare(on)) => tell(CallEvent::FarEndShare(on)),
+                    Some(MediaEvent::ChannelOpen) => {
+                        if let Some(meeting) = &mut self.meeting {
+                            meeting.channel = super::channel::Channel::default();
+                            meeting.watching = None;
+                            session.send_data(meeting.channel.syn());
+                        }
+                    }
+                    Some(MediaEvent::ChannelData(message)) => self.on_channel(&message, session, tell),
                     Some(MediaEvent::AudioFlowing) => {
                         log::info!("Teams call: audio flows both ways");
                         tell(CallEvent::AudioFlowing);
@@ -1035,10 +1056,12 @@ impl Call {
                     let people = meeting.people.list();
                     let waiting = people.iter().filter(|p| p.waiting).count();
                     log::info!(
-                        "Teams meeting: {} others in, {waiting} waiting",
-                        people.len() - waiting
+                        "Teams meeting: {} others in, {waiting} waiting, {} with a camera on",
+                        people.len() - waiting,
+                        people.iter().filter(|p| p.camera.is_some()).count()
                     );
                     tell(CallEvent::People(people));
+                    self.ask_for_video(session, tell);
                 }
             }
             Push::RosterUpdate(update) => {
@@ -1160,8 +1183,12 @@ impl Call {
         };
         // Without them (the session had ended) the call goes on silent.
         let held = session.release().await.unwrap_or_default();
-        let started =
-            MediaSession::resume(MediaConfig::answer(self.relay.clone(), remote), held).await;
+        let config = MediaConfig {
+            // The meeting's data channel, on the new server too.
+            data: self.meeting.is_some(),
+            ..MediaConfig::answer(self.relay.clone(), remote)
+        };
+        let started = MediaSession::resume(config, held).await;
         let (fresh, fresh_local) = match started {
             Ok(started) => started,
             Err(failure) => {
@@ -1201,6 +1228,78 @@ impl Call {
             }
         }
         Ok(())
+    }
+
+    /// Takes in a message on the meeting's data channel.
+    fn on_channel(
+        &mut self,
+        message: &[u8],
+        session: &MediaSession,
+        tell: &(impl Fn(CallEvent) + Send),
+    ) {
+        let Some(meeting) = &mut self.meeting else {
+            return;
+        };
+        for heard in meeting.channel.heard(message) {
+            match heard {
+                super::channel::Heard::Ready => {
+                    log::info!("Teams meeting: the data channel is ready");
+                    self.ask_for_video(session, tell);
+                }
+                super::channel::Heard::SourceAnswered { sequence, ok } => {
+                    if ok {
+                        log::info!("Teams meeting: video request {sequence} taken");
+                    } else {
+                        log::warn!("Teams meeting: video request {sequence} refused");
+                    }
+                }
+                super::channel::Heard::Speakers(_) => {}
+            }
+        }
+    }
+
+    /// Asks the meeting for the camera to show, if that changed: the
+    /// first one on of those in the call, on our camera's line; none
+    /// once no one's is on.
+    fn ask_for_video(&mut self, session: &MediaSession, tell: &(impl Fn(CallEvent) + Send)) {
+        let stream = self.last_remote.as_ref().and_then(|r| r.camera_stream);
+        let Some(meeting) = &mut self.meeting else {
+            return;
+        };
+        let Some(stream) = stream else {
+            log::info!("Teams meeting: no stream to show a camera on");
+            return;
+        };
+        if !meeting.channel.ready() {
+            return;
+        }
+        let wanted = meeting
+            .people
+            .list()
+            .into_iter()
+            .find(|a| !a.waiting && a.camera.is_some())
+            .and_then(|a| Some((a.mri, a.camera?)));
+        let asked = meeting.watching.clone();
+        if asked.as_ref() == Some(&wanted) || (asked.is_none() && wanted.is_none()) {
+            return;
+        }
+        let source = wanted.as_ref().map(|(_, source)| *source);
+        let Some(request) = meeting.channel.request_video(source, stream) else {
+            return;
+        };
+        session.send_data(request);
+        log::info!(
+            "Teams meeting: asked for {}",
+            if wanted.is_some() {
+                "a camera"
+            } else {
+                "no camera"
+            }
+        );
+        tell(CallEvent::Watching(
+            wanted.as_ref().map(|(mri, _)| mri.clone()),
+        ));
+        meeting.watching = Some(wanted);
     }
 
     /// The next `mediaDescriptions` of a meeting, for our SDP `sdp`;
