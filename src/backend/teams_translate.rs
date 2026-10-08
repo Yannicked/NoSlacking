@@ -101,7 +101,7 @@ pub fn translate_teams_content(
             format!(
                 "{} changed a setting to “{}”",
                 activity.who(),
-                mrkdwn_escape(&activity.value.unwrap_or_default())
+                crate::mrkdwn::escape(&activity.value.unwrap_or_default())
             ),
             Some("channel_purpose".to_owned()),
             Vec::new(),
@@ -149,7 +149,11 @@ pub fn translate_teams_content(
             .into_iter()
             .chain(attribute(raw_content, "OriginalName", "v"))
             .next()?;
-        return Some((format!("📎 {}", mrkdwn_escape(&title)), None, Vec::new()));
+        return Some((
+            format!("📎 {}", crate::mrkdwn::escape(&title)),
+            None,
+            Vec::new(),
+        ));
     }
 
     // Anything else that is not a message (calls' signalling, typing,
@@ -282,7 +286,10 @@ impl Activity {
         let people: Vec<String> = if self.names.is_empty() {
             self.targets.iter().map(|id| format!("<@{id}>")).collect()
         } else {
-            self.names.iter().map(|n| mrkdwn_escape(n)).collect()
+            self.names
+                .iter()
+                .map(|n| crate::mrkdwn::escape(n))
+                .collect()
         };
         match people.as_slice() {
             [] => "someone".to_owned(),
@@ -360,7 +367,7 @@ fn pictures(html: &str) -> Vec<crate::model::File> {
 /// subtype, or `None` for one with nothing worth a line.
 fn thread_activity(kind: &str, content: &str) -> Option<(String, &'static str)> {
     let activity = Activity::parse(content);
-    let value = activity.value.as_deref().map(mrkdwn_escape);
+    let value = activity.value.as_deref().map(crate::mrkdwn::escape);
     Some(match kind {
         "AddMember" | "MemberJoined" if activity.by_themselves() || !activity.names.is_empty() => {
             (format!("{} joined", activity.whom()), "channel_join")
@@ -448,14 +455,6 @@ fn camel_to_words(name: &str) -> String {
         words.extend(c.to_lowercase());
     }
     words
-}
-
-/// Text made safe to put in a message's mrkdwn, where `<` starts a
-/// mention or link.
-fn mrkdwn_escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 /// A work channel's posts as the interface shows them: each post, then

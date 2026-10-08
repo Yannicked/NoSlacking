@@ -63,6 +63,7 @@ pub mod spell;
 pub mod sync;
 #[cfg(feature = "teams")]
 pub mod teams;
+pub mod text;
 pub mod theme;
 pub mod tray;
 mod ui;

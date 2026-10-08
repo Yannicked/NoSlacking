@@ -64,18 +64,10 @@ pub fn desktop_entry(exe: &Path) -> String {
     )
 }
 
-/// `text` safe inside an XML element.
-fn xml_escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 /// The LaunchAgent property list that starts `exe` hidden at login.
 pub fn launch_agent(exe: &Path) -> String {
     use crate::paths::APP_ID;
-    let program = xml_escape(&exe.display().to_string());
+    let program = crate::text::xml_escape(&exe.display().to_string());
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\

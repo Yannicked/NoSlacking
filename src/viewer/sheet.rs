@@ -504,12 +504,7 @@ pub fn sample_workbook(sheets: &[(&str, &[&[SampleCell<'_>]])]) -> Vec<u8> {
     use std::fmt::Write as _;
     use std::io::Write as _;
 
-    let escape = |text: &str| {
-        text.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-    };
+    let escape = crate::text::xml_escape;
     let mut parts: Vec<(String, String)> = Vec::new();
     let mut types = String::new();
     let mut listed = String::new();

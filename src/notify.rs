@@ -319,22 +319,6 @@ impl Notifier {
     }
 }
 
-/// `text` safe as freedesktop notification markup, where `&`, `<` and
-/// `>` would otherwise start an entity or a tag.
-#[cfg(any(test, not(any(target_os = "macos", windows))))]
-fn escape_markup(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 #[cfg(any(
     target_os = "linux",
     target_os = "freebsd",
@@ -421,7 +405,7 @@ mod platform {
         // always plain text.
         #[cfg(not(any(target_os = "macos", windows)))]
         let body = if reads_markup() {
-            super::escape_markup(&note.body)
+            crate::mrkdwn::escape(&note.body)
         } else {
             note.body.clone()
         };
@@ -618,18 +602,18 @@ mod tests {
     #[test]
     fn notification_text_is_never_read_as_markup() {
         assert_eq!(
-            escape_markup("a < b && c > d"),
+            crate::mrkdwn::escape("a < b && c > d"),
             "a &lt; b &amp;&amp; c &gt; d"
         );
         assert_eq!(
-            escape_markup("<a href=\"https://evil\">bank</a>"),
+            crate::mrkdwn::escape("<a href=\"https://evil\">bank</a>"),
             "&lt;a href=\"https://evil\"&gt;bank&lt;/a&gt;"
         );
         assert_eq!(
-            escape_markup("&amp; stays as typed"),
+            crate::mrkdwn::escape("&amp; stays as typed"),
             "&amp;amp; stays as typed"
         );
-        assert_eq!(escape_markup("plain words 👍"), "plain words 👍");
+        assert_eq!(crate::mrkdwn::escape("plain words 👍"), "plain words 👍");
     }
 
     #[test]
