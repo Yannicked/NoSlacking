@@ -277,6 +277,39 @@ pub enum Command {
     },
 }
 
+impl Command {
+    /// The answer that says this command could not run at all, and
+    /// `error` why, for a command the interface waits on; `None` for one
+    /// it sends on its own (presence, typing, the call's controls), which
+    /// is only logged.
+    pub fn refused(&self, error: Failure) -> Option<Event> {
+        let ended = |channel: &str| Event::Listening {
+            channel: channel.to_owned(),
+            state: crate::huddles::Listen::Ended(Err(error.clone())),
+        };
+        match self {
+            Self::SetStatus { .. } => Some(Event::StatusSet { result: Err(error) }),
+            Self::SetAway(away) => Some(Event::AwaySet {
+                away: *away,
+                result: Err(error),
+            }),
+            Self::DeclineHuddle { .. } => Some(Event::InviteDeclined { result: Err(error) }),
+            Self::CheckHuddle { channel, room } => Some(Event::HuddleChecked {
+                channel: channel.clone(),
+                room: room.clone(),
+                result: Err(error),
+            }),
+            Self::ListenHuddle { channel }
+            | Self::Call { channel, .. }
+            | Self::AnswerCall { channel, .. } => Some(ended(channel)),
+            Self::JoinMeeting { .. } | Self::MeetNow { .. } => {
+                Some(ended(crate::meetings::MEETING_CHANNEL))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// How often, at most, Slack hears that you are active: Slack's desktop
 /// app tickles about this often, and it marks you away only after minutes
 /// without one.
@@ -857,6 +890,30 @@ fn presence_of(away: bool) -> Presence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_command_answers_only_where_a_view_waits() {
+        let why = Failure::NotSignedIn;
+        assert_eq!(
+            Command::SetAway(true).refused(why.clone()),
+            Some(Event::AwaySet {
+                away: true,
+                result: Err(why.clone())
+            })
+        );
+        assert_eq!(
+            Command::ListenHuddle {
+                channel: "C1".into()
+            }
+            .refused(why.clone()),
+            Some(Event::Listening {
+                channel: "C1".into(),
+                state: crate::huddles::Listen::Ended(Err(why.clone())),
+            })
+        );
+        assert_eq!(Command::Active.refused(why.clone()), None);
+        assert_eq!(Command::MuteHuddle { muted: true }.refused(why), None);
+    }
     use crate::model::{Conversation, Ts, User, Workspace};
 
     #[test]

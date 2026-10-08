@@ -103,7 +103,7 @@ pub(super) fn press_params(press: &Press, now_ms: u64) -> Vec<(&'static str, Str
 /// Sends `press` to Slack. It is never retried after a network failure
 /// ([`Client::act`]): a press is not something to do twice.
 pub(super) async fn press(client: &Client, press: &Press, now_ms: u64) -> Result<(), Failure> {
-    if !client.token().is_session() {
+    if !client.is_session() {
         return Err(Failure::NeedsSession);
     }
     client

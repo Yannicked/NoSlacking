@@ -8,6 +8,7 @@
 //! version 2 asks for; an app made from the first one lacks them, so these
 //! calls are not made and the interface keeps your snooze to itself.
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::{Event, Sink};
@@ -51,9 +52,7 @@ impl DndInfo {
 /// The Do Not Disturb state a `dnd_updated` event carries, if it is one.
 pub fn dnd_event(event: &Value) -> Option<Dnd> {
     let status = event.get("dnd_status")?;
-    serde_json::from_value::<DndInfo>(status.clone())
-        .ok()
-        .map(DndInfo::into_model)
+    DndInfo::deserialize(status).ok().map(DndInfo::into_model)
 }
 
 /// Asks Slack for your Do Not Disturb state. A failure is only logged: the
@@ -87,12 +86,9 @@ pub async fn snooze(client: Client, team: String, minutes: Option<u32>, sink: Si
         }
         None => client.act::<Value>("dnd.endSnooze", &[]).await,
     };
-    match result {
-        Ok(_) => dnd_info(client, team, sink).await,
-        // Ending a snooze that already ended is what was asked for.
-        Err(crate::slack::SlackError::Api(code)) if code == "snooze_not_active" => {
-            dnd_info(client, team, sink).await;
-        }
+    // Ending a snooze that already ended is what was asked for.
+    match super::api::done_if(result, &["snooze_not_active"]) {
+        Ok(()) => dnd_info(client, team, sink).await,
         Err(error) => {
             log::info!("could not change the snooze in Slack: {error}");
             sink.send(Event::Error(Problem::new(

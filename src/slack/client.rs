@@ -41,6 +41,11 @@ pub enum SlackError {
     /// An OAuth sign-in's answer held no user token.
     #[error("no user token")]
     NoUserToken,
+    /// The call is one only a browser session may make (the web client's
+    /// own methods), and this sign-in is not one; refused here, before
+    /// Slack is asked.
+    #[error("only a browser session may do that")]
+    NeedsSession,
 }
 
 /// The error codes that mean a token no longer works and the workspace
@@ -77,11 +82,17 @@ impl SlackError {
         matches!(self, Self::Api(code) if is_auth_code(code))
     }
 
+    /// Slack's own error code, when Slack refused the call.
     pub fn code(&self) -> Option<&str> {
         match self {
             Self::Api(code) => Some(code),
             _ => None,
         }
+    }
+
+    /// Whether Slack refused the call with one of `codes`.
+    pub fn is_code(&self, codes: &[&str]) -> bool {
+        self.code().is_some_and(|code| codes.contains(&code))
     }
 }
 
@@ -439,6 +450,22 @@ impl Client {
         self.auth().token.clone()
     }
 
+    /// Whether this is a browser session, which may call the web client's
+    /// own methods.
+    pub fn is_session(&self) -> bool {
+        self.auth().token.is_session()
+    }
+
+    /// Refuses, as [`SlackError::NeedsSession`], a call only a browser
+    /// session may make, unless this is one.
+    pub fn require_session(&self) -> Result<(), SlackError> {
+        if self.is_session() {
+            Ok(())
+        } else {
+            Err(SlackError::NeedsSession)
+        }
+    }
+
     /// The scopes this token has, as recorded at sign-in or as Slack's
     /// last answer said; `None` for a session or when not known.
     pub fn scopes(&self) -> Option<Scopes> {
@@ -753,7 +780,7 @@ impl Client {
     ) -> Result<(), SlackError> {
         let token = self.token();
         let Some((url, fields)) = emoji_add_request(&token, &self.base, name) else {
-            return Err(SlackError::Api("not_allowed_token_type".into()));
+            return Err(SlackError::NeedsSession);
         };
         let mut form = reqwest::multipart::Form::new();
         for (key, value) in fields {

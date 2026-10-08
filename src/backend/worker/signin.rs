@@ -387,7 +387,7 @@ impl Worker {
             let team = team.to_owned();
             // A session token belongs to the browser login; revoking it would
             // sign the browser out too, so only OAuth tokens are revoked.
-            let revoke = !removed.client.token().is_session();
+            let revoke = !removed.client.is_session();
             // A token renewed on the way to revoking must not be saved
             // again after it is deleted.
             removed.client.stop_reporting();

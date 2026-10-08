@@ -13,8 +13,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::app::{App, WorkspaceState};
 use crate::backend;
-// Why a request failed; `Failure` here names which request it was.
-use crate::failure::Failure as Why;
+use crate::failure::Failure;
 use crate::i18n::tf;
 use crate::model::{ConversationKind, File, Message, Ts, User};
 
@@ -147,30 +146,30 @@ pub enum Command {
 
 impl Command {
     /// What failed, should this command fail.
-    pub fn failure(&self) -> Failure {
+    pub fn doing(&self) -> Doing {
         match self {
-            Self::Open { .. } | Self::FindPeople { .. } => Failure::Open,
-            Self::Browse => Failure::Browse,
-            Self::Join { .. } => Failure::Join,
-            Self::Leave { .. } => Failure::Leave,
-            Self::Create { .. } => Failure::Create,
+            Self::Open { .. } | Self::FindPeople { .. } => Doing::Open,
+            Self::Browse => Doing::Browse,
+            Self::Join { .. } => Doing::Join,
+            Self::Leave { .. } => Doing::Leave,
+            Self::Create { .. } => Doing::Create,
             Self::About { channel }
             | Self::Members { channel }
             | Self::Files { channel }
             | Self::Pins { channel }
-            | Self::Bookmarks { channel } => Failure::Load {
+            | Self::Bookmarks { channel } => Doing::Load {
                 channel: channel.clone(),
             },
-            Self::Pin { channel, ts, pin } => Failure::Pin {
+            Self::Pin { channel, ts, pin } => Doing::Pin {
                 channel: channel.clone(),
                 ts: ts.clone(),
                 pin: *pin,
             },
-            Self::Describe { channel, field, .. } => Failure::Describe {
+            Self::Describe { channel, field, .. } => Doing::Describe {
                 channel: channel.clone(),
                 field: *field,
             },
-            Self::Bookmark { channel, change } => Failure::Bookmark {
+            Self::Bookmark { channel, change } => Doing::Bookmark {
                 channel: channel.clone(),
                 change: change.clone(),
             },
@@ -188,23 +187,23 @@ pub enum Event {
     Browsed { channels: Vec<Listed>, done: bool },
     About {
         channel: String,
-        result: Result<About, Why>,
+        result: Result<About, Failure>,
     },
     Members {
         channel: String,
-        result: Result<Vec<String>, Why>,
+        result: Result<Vec<String>, Failure>,
     },
     Files {
         channel: String,
-        result: Result<Vec<SharedFile>, Why>,
+        result: Result<Vec<SharedFile>, Failure>,
     },
     Pins {
         channel: String,
-        result: Result<Vec<Pin>, Why>,
+        result: Result<Vec<Pin>, Failure>,
     },
     Bookmarks {
         channel: String,
-        result: Result<Vec<Bookmark>, Why>,
+        result: Result<Vec<Bookmark>, Failure>,
     },
     /// A message was pinned or unpinned, maybe by someone else.
     Pinned {
@@ -225,12 +224,12 @@ pub enum Event {
     /// A bookmark was removed, maybe by someone else.
     BookmarkRemoved { channel: String, id: String },
     /// Slack refused, or could not be reached.
-    Failed { what: Failure, error: Why },
+    Failed { what: Doing, error: Failure },
 }
 
-/// Which request failed, so the interface can say so in its own words.
+/// Which request failed (what it was doing), so the interface can say so in its own words.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Failure {
+pub enum Doing {
     Open,
     Browse,
     Join,
@@ -370,7 +369,7 @@ pub struct BookmarkForm {
     pub emoji: Option<String>,
 }
 
-/// Why the bookmark dialog's fields cannot be saved.
+/// Failure the bookmark dialog's fields cannot be saved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BookmarkProblem {
     NoLink,
@@ -481,7 +480,7 @@ pub enum Loaded<T> {
     Idle,
     Loading,
     Ready(T),
-    Failed(Why),
+    Failed(Failure),
 }
 
 impl<T> Loaded<T> {
@@ -491,8 +490,8 @@ impl<T> Loaded<T> {
     }
 }
 
-impl<T> From<Result<T, Why>> for Loaded<T> {
-    fn from(result: Result<T, Why>) -> Self {
+impl<T> From<Result<T, Failure>> for Loaded<T> {
+    fn from(result: Result<T, Failure>) -> Self {
         match result {
             Ok(value) => Self::Ready(value),
             Err(error) => Self::Failed(error),
@@ -637,8 +636,8 @@ pub struct Browse {
     pub channels: Vec<Listed>,
     /// Whether the whole list is in.
     pub done: bool,
-    /// Why the list stopped, if it did.
-    pub error: Option<Why>,
+    /// Failure the list stopped, if it did.
+    pub error: Option<Failure>,
     /// Channels being joined, waiting for Slack.
     pub joining: HashSet<String>,
     /// The last query's matches: thousands of channels are too many to
@@ -864,7 +863,7 @@ pub fn conversations_matching(candidates: Vec<Candidate>, query: &str) -> Vec<Ca
     found.into_iter().map(|(_, c)| c).collect()
 }
 
-/// Why a channel name cannot be used.
+/// Failure a channel name cannot be used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NameProblem {
     Empty,
@@ -1137,12 +1136,12 @@ fn change_bookmarks(app: &mut App, team: &str, channel: &str, change: &BookmarkC
     }
 }
 
-/// Why a bookmark change was taken back, in words.
-fn bookmark_failure(change: &BookmarkChange, error: &Why) -> String {
+/// Failure a bookmark change was taken back, in words.
+fn bookmark_failure(change: &BookmarkChange, error: &Failure) -> String {
     // An app made from the first manifest lacks `bookmarks:write`; the
     // interface hides the controls once it knows, and says which
     // permission is missing when it did not know yet.
-    if *error == Why::MissingPermission {
+    if *error == Failure::MissingPermission {
         return crate::i18n::t("Changing bookmarks needs the bookmarks:write permission, which your Slack app does not have.").into_owned();
     }
     let error = error.message();
@@ -1397,7 +1396,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
         }
         Event::Failed { what, error } => {
             let text = match what {
-                Failure::Open => {
+                Doing::Open => {
                     if let Some(dialog) = &mut app.convos.new_message {
                         dialog.busy = false;
                     }
@@ -1406,7 +1405,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                         &[("error", &error.message())],
                     )
                 }
-                Failure::Browse => {
+                Doing::Browse => {
                     if let Some(browse) = &mut app.convos.browse {
                         browse.error = Some(error.clone());
                         browse.done = true;
@@ -1416,7 +1415,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                         &[("error", &error.message())],
                     )
                 }
-                Failure::Join => {
+                Doing::Join => {
                     if let Some(browse) = &mut app.convos.browse {
                         browse.joining.clear();
                     }
@@ -1425,11 +1424,11 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                         &[("error", &error.message())],
                     )
                 }
-                Failure::Leave => tf(
+                Doing::Leave => tf(
                     "Could not leave the channel: {error}",
                     &[("error", &error.message())],
                 ),
-                Failure::Create => {
+                Doing::Create => {
                     if let Some(dialog) = &mut app.convos.new_channel {
                         dialog.busy = false;
                     }
@@ -1438,7 +1437,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                         &[("error", &error.message())],
                     )
                 }
-                Failure::Load { channel } => {
+                Doing::Load { channel } => {
                     // The panel shows it where the list would be.
                     let data = app.convos.data_mut(team, &channel);
                     if data.about == Loaded::Loading {
@@ -1458,7 +1457,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                     }
                     return;
                 }
-                Failure::Pin { channel, ts, pin } => {
+                Doing::Pin { channel, ts, pin } => {
                     pinned(app, team, &channel, &ts, !pin, None);
                     if pin {
                         tf(
@@ -1472,11 +1471,11 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                         )
                     }
                 }
-                Failure::Bookmark { channel, change } => {
+                Doing::Bookmark { channel, change } => {
                     change_bookmarks(app, team, &channel, &change, true);
                     bookmark_failure(&change, &error)
                 }
-                Failure::Describe { channel, field } => {
+                Doing::Describe { channel, field } => {
                     // Put back what Slack really has.
                     app.backend.send(backend::Command::FetchConversation {
                         team: team.to_owned(),
@@ -2003,10 +2002,10 @@ mod tests {
     #[test]
     fn a_missing_bookmark_permission_is_named() {
         let change = BookmarkChange::Add(mark("local-1", "New"));
-        let text = bookmark_failure(&change, &Why::MissingPermission);
+        let text = bookmark_failure(&change, &Failure::MissingPermission);
         assert!(text.contains("bookmarks:write"), "{text}");
-        let text = bookmark_failure(&change, &Why::Archived);
-        assert!(text.contains(&Why::Archived.message()), "{text}");
+        let text = bookmark_failure(&change, &Failure::Archived);
+        assert!(text.contains(&Failure::Archived.message()), "{text}");
         assert!(!text.contains("bookmarks:write"), "{text}");
     }
 
