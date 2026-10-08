@@ -1714,9 +1714,225 @@ pub struct Authorization {
     pub user_id: Option<String>,
 }
 
+/// A real-time event (Socket Mode, the Events API or RTM), by its `type`,
+/// for the events whose fields are read one by one. Any other type is
+/// [`RtEvent::Other`] and read from its JSON (messages, huddles, emoji,
+/// pins and bookmarks, whose shapes vary by subtype).
+///
+/// Every field is optional: Slack leaves fields out, or sends `null`, and
+/// an event missing one is passed over where it is used, not lost here.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RtEvent {
+    ReactionAdded(ReactionEvent),
+    ReactionRemoved(ReactionEvent),
+    FileDeleted(FileDeleted),
+    MemberJoinedChannel(ChannelEvent),
+    MemberLeftChannel(ChannelEvent),
+    /// You left, or the conversation was deleted or archived.
+    ChannelLeft(ChannelEvent),
+    GroupLeft(ChannelEvent),
+    ChannelDeleted(ChannelEvent),
+    GroupDeleted(ChannelEvent),
+    ChannelArchive(ChannelEvent),
+    GroupArchive(ChannelEvent),
+    /// A conversation renamed, made, unarchived or opened: its details
+    /// are fetched again. `channel` may be an id or an object.
+    ChannelRename(ChannelEvent),
+    GroupRename(ChannelEvent),
+    ChannelCreated(ChannelEvent),
+    ChannelUnarchive(ChannelEvent),
+    ImCreated(ChannelEvent),
+    /// A direct message or group DM opened or closed in your sidebar.
+    ImOpen(ChannelEvent),
+    ImClose(ChannelEvent),
+    MpimOpen(ChannelEvent),
+    MpimClose(ChannelEvent),
+    GroupOpen(ChannelEvent),
+    GroupClose(ChannelEvent),
+    /// Your read marker moved, maybe on another device.
+    ChannelMarked(ChannelEvent),
+    GroupMarked(ChannelEvent),
+    ImMarked(ChannelEvent),
+    MpimMarked(ChannelEvent),
+    UserChange(UserEvent),
+    TeamJoin(UserEvent),
+    PrefChange(PrefChange),
+    ThreadSubscribed(Subscription),
+    ThreadUnsubscribed(Subscription),
+    /// One person's presence (`user`), or several at once (`users`).
+    PresenceChange(PresenceChange),
+    /// You set yourself away or active.
+    ManualPresenceChange(PresenceChange),
+    /// Someone typing, over RTM.
+    UserTyping(ChannelEvent),
+    /// Every other type.
+    #[serde(other)]
+    Other,
+}
+
+/// `reaction_added` and `reaction_removed`.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ReactionEvent {
+    pub user: Option<String>,
+    pub reaction: Option<String>,
+    pub item: Option<ReactionItem>,
+}
+
+/// What a reaction is on: a message, by its conversation and `ts`.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ReactionItem {
+    pub channel: Option<String>,
+    pub ts: Option<String>,
+}
+
+/// `file_deleted`.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FileDeleted {
+    pub file_id: Option<String>,
+}
+
+/// The events about one conversation, and who and when where they say.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ChannelEvent {
+    pub channel: Option<ChannelRef>,
+    pub user: Option<String>,
+    pub ts: Option<String>,
+    pub thread_ts: Option<String>,
+}
+
+impl ChannelEvent {
+    /// The conversation's id, however it was given.
+    pub fn id(&self) -> Option<&str> {
+        match self.channel.as_ref()? {
+            ChannelRef::Id(id) => Some(id.as_str()),
+            ChannelRef::Object { id } => id.as_deref(),
+        }
+        .filter(|id| !id.is_empty())
+    }
+}
+
+/// A conversation as an event names it: its id, or an object with one.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ChannelRef {
+    Id(String),
+    Object {
+        #[serde(default)]
+        id: Option<String>,
+    },
+}
+
+/// `user_change` and `team_join`: the person as `users.info` has them.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct UserEvent {
+    pub user: Option<Value>,
+}
+
+impl UserEvent {
+    /// The person, when Slack sent one that reads.
+    pub fn user(&self) -> Option<User> {
+        User::deserialize(self.user.as_ref()?).ok()
+    }
+}
+
+/// `pref_change`: which preference.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PrefChange {
+    pub name: Option<String>,
+}
+
+/// `thread_subscribed` and `thread_unsubscribed`.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Subscription {
+    pub subscription: SubscribedThread,
+}
+
+/// The thread a subscription is about.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SubscribedThread {
+    /// `thread`, or left out; anything else is not a thread.
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub channel: Option<String>,
+    pub thread_ts: Option<String>,
+}
+
+/// `presence_change` and `manual_presence_change`.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PresenceChange {
+    pub presence: Option<String>,
+    pub user: Option<String>,
+    pub users: Option<Vec<String>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rt(json: &str) -> RtEvent {
+        serde_json::from_str(json).expect("an event")
+    }
+
+    #[test]
+    fn real_time_events_read_by_their_type() {
+        assert_eq!(
+            rt(r#"{"type":"reaction_added","user":"U1","reaction":"tada",
+                "item":{"type":"message","channel":"C1","ts":"1.000100"},"event_ts":"2.0"}"#),
+            RtEvent::ReactionAdded(ReactionEvent {
+                user: Some("U1".into()),
+                reaction: Some("tada".into()),
+                item: Some(ReactionItem {
+                    channel: Some("C1".into()),
+                    ts: Some("1.000100".into()),
+                }),
+            })
+        );
+        // A conversation by its id, or as an object with one.
+        let RtEvent::ChannelLeft(left) = rt(r#"{"type":"channel_left","channel":"C1"}"#) else {
+            panic!("channel_left");
+        };
+        assert_eq!(left.id(), Some("C1"));
+        let RtEvent::ChannelRename(renamed) =
+            rt(r#"{"type":"channel_rename","channel":{"id":"C2","name":"new","created":1}}"#)
+        else {
+            panic!("channel_rename");
+        };
+        assert_eq!(renamed.id(), Some("C2"));
+        // Slack's nulls and missing fields read as absent.
+        let RtEvent::UserTyping(typing) =
+            rt(r#"{"type":"user_typing","channel":"C1","user":null}"#)
+        else {
+            panic!("user_typing");
+        };
+        assert_eq!((typing.id(), typing.user.as_deref()), (Some("C1"), None));
+        let RtEvent::UserChange(changed) =
+            rt(r#"{"type":"user_change","user":{"id":"U1","name":"ana"}}"#)
+        else {
+            panic!("user_change");
+        };
+        assert_eq!(changed.user().map(|u| u.id), Some("U1".to_owned()));
+    }
+
+    #[test]
+    fn other_real_time_events_are_left_to_their_json() {
+        for json in [
+            r#"{"type":"message","channel":"C1","text":"hi","ts":"1.0"}"#,
+            r#"{"type":"sh_room_join","room":{"id":"R1"}}"#,
+            r#"{"type":"something_new","whatever":[1,2]}"#,
+        ] {
+            assert_eq!(rt(json), RtEvent::Other, "{json}");
+        }
+    }
 
     #[test]
     fn a_message_keeps_its_client_id() {
