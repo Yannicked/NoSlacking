@@ -1,5 +1,21 @@
 //! Small text helpers shared across the app.
 
+use std::borrow::Cow;
+
+/// `text` in at most `max_chars` characters: when it is longer, cut, with
+/// the space before the cut dropped and an ellipsis as its last
+/// character. True when it was cut.
+pub fn ellipsize(text: &str, max_chars: usize) -> (Cow<'_, str>, bool) {
+    if text.char_indices().nth(max_chars).is_none() {
+        return (Cow::Borrowed(text), false);
+    }
+    let end = text
+        .char_indices()
+        .nth(max_chars.saturating_sub(1))
+        .map_or(text.len(), |(at, _)| at);
+    (Cow::Owned(format!("{}…", text[..end].trim_end())), true)
+}
+
 /// `text` safe inside an XML or HTML element or a quoted attribute: `&`,
 /// `<`, `>` and both quotes become entities, so nothing in it can close
 /// the element or attribute it sits in.
@@ -51,6 +67,16 @@ pub fn unhex(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ellipsize_cuts_only_what_does_not_fit() {
+        assert_eq!(ellipsize("short", 5), (Cow::Borrowed("short"), false));
+        assert_eq!(ellipsize("", 0), (Cow::Borrowed(""), false));
+        assert_eq!(ellipsize("one two three", 8).0, "one two…");
+        assert_eq!(ellipsize("ééééé", 3), (Cow::Owned("éé…".into()), true));
+        assert_eq!(ellipsize("ab", 1).0, "…");
+        assert_eq!(ellipsize("ab", 0).0, "…");
+    }
 
     #[test]
     fn unhex_undoes_hex() {

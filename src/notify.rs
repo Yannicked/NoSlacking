@@ -165,13 +165,7 @@ pub fn compose(kind: ConversationKind, place: &str, author: &str, plain: &str) -
 
 /// `text` cut to `limit` characters with an ellipsis.
 fn shorten(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_owned();
-    }
-    let mut out: String = text.chars().take(limit.saturating_sub(1)).collect();
-    out.truncate(out.trim_end().len());
-    out.push('…');
-    out
+    crate::text::ellipsize(text, limit).0.into_owned()
 }
 
 /// A notification to show.

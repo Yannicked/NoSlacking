@@ -672,10 +672,10 @@ mod tests {
         let huge = "word ".repeat(10_000);
         let bytes = sample_workbook(&[("S", &[&[Text(&huge)]])]);
         let (sheets, _) = read(&bytes).expect("huge cell");
-        assert_eq!(
-            sheets[0].rows[0][0].chars().count(),
-            super::super::MAX_CELL_CHARS + 1
-        );
+        let cell = &sheets[0].rows[0][0];
+        // The space before the cut goes, so a word ends right at the "…".
+        assert_eq!(cell.chars().count(), super::super::MAX_CELL_CHARS);
+        assert!(cell.ends_with("word…"), "{cell}");
         assert_eq!(sheets[0].notes, vec![Note::LongCells { count: 1 }]);
     }
 
