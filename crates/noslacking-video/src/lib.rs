@@ -1,23 +1,26 @@
-//! NoSlacking's video helper: every huddle video stream the app shows
-//! is decoded here.
+//! NoSlacking's video helper: everything in a huddle that touches
+//! pixels happens here.
 //!
-//! The app starts `noslacking-video` the first time it decodes a video
-//! stream and talks to it over its standard input and output in the
-//! messages of `noslacking-video-ipc`. The helper decodes on the GPU
-//! through the platform's video API, a [`backend::Backend`] (VA-API on
-//! Linux, `vaapi`), when the app asks for it and the GPU can; and
-//! otherwise, or once the GPU fails, in software ([`software`]). On
+//! The app starts `noslacking-video` the first time it needs it and
+//! talks to it over its standard input and output in the messages of
+//! `noslacking-video-ipc`. The helper decodes every stream the app shows
+//! on the GPU through the platform's video API, a [`backend::Backend`]
+//! (VA-API on Linux, `vaapi`), when the app asks for it and the GPU can;
+//! and otherwise, or once the GPU fails, in software ([`software`]). On
 //! other systems, and where VA-API has no H.264 decoder, it reports no
-//! hardware and decodes everything in software. It also encodes the
-//! app's camera on the GPU when it can (the app encodes in software
-//! itself otherwise), and captures and encodes the screen the user
-//! shares ([`capture`], [`share`]): the app gets only the H.264 to send.
+//! hardware and decodes everything in software. It also captures and
+//! encodes what the user sends ([`capture`], [`pipeline`]): the screen
+//! they share and their camera ([`capture::camera`]), on the GPU when it
+//! can and in software otherwise. The app gets only the H.264 to send
+//! and, for the camera, a small picture for its self-view.
 //!
 //! Why a separate process: the platform APIs are C, so calling them
 //! takes `unsafe` code the app forbids, and a GPU driver or a decoder
 //! handed a stranger's malformed stream may crash or hang (release
 //! builds abort on a panic). Here that costs only the helper, which the
-//! app restarts a few times and then shows no video without.
+//! app restarts a few times and then shows no video without. Capture's
+//! native dependencies (V4L2's and PipeWire's calls, the portal's file
+//! descriptors, nokhwa's Objective-C shim) stay out of the app's build.
 
 pub mod backend;
 pub mod capture;
@@ -28,8 +31,8 @@ pub mod nal;
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 pub mod pipe;
+pub mod pipeline;
 pub mod server;
-pub mod share;
 pub mod shrink;
 pub mod software;
 pub mod software_encoder;

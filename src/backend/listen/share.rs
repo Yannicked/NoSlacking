@@ -33,14 +33,13 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::failure::{Failure, HuddleTrouble};
-use crate::huddle_audio::camera_send::SendControl;
-use crate::huddle_audio::helper::{self, Lane, RemoteShare, ShareTrouble};
+use crate::huddle_audio::camera_send::{Encoding, Ending, Limits, START_BITRATE, SendControl};
+use crate::huddle_audio::helper::{self, CaptureTrouble, Lane, RemoteCapture};
 use crate::huddle_audio::join::ChimeJoin;
 use crate::huddle_audio::media::{self, Stage};
 use crate::huddle_audio::share::{Source, may_share, problem_failure};
-use crate::huddle_audio::share_send::{self, Encoding, Ending};
+use crate::huddle_audio::share_send;
 use crate::huddle_audio::video::Share;
-use crate::huddle_audio::video_encoder::Limits;
 use crate::huddle_share::{ShareNews, ShareRequest};
 use noslacking_video_ipc::ShareChoice;
 
@@ -54,10 +53,10 @@ const LEAVE_WAIT: Duration = Duration::from_secs(4);
 static RESTORE: Mutex<String> = Mutex::new(String::new());
 
 /// What a share the helper could not start or keep tells the interface.
-pub fn start_failure(trouble: &ShareTrouble) -> Failure {
+pub fn start_failure(trouble: &CaptureTrouble) -> Failure {
     match trouble {
-        ShareTrouble::Problem(problem, _) => problem_failure(*problem),
-        ShareTrouble::Lost(_) => Failure::Huddle(HuddleTrouble::ShareHelperLost),
+        CaptureTrouble::Problem(problem, _) => problem_failure(*problem),
+        CaptureTrouble::Lost(_) => Failure::Huddle(HuddleTrouble::VideoHelperLost),
     }
 }
 
@@ -113,7 +112,7 @@ enum Step {
     /// No dialog of the system's: these can be picked.
     Choose(Vec<Source>),
     /// The share started in the helper, or why not.
-    Started(Result<RemoteShare, Failure>),
+    Started(Result<RemoteCapture, Failure>),
 }
 
 /// What a running share has to say.
@@ -192,9 +191,9 @@ fn begin(begin: Begin) -> Step {
         log::warn!("huddle share: no video helper: no sharing");
         return Step::Started(Err(Failure::Huddle(HuddleTrouble::NoVideoHelper)));
     };
-    let lost = |helper: &helper::Helper, trouble: ShareTrouble| {
+    let lost = |helper: &helper::Helper, trouble: CaptureTrouble| {
         log::warn!("huddle share: {trouble:?}");
-        if helper.given_up() && matches!(trouble, ShareTrouble::Lost(_)) {
+        if helper.given_up() && matches!(trouble, CaptureTrouble::Lost(_)) {
             Step::Started(Err(Failure::Huddle(HuddleTrouble::NoVideoHelper)))
         } else {
             Step::Started(Err(start_failure(&trouble)))
@@ -212,7 +211,7 @@ fn begin(begin: Begin) -> Step {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .clone();
-    let bitrate = Limits::SHARE.bitrate(crate::huddle_audio::video_encoder::START_BITRATE);
+    let bitrate = Limits::SHARE.bitrate(START_BITRATE);
     match helper.start_share(choice, helper::gpu(), bitrate, &restore) {
         Ok((share, token)) => {
             if !token.is_empty() {
@@ -226,11 +225,11 @@ fn begin(begin: Begin) -> Step {
 
 /// Starts the share's session and sending thread for a share the helper
 /// started.
-fn go_live(content: &ChimeJoin, share: RemoteShare) -> Result<Live, String> {
+fn go_live(content: &ChimeJoin, share: RemoteCapture) -> Result<Live, String> {
     let (encoded, encoded_in) = mpsc::channel(crate::huddle_audio::camera_send::QUEUE);
     let control = SendControl::new(Limits::SHARE);
     let (ending, ended) = watch::channel(None);
-    let encoding = Encoding::spawn(share, encoded, control.clone(), ending)?;
+    let encoding = share_send::spawn(share, encoded, control.clone(), ending)?;
     let (on, on_rx) = watch::channel(true);
     let (refused, refusals) = mpsc::channel(1);
     let uplink = share_send::uplink(encoded_in, on_rx, control, refused);
@@ -428,17 +427,20 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noslacking_video_ipc::ShareProblem;
+    use noslacking_video_ipc::CaptureProblem;
 
     #[test]
     fn the_helpers_troubles_have_their_words() {
         assert_eq!(
-            start_failure(&ShareTrouble::Problem(ShareProblem::Cancelled, "x".into())),
+            start_failure(&CaptureTrouble::Problem(
+                CaptureProblem::Cancelled,
+                "x".into()
+            )),
             Failure::Huddle(HuddleTrouble::ShareCancelled)
         );
         assert_eq!(
-            start_failure(&ShareTrouble::Lost("crashed".into())),
-            Failure::Huddle(HuddleTrouble::ShareHelperLost)
+            start_failure(&CaptureTrouble::Lost("crashed".into())),
+            Failure::Huddle(HuddleTrouble::VideoHelperLost)
         );
     }
 

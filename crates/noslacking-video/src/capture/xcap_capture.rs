@@ -1,5 +1,5 @@
 //! Capture on macOS and Windows through `xcap`: screens and windows by
-//! name for the app's picker, each picture asked for at [`super::FPS`]
+//! name for the app's picker, each picture asked for at the share's rate
 //! (CoreGraphics through `objc2` on macOS, GDI and DXGI through the
 //! `windows` crate on Windows; neither compiles C).
 //!
@@ -7,12 +7,12 @@
 //! Settings → Privacy & Security → Screen & System Audio Recording); the
 //! helper, started by the app from inside its bundle, is covered by the
 //! app's permission. Until it is allowed, captures fail or come back
-//! empty, which is reported as [`ShareProblem::Denied`].
+//! empty, which is reported as [`CaptureProblem::Denied`].
 
-use noslacking_video_ipc::{ShareChoice, ShareProblem, Source, SourceKind};
+use noslacking_video_ipc::{CaptureProblem, ShareChoice, Source, SourceKind};
 
 use super::{Frame, Order, Packed, Trouble};
-use crate::share::{Settings, Share};
+use crate::pipeline::{Capture, Settings};
 
 /// The screens, then the windows that have a title and are not
 /// minimised.
@@ -69,7 +69,7 @@ pub fn sources() -> Result<Vec<Source>, Trouble> {
     }
     if sources.is_empty() {
         return Err(Trouble::new(
-            ShareProblem::Unavailable,
+            CaptureProblem::Unavailable,
             "xcap found no screen or window",
         ));
     }
@@ -77,19 +77,19 @@ pub fn sources() -> Result<Vec<Source>, Trouble> {
 }
 
 /// Captures the screen or window `choice` names.
-pub fn start(choice: &ShareChoice, settings: Settings) -> Result<Share, Trouble> {
+pub fn start(choice: &ShareChoice, settings: Settings) -> Result<Capture, Trouble> {
     let id = match choice {
         ShareChoice::Source(id) => id.clone(),
         _ => sources()?
             .first()
             .map(|s| s.id.clone())
-            .ok_or_else(|| Trouble::new(ShareProblem::Gone, "nothing to share"))?,
+            .ok_or_else(|| Trouble::new(CaptureProblem::Gone, "nothing to share"))?,
     };
     allowed()?;
     super::spawn(
         "noslacking-share-xcap",
         settings,
-        move |pipeline, inbox, started| {
+        move |pipeline, inbox, _feed, started| {
             // Found again on this thread: the handles need not cross it.
             let target = match find(&id) {
                 Ok(target) => target,
@@ -144,7 +144,7 @@ impl Target {
 
 /// The screen or window a picker's id names.
 fn find(id: &str) -> Result<Target, Trouble> {
-    let gone = || Trouble::new(ShareProblem::Gone, format!("no {id}"));
+    let gone = || Trouble::new(CaptureProblem::Gone, format!("no {id}"));
     if let Some(wanted) = id
         .strip_prefix("screen:")
         .and_then(|n| n.parse::<u32>().ok())
@@ -178,7 +178,7 @@ fn failure(error: &xcap::XCapError) -> Trouble {
 fn error_of(error: &xcap::XCapError) -> Trouble {
     eprintln!("noslacking-video: share: the first capture failed: {error}");
     if cfg!(target_os = "macos") {
-        Trouble::new(ShareProblem::Denied, error.to_string())
+        Trouble::new(CaptureProblem::Denied, error.to_string())
     } else {
         failure(error)
     }
@@ -198,7 +198,7 @@ fn allowed() -> Result<(), Trouble> {
         Ok(())
     } else {
         Err(Trouble::new(
-            ShareProblem::Denied,
+            CaptureProblem::Denied,
             "Screen Recording is not allowed",
         ))
     }

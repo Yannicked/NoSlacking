@@ -4,11 +4,12 @@
 //! stateless interface: [`crate::h264`] works out what each picture
 //! needs; this fills in libva's parameter buffers, decodes into a surface
 //! and reads the picture back as I420. Encoding is [`encoder`]'s; a
-//! shared screen's frames reach it through [`share`] (dma-bufs imported,
-//! RGB converted by video processing).
+//! capture's frames (a shared screen's, the camera's) reach it through
+//! [`capture`] (dma-bufs imported, RGB converted by video processing,
+//! I420 written in).
 
+pub mod capture;
 pub mod encoder;
-pub mod share;
 pub mod synthetic;
 #[allow(unsafe_code)]
 pub mod va;
@@ -20,7 +21,7 @@ use noslacking_video_ipc::{
     Capability, Codec, Decoded, Direction, FailKind, MAX_SIDE, Planes, output_size,
 };
 
-use crate::backend::{Backend, Decoder, Encoder, Failure};
+use crate::backend::{Backend, Decoder, Failure};
 use crate::h264::{FrontEnd, Picture, Reference};
 use crate::shrink;
 use va::{
@@ -134,29 +135,12 @@ impl Backend for Vaapi {
         capabilities
     }
 
-    fn open_encoder(
-        &mut self,
-        codec: Codec,
-        width: u32,
-        height: u32,
-        fps: u32,
-        bitrate: u32,
-    ) -> Result<Box<dyn Encoder>, Failure> {
-        let Codec::H264 = codec;
-        let Some(support) = self.encode else {
-            return Err(Failure::unsupported("the driver does not encode H.264"));
-        };
-        let encoder =
-            encoder::VaapiEncoder::new(&self.display, support, (width, height), fps, bitrate)?;
-        Ok(Box::new(encoder))
-    }
-
-    fn share_gpu(&self) -> Option<crate::share::GpuOpener> {
+    fn capture_gpu(&self) -> Option<crate::pipeline::GpuOpener> {
         self.encode?;
-        Some(std::sync::Arc::new(|| match share::GpuShare::open() {
-            Ok(gpu) => Some(Box::new(gpu) as Box<dyn crate::share::Gpu>),
+        Some(std::sync::Arc::new(|| match capture::GpuCapture::open() {
+            Ok(gpu) => Some(Box::new(gpu) as Box<dyn crate::pipeline::Gpu>),
             Err(why) => {
-                eprintln!("noslacking-video: share: no GPU encoder ({why})");
+                eprintln!("noslacking-video: capture: no GPU encoder ({why})");
                 None
             }
         }))

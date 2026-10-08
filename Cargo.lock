@@ -3742,7 +3742,6 @@ dependencies = [
  "keyring-core",
  "log",
  "md-5",
- "nokhwa",
  "noslacking-video",
  "noslacking-video-ipc",
  "notify-rust",
@@ -3758,9 +3757,7 @@ dependencies = [
  "rfd",
  "rodio",
  "rustls-native-certs",
- "rusty_h264-common",
  "rusty_h264-decoder",
- "rusty_h264-encoder",
  "serde",
  "serde_json",
  "sha1",
@@ -3793,6 +3790,7 @@ dependencies = [
  "futures-lite",
  "libc",
  "libloading",
+ "nokhwa",
  "noslacking-video-ipc",
  "objc2-core-graphics",
  "pipewire",
@@ -3803,6 +3801,7 @@ dependencies = [
  "x11rb",
  "xcap",
  "yuv",
+ "zune-jpeg",
 ]
 
 [[package]]

@@ -6,22 +6,22 @@
 //! The pictures ([`pattern::packed_loop`]) are written once into RGB
 //! surfaces of a display of their own (laid out linearly where the
 //! driver can, as the portal's buffers are), exported as dma-bufs and
-//! handed to the share at [`crate::capture::FPS`], round and round.
+//! handed to the share at the share's rate, round and round.
 
 use std::os::fd::AsFd;
 
 use crate::capture::{self, DmaBuf, Frame, Order, Trouble, pattern};
-use crate::share::{Settings, Share};
+use crate::pipeline::{Capture, Settings};
 
 use super::va::Display;
 use super::va::prime::{Exported, Rgb};
 
 /// Starts the dma-buf test screen.
-pub fn test_screen(settings: Settings) -> Result<Share, Trouble> {
+pub fn test_screen(settings: Settings) -> Result<Capture, Trouble> {
     capture::spawn(
         "noslacking-share-test-dmabuf",
         settings,
-        |pipeline, inbox, started| {
+        |pipeline, inbox, _feed, started| {
             let made = (|| -> Result<_, String> {
                 let display = Display::open()?;
                 if !display.exports() {

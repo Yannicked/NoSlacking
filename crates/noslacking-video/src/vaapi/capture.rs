@@ -1,18 +1,20 @@
-//! A shared screen encoded on the GPU through VA-API: frames come in as
-//! dma-bufs (imported as surfaces, never read by the processor), as
-//! packed RGB in memory (written into an RGB surface), or as I420 (the
-//! test screen); video processing scales and converts the first two into
-//! the encoder's NV12 input surface, and [`VaapiEncoder`] encodes it.
+//! A capture (a shared screen, the camera) encoded on the GPU through
+//! VA-API: frames come in as dma-bufs (imported as surfaces, never read
+//! by the processor), as packed RGB in memory (written into an RGB
+//! surface), or as I420 (the camera's, the test screen; written straight
+//! into the encoder's input); video processing scales and converts the
+//! first two into the encoder's NV12 input surface, and [`VaapiEncoder`]
+//! encodes it.
 //!
-//! It opens a display of its own on the share's thread (libva's state
-//! here is kept to one thread), so a share's GPU work never waits on
-//! decoding in the same helper.
+//! It opens a display of its own on the capture's thread (libva's state
+//! here is kept to one thread), so a capture's GPU work never waits on
+//! decoding in the same helper, or on another capture.
 
 use std::rc::Rc;
 
 use crate::backend::{Encoded, Encoder as _, Failure};
 use crate::capture::{Frame, Order, Packed, convert};
-use crate::share::Gpu;
+use crate::pipeline::Gpu;
 
 use super::encoder::{EncodeSupport, VaapiEncoder};
 use super::va::prime::{DmaBufIn, Rgb};
@@ -28,8 +30,8 @@ pub fn rgb(order: Order, alpha: bool) -> Rgb {
     }
 }
 
-/// A share's encoder on the GPU.
-pub struct GpuShare {
+/// A capture's encoder on the GPU.
+pub struct GpuCapture {
     // Fields drop in order: everything made on the display before it.
     encoder: Option<VaapiEncoder>,
     scaler: Option<Scaler>,
@@ -46,16 +48,16 @@ pub struct GpuShare {
     no_upload: bool,
 }
 
-impl std::fmt::Debug for GpuShare {
+impl std::fmt::Debug for GpuCapture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GpuShare")
+        f.debug_struct("GpuCapture")
             .field("display", &self.display)
             .field("dmabuf", &self.dmabuf)
             .finish_non_exhaustive()
     }
 }
 
-impl GpuShare {
+impl GpuCapture {
     /// The first render node's encoder, if its driver encodes H.264;
     /// with video processing if it has it.
     pub fn open() -> Result<Self, String> {
@@ -71,7 +73,7 @@ impl GpuShare {
             Ok(scaler) => Some(scaler),
             Err(why) => {
                 eprintln!(
-                    "noslacking-video: share: no video processing ({why}): the processor \
+                    "noslacking-video: capture: no video processing ({why}): the processor \
                      converts"
                 );
                 None
@@ -126,7 +128,7 @@ impl GpuShare {
     }
 }
 
-impl Gpu for GpuShare {
+impl Gpu for GpuCapture {
     fn name(&self) -> String {
         format!(
             "the GPU (vaapi: {}, {}{})",
@@ -202,7 +204,7 @@ impl Gpu for GpuShare {
                         Ok(()) => return Ok(()),
                         Err(why) => {
                             eprintln!(
-                                "noslacking-video: share: RGB onto the GPU failed ({why}): the \
+                                "noslacking-video: capture: RGB onto the GPU failed ({why}): the \
                                  processor converts from now on"
                             );
                             self.no_upload = true;
@@ -267,7 +269,7 @@ mod tests {
     #[allow(clippy::print_stdout, reason = "the timings are for the reader")]
     fn vaapi_shares_dmabufs_packed_and_i420_pictures() {
         use std::os::fd::AsFd;
-        let mut share = GpuShare::open().expect("VA-API with an H.264 encoder");
+        let mut share = GpuCapture::open().expect("VA-API with an H.264 encoder");
         println!("{}", share.name());
         let size = (1920, 1080);
         share.open(size, 15, 2_500_000).expect("opened");

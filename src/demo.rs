@@ -1306,18 +1306,13 @@ pub fn share_screen() -> Option<crate::huddles::Screen> {
     SHARE.get().map(|(screen, _)| screen.clone())
 }
 
-/// The demo's camera: the test picture, never a real one, feeding the
-/// self-preview while it is on.
+/// The demo's camera: the video helper's test camera, never a real one,
+/// feeding the self-preview while it is on (its frames go nowhere). As
+/// in the real app, there is no camera without the helper.
 #[cfg(feature = "huddle-camera")]
 struct DemoCamera {
     preview: crate::huddle_camera::Preview,
-    latest: crate::huddle_audio::camera::Latest,
-    running: std::sync::Mutex<
-        Option<(
-            crate::huddle_audio::camera::Capturing,
-            crate::huddle_audio::microphone::Running,
-        )>,
-    >,
+    running: std::sync::Arc<std::sync::Mutex<Option<crate::huddle_audio::camera_send::Encoding>>>,
 }
 
 #[cfg(feature = "huddle-camera")]
@@ -1330,8 +1325,7 @@ fn start_camera(sink: &Sink) {
     let waker = sink.waker();
     let _ = CAMERA.set(DemoCamera {
         preview: crate::huddle_camera::Preview::new(move || waker.wake()),
-        latest: crate::huddle_audio::camera::Latest::default(),
-        running: std::sync::Mutex::new(None),
+        running: std::sync::Arc::default(),
     });
 }
 
@@ -1341,33 +1335,62 @@ pub fn camera_preview() -> Option<crate::huddle_camera::Preview> {
     CAMERA.get().map(|c| c.preview.clone())
 }
 
-/// Turns the demo's camera (the test picture) on or off.
+/// Turns the demo's camera (the helper's test camera) on or off, on a
+/// thread of its own: starting the helper takes a moment.
 #[cfg(feature = "huddle-camera")]
 pub fn camera(on: bool) {
-    use crate::huddle_audio::camera::{Camera as _, TestPattern};
+    use crate::huddle_audio::camera_send::{
+        Encoding, Ending, Options, PREVIEW_WIDTH, Pace, START_BITRATE, SendControl,
+    };
+    use crate::huddle_audio::helper::{self, Lane};
     let Some(camera) = CAMERA.get() else {
         return;
     };
-    let mut running = camera
-        .running
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !on {
-        *running = None;
-        return;
-    }
-    if running.is_some() {
-        return;
-    }
-    let pattern = TestPattern::new(camera.latest.clone()).open();
-    let feed = crate::huddle_audio::camera_send::preview_feed(
-        camera.latest.clone(),
-        camera.preview.clone(),
-    );
-    match (pattern, feed) {
-        (Ok(pattern), Ok(feed)) => *running = Some((pattern, feed)),
-        (Err(error), _) => log::warn!("demo: no camera: {error}"),
-        (_, Err(error)) => log::warn!("demo: no camera: {error}"),
+    let (preview, running) = (camera.preview.clone(), camera.running.clone());
+    let spawned = std::thread::Builder::new()
+        .name("noslacking-demo-camera".into())
+        .spawn(move || {
+            let mut running = running
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !on {
+                // Joins the sending thread, which closes the camera.
+                *running = None;
+                return;
+            }
+            if running.is_some() {
+                return;
+            }
+            let Some(helper) = helper::shared(Lane::Camera) else {
+                log::warn!("demo: no video helper: no camera");
+                return;
+            };
+            let started = helper
+                .start_camera(
+                    noslacking_video_ipc::CameraChoice::Test,
+                    helper::gpu(),
+                    START_BITRATE,
+                    PREVIEW_WIDTH,
+                )
+                .map_err(|trouble| format!("{trouble:?}"))
+                .and_then(|camera| {
+                    let (ended, _) = tokio::sync::watch::channel(None);
+                    let options = Options {
+                        what: "demo camera",
+                        pace: Pace::CAMERA,
+                        preview: Some(preview),
+                        restart: None,
+                        ending: Box::new(|_| Ending::Ended),
+                    };
+                    Encoding::spawn(camera, None, SendControl::default(), ended, options)
+                });
+            match started {
+                Ok(encoding) => *running = Some(encoding),
+                Err(why) => log::warn!("demo: no camera: {why}"),
+            }
+        });
+    if let Err(error) = spawned {
+        log::warn!("demo: no camera thread: {error}");
     }
 }
 

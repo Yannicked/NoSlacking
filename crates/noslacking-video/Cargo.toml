@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.98"
 license = "MIT"
 publish = false
-description = "NoSlacking's video helper: decodes H.264 on the GPU or in software, in a process of its own"
+description = "NoSlacking's video helper: decodes H.264, and captures and encodes the screen and camera, on the GPU or in software, in a process of its own"
 repository = "https://github.com/Yannicked/NoSlacking"
 
 [lib]
@@ -35,6 +35,10 @@ rusty_h264-common = { version = "0.16", default-features = false, features = ["s
 # the test screen back to RGB (BSD-3-Clause/Apache-2.0, SIMD chosen at
 # run time; its unsafe is the intrinsics). The GPU converts on its own.
 yuv = "0.8.19"
+# A webcam's MJPEG frames (Zlib/MIT/Apache-2.0, pure Rust, its SIMD
+# behind run-time checks; already in the tree as `image`'s JPEG decoder).
+# It fills in the Huffman tables MJPEG frames leave out.
+zune-jpeg = { version = "0.5.15", default-features = false, features = ["std", "x86", "neon"] }
 
 # VA-API, Linux's video acceleration API. libva is opened at run time
 # (libloading, ISC), never linked: the helper builds without libva's
@@ -46,7 +50,8 @@ yuv = "0.8.19"
 # src/h264.rs, as is the small part of libva's API used (src/vaapi/ffi.rs).
 [target.'cfg(target_os = "linux")'.dependencies]
 libloading = "0.8.9"
-# fcntl, to make the pipe a picture goes back through larger (src/pipe.rs).
+# fcntl, to make the pipe a picture goes back through larger (src/pipe.rs),
+# and the camera's V4L2 calls (ioctl, mmap, poll: src/capture/camera/v4l2.rs).
 libc = "0.2.189"
 cros-codecs = { version = "0.0.6", default-features = false }
 # Sharing the screen of an X11 session without the ScreenCast portal:
@@ -67,8 +72,16 @@ futures-lite = { version = "2.6", default-features = false, features = ["std"], 
 
 # Sharing the screen on macOS and Windows: xcap (Apache-2.0), over
 # objc2's CoreGraphics bindings and the windows crate; nothing compiled.
+# The camera there: nokhwa (Apache-2.0; AVFoundation on macOS, where
+# objc_exception compiles a one-file Objective-C shim with Xcode's clang,
+# and Media Foundation on Windows through the windows crate). Without its
+# default `decoding` feature, which would build mozjpeg's C; MJPEG is
+# zune-jpeg's. Moved here from the app, so its native parts are the
+# helper's alone. On Linux the helper speaks V4L2 itself, which needs no
+# libclang (nokhwa's V4L2 bindings are made by bindgen).
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 xcap = { version = "0.9.8", default-features = false }
+nokhwa = { version = "0.10.11", default-features = false, features = ["input-native"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS's Screen Recording permission, checked and asked for before the
@@ -90,7 +103,8 @@ sha2 = "0.11"
 
 [lints.rust]
 # This crate is where the unsafe code lives that the app forbids: the
-# calls into libva (and one fcntl). Everything else in it is denied
+# calls into libva, the PipeWire stream, V4L2 (the camera on Linux) and
+# one fcntl. Everything else in it is denied
 # unsafe code, and the modules that need it say so
 # (`#[allow(unsafe_code)]`).
 unsafe_code = "deny"

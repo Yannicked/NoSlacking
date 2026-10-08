@@ -1,13 +1,13 @@
 //! A back end with no hardware behind it, for tests: it "decodes" a
 //! frame into a flat grey picture of the size it was opened at, as if
-//! on the GPU, and "encodes" a picture into a made-up NAL unit. Chosen
-//! with `NOSLACKING_VIDEO_BACKEND=fake`.
+//! on the GPU, and has no GPU encoder (captures encode in software).
+//! Chosen with `NOSLACKING_VIDEO_BACKEND=fake`.
 
 use noslacking_video_ipc::{
     Capability, Codec, Decoded, Direction, MAX_SIDE, Planes, chroma_size, output_size,
 };
 
-use crate::backend::{Backend, Decoder, Encoded, Encoder, Failure};
+use crate::backend::{Backend, Decoder, Failure};
 
 /// The pretend back end.
 #[derive(Debug, Default)]
@@ -44,21 +44,6 @@ impl Backend for Fake {
             height,
             fit: (0, 0),
             started: false,
-            frames: 0,
-        }))
-    }
-
-    fn open_encoder(
-        &mut self,
-        _: Codec,
-        width: u32,
-        height: u32,
-        _: u32,
-        _: u32,
-    ) -> Result<Box<dyn Encoder>, Failure> {
-        Ok(Box::new(FakeEncoder {
-            width,
-            height,
             frames: 0,
         }))
     }
@@ -103,29 +88,5 @@ impl Decoder for FakeDecoder {
 
     fn set_output_size(&mut self, width: u32, height: u32) {
         self.fit = (width, height);
-    }
-}
-
-struct FakeEncoder {
-    width: u32,
-    height: u32,
-    frames: u32,
-}
-
-impl Encoder for FakeEncoder {
-    fn encode(&mut self, picture: &Planes, force_keyframe: bool) -> Result<Encoded, Failure> {
-        if picture.width != self.width || picture.height != self.height {
-            return Err(Failure::broken("not the size the encoder was opened at"));
-        }
-        let keyframe = force_keyframe || self.frames == 0;
-        self.frames += 1;
-        Ok(Encoded {
-            keyframe,
-            data: vec![0, 0, 0, 1, if keyframe { 0x65 } else { 0x41 }, 0x80],
-        })
-    }
-
-    fn set_bitrate(&mut self, _: u32) -> Result<(), Failure> {
-        Ok(())
     }
 }

@@ -1,6 +1,6 @@
 //! The helper's side of the conversation: reads requests, hands them to
-//! the back end (or a share's capture), writes one reply for each, until
-//! its input closes.
+//! the back end (or a capture: a share or the camera), writes one reply
+//! for each, until its input closes.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -8,13 +8,23 @@ use std::time::Duration;
 
 use noslacking_video_ipc::{self as ipc, FailKind, Reply, Request};
 
-use crate::backend::{self, Backend, Decoder, Encoder};
+use crate::backend::{self, Backend, Decoder};
+use crate::capture::camera::Cameras;
 use crate::capture::{Screens, Trouble};
-use crate::share::{Settings, Share};
+use crate::pipeline::{Capture, Settings};
 
-/// The most decoders and encoders open at once: a huddle's share, its
+/// The most decoders and captures open at once: a huddle's share, its
 /// camera tiles and your own camera are far fewer.
 const MAX_OPEN: usize = 64;
+
+/// What captures the server starts: the screens a share is taken from,
+/// and the cameras.
+pub struct Sources<'a> {
+    /// Where shares come from.
+    pub screens: &'a mut dyn Screens,
+    /// Where the camera comes from.
+    pub cameras: &'a mut dyn Cameras,
+}
 
 /// Serves requests from `input` until it closes, replying on `output`.
 ///
@@ -23,20 +33,21 @@ const MAX_OPEN: usize = 64;
 /// and the conversation goes on (its frame was whole); broken framing
 /// ends it, since nothing after it can be trusted to line up.
 ///
-/// Screen shares are captured from `screens`; when the input closes, any
-/// share still open is stopped before this returns.
+/// Screen shares are captured from `sources.screens` and cameras from
+/// `sources.cameras`; when the input closes, any capture still open is
+/// stopped (a camera closed) before this returns.
 pub fn serve(
     input: &mut impl Read,
     output: &mut impl Write,
     backend: &mut dyn Backend,
-    screens: &mut dyn Screens,
+    sources: Sources<'_>,
 ) -> Result<(), ipc::Error> {
     let mut server = Server {
         backend,
-        screens,
+        screens: sources.screens,
+        cameras: sources.cameras,
         decoders: HashMap::new(),
-        encoders: HashMap::new(),
-        shares: HashMap::new(),
+        captures: HashMap::new(),
         next_id: 1,
     };
     let Some((first, hello)) = ipc::read_request(input)? else {
@@ -58,12 +69,12 @@ pub fn serve(
             return Err(ipc::Error::BadValue("first message"));
         }
     }
-    // Pictures to encode are read straight into their planes.
     while let Some((seq, request)) = ipc::read_request(input)? {
         let reply = match request {
             Ok(request) => server.handle(request),
             Err(error) => failed(FailKind::Protocol, &error.to_string()),
         };
+        // A decoded picture goes from its planes into the pipe.
         ipc::write_reply(output, seq, &reply)?;
     }
     Ok(())
@@ -76,12 +87,12 @@ fn failed(kind: FailKind, detail: &str) -> Reply {
     }
 }
 
-/// The most screen shares open at once: the app makes one; its tests,
-/// sharing one helper, a few.
-const MAX_SHARES: usize = 4;
+/// The most captures open at once: the app makes a share and a camera;
+/// its tests, sharing one helper, a few.
+const MAX_CAPTURES: usize = 4;
 
-fn share_problem(trouble: Trouble) -> Reply {
-    Reply::ShareProblem {
+fn problem(trouble: Trouble) -> Reply {
+    Reply::Problem {
         problem: trouble.problem,
         detail: trouble.detail,
     }
@@ -90,9 +101,9 @@ fn share_problem(trouble: Trouble) -> Reply {
 struct Server<'a> {
     backend: &'a mut dyn Backend,
     screens: &'a mut dyn Screens,
+    cameras: &'a mut dyn Cameras,
     decoders: HashMap<u32, Box<dyn Decoder>>,
-    encoders: HashMap<u32, Box<dyn Encoder>>,
-    shares: HashMap<u32, Share>,
+    captures: HashMap<u32, Capture>,
     next_id: u32,
 }
 
@@ -104,7 +115,19 @@ impl Server<'_> {
     }
 
     fn full(&self) -> bool {
-        self.decoders.len() + self.encoders.len() + self.shares.len() >= MAX_OPEN
+        self.decoders.len() + self.captures.len() >= MAX_OPEN || self.captures.len() >= MAX_CAPTURES
+    }
+
+    /// Keeps a capture that started, or says why it did not.
+    fn started(&mut self, started: Result<(Capture, String), Trouble>) -> Reply {
+        match started {
+            Ok((capture, restore)) => {
+                let id = self.id();
+                self.captures.insert(id, capture);
+                Reply::Started { id, restore }
+            }
+            Err(trouble) => problem(trouble),
+        }
     }
 
     fn handle(&mut self, request: Request) -> Reply {
@@ -116,7 +139,7 @@ impl Server<'_> {
                 height,
                 hardware,
             } => {
-                if self.full() {
+                if self.decoders.len() + self.captures.len() >= MAX_OPEN {
                     return failed(FailKind::Unsupported, "too many open");
                 }
                 let decoder = backend::open_decoder(self.backend, codec, width, height, hardware);
@@ -138,57 +161,13 @@ impl Server<'_> {
                     Err(failure) => failed(failure.kind, &failure.detail),
                 }
             }
-            Request::OpenEncoder {
-                codec,
-                width,
-                height,
-                fps,
-                bitrate,
-            } => {
-                if self.full() {
-                    return failed(FailKind::Unsupported, "too many open");
+            Request::SetBitrate { id, bitrate } => match self.captures.get(&id) {
+                Some(capture) => {
+                    capture.set_bitrate(bitrate);
+                    Reply::Done
                 }
-                match self
-                    .backend
-                    .open_encoder(codec, width, height, fps, bitrate)
-                {
-                    Ok(encoder) => {
-                        let id = self.id();
-                        self.encoders.insert(id, encoder);
-                        Reply::Opened { id }
-                    }
-                    Err(failure) => failed(failure.kind, &failure.detail),
-                }
-            }
-            Request::Encode {
-                id,
-                force_keyframe,
-                picture,
-            } => {
-                let Some(encoder) = self.encoders.get_mut(&id) else {
-                    return failed(FailKind::UnknownId, "no such encoder");
-                };
-                match encoder.encode(&picture, force_keyframe) {
-                    Ok(encoded) => Reply::Encoded {
-                        keyframe: encoded.keyframe,
-                        data: encoded.data,
-                    },
-                    Err(failure) => failed(failure.kind, &failure.detail),
-                }
-            }
-            Request::SetBitrate { id, bitrate } => {
-                if let Some(share) = self.shares.get(&id) {
-                    share.set_bitrate(bitrate);
-                    return Reply::Done;
-                }
-                let Some(encoder) = self.encoders.get_mut(&id) else {
-                    return failed(FailKind::UnknownId, "no such encoder");
-                };
-                match encoder.set_bitrate(bitrate) {
-                    Ok(()) => Reply::Done,
-                    Err(failure) => failed(failure.kind, &failure.detail),
-                }
-            }
+                None => failed(FailKind::UnknownId, "no such capture"),
+            },
             Request::SetOutputSize { id, width, height } => {
                 let Some(decoder) = self.decoders.get_mut(&id) else {
                     return failed(FailKind::UnknownId, "no such decoder");
@@ -197,10 +176,7 @@ impl Server<'_> {
                 Reply::Done
             }
             Request::Close { id } => {
-                if self.decoders.remove(&id).is_some()
-                    || self.encoders.remove(&id).is_some()
-                    || self.shares.remove(&id).is_some()
-                {
+                if self.decoders.remove(&id).is_some() || self.captures.remove(&id).is_some() {
                     Reply::Done
                 } else {
                     failed(FailKind::UnknownId, "nothing open with that number")
@@ -208,7 +184,7 @@ impl Server<'_> {
             }
             Request::ListSources => match self.screens.sources() {
                 Ok((dialog, sources)) => Reply::Sources { dialog, sources },
-                Err(trouble) => share_problem(trouble),
+                Err(trouble) => problem(trouble),
             },
             Request::StartShare {
                 choice,
@@ -216,37 +192,51 @@ impl Server<'_> {
                 bitrate,
                 restore,
             } => {
-                if self.full() || self.shares.len() >= MAX_SHARES {
+                if self.full() {
                     return failed(FailKind::Unsupported, "too many open");
                 }
-                let settings = Settings {
-                    hardware,
-                    bitrate,
-                    gpu: self.backend.share_gpu(),
-                };
-                match self.screens.start(&choice, settings, &restore) {
-                    Ok((share, restore)) => {
-                        let id = self.id();
-                        self.shares.insert(id, share);
-                        Reply::ShareStarted { id, restore }
-                    }
-                    Err(trouble) => share_problem(trouble),
-                }
+                let settings = Settings::share(hardware, bitrate, self.backend.capture_gpu());
+                let started = self.screens.start(&choice, settings, &restore);
+                self.started(started)
             }
-            Request::NextShareFrame {
+            Request::ListCameras => match self.cameras.list() {
+                Ok(sources) => Reply::Sources {
+                    dialog: false,
+                    sources,
+                },
+                Err(trouble) => problem(trouble),
+            },
+            Request::StartCamera {
+                choice,
+                hardware,
+                bitrate,
+                preview,
+            } => {
+                if self.full() {
+                    return failed(FailKind::Unsupported, "too many open");
+                }
+                let settings =
+                    Settings::camera(hardware, bitrate, self.backend.capture_gpu(), preview);
+                let started = self
+                    .cameras
+                    .start(&choice, settings)
+                    .map(|capture| (capture, String::new()));
+                self.started(started)
+            }
+            Request::NextFrame {
                 id,
                 force_keyframe,
                 repeat,
                 wait_ms,
             } => {
-                let Some(share) = self.shares.get(&id) else {
-                    return failed(FailKind::UnknownId, "no such share");
+                let Some(capture) = self.captures.get(&id) else {
+                    return failed(FailKind::UnknownId, "no such capture");
                 };
-                let wait = Duration::from_millis(u64::from(wait_ms.min(ipc::MAX_SHARE_WAIT_MS)));
-                match share.next(force_keyframe, repeat, wait) {
-                    Ok(Some(frame)) => Reply::ShareFrame(frame),
+                let wait = Duration::from_millis(u64::from(wait_ms.min(ipc::MAX_WAIT_MS)));
+                match capture.next(force_keyframe, repeat, wait) {
+                    Ok(Some(frame)) => Reply::Frame(frame),
                     Ok(None) => Reply::NoPicture,
-                    Err(trouble) => share_problem(trouble),
+                    Err(trouble) => problem(trouble),
                 }
             }
         }
@@ -258,13 +248,27 @@ mod tests {
     use super::*;
     use crate::backend::{Failure, Nothing};
     use crate::fake::Fake;
-    use noslacking_video_ipc::{Codec, Planes};
+    use noslacking_video_ipc::{CameraChoice, CaptureProblem, Codec, Planes, Source, SourceKind};
 
     const CAMERA: &[u8] = include_bytes!("../../../src/huddle_audio/fixtures/camera-480x480.h264");
 
-    /// Runs `requests` through a server with `backend` and returns its
-    /// replies, each with the sequence number it carried.
+    /// Runs `requests` through a server with `backend` and the pretend
+    /// screens and cameras, and returns its replies, each with the
+    /// sequence number it carried.
     fn talk(backend: &mut dyn Backend, requests: &[Vec<u8>]) -> (Vec<(u32, Reply)>, bool) {
+        let cameras = vec![Source {
+            id: "pretend:1".into(),
+            name: "A pretend camera".into(),
+            kind: SourceKind::Camera,
+        }];
+        talk_with(backend, cameras, requests)
+    }
+
+    fn talk_with(
+        backend: &mut dyn Backend,
+        cameras: Vec<Source>,
+        requests: &[Vec<u8>],
+    ) -> (Vec<(u32, Reply)>, bool) {
         let mut input = Vec::new();
         for (seq, body) in requests.iter().enumerate() {
             ipc::write_frame(&mut input, 10 + seq as u32, body).expect("written");
@@ -274,7 +278,13 @@ mod tests {
             &mut input.as_slice(),
             &mut output,
             backend,
-            &mut crate::capture::Pretend::default(),
+            Sources {
+                screens: &mut crate::capture::Pretend::default(),
+                cameras: &mut crate::capture::camera::Pretend {
+                    cameras,
+                    refuse: None,
+                },
+            },
         )
         .is_ok();
         let mut replies = Vec::new();
@@ -331,26 +341,6 @@ mod tests {
                 decode(9, true),
                 Request::Close { id: 1 }.encode(),
                 Request::Close { id: 1 }.encode(),
-                Request::OpenEncoder {
-                    codec: Codec::H264,
-                    width: 4,
-                    height: 2,
-                    fps: 30,
-                    bitrate: 1_000_000,
-                }
-                .encode(),
-                Request::Encode {
-                    id: 2,
-                    force_keyframe: false,
-                    picture: Planes {
-                        width: 4,
-                        height: 2,
-                        y: vec![0; 8],
-                        u: vec![0; 2],
-                        v: vec![0; 2],
-                    },
-                }
-                .encode(),
                 Request::SetBitrate {
                     id: 2,
                     bitrate: 500_000,
@@ -362,7 +352,7 @@ mod tests {
         let seqs: Vec<u32> = replies.iter().map(|(seq, _)| *seq).collect();
         assert_eq!(
             seqs,
-            (10..21).collect::<Vec<_>>(),
+            (10..19).collect::<Vec<_>>(),
             "one reply each, in order"
         );
         let replies: Vec<Reply> = replies.into_iter().map(|(_, reply)| reply).collect();
@@ -390,9 +380,121 @@ mod tests {
             Some(FailKind::UnknownId),
             "closed already"
         );
-        assert_eq!(replies[8], Reply::Opened { id: 2 });
-        assert!(matches!(&replies[9], Reply::Encoded { keyframe: true, .. }));
-        assert_eq!(replies[10], Reply::Done);
+        assert_eq!(
+            kind(&replies[8]),
+            Some(FailKind::UnknownId),
+            "no capture to retune"
+        );
+    }
+
+    /// The camera through the server: listed, started (the test camera
+    /// whatever is chosen), its frames pulled with their self-views, its
+    /// rate changed, closed; a camera that is not there says so.
+    #[test]
+    fn a_camera_is_listed_started_pulled_and_closed() {
+        let start = |choice| {
+            Request::StartCamera {
+                choice,
+                hardware: false,
+                bitrate: 600_000,
+                preview: 320,
+            }
+            .encode()
+        };
+        let next = Request::NextFrame {
+            id: 1,
+            force_keyframe: false,
+            repeat: false,
+            wait_ms: ipc::MAX_WAIT_MS,
+        }
+        .encode();
+        let (replies, ok) = talk(
+            &mut Nothing::new("none: a test"),
+            &[
+                hello(),
+                Request::ListCameras.encode(),
+                start(CameraChoice::First),
+                next.clone(),
+                next,
+                Request::SetBitrate {
+                    id: 1,
+                    bitrate: 250_000,
+                }
+                .encode(),
+                Request::Close { id: 1 }.encode(),
+                start(CameraChoice::Device("pretend:7".into())),
+            ],
+        );
+        assert!(ok);
+        let replies: Vec<Reply> = replies.into_iter().map(|(_, reply)| reply).collect();
+        assert!(matches!(
+            &replies[1],
+            Reply::Sources { dialog: false, sources } if sources.len() == 1
+                && sources[0].kind == SourceKind::Camera
+        ));
+        assert_eq!(
+            replies[2],
+            Reply::Started {
+                id: 1,
+                restore: String::new()
+            }
+        );
+        for (n, reply) in replies[3..5].iter().enumerate() {
+            let Reply::Frame(frame) = reply else {
+                panic!("a frame: {reply:?}");
+            };
+            assert_eq!(frame.keyframe, n == 0);
+            assert_eq!((frame.width, frame.height), (640, 480));
+            assert!(!frame.hardware);
+            let preview = frame.preview.as_ref().expect("a self-view");
+            assert_eq!((preview.width, preview.height), (320, 240));
+        }
+        assert_eq!(replies[5], Reply::Done);
+        assert_eq!(replies[6], Reply::Done);
+        assert!(matches!(
+            replies[7],
+            Reply::Problem {
+                problem: CaptureProblem::Gone,
+                ..
+            }
+        ));
+        // No camera at all.
+        let (replies, _) = talk_with(
+            &mut Fake,
+            Vec::new(),
+            &[
+                hello(),
+                Request::ListCameras.encode(),
+                start(CameraChoice::First),
+            ],
+        );
+        assert!(matches!(&replies[1].1, Reply::Sources { sources, .. } if sources.is_empty()));
+        assert!(matches!(
+            replies[2].1,
+            Reply::Problem {
+                problem: CaptureProblem::Unavailable,
+                ..
+            }
+        ));
+    }
+
+    /// A self-view asked wider than allowed is a bad message, and the
+    /// conversation goes on.
+    #[test]
+    fn a_camera_asked_for_too_wide_a_self_view_is_refused() {
+        let mut wide = Request::StartCamera {
+            choice: CameraChoice::Test,
+            hardware: false,
+            bitrate: 1,
+            preview: 0,
+        }
+        .encode();
+        let last = wide.len() - 4;
+        wide[last..].copy_from_slice(&(ipc::MAX_PREVIEW_SIDE + 1).to_le_bytes());
+        let (replies, ok) = talk(&mut Fake, &[hello(), wide, Request::ListCameras.encode()]);
+        assert!(ok);
+        assert_eq!(kind(&replies[1].1), Some(FailKind::Protocol));
+        assert!(matches!(replies[2].1, Reply::Sources { .. }));
     }
 
     /// Decodes `frames` (each with whether it is a keyframe) through a
@@ -612,7 +714,10 @@ mod tests {
                 &mut input.as_slice(),
                 &mut output,
                 &mut Fake,
-                &mut crate::capture::Pretend::default()
+                Sources {
+                    screens: &mut crate::capture::Pretend::default(),
+                    cameras: &mut crate::capture::camera::Pretend::default(),
+                }
             )
             .is_err()
         );

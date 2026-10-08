@@ -1,7 +1,9 @@
 //! What a platform's video API must provide to serve the app: one
 //! [`Backend`] per API (VA-API today; VideoToolbox, Media Foundation,
 //! Vulkan Video and V4L2 are planned, see docs/research/huddle-video.md),
-//! opening [`Decoder`]s and [`Encoder`]s.
+//! opening [`Decoder`]s, and the GPU's [`crate::pipeline::Gpu`] a capture
+//! encodes on. An [`Encoder`] is what a GPU's encoder offers whatever
+//! feeds it.
 //!
 //! A back end takes whole frames (access units, Annex B) and gives whole
 //! I420 pictures, so stateful APIs (VideoToolbox, Media Foundation, V4L2
@@ -77,23 +79,11 @@ pub trait Backend {
         width: u32,
         height: u32,
     ) -> Result<Box<dyn Decoder>, Failure>;
-    /// An encoder of `width`×`height` pictures at `fps` and `bitrate`
-    /// bits a second.
-    fn open_encoder(
-        &mut self,
-        codec: Codec,
-        width: u32,
-        height: u32,
-        fps: u32,
-        bitrate: u32,
-    ) -> Result<Box<dyn Encoder>, Failure> {
-        let _ = (codec, width, height, fps, bitrate);
-        Err(Failure::unsupported("this back end does not encode"))
-    }
-    /// What opens its GPU's share encoder on a share's capture thread,
-    /// if it has one (libva's state is kept to one thread, so the share
-    /// opens its own rather than borrowing this back end's).
-    fn share_gpu(&self) -> Option<crate::share::GpuOpener> {
+    /// What opens its GPU's encoder on a capture's thread (a share's or
+    /// the camera's), if it has one (libva's state is kept to one thread,
+    /// so each capture opens its own rather than borrowing this back
+    /// end's).
+    fn capture_gpu(&self) -> Option<crate::pipeline::GpuOpener> {
         None
     }
 }
@@ -108,7 +98,7 @@ pub trait Decoder {
     fn set_output_size(&mut self, width: u32, height: u32);
 }
 
-/// One stream's encoder.
+/// One stream's encoder, fed pictures in memory.
 pub trait Encoder {
     /// Encodes one picture.
     fn encode(&mut self, picture: &Planes, force_keyframe: bool) -> Result<Encoded, Failure>;

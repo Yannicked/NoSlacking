@@ -21,6 +21,21 @@ pub fn shrink(planes: Planes, fit: (u32, u32)) -> Planes {
     if by <= 1 {
         return planes;
     }
+    by_step(&planes, by)
+}
+
+/// A camera's self-view: `planes` shrunk by the smallest whole step that
+/// makes it at most `width` wide; a copy if it is already.
+pub fn preview(planes: &Planes, width: u32) -> Planes {
+    let by = planes.width.div_ceil(width.max(1)).max(1);
+    if by <= 1 {
+        return planes.clone();
+    }
+    by_step(planes, by)
+}
+
+/// `planes` averaged down by `by` (more than 1) each way, even-sized.
+fn by_step(planes: &Planes, by: u32) -> Planes {
     let n = |v: u32| usize::try_from(v).unwrap_or(0);
     let width = ((planes.width / by) & !1).max(2);
     let height = ((planes.height / by) & !1).max(2);
@@ -115,5 +130,23 @@ mod tests {
         // Nothing to do: as it was.
         let same = shrink(picture(64, 48), (64, 48));
         assert_eq!((same.width, same.height), (64, 48));
+    }
+
+    #[test]
+    fn a_self_view_is_at_most_as_wide_as_asked() {
+        for ((w, h), max, want) in [
+            ((640, 480), 320, (320, 240)),
+            ((480, 480), 320, (240, 240)),
+            ((640, 360), 320, (320, 180)),
+            ((1280, 720), 320, (320, 180)),
+            ((320, 240), 320, (320, 240)),
+            ((200, 100), 320, (200, 100)),
+            ((642, 482), 320, (214, 160)),
+        ] {
+            let small = preview(&picture(w, h), max);
+            assert_eq!((small.width, small.height), want, "{w}x{h}");
+            assert!(small.check().is_ok());
+            assert!(small.width <= max);
+        }
     }
 }
