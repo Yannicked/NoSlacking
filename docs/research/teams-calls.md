@@ -1572,8 +1572,14 @@ receiving video line, so the web client offers ten video lines (six
 `sendrecv` and four `recvonly`) and lists them in `mediaDescriptions`. We
 offer three more receive-only `main-video` lines after the data line
 (mids 4–6), or keep three more of the media server's camera lines in our
-answer to it. We list them in `mediaDescriptions`, and send one `sr` per
-line, each with that line's `x-source-streamid`. A camera keeps its line
+answer to it. Like the web client's receive-only lines, each names the
+placeholder stream 1 (`a=x-ssrc-range:1-1`, `a=ssrc:1 cname:…`): without
+it the meeting rejected them (port 0). They are **not** listed in
+`mediaDescriptions`, which the web client keeps to its send-and-receive
+camera lines and the share line: listing them, rejected as they were,
+left the call with no audio and no data channel answer. We send one `sr`
+per line the meeting kept, each with that line's
+`x-source-streamid`. A camera keeps its line
 while it stays on; newcomers take free lines in roster order. So up to
 four cameras show, each in a tile of its own.
 

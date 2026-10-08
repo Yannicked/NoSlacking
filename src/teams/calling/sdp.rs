@@ -505,6 +505,7 @@ pub fn offer(local: &LocalMedia) -> String {
                 ssrcs: (ssrc, local.video_rtx_ssrc),
                 direction: local.video_direction,
                 share: false,
+                placeholder: false,
             };
             video_line(&mut out, local, &line, setup_text(local.setup), false);
             continue;
@@ -524,6 +525,7 @@ pub fn offer(local: &LocalMedia) -> String {
                 ssrcs: (ssrc, local.share_rtx_ssrc),
                 direction: Direction::SendOnly,
                 share: true,
+                placeholder: false,
             };
             video_line(&mut out, local, &line, setup_text(local.setup), false);
             continue;
@@ -576,6 +578,7 @@ fn receiving_camera(mid: &str, pt: u8, rtx: Option<u8>) -> VideoLine<'_> {
         ssrcs: (0, None),
         direction: Direction::RecvOnly,
         share: false,
+        placeholder: true,
     }
 }
 
@@ -747,6 +750,7 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
                         ssrcs: (ssrc, local.share_rtx_ssrc),
                         direction: share_direction(line.direction),
                         share: true,
+                        placeholder: false,
                     };
                     video_line(&mut out, local, &line_spec, setup, first);
                 }
@@ -773,6 +777,7 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
                         ssrcs: (ssrc, local.video_rtx_ssrc),
                         direction: direction(local.video_direction),
                         share: false,
+                        placeholder: false,
                     };
                     video_line(&mut out, local, &line_spec, setup, first);
                 }
@@ -866,6 +871,10 @@ struct VideoLine<'a> {
     /// The share line: the web client's limits for a screen, 15 pictures
     /// a second of up to 8160 macroblocks (1920×1088).
     share: bool,
+    /// One more camera's line, receive-only: it names the placeholder
+    /// stream 1, as the web client's do (recorded), or a meeting rejects
+    /// it.
+    placeholder: bool,
 }
 
 /// A video line: H.264 at `codec.pt`, packetization mode 1, constrained
@@ -896,6 +905,8 @@ fn video_line(
     let sending = matches!(line.direction, Direction::SendRecv | Direction::SendOnly);
     if sending {
         push(out, &ssrc_range(ssrc));
+    } else if line.placeholder {
+        push(out, "a=x-ssrc-range:1-1");
     }
     push(out, &format!("a=rtpmap:{pt} H264/90000"));
     let limits = if line.share {
@@ -927,6 +938,9 @@ fn video_line(
             push(out, &format!("a=ssrc:{one} cname:{CNAME}"));
         }
         push(out, &format!("a=ssrc-group:FID {ssrc} {rtx_ssrc}"));
+    }
+    if line.placeholder && !sending {
+        push(out, &format!("a=ssrc:1 cname:{CNAME}"));
     }
     push(out, &format!("a=setup:{setup}"));
     push(out, &format!("a=mid:{}", line.mid));
@@ -1839,6 +1853,9 @@ mod tests {
             [("4", Direction::RecvOnly), ("5", Direction::RecvOnly)]
         );
         assert_eq!(offered.camera().map(|l| l.mid.as_str()), Some("1"));
+        // With the web client's placeholder stream, once each.
+        assert_eq!(sdp.matches("a=x-ssrc-range:1-1\r\n").count(), 2);
+        assert_eq!(sdp.matches("a=ssrc:1 cname:").count(), 2);
 
         // To the meeting's media server's offer: its camera line, and the
         // lines asked for, receiving; its other video lines rejected.

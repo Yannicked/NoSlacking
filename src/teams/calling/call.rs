@@ -967,6 +967,17 @@ impl Call {
                 if let Some(content) = &acceptance.media_content
                     && let Some(remote) = apply(session, &content.blob)
                 {
+                    // Camera lines the meeting rejected show no one.
+                    if let Some(meeting) = &mut self.meeting {
+                        let open = |mid: &String| {
+                            remote.lines.iter().any(|l| &l.mid == mid && l.port != 0)
+                        };
+                        meeting.camera_lines.retain(open);
+                        log::info!(
+                            "Teams meeting: {} camera lines to show cameras on",
+                            meeting.camera_lines.len()
+                        );
+                    }
                     self.last_remote = Some(remote);
                 }
                 self.renegotiation = acceptance.links.media_renegotiation.clone();
@@ -1365,20 +1376,9 @@ impl Call {
         };
         meeting.camera_on = on;
         meeting.request += 1;
-        let more: Vec<&str> = meeting
-            .camera_lines
-            .iter()
-            .skip(1)
-            .map(String::as_str)
-            .collect();
         meeting.changes += 1;
-        let descriptions = super::api::media_descriptions(
-            Some(&mid),
-            on,
-            &more,
-            share.as_deref(),
-            meeting.request,
-        );
+        let descriptions =
+            super::api::media_descriptions(Some(&mid), on, share.as_deref(), meeting.request);
         let number = meeting.changes;
         let (update, capabilities) = (
             meeting.update_descriptions.clone(),

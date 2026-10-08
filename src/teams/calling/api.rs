@@ -218,12 +218,12 @@ pub fn meeting_data(meeting: &crate::meetings::Meeting) -> serde_json::Value {
 
 /// A meeting's `mediaDescriptions` (§H.8): our camera's line (`camera`,
 /// its mid) sending and receiving while `camera_on`, else receiving only,
-/// more camera lines (`more`) and the share's line receiving, numbered
-/// `request_id`, which rises with each.
+/// and the share's line receiving, numbered `request_id`, which rises with
+/// each. Receive-only camera lines are not listed, as the web client does
+/// not list its own (recorded).
 pub fn media_descriptions(
     camera: Option<&str>,
     camera_on: bool,
-    more: &[&str],
     share: Option<&str>,
     request_id: u32,
 ) -> serde_json::Value {
@@ -235,9 +235,6 @@ pub fn media_descriptions(
             serde_json::json!({"mid": mid, "direction": "recvonly"})
         });
     }
-    for mid in more {
-        descriptions.push(serde_json::json!({"mid": mid, "direction": "recvonly"}));
-    }
     if let Some(mid) = share {
         descriptions.push(serde_json::json!({"mid": mid, "direction": "recvonly"}));
     }
@@ -248,15 +245,9 @@ pub fn media_descriptions(
 /// camera and share lines, the camera as `camera_on` says.
 pub fn descriptions_for(sdp: &str, camera_on: bool, request_id: u32) -> serde_json::Value {
     let media = crate::teams::calling::sdp::read(sdp).unwrap_or_default();
-    let more: Vec<&str> = media
-        .other_cameras()
-        .into_iter()
-        .map(|l| l.mid.as_str())
-        .collect();
     media_descriptions(
         media.camera().map(|l| l.mid.as_str()),
         camera_on,
-        &more,
         media.share().map(|l| l.mid.as_str()),
         request_id,
     )
@@ -1491,7 +1482,7 @@ mod tests {
     #[test]
     fn a_meeting_is_told_which_video_lines_receive_and_send() {
         // As the web client said it on joining, its camera off.
-        let off = media_descriptions(Some("1"), false, &[], Some("11"), 1);
+        let off = media_descriptions(Some("1"), false, Some("11"), 1);
         assert_eq!(
             off,
             serde_json::json!({"descriptions": [
@@ -1500,12 +1491,10 @@ mod tests {
             ], "requestId": 1})
         );
         // And once it was on.
-        let on = media_descriptions(Some("1"), true, &["2"], Some("11"), 2);
+        let on = media_descriptions(Some("1"), true, Some("11"), 2);
         assert_eq!(on["descriptions"][0]["direction"], "sendrecv");
         assert_eq!(on["descriptions"][0]["label"], "main-video");
         assert_eq!(on["requestId"], 2);
-        assert_eq!(on["descriptions"][1]["mid"], "2");
-        assert_eq!(on["descriptions"][1]["direction"], "recvonly");
         // An SDP's own lines: the meeting's media server's renumbered ones.
         let read = descriptions_for(include_str!("fixtures/meeting_retarget.sdp"), false, 3);
         let mids: Vec<&str> = read["descriptions"]
@@ -1514,10 +1503,8 @@ mod tests {
             .iter()
             .filter_map(|d| d["mid"].as_str())
             .collect();
-        // The camera's, its other camera lines, then the share's.
-        assert_eq!(mids.first(), Some(&"2"));
-        assert_eq!(mids.get(1), Some(&"5"));
-        assert_eq!(mids.last(), Some(&"3"));
+        // The camera's and the share's only.
+        assert_eq!(mids, ["2", "3"]);
         // An audio-only SDP has none.
         let none = descriptions_for("v=0\r\nm=audio 9 RTP/SAVP 111\r\na=mid:0\r\n", false, 1);
         assert_eq!(none["descriptions"], serde_json::json!([]));
