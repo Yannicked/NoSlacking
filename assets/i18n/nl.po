@@ -3065,6 +3065,9 @@ msgstr "Een vergader-ID heeft een wachtwoordcode nodig."
 msgid "Admit"
 msgstr "Toelaten"
 
+msgid "Letting in…"
+msgstr "Bezig met toelaten…"
+
 msgid "Copy the link others join the meeting with"
 msgstr "De link kopiëren waarmee anderen aan de vergadering deelnemen"
 

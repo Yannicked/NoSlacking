@@ -198,13 +198,13 @@ pub fn check_due(last: Option<&Check>, now: Instant) -> Instant {
 }
 
 mod listen;
+pub use listen::{
+    ADMIT_WAIT, Left, Listen, Listening, Person, Phase, Place, Roster, call_title_text, clock,
+    faces, meeting_title_text, quit, status_text, title_text,
+};
 #[cfg(feature = "huddle-video")]
 pub use listen::{
     Camera, Gallery, MAX_TILES, Screen, Share, Wish, cameras_text, sharing_text, tell_wish,
-};
-pub use listen::{
-    Left, Listen, Listening, Person, Phase, Place, Roster, call_title_text, clock, faces,
-    meeting_title_text, quit, status_text, title_text,
 };
 
 /// The call window's side of the app: what it draws from, shared with
