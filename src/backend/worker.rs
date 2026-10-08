@@ -1100,15 +1100,7 @@ impl Worker {
             Command::FetchUsers { team, ids } => self.fetch_users(team, ids),
             Command::FetchBots { team, ids } => self.fetch_bots(team, ids),
             Command::Sidebar { team, calls } => self.edit_sidebar(team, calls),
-            Command::CloseConversation { team, channel } => self.act(
-                team,
-                Doing::CloseConversation,
-                Call::new(
-                    "conversations.close",
-                    vec![("channel", channel)],
-                    &["channel_not_found", "already_closed"],
-                ),
-            ),
+            Command::CloseConversation { team, channel } => self.close_conversation(team, channel),
             Command::FetchConversation { team, channel } => self.spawn_slack(
                 team,
                 Otherwise::Skip("fetching a conversation"),
@@ -1548,6 +1540,27 @@ impl Worker {
             }
             None => log::debug!("not marking read in {team}: signed out"),
         }
+    }
+
+    /// Closes a direct message in Slack too. The sidebar has hidden it
+    /// already (`Settings::closed`) until something new comes; a Teams
+    /// chat has no closing on Microsoft's side that we know of, so there
+    /// it stays the sidebar's alone.
+    fn close_conversation(&self, team: String, channel: String) {
+        #[cfg(feature = "teams")]
+        if matches!(self.workspaces.get(&team), Some(Backend::Teams(_))) {
+            log::debug!("closing a Teams chat: the sidebar's alone");
+            return;
+        }
+        self.act(
+            team,
+            Doing::CloseConversation,
+            Call::new(
+                "conversations.close",
+                vec![("channel", channel)],
+                &["channel_not_found", "already_closed"],
+            ),
+        );
     }
 
     fn edit_sidebar(&self, team: String, calls: Vec<crate::sidebar::SidebarCall>) {
@@ -2526,6 +2539,23 @@ mod tests {
             .workspaces
             .insert(id.to_owned(), Backend::Teams(session));
         generation
+    }
+
+    /// Closing a Teams chat is the sidebar's alone: nothing is asked of
+    /// Microsoft, and no error comes back.
+    #[cfg(feature = "teams")]
+    #[tokio::test]
+    async fn closing_a_teams_chat_says_nothing() {
+        let (mut worker, events) = worker();
+        worker.waiting = None;
+        teams(&mut worker, "TT");
+        worker.command(Command::CloseConversation {
+            team: "TT".into(),
+            channel: "19:abc@unq.gbl.spaces".into(),
+        });
+        tokio::task::yield_now().await;
+        let events: Vec<Event> = events.try_iter().collect();
+        assert!(events.is_empty(), "{events:?}");
     }
 
     /// The next event, waiting for tasks the worker started to send it.
