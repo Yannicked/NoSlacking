@@ -205,13 +205,6 @@ impl Worker {
             log::debug!("event for a workspace not signed in here");
             return;
         };
-        // A huddle's message, besides the message itself.
-        if let Some(event) = crate::backend::people::huddle_in_message(event) {
-            self.sink.send(Event::People {
-                team: team.to_owned(),
-                event,
-            });
-        }
         for translated in translate(team, &me, event) {
             match translated {
                 Translated::Event(event) => self.sink.send(event),
