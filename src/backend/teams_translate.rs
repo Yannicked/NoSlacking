@@ -682,8 +682,10 @@ pub fn translate_team(team: &types::Team) -> (SidebarSection, Vec<Conversation>)
             purpose: String::new(),
             members: None,
             archived: false,
-            last_read: None,
-            latest: None,
+            // Read state as the teams list gives it; a channel whose
+            // newest message is past it is unread.
+            last_read: c.last_read_id().map(|id| teams_id_to_ts(&id)),
+            latest: c.latest_id().map(|id| teams_id_to_ts(&id)),
             unread: 0,
             mentions: 0,
             external: false,
@@ -767,6 +769,35 @@ fn emoji_key_name(key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn team_channels_carry_how_far_you_read() {
+        let team: types::Team = serde_json::from_value(serde_json::json!({
+            "id": "19:team@thread.tacv2",
+            "displayName": "Design",
+            "channels": [
+                {
+                    "id": "19:general@thread.tacv2",
+                    "displayName": "General",
+                    "consumptionHorizon": {"originalArrivalTime": 1_700_000_000_000_u64, "timeStamp": 1, "clientMessageId": "0"},
+                    "lastMessage": {"id": "1700000000500"}
+                },
+                {
+                    "id": "19:ideas@thread.tacv2",
+                    "displayName": "Ideas",
+                    "consumptionHorizon": "1700000000900;1700000000999;0"
+                },
+                {"id": "19:quiet@thread.tacv2", "displayName": "Quiet"}
+            ]
+        }))
+        .expect("a team reads");
+        let (_, channels) = translate_team(&team);
+        assert_eq!(channels[0].last_read, Some(teams_id_to_ts("1700000000000")));
+        assert_eq!(channels[0].latest, Some(teams_id_to_ts("1700000000500")));
+        assert_eq!(channels[1].last_read, Some(teams_id_to_ts("1700000000900")));
+        assert_eq!(channels[1].latest, None);
+        assert_eq!(channels[2].last_read, None);
+    }
 
     fn channel_message(id: &str, link: &str) -> types::Message {
         types::Message {

@@ -83,6 +83,44 @@ pub struct Channel {
     pub display_name: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// How far you have read, as the web client's channel model holds it:
+    /// `{originalArrivalTime, timeStamp, clientMessageId}`, or the chats'
+    /// `arrival;stamp;id` text.
+    #[serde(default, rename = "consumptionHorizon")]
+    pub consumption_horizon: Option<serde_json::Value>,
+    /// The channel's newest message, when the list says.
+    #[serde(default, rename = "lastMessage")]
+    pub last_message: Option<serde_json::Value>,
+}
+
+impl Channel {
+    /// The id (arrival time) of the last message you read here.
+    pub fn last_read_id(&self) -> Option<String> {
+        let id = match self.consumption_horizon.as_ref()? {
+            serde_json::Value::String(text) => text.split(';').next()?.to_owned(),
+            serde_json::Value::Object(horizon) => id_text(horizon.get("originalArrivalTime")?)?,
+            _ => return None,
+        };
+        (!id.is_empty() && id != "0").then_some(id)
+    }
+
+    /// The id of the channel's newest message, when the list names it.
+    pub fn latest_id(&self) -> Option<String> {
+        let last = self.last_message.as_ref()?.as_object()?;
+        last.get("id")
+            .or_else(|| last.get("originalArrivalTime"))
+            .and_then(id_text)
+            .filter(|id| !id.is_empty() && id != "0")
+    }
+}
+
+/// A message id or arrival time, written as a number or as text.
+fn id_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
 }
 
 /// A conversation (1:1 chat, group chat, meeting chat, or channel thread).
