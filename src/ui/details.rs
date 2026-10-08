@@ -103,46 +103,34 @@ fn header(
     conversation: &Conversation,
     actions: &mut Vec<Action>,
 ) {
-    let inset = theme::titlebar_inset(ui.ctx());
-    egui::Panel::top("details-header")
-        .exact_size(52.0 + inset)
-        .show_separator_line(false)
-        .frame(egui::Frame::new().inner_margin(Margin {
-            left: 16,
-            right: 8,
-            top: inset as i8,
-            bottom: 0,
-        }))
-        .show(ui, |ui| {
-            let rect = ui.max_rect();
-            ui.painter().hline(
-                rect.x_range(),
-                rect.bottom() - 0.5,
-                Stroke::new(1.0, palette.outline),
-            );
-            ui.horizontal_centered(|ui| {
-                let title = match conversation.kind {
-                    ConversationKind::Channel => format!("# {}", conversation.name),
-                    _ => workspace.title(conversation),
-                };
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::icon_button(ui, palette, Icon::X, 16.0, &t("Close details")).clicked()
-                    {
-                        actions.push(Action::Convos(Convos::CloseDetails));
-                    }
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(title)
-                                    .font(theme::bold(16.0))
-                                    .color(palette.text),
-                            )
-                            .truncate(),
-                        );
-                    });
+    theme::pane_header(
+        ui,
+        palette,
+        "details-header",
+        egui::Color32::TRANSPARENT,
+        [16, 8],
+        |ui| {
+            let title = match conversation.kind {
+                ConversationKind::Channel => format!("# {}", conversation.name),
+                _ => workspace.title(conversation),
+            };
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::icon_button(ui, palette, Icon::X, 16.0, &t("Close details")).clicked() {
+                    actions.push(Action::Convos(Convos::CloseDetails));
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(title)
+                                .font(theme::bold(16.0))
+                                .color(palette.text),
+                        )
+                        .truncate(),
+                    );
                 });
             });
-        });
+        },
+    );
 }
 
 /// Whether the details panel shows `tab` for `workspace`: pins and
@@ -262,7 +250,7 @@ fn about(
                     ui.label(RichText::new(error.sentence()).color(palette.dim));
                 }
                 Loaded::Idle | Loaded::Loading => {
-                    ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
+                    ui.add(theme::spinner(palette, 14.0));
                 }
             }
             if !conversation.kind.is_dm() {
@@ -391,7 +379,7 @@ fn loaded<'a, T>(
             None
         }
         Loaded::Idle | Loaded::Loading => {
-            ui.add(egui::Spinner::new().size(16.0).color(palette.dim));
+            ui.add(theme::spinner(palette, 16.0));
             None
         }
     }
@@ -705,10 +693,7 @@ fn pins(
                 if open.clicked() {
                     actions.push(Action::OpenThread {
                         channel: conversation.id.clone(),
-                        ts: message
-                            .thread_ts
-                            .clone()
-                            .unwrap_or_else(|| message.ts.clone()),
+                        ts: message.thread_root().clone(),
                     });
                 }
                 ui.add_space(6.0);

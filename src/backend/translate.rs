@@ -65,8 +65,150 @@ fn message_of(value: &Value) -> Option<Message> {
     types::Message::deserialize(value).ok()?.into_model()
 }
 
-/// Turns an Events API event into interface events.
+/// Turns a real-time event into interface events: the events with fields
+/// of their own as [`types::RtEvent`], the rest from their JSON.
 pub(super) fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> {
+    let mut out = Vec::new();
+    // A huddle's message, besides the message itself.
+    if let Some(huddle) = super::people::huddle_in_message(event) {
+        out.push(Translated::Event(Event::People {
+            team: team.to_owned(),
+            event: huddle,
+        }));
+    }
+    match types::RtEvent::deserialize(event) {
+        Ok(types::RtEvent::Other) => out.extend(from_json(team, event)),
+        Ok(typed) => out.extend(from_rt(team.to_owned(), me, typed)),
+        Err(error) => log::debug!(
+            "unreadable {} event: {error}",
+            str_of(event, "type").unwrap_or("")
+        ),
+    }
+    out
+}
+
+/// What an event read by its fields means here.
+fn from_rt(team: String, me: &str, event: types::RtEvent) -> Option<Translated> {
+    use types::RtEvent as Rt;
+    let event_of = |event| Some(Translated::Event(event));
+    match event {
+        Rt::ReactionAdded(reaction) => reacted(team, reaction, true),
+        Rt::ReactionRemoved(reaction) => reacted(team, reaction, false),
+        // Slack also sends the message with the file as a tombstone
+        // (`message_changed`); this says so for every copy at once.
+        Rt::FileDeleted(deleted) => event_of(Event::FileGone {
+            team,
+            file: deleted.file_id.filter(|f| !f.is_empty())?,
+        }),
+        Rt::MemberJoinedChannel(joined) if joined.user.as_deref() == Some(me) => {
+            Some(Translated::Refresh(joined.id()?.to_owned()))
+        }
+        Rt::MemberLeftChannel(left) if left.user.as_deref() == Some(me) => {
+            event_of(Event::ConversationGone {
+                team,
+                channel: left.id()?.to_owned(),
+            })
+        }
+        Rt::ChannelLeft(gone)
+        | Rt::GroupLeft(gone)
+        | Rt::ChannelDeleted(gone)
+        | Rt::GroupDeleted(gone)
+        | Rt::ChannelArchive(gone)
+        | Rt::GroupArchive(gone) => event_of(Event::ConversationGone {
+            team,
+            channel: gone.id()?.to_owned(),
+        }),
+        // Only conversations you are in belong in the sidebar; a fresh
+        // channel someone else made is not one of them.
+        Rt::ChannelCreated(_) => None,
+        Rt::ChannelRename(changed)
+        | Rt::GroupRename(changed)
+        | Rt::ChannelUnarchive(changed)
+        | Rt::ImCreated(changed) => Some(Translated::Refresh(changed.id()?.to_owned())),
+        // A direct message or group DM opened or closed in your sidebar,
+        // perhaps in another client. Slack documents `im_open`/`im_close`
+        // and, for group DMs, `group_open`; `group_close` is documented
+        // for private channels, which have no open state, so the app
+        // ignores it for them. `mpim_open`/`mpim_close` are not
+        // documented and are read the same way, by their `channel`.
+        Rt::ImOpen(opened) | Rt::MpimOpen(opened) | Rt::GroupOpen(opened) => {
+            event_of(Event::Opened {
+                team,
+                channel: opened.id()?.to_owned(),
+                open: true,
+            })
+        }
+        Rt::ImClose(closed) | Rt::MpimClose(closed) | Rt::GroupClose(closed) => {
+            event_of(Event::Opened {
+                team,
+                channel: closed.id()?.to_owned(),
+                open: false,
+            })
+        }
+        // Read on another device (or in another window): the read marker
+        // moves, so unread counts here follow. The interface only ever moves
+        // a marker forward, so an older mark arriving late changes nothing.
+        Rt::ChannelMarked(read)
+        | Rt::GroupMarked(read)
+        | Rt::ImMarked(read)
+        | Rt::MpimMarked(read) => event_of(Event::Read {
+            team,
+            channel: read.id()?.to_owned(),
+            ts: Ts::new(read.ts?),
+        }),
+        Rt::UserChange(changed) | Rt::TeamJoin(changed) => event_of(Event::Users {
+            team,
+            users: vec![changed.user()?.into_model()],
+        }),
+        // Mutes, notification levels or keywords changed in another client.
+        Rt::PrefChange(pref) => {
+            super::desktop::is_notification_pref(pref.name.as_deref().unwrap_or(""))
+                .then_some(Translated::RefreshPrefs)
+        }
+        // A thread followed or no longer followed, here or in another
+        // client. Only a browser session's socket says so; wee-slack reads
+        // the same events (`slack_workspace.py`).
+        Rt::ThreadSubscribed(changed) => followed(team, changed.subscription, true),
+        Rt::ThreadUnsubscribed(changed) => followed(team, changed.subscription, false),
+        Rt::PresenceChange(_) | Rt::ManualPresenceChange(_) | Rt::UserTyping(_) => {
+            let event = super::people::from_rt(&event)?;
+            event_of(Event::People { team, event })
+        }
+        _ => None,
+    }
+}
+
+/// A reaction `added` or taken off.
+fn reacted(team: String, reaction: types::ReactionEvent, added: bool) -> Option<Translated> {
+    let item = reaction.item?;
+    Some(Translated::Event(Event::Reaction {
+        team,
+        channel: item.channel?,
+        ts: Ts::new(item.ts?),
+        name: reaction.reaction?,
+        user: reaction.user?,
+        added,
+    }))
+}
+
+/// A thread followed (`follow`) or no longer followed.
+fn followed(team: String, thread: types::SubscribedThread, follow: bool) -> Option<Translated> {
+    if thread.kind.as_deref().is_some_and(|kind| kind != "thread") {
+        return None;
+    }
+    Some(Translated::Event(Event::Views {
+        team,
+        event: crate::views::Event::Followed {
+            channel: thread.channel?,
+            thread: Ts::new(thread.thread_ts?),
+            follow,
+        },
+    }))
+}
+
+/// What an event read from its JSON means here: messages, by their
+/// subtype, and the events whose shapes vary.
+fn from_json(team: &str, event: &Value) -> Vec<Translated> {
     let team = team.to_owned();
     let kind = str_of(event, "type").unwrap_or("");
     let channel = str_of(event, "channel").map(str::to_owned);
@@ -119,93 +261,6 @@ pub(super) fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> 
                 }
             }
         }
-        "reaction_added" | "reaction_removed" => {
-            let item = event.get("item");
-            let channel = item.and_then(|i| str_of(i, "channel"));
-            let ts = item.and_then(|i| str_of(i, "ts"));
-            let name = str_of(event, "reaction");
-            let user = str_of(event, "user");
-            if let (Some(channel), Some(ts), Some(name), Some(user)) = (channel, ts, name, user) {
-                out.push(Translated::Event(Event::Reaction {
-                    team,
-                    channel: channel.to_owned(),
-                    ts: Ts::new(ts),
-                    name: name.to_owned(),
-                    user: user.to_owned(),
-                    added: kind == "reaction_added",
-                }));
-            }
-        }
-        // Slack also sends the message with the file as a tombstone
-        // (`message_changed`); this says so for every copy at once.
-        "file_deleted" => {
-            if let Some(file) = str_of(event, "file_id").filter(|f| !f.is_empty()) {
-                out.push(Translated::Event(Event::FileGone {
-                    team,
-                    file: file.to_owned(),
-                }));
-            }
-        }
-        "member_joined_channel" | "member_left_channel" => {
-            let user = str_of(event, "user");
-            if user == Some(me)
-                && let Some(channel) = channel
-            {
-                if kind == "member_joined_channel" {
-                    out.push(Translated::Refresh(channel));
-                } else {
-                    out.push(Translated::Event(Event::ConversationGone { team, channel }));
-                }
-            }
-        }
-        "channel_left" | "group_left" | "channel_deleted" | "group_deleted" | "channel_archive"
-        | "group_archive" => {
-            if let Some(channel) = channel {
-                out.push(Translated::Event(Event::ConversationGone { team, channel }));
-            }
-        }
-        "channel_rename" | "group_rename" | "channel_created" | "channel_unarchive"
-        | "im_created" => {
-            let id = channel.or_else(|| {
-                event
-                    .get("channel")
-                    .and_then(|c| str_of(c, "id"))
-                    .map(str::to_owned)
-            });
-            // Only conversations you are in belong in the sidebar; a fresh
-            // channel someone else made is not one of them.
-            if let Some(id) = id
-                && kind != "channel_created"
-            {
-                out.push(Translated::Refresh(id));
-            }
-        }
-        // A direct message or group DM opened or closed in your sidebar,
-        // perhaps in another client. Slack documents `im_open`/`im_close`
-        // and, for group DMs, `group_open`; `group_close` is documented
-        // for private channels, which have no open state, so the app
-        // ignores it for them. `mpim_open`/`mpim_close` are not
-        // documented and are read the same way, by their `channel`.
-        "im_open" | "im_close" | "mpim_open" | "mpim_close" | "group_open" | "group_close" => {
-            if let Some(channel) = channel {
-                out.push(Translated::Event(Event::Opened {
-                    team,
-                    channel,
-                    open: kind.ends_with("_open"),
-                }));
-            }
-        }
-        "user_change" | "team_join" => {
-            if let Some(user) = event
-                .get("user")
-                .and_then(|u| serde_json::from_value::<types::User>(u.clone()).ok())
-            {
-                out.push(Translated::Event(Event::Users {
-                    team,
-                    users: vec![user.into_model()],
-                }));
-            }
-        }
         // Sections made, renamed, moved, deleted, or channels moved between
         // them, and stars, in Slack's own client.
         "channel_section_upserted"
@@ -214,12 +269,6 @@ pub(super) fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> 
         | "channel_sections_channels_removed"
         | "star_added"
         | "star_removed" => out.push(Translated::RefreshSections),
-        // Mutes, notification levels or keywords changed in another client.
-        "pref_change" => {
-            if super::desktop::is_notification_pref(str_of(event, "name").unwrap_or("")) {
-                out.push(Translated::RefreshPrefs);
-            }
-        }
         // A custom emoji added, removed or renamed anywhere, so it shows
         // here without a restart.
         "emoji_changed" => out.push(match emoji_change(event) {
@@ -243,45 +292,13 @@ pub(super) fn translate(team: &str, me: &str, event: &Value) -> Vec<Translated> 
                 out.push(Translated::Event(Event::Convos { team, event }));
             }
         }
-        // Read on another device (or in another window): the read marker
-        // moves, so unread counts here follow. The interface only ever moves
-        // a marker forward, so an older mark arriving late changes nothing.
-        "channel_marked" | "group_marked" | "im_marked" | "mpim_marked" => {
-            if let (Some(channel), Some(ts)) = (channel, str_of(event, "ts")) {
-                out.push(Translated::Event(Event::Read {
-                    team,
-                    channel,
-                    ts: Ts::new(ts),
-                }));
-            }
-        }
-        // A thread followed or no longer followed, here or in another
-        // client. Only a browser session's socket says so; wee-slack reads
-        // the same events (`slack_workspace.py`).
-        "thread_subscribed" | "thread_unsubscribed" => {
-            let subscription = event.get("subscription").unwrap_or(&Value::Null);
-            if let (Some(channel), Some(thread)) = (
-                str_of(subscription, "channel"),
-                str_of(subscription, "thread_ts"),
-            ) && str_of(subscription, "type").is_none_or(|t| t == "thread")
-            {
-                out.push(Translated::Event(Event::Views {
-                    team,
-                    event: crate::views::Event::Followed {
-                        channel: channel.to_owned(),
-                        thread: Ts::new(thread),
-                        follow: kind == "thread_subscribed",
-                    },
-                }));
-            }
-        }
         // A browser session's socket also carries what Slack's own client
         // keeps for its activity badge, counts and search box, none of
         // which shows here. `user_huddle_changed` is a person's "in a
         // huddle" mark on their profile; the model keeps no such mark,
         // as who is in a huddle comes from the `sh_room_*` events.
         "activity" | "badge_counts_updated" | "search_recents" | "user_huddle_changed" => {}
-        _ => match super::people::translate(event) {
+        _ => match super::people::huddle_event(event) {
             Some(event) => out.push(Translated::Event(Event::People { team, event })),
             None => log::debug!("unhandled event {kind}"),
         },
@@ -295,6 +312,47 @@ mod tests {
 
     fn events(value: &str) -> Vec<Translated> {
         translate("T1", "U1", &serde_json::from_str(value).expect("json"))
+    }
+
+    #[test]
+    fn a_huddle_message_tells_of_the_huddle_and_is_a_message() {
+        let got = events(
+            r#"{"type":"message","subtype":"huddle_thread","channel":"C1","ts":"1.0",
+                "user":"U2","text":"","room":{"id":"R1","channels":["C1"],
+                "participants":["U2"],"date_end":0}}"#,
+        );
+        assert!(
+            matches!(
+                &got[..],
+                [
+                    Translated::Event(Event::People {
+                        event: crate::people::Event::Huddles { .. },
+                        ..
+                    }),
+                    Translated::Event(Event::Message { .. }),
+                ]
+            ),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn people_events_read_by_their_fields() {
+        let got = events(r#"{"type":"user_typing","channel":"C1","user":"U2"}"#);
+        assert!(
+            matches!(&got[..], [Translated::Event(Event::People {
+                event: crate::people::Event::Typing { channel, user, thread: None },
+                ..
+            })] if channel == "C1" && user == "U2"),
+            "{got:?}"
+        );
+        let got = events(r#"{"type":"channel_rename","channel":{"id":"C3","name":"x"}}"#);
+        assert!(
+            matches!(&got[..], [Translated::Refresh(id)] if id == "C3"),
+            "{got:?}"
+        );
+        // A channel someone else made is not yours.
+        assert!(events(r#"{"type":"channel_created","channel":{"id":"C4"}}"#).is_empty());
     }
 
     #[test]

@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 use super::jitter::{CLOCK, Counts, FRAME, Jitter, Pull, opus_samples};
 use super::processing::RenderTap;
 use crate::audio::guard::{self, Health};
+use crate::sync::lock;
 
 /// Channels played: Chime's Opus is stereo-capable; mono comes out on
 /// both.
@@ -72,12 +73,6 @@ struct Device {
     pulls: AtomicU64,
     /// Whether the callback's thread was ended by a panic.
     health: Health,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// What the speaker played so far.

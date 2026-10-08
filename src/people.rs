@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::app::{App, WorkspaceState};
+use crate::app::{App, Tone, WorkspaceState};
 use crate::backend;
 use crate::failure::Failure;
 use crate::i18n::{t, tf};
@@ -716,7 +716,7 @@ pub fn apply(app: &mut App, action: Action) {
             } else {
                 t("You are shown as active only while you use NoSlacking")
             };
-            app.toast(said.into_owned(), false);
+            app.toast(said.into_owned(), Tone::Info);
         }
         Action::EditStatus => {
             let me = app.active_workspace().and_then(|w| w.user(&w.info.user_id));
@@ -794,7 +794,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
     };
     let me = workspace.info.user_id.clone();
     // Said once the workspace is no longer borrowed.
-    let mut toast: Option<(String, bool)> = None;
+    let mut toast: Option<(String, Tone)> = None;
     match event {
         Event::Presence { users } => {
             workspace.people.presence.extend(users);
@@ -829,7 +829,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                 } else {
                     t("You are now shown as active")
                 };
-                toast = Some((done.into_owned(), false));
+                toast = Some((done.into_owned(), Tone::Info));
             }
             Err(error) => {
                 toast = Some((
@@ -837,7 +837,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                         "Could not change your presence: {error}",
                         &[("error", &error.message())],
                     ),
-                    true,
+                    Tone::Error,
                 ));
             }
         },
@@ -854,7 +854,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                         "Could not set your status: {error}",
                         &[("error", &error.message())],
                     ),
-                    true,
+                    Tone::Error,
                 ));
             }
         }

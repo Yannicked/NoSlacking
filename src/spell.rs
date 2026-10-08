@@ -17,6 +17,8 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
+use crate::sync::{lock, write};
+
 /// The spell-checking setting.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SpellSettings {
@@ -190,9 +192,7 @@ pub fn configure(settings: &SpellSettings, config_dir: &Path) {
     if current == tag {
         return;
     }
-    *CURRENT
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *write(&CURRENT) = None;
     let Some(found) = found else {
         return;
     };
@@ -214,14 +214,11 @@ pub fn configure(settings: &SpellSettings, config_dir: &Path) {
                         found.tag,
                         started.elapsed().as_secs_f32() * 1e3
                     );
-                    *CURRENT
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        Some(Arc::new(Loaded {
-                            tag: found.tag,
-                            dictionary,
-                            known: Mutex::new(HashMap::new()),
-                        }));
+                    *write(&CURRENT) = Some(Arc::new(Loaded {
+                        tag: found.tag,
+                        dictionary,
+                        known: Mutex::new(HashMap::new()),
+                    }));
                 }
                 Err(error) => log::warn!("the {} dictionary is unusable: {error}", found.tag),
             }
@@ -233,12 +230,6 @@ pub fn configure(settings: &SpellSettings, config_dir: &Path) {
 
 fn read_current() -> Option<Arc<Loaded>> {
     CURRENT.read().ok().and_then(|current| current.clone())
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// How many checked words are remembered before the memory starts over.

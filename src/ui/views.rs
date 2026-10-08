@@ -148,11 +148,7 @@ pub fn entries(
                     ))
                     .layout(egui::Layout::right_to_left(egui::Align::Center)),
             );
-            super::badge(
-                &mut badge,
-                palette,
-                u32::try_from(count).unwrap_or(u32::MAX),
-            );
+            super::badge(&mut badge, palette, crate::i18n::count(count));
         }
         theme::focus_ring(ui, &response, palette, theme::RADIUS_SMALL + 2);
         let spoken = if count > 0 {
@@ -272,7 +268,6 @@ fn header(
     data: &TeamViews,
     actions: &mut Vec<Action>,
 ) {
-    let inset = theme::titlebar_inset(ui.ctx());
     let loading = match view {
         View::Activity => data.activity.loading,
         View::Unreads => data.unread.values().any(|f| f.loading),
@@ -280,49 +275,27 @@ fn header(
         View::Later => data.saved.loading || data.reminders.loading,
         View::Scheduled => data.scheduled.loading,
     };
-    egui::Panel::top("view-header")
-        .exact_size(52.0 + inset)
-        .show_separator_line(false)
-        .frame(
-            egui::Frame::new()
-                .fill(palette.window)
-                .inner_margin(Margin {
-                    left: 20,
-                    right: 12,
-                    top: inset as i8,
-                    bottom: 0,
-                }),
-        )
-        .show(ui, |ui| {
-            let rect = ui.max_rect();
-            ui.painter().hline(
-                rect.x_range(),
-                rect.bottom() - 0.5,
-                Stroke::new(1.0, palette.outline),
-            );
-            ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                let (spot, _) = ui.allocate_exact_size(Vec2::splat(17.0), Sense::hover());
-                icon(view).image(palette.secondary, 17.0).paint_at(ui, spot);
-                ui.label(
-                    RichText::new(view.label())
-                        .font(theme::bold(17.0))
-                        .color(palette.text),
-                );
-                if loading {
-                    ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::icon_button(ui, palette, Icon::X, 16.0, &t("Close")).clicked() {
-                        actions.push(Action::Views(Views::Close));
-                    }
-                    if theme::icon_button(ui, palette, Icon::Refresh, 15.0, &t("Refresh")).clicked()
-                    {
-                        actions.push(Action::Views(Views::Refresh));
-                    }
-                });
-            });
+    theme::pane_header(ui, palette, "view-header", palette.window, [20, 12], |ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let (spot, _) = ui.allocate_exact_size(Vec2::splat(17.0), Sense::hover());
+        icon(view).image(palette.secondary, 17.0).paint_at(ui, spot);
+        ui.label(
+            RichText::new(view.label())
+                .font(theme::bold(17.0))
+                .color(palette.text),
+        );
+        if loading {
+            ui.add(theme::spinner(palette, 14.0));
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if theme::icon_button(ui, palette, Icon::X, 16.0, &t("Close")).clicked() {
+                actions.push(Action::Views(Views::Close));
+            }
+            if theme::icon_button(ui, palette, Icon::Refresh, 15.0, &t("Refresh")).clicked() {
+                actions.push(Action::Views(Views::Refresh));
+            }
         });
+    });
 }
 
 /// A line in the middle of the pane: nothing to list, or why not.
@@ -343,24 +316,47 @@ fn status(ui: &mut egui::Ui, palette: &Palette, waiting: bool, error: Option<&Fa
     if waiting {
         ui.add_space(40.0);
         ui.vertical_centered(|ui| {
-            ui.add(egui::Spinner::new().size(20.0).color(palette.dim));
+            ui.add(theme::spinner(palette, 20.0));
         });
     } else if let Some(error) = error {
-        egui::Frame::new()
-            .fill(palette.danger.gamma_multiply(0.12))
-            .inner_margin(Margin::symmetric(20, 8))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(
-                    RichText::new(tf(
-                        "Could not load this list: {error}",
-                        &[("error", &error.message())],
-                    ))
+        error_banner(
+            ui,
+            palette,
+            &tf(
+                "Could not load this list: {error}",
+                &[("error", &error.message())],
+            ),
+        );
+    }
+}
+
+/// Why a list could not be loaded, on a red strip across the pane.
+fn error_banner(ui: &mut egui::Ui, palette: &Palette, text: &str) {
+    egui::Frame::new()
+        .fill(palette.danger.gamma_multiply(0.12))
+        .inner_margin(Margin::symmetric(20, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new(text)
                     .font(theme::regular(13.0))
                     .color(palette.text),
-                );
-            });
-    }
+            );
+        });
+}
+
+/// A quiet line above a list that was found by searching, which says
+/// what it may miss.
+fn searched_note(ui: &mut egui::Ui, palette: &Palette, text: &str) {
+    egui::Frame::new()
+        .inner_margin(Margin::symmetric(20, 6))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(text)
+                    .font(theme::regular(12.5))
+                    .color(palette.dim),
+            );
+        });
 }
 
 /// What a conversation is called in a list: "#name", or the person.
@@ -395,42 +391,30 @@ pub fn jump(channel: &str, message: &Message) -> Action {
 }
 
 /// A list of rows of different heights, of which only those in and near
-/// the view are laid out. `keys` tells the rows apart and `guesses` says
-/// about how tall each is before it is drawn.
-fn list(
+/// the view are laid out. `spec` tells a row apart from the others and
+/// says about how tall it is before it is drawn.
+fn list<R>(
     ui: &mut egui::Ui,
     salt: &str,
-    keys: &[u64],
-    guesses: &[f32],
+    rows: &[R],
+    spec: impl Fn(&R) -> (u64, f32),
     mut draw: impl FnMut(&mut egui::Ui, usize),
 ) {
-    let heights_id = egui::Id::new(("view-heights", salt));
-    let mut heights: rows::Heights = ui
-        .data_mut(|d| d.remove_temp(heights_id))
-        .unwrap_or_default();
     egui::ScrollArea::vertical()
         .id_salt(("view", salt))
         .auto_shrink([false, false])
         .show_viewport(ui, |ui, viewport| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            let entries: Vec<rows::Entry> = keys
+            let entries: Vec<rows::Entry> = rows
                 .iter()
-                .zip(guesses)
-                .map(|(key, guess)| rows::Entry {
-                    key: *key,
-                    guess: *guess,
+                .map(|row| {
+                    let (key, guess) = spec(row);
+                    rows::Entry { key, guess }
                 })
                 .collect();
-            let plan = rows::plan(
-                entries.iter().map(|entry| heights.planned(entry)),
-                viewport.min.y,
-                viewport.max.y,
-                400.0,
-            );
-            heights.sweep();
-            rows::show(ui, &mut heights, &entries, &plan, &mut draw);
+            let heights = egui::Id::new(("view-heights", salt));
+            rows::virtual_list(ui, heights, 0, viewport, &entries, &mut draw);
         });
-    ui.data_mut(|d| d.insert_temp(heights_id, heights));
 }
 
 /// A row key from anything hashable.
@@ -611,17 +595,11 @@ fn activity(
         data.activity.error.as_ref(),
     );
     if data.searched {
-        egui::Frame::new()
-            .inner_margin(Margin::symmetric(20, 6))
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new(t(
-                        "Found by searching for your name; replies to your threads show as they arrive.",
-                    ))
-                    .font(theme::regular(12.5))
-                    .color(palette.dim),
-                );
-            });
+        searched_note(
+            ui,
+            palette,
+            &t("Found by searching for your name; replies to your threads show as they arrive."),
+        );
     }
     let items: Vec<&Activity> = data.activity();
     if items.is_empty() {
@@ -630,12 +608,13 @@ fn activity(
         }
         return;
     }
-    let keys: Vec<u64> = items
-        .iter()
-        .map(|a| key((&a.channel, a.message.ts.as_str())))
-        .collect();
-    let guesses: Vec<f32> = items.iter().map(|a| card_guess(&a.message)).collect();
-    list(ui, "activity", &keys, &guesses, |ui, index| {
+    let spec = |a: &&Activity| {
+        (
+            key((&a.channel, a.message.ts.as_str())),
+            card_guess(&a.message),
+        )
+    };
+    list(ui, "activity", &items, spec, |ui, index| {
         let item = items[index];
         let above = item.reason.label(&place(workspace, &item.channel));
         card(
@@ -688,7 +667,7 @@ fn unreads(
                     RichText::new(tn(
                         "{count} conversation with unread messages",
                         "{count} conversations with unread messages",
-                        u32::try_from(conversations.len()).unwrap_or(u32::MAX),
+                        crate::i18n::count(conversations.len()),
                     ))
                     .font(theme::regular(13.0))
                     .color(palette.secondary),
@@ -725,24 +704,16 @@ fn unreads(
             .map(|(messages, _)| messages.as_slice())
             .unwrap_or_default()
     };
-    let keys: Vec<u64> = rows
-        .iter()
-        .map(|row| match *row {
-            UnreadRow::Head(c) => key(("head", &conversations[c].id)),
-            UnreadRow::Message(c, m) => key((&conversations[c].id, messages(c)[m].ts.as_str())),
-            UnreadRow::Status(c) => key(("status", &conversations[c].id)),
-            UnreadRow::More(c) => key(("more", &conversations[c].id)),
-        })
-        .collect();
-    let guesses: Vec<f32> = rows
-        .iter()
-        .map(|row| match *row {
-            UnreadRow::Head(_) => 52.0,
-            UnreadRow::Message(c, m) => card_guess(&messages(c)[m]) - 20.0,
-            UnreadRow::Status(_) | UnreadRow::More(_) => 34.0,
-        })
-        .collect();
-    list(ui, "unreads", &keys, &guesses, |ui, index| {
+    let spec = |row: &UnreadRow| match *row {
+        UnreadRow::Head(c) => (key(("head", &conversations[c].id)), 52.0),
+        UnreadRow::Message(c, m) => (
+            key((&conversations[c].id, messages(c)[m].ts.as_str())),
+            card_guess(&messages(c)[m]) - 20.0,
+        ),
+        UnreadRow::Status(c) => (key(("status", &conversations[c].id)), 34.0),
+        UnreadRow::More(c) => (key(("more", &conversations[c].id)), 34.0),
+    };
+    list(ui, "unreads", &rows, spec, |ui, index| {
         match rows[index] {
             UnreadRow::Head(c) => unread_head(ui, palette, workspace, conversations[c], actions),
             UnreadRow::Message(c, m) => card(
@@ -765,7 +736,7 @@ fn unreads(
                     .inner_margin(Margin::symmetric(20, 8))
                     .show(ui, |ui| match fetch {
                         Some(fetch) if fetch.loading => {
-                            ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
+                            ui.add(theme::spinner(palette, 14.0));
                         }
                         Some(fetch) => {
                             let error = fetch.error.as_ref().map(Failure::message);
@@ -783,7 +754,7 @@ fn unreads(
                             actions.push(Action::Views(Views::LoadUnread {
                                 channel: channel.clone(),
                             }));
-                            ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
+                            ui.add(theme::spinner(palette, 14.0));
                         }
                     });
             }
@@ -805,13 +776,14 @@ fn unreads(
     });
 }
 
-/// The heading of a conversation in the unreads list.
-fn unread_head(
+/// The heading of a group of rows (a conversation in Unreads, a thread
+/// in Threads), on a strip of its own: `left` draws its title and what
+/// follows it, `right` its buttons from the right edge in.
+fn group_head(
     ui: &mut egui::Ui,
     palette: &Palette,
-    workspace: &WorkspaceState,
-    conversation: &crate::model::Conversation,
-    actions: &mut Vec<Action>,
+    left: impl FnOnce(&mut egui::Ui),
+    right: impl FnOnce(&mut egui::Ui),
 ) {
     ui.add_space(10.0);
     egui::Frame::new()
@@ -821,35 +793,54 @@ fn unread_head(
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                let name = place(workspace, &conversation.id);
-                let title = ui
-                    .add(
-                        egui::Label::new(
-                            RichText::new(&name)
-                                .font(theme::bold(15.0))
-                                .color(palette.text),
-                        )
-                        .sense(Sense::click()),
-                    )
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text(t("Open the conversation"));
-                if title.clicked() {
-                    actions.push(Action::OpenConversation(conversation.id.clone()));
-                }
-                if conversation.mentions > 0 {
-                    super::badge(ui, palette, conversation.mentions);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::icon_button(ui, palette, Icon::CheckCheck, 15.0, &t("Mark as read"))
-                        .clicked()
-                    {
-                        actions.push(Action::Views(Views::MarkRead {
-                            channel: conversation.id.clone(),
-                        }));
-                    }
-                });
+                left(ui);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), right);
             });
         });
+}
+
+/// A group's title in [`group_head`].
+fn group_title(name: &str, palette: &Palette) -> RichText {
+    RichText::new(name)
+        .font(theme::bold(15.0))
+        .color(palette.text)
+}
+
+/// The heading of a conversation in the unreads list.
+fn unread_head(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    workspace: &WorkspaceState,
+    conversation: &crate::model::Conversation,
+    actions: &mut Vec<Action>,
+) {
+    let mut open = false;
+    let mut read = false;
+    group_head(
+        ui,
+        palette,
+        |ui| {
+            let name = place(workspace, &conversation.id);
+            open = theme::link_label(ui, egui::Label::new(group_title(&name, palette)))
+                .on_hover_text(t("Open the conversation"))
+                .clicked();
+            if conversation.mentions > 0 {
+                super::badge(ui, palette, conversation.mentions);
+            }
+        },
+        |ui| {
+            read = theme::icon_button(ui, palette, Icon::CheckCheck, 15.0, &t("Mark as read"))
+                .clicked();
+        },
+    );
+    if open {
+        actions.push(Action::OpenConversation(conversation.id.clone()));
+    }
+    if read {
+        actions.push(Action::Views(Views::MarkRead {
+            channel: conversation.id.clone(),
+        }));
+    }
 }
 
 /// A row of the threads list.
@@ -881,15 +872,11 @@ fn threads(
         data.threads.error.as_ref(),
     );
     if data.threads_searched {
-        egui::Frame::new()
-            .inner_margin(Margin::symmetric(20, 6))
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new(t("Threads you replied in, found by searching."))
-                        .font(theme::regular(12.5))
-                        .color(palette.dim),
-                );
-            });
+        searched_note(
+            ui,
+            palette,
+            &t("Threads you replied in, found by searching."),
+        );
     }
     let threads = data.threads.value.as_deref().unwrap_or_default();
     if threads.is_empty() {
@@ -910,76 +897,54 @@ fn threads(
         rows.push(ThreadRow::Foot(index));
     }
     let thread_key = |t: &crate::views::Followed| (t.channel.clone(), t.parent.ts.0.clone());
-    let keys: Vec<u64> = rows
-        .iter()
-        .map(|row| match *row {
-            ThreadRow::Head(i) => key(("head", thread_key(&threads[i]))),
-            ThreadRow::Parent(i) => key(("parent", thread_key(&threads[i]))),
-            ThreadRow::Reply(i, r) => key(("reply", threads[i].replies[r].ts.as_str())),
-            ThreadRow::Foot(i) => key(("foot", thread_key(&threads[i]))),
-        })
-        .collect();
-    let guesses: Vec<f32> = rows
-        .iter()
-        .map(|row| match *row {
-            ThreadRow::Head(_) => 52.0,
-            ThreadRow::Parent(i) => card_guess(&threads[i].parent) - 20.0,
-            ThreadRow::Reply(i, r) => card_guess(&threads[i].replies[r]) - 20.0,
-            ThreadRow::Foot(_) => 36.0,
-        })
-        .collect();
+    let spec = |row: &ThreadRow| match *row {
+        ThreadRow::Head(i) => (key(("head", thread_key(&threads[i]))), 52.0),
+        ThreadRow::Parent(i) => (
+            key(("parent", thread_key(&threads[i]))),
+            card_guess(&threads[i].parent) - 20.0,
+        ),
+        ThreadRow::Reply(i, r) => (
+            key(("reply", threads[i].replies[r].ts.as_str())),
+            card_guess(&threads[i].replies[r]) - 20.0,
+        ),
+        ThreadRow::Foot(i) => (key(("foot", thread_key(&threads[i]))), 36.0),
+    };
     let open = |thread: &crate::views::Followed| {
         Action::Views(Views::OpenThread {
             channel: thread.channel.clone(),
             ts: thread.parent.ts.clone(),
         })
     };
-    list(ui, "threads", &keys, &guesses, |ui, index| {
+    list(ui, "threads", &rows, spec, |ui, index| {
         match rows[index] {
             ThreadRow::Head(i) => {
                 let thread = &threads[i];
-                ui.add_space(10.0);
-                egui::Frame::new()
-                    .fill(palette.surface)
-                    .inner_margin(Margin::symmetric(20, 8))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
+                let mut reply = false;
+                group_head(
+                    ui,
+                    palette,
+                    |ui| {
+                        ui.label(group_title(&place(workspace, &thread.channel), palette));
+                        if thread.unread > 0 {
                             ui.label(
-                                RichText::new(place(workspace, &thread.channel))
-                                    .font(theme::bold(15.0))
-                                    .color(palette.text),
+                                RichText::new(tn(
+                                    "{count} new reply",
+                                    "{count} new replies",
+                                    thread.unread,
+                                ))
+                                .font(theme::semibold(12.5))
+                                .color(palette.accent),
                             );
-                            if thread.unread > 0 {
-                                ui.label(
-                                    RichText::new(tn(
-                                        "{count} new reply",
-                                        "{count} new replies",
-                                        thread.unread,
-                                    ))
-                                    .font(theme::semibold(12.5))
-                                    .color(palette.accent),
-                                );
-                            }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if theme::icon_button(
-                                        ui,
-                                        palette,
-                                        Icon::Reply,
-                                        15.0,
-                                        &t("Reply"),
-                                    )
-                                    .clicked()
-                                    {
-                                        actions.push(open(thread));
-                                    }
-                                },
-                            );
-                        });
-                    });
+                        }
+                    },
+                    |ui| {
+                        reply = theme::icon_button(ui, palette, Icon::Reply, 15.0, &t("Reply"))
+                            .clicked();
+                    },
+                );
+                if reply {
+                    actions.push(open(thread));
+                }
             }
             ThreadRow::Parent(i) => {
                 let thread = &threads[i];
@@ -1023,7 +988,7 @@ fn threads(
             }
             ThreadRow::Foot(i) => {
                 let thread = &threads[i];
-                let shown = u32::try_from(thread.replies.len()).unwrap_or(u32::MAX);
+                let shown = crate::i18n::count(thread.replies.len());
                 let total = thread.parent.reply_count.max(shown);
                 egui::Frame::new()
                     .inner_margin(Margin {
@@ -1081,17 +1046,7 @@ fn later(
         }),
     ];
     for error in errors.into_iter().flatten() {
-        egui::Frame::new()
-            .fill(palette.danger.gamma_multiply(0.12))
-            .inner_margin(Margin::symmetric(20, 8))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(
-                    RichText::new(&error)
-                        .font(theme::regular(13.0))
-                        .color(palette.text),
-                );
-            });
+        error_banner(ui, palette, &error);
     }
     let saved = data.saved.value.as_deref().unwrap_or_default();
     let reminders = data.reminders.value.as_deref().unwrap_or_default();
@@ -1105,92 +1060,82 @@ fn later(
         rows.push(LaterRow::Empty(false));
     }
     rows.extend((0..reminders.len()).map(LaterRow::Reminder));
-    let keys: Vec<u64> = rows
-        .iter()
-        .map(|row| match *row {
-            LaterRow::Heading(first) => key(("heading", first)),
-            LaterRow::Saved(i) => key((&saved[i].channel, saved[i].message.ts.as_str())),
-            LaterRow::Reminder(i) => key(("reminder", &reminders[i].id)),
-            LaterRow::Empty(first) => key(("empty", first)),
-        })
-        .collect();
-    let guesses: Vec<f32> = rows
-        .iter()
-        .map(|row| match *row {
-            LaterRow::Saved(i) => card_guess(&saved[i].message),
-            LaterRow::Reminder(_) => 56.0,
-            LaterRow::Heading(_) | LaterRow::Empty(_) => 40.0,
-        })
-        .collect();
-    list(ui, "later", &keys, &guesses, |ui, index| {
-        match rows[index] {
-            LaterRow::Heading(first) => {
-                ui.add_space(12.0);
-                egui::Frame::new()
-                    .inner_margin(Margin::symmetric(20, 4))
-                    .show(ui, |ui| {
-                        let text = match (first, data.starred) {
-                            (true, false) => t("Saved for later"),
-                            (true, true) => t("Starred messages"),
-                            (false, _) => t("Reminders"),
-                        };
-                        super::section_label(ui, palette, &text);
-                    });
-            }
-            LaterRow::Empty(first) => {
-                egui::Frame::new()
-                    .inner_margin(Margin::symmetric(20, 6))
-                    .show(ui, |ui| {
-                        let fetch_waiting = if first {
-                            data.saved.waiting()
-                        } else {
-                            data.reminders.waiting()
-                        };
-                        if fetch_waiting {
-                            ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
-                        } else {
-                            let text = if first {
-                                t("Nothing saved. Save a message from its ⋯ menu.")
-                            } else {
-                                t("No reminders. Ask Slack with /remind.")
-                            };
-                            ui.label(
-                                RichText::new(text)
-                                    .font(theme::regular(13.5))
-                                    .color(palette.dim),
-                            );
-                        }
-                    });
-            }
-            LaterRow::Saved(i) => {
-                let item = &saved[i];
-                let above = place(workspace, &item.channel);
-                card(
-                    ui,
-                    palette,
-                    workspace,
-                    Card {
-                        message: &item.message,
-                        above: Some(&above),
-                        unread: false,
-                        open: jump(&item.channel, &item.message),
-                    },
-                    actions,
-                    |ui, actions| {
-                        if theme::icon_button(ui, palette, Icon::X, 14.0, &t("Remove from Later"))
-                            .clicked()
-                        {
-                            actions.push(Action::Views(Views::Save {
-                                channel: item.channel.clone(),
-                                ts: item.message.ts.clone(),
-                                save: false,
-                            }));
-                        }
-                    },
-                );
-            }
-            LaterRow::Reminder(i) => reminder_row(ui, palette, workspace, &reminders[i], actions),
+    let spec = |row: &LaterRow| match *row {
+        LaterRow::Heading(first) => (key(("heading", first)), 40.0),
+        LaterRow::Saved(i) => (
+            key((&saved[i].channel, saved[i].message.ts.as_str())),
+            card_guess(&saved[i].message),
+        ),
+        LaterRow::Reminder(i) => (key(("reminder", &reminders[i].id)), 56.0),
+        LaterRow::Empty(first) => (key(("empty", first)), 40.0),
+    };
+    list(ui, "later", &rows, spec, |ui, index| match rows[index] {
+        LaterRow::Heading(first) => {
+            ui.add_space(12.0);
+            egui::Frame::new()
+                .inner_margin(Margin::symmetric(20, 4))
+                .show(ui, |ui| {
+                    let text = match (first, data.starred) {
+                        (true, false) => t("Saved for later"),
+                        (true, true) => t("Starred messages"),
+                        (false, _) => t("Reminders"),
+                    };
+                    super::section_label(ui, palette, &text);
+                });
         }
+        LaterRow::Empty(first) => {
+            egui::Frame::new()
+                .inner_margin(Margin::symmetric(20, 6))
+                .show(ui, |ui| {
+                    let fetch_waiting = if first {
+                        data.saved.waiting()
+                    } else {
+                        data.reminders.waiting()
+                    };
+                    if fetch_waiting {
+                        ui.add(theme::spinner(palette, 14.0));
+                    } else {
+                        let text = if first {
+                            t("Nothing saved. Save a message from its ⋯ menu.")
+                        } else {
+                            t("No reminders. Ask Slack with /remind.")
+                        };
+                        ui.label(
+                            RichText::new(text)
+                                .font(theme::regular(13.5))
+                                .color(palette.dim),
+                        );
+                    }
+                });
+        }
+        LaterRow::Saved(i) => {
+            let item = &saved[i];
+            let above = place(workspace, &item.channel);
+            card(
+                ui,
+                palette,
+                workspace,
+                Card {
+                    message: &item.message,
+                    above: Some(&above),
+                    unread: false,
+                    open: jump(&item.channel, &item.message),
+                },
+                actions,
+                |ui, actions| {
+                    if theme::icon_button(ui, palette, Icon::X, 14.0, &t("Remove from Later"))
+                        .clicked()
+                    {
+                        actions.push(Action::Views(Views::Save {
+                            channel: item.channel.clone(),
+                            ts: item.message.ts.clone(),
+                            save: false,
+                        }));
+                    }
+                },
+            );
+        }
+        LaterRow::Reminder(i) => reminder_row(ui, palette, workspace, &reminders[i], actions),
     });
 }
 
@@ -1315,12 +1260,13 @@ fn scheduled(
         }
         return;
     }
-    let keys: Vec<u64> = items.iter().map(|s| key(("scheduled", &s.id))).collect();
-    let guesses: Vec<f32> = items
-        .iter()
-        .map(|s| 70.0 + (s.text.len() / 90) as f32 * 20.0)
-        .collect();
-    list(ui, "scheduled", &keys, &guesses, |ui, index| {
+    let spec = |s: &crate::views::schedule::Scheduled| {
+        (
+            key(("scheduled", &s.id)),
+            70.0 + (s.text.len() / 90) as f32 * 20.0,
+        )
+    };
+    list(ui, "scheduled", items, spec, |ui, index| {
         let item = &items[index];
         let inner = egui::Frame::new()
             .inner_margin(Margin::symmetric(20, 10))
@@ -1412,11 +1358,7 @@ pub fn dialog(app: &mut App, ctx: &egui::Context) {
             } else {
                 t("Send at a time of your choosing")
             };
-            ui.label(
-                RichText::new(title)
-                    .font(theme::bold(17.0))
-                    .color(palette.text),
-            );
+            theme::dialog_heading(ui, &palette, title);
             ui.add_space(10.0);
             if editing {
                 let field = ui.add(
@@ -1480,7 +1422,7 @@ pub fn dialog(app: &mut App, ctx: &egui::Context) {
                     confirm = true;
                 }
                 if dialog.busy {
-                    ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
+                    ui.add(theme::spinner(&palette, 14.0));
                 }
             });
             // Enter schedules, except in the text, where it breaks a line.

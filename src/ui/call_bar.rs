@@ -81,6 +81,9 @@ struct Waiting {
     /// The id the interface knows them by, which Admit sends.
     user: String,
     text: String,
+    /// Admit was pressed for them, and they are not in yet: until when
+    /// that shows.
+    admitting: Option<std::time::Instant>,
 }
 
 /// One person as the bar draws them.
@@ -209,9 +212,16 @@ fn gather(
             .filter_map(|person| {
                 let user = person.user.clone()?;
                 let name = label(person, &user);
+                let admitting = listening
+                    .admitting
+                    .iter()
+                    .find(|(who, _)| *who == user)
+                    .map(|(_, at)| *at + huddles::ADMIT_WAIT)
+                    .filter(|_| listening.is_admitting(&user, now));
                 Some(Waiting {
                     text: tf("{name} is waiting in the lobby", &[("name", &name)]),
                     user,
+                    admitting,
                 })
             })
             .collect(),
@@ -458,7 +468,20 @@ fn waiting_row(ui: &mut egui::Ui, palette: &Palette, waiting: &Waiting, actions:
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if small_button(ui, palette, &t("Admit"), Some(ACTIVE_BUTTON))
+            if let Some(until) = waiting.admitting {
+                // Asked: Teams lets them in within seconds, and the roster
+                // then takes them out of the lobby. Admit comes back if
+                // it does not.
+                ui.label(
+                    RichText::new(t("Letting in…"))
+                        .font(theme::medium(13.0))
+                        .color(palette.secondary),
+                );
+                ui.add(egui::Spinner::new().size(12.0).color(palette.secondary));
+                ui.ctx().request_repaint_after(
+                    until.saturating_duration_since(std::time::Instant::now()),
+                );
+            } else if small_button(ui, palette, &t("Admit"), Some(ACTIVE_BUTTON))
                 .on_hover_text(&waiting.text)
                 .clicked()
             {
@@ -610,10 +633,7 @@ fn title_row(
                     ui.add(label);
                     return;
                 }
-                let title = ui
-                    .add(label.sense(Sense::click()))
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text(t("Open the conversation"));
+                let title = theme::link_label(ui, label).on_hover_text(t("Open the conversation"));
                 theme::describe(&title, egui::WidgetType::Button, &bar.title);
                 if title.clicked() {
                     if settings {
@@ -733,11 +753,67 @@ pub fn control(
     response
 }
 
+/// How an on/off call control (the microphone, the camera, the screen)
+/// is coloured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lit {
+    /// On: filled with the huddle's green, in white, so it is never
+    /// missed.
+    On,
+    /// On its way on or off: quiet and greyed.
+    Pending,
+    /// Off: quiet, its icon red where being off is worth seeing (a muted
+    /// microphone, a camera off).
+    Off {
+        /// Whether the icon is red.
+        red: bool,
+    },
+}
+
+/// What an on/off call control shows, and the chord that flips it.
+pub struct Toggle {
+    /// The icon for its present state.
+    pub icon: Icon,
+    /// Its word, or what a screen reader says where it shows no word.
+    pub label: String,
+    /// What it is doing and what a click does, with the chord.
+    pub tip: String,
+    /// How it is coloured.
+    pub lit: Lit,
+    /// The chord that flips it, wherever it shows.
+    pub chord: super::shortcuts::Chord,
+}
+
+/// An on/off call control in `look`, shared by the microphone, the camera
+/// and the screen: its response, and whether a click or its chord asked
+/// to flip it. The chord is taken from the window with the focus.
+pub fn toggle_control(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    look: Look,
+    toggle: Toggle,
+) -> (egui::Response, bool) {
+    let (fill, ink, icon_ink) = match toggle.lit {
+        Lit::On => (ACTIVE, Color32::WHITE, Color32::WHITE),
+        Lit::Pending => (palette.surface_hover, palette.secondary, palette.secondary),
+        Lit::Off { red } => (
+            palette.surface_hover,
+            palette.text,
+            if red { palette.danger } else { palette.text },
+        ),
+    };
+    let response = control(ui, look, (toggle.icon, icon_ink), &toggle.label, ink, fill)
+        .on_hover_text(toggle.tip);
+    let chord = toggle.chord.pressed(ui);
+    let asked = response.clicked() || chord;
+    (response, asked)
+}
+
 /// Leave, in red, in `look` ("Hang up" for a `call`); whether it was
-/// clicked. Its chord is [`super::keys::leave_chord`], taken by the
+/// clicked. Its chord is [`super::shortcuts::HANG_UP`], taken by the
 /// window with the focus.
 pub fn leave_button(ui: &mut egui::Ui, palette: &Palette, look: Look, leaving: Leaving) -> bool {
-    let shortcut = super::shortcuts::spell("Cmd+Shift+H", cfg!(target_os = "macos"));
+    let shortcut = super::shortcuts::HANG_UP.spelled();
     let (tip, label) = match leaving {
         Leaving::Call => (
             tf("Hang up ({shortcut})", &[("shortcut", &shortcut)]),

@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 
+use super::Tone;
 use super::workspace::local_message;
 use super::{App, Draft, LentDraft, PickedFile, Upload, UploadTarget, to_wire};
 use crate::backend::Command;
@@ -158,7 +159,7 @@ impl App {
         };
         let Some(link) = crate::links::permalink(&workspace.info.domain, channel, ts, thread)
         else {
-            self.toast(t("This message has no link yet"), true);
+            self.toast(t("This message has no link yet"), Tone::Error);
             return;
         };
         let place = workspace
@@ -174,7 +175,7 @@ impl App {
             Some(place) => tf("Shared to {conversation}", &[("conversation", &place)]),
             None => t("Shared").into_owned(),
         };
-        self.toast(toast, false);
+        self.toast(toast, Tone::Info);
     }
 
     pub(super) fn retry(&mut self, channel: &str, local: &Ts) {
@@ -421,7 +422,7 @@ impl App {
         match result {
             Ok(Some(reply)) => {
                 let reply = mrkdwn::plain(&reply, |_| None);
-                self.toast(reply, false);
+                self.toast(reply, Tone::Info);
             }
             Ok(None) => {
                 let done = match command {
@@ -435,21 +436,21 @@ impl App {
                     "leave" => t("You left the channel"),
                     _ => t("Done"),
                 };
-                self.toast(done.into_owned(), false);
+                self.toast(done.into_owned(), Tone::Info);
             }
             Err(Failure::NeedsSession) => self.toast(
                 tf(
                     "{command} only works when you sign in with your browser",
                     &[("command", &name)],
                 ),
-                true,
+                Tone::Error,
             ),
             Err(error) => self.toast(
                 tf(
                     "{command} failed: {error}",
                     &[("command", &name), ("error", &error.message())],
                 ),
-                true,
+                Tone::Error,
             ),
         }
     }

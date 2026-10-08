@@ -509,6 +509,79 @@ pub fn secondary_button(ui: &mut egui::Ui, palette: &Palette, label: &str) -> eg
     .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// A red button for what cannot be taken back: Delete, Leave, Remove.
+pub fn danger_button(ui: &mut egui::Ui, palette: &Palette, label: &str) -> egui::Response {
+    let text = egui::RichText::new(label)
+        .font(medium(14.0))
+        .color(Color32::WHITE);
+    ui.add(
+        egui::Button::new(text)
+            .fill(palette.danger)
+            .corner_radius(CornerRadius::same(RADIUS_SMALL + 2))
+            .min_size(Vec2::new(0.0, 32.0)),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A dialog's title, the first line of every modal.
+pub fn dialog_heading(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    text: impl Into<String>,
+) -> egui::Response {
+    ui.label(
+        egui::RichText::new(text)
+            .font(bold(17.0))
+            .color(palette.text),
+    )
+}
+
+/// The quiet spinner of something on its way, `size` points across.
+pub fn spinner(palette: &Palette, size: f32) -> egui::Spinner {
+    egui::Spinner::new().size(size).color(palette.dim)
+}
+
+/// `label` taking clicks, with the pointing hand over it, as a name or a
+/// link in running text does.
+pub fn link_label(ui: &mut egui::Ui, label: egui::Label) -> egui::Response {
+    ui.add(label.sense(egui::Sense::click()))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The top strip of a pane (the sidebar, a conversation, a thread, the
+/// details, a view): 52 points tall below the macOS traffic lights, filled
+/// with `fill`, `margin` points in from the left and right, a hairline
+/// along its bottom. `add` lays out its row, centred.
+pub fn pane_header<R>(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    id: &'static str,
+    fill: Color32,
+    margin: [i8; 2],
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let inset = titlebar_inset(ui.ctx());
+    egui::Panel::top(id)
+        .exact_size(52.0 + inset)
+        .show_separator_line(false)
+        .frame(egui::Frame::new().fill(fill).inner_margin(egui::Margin {
+            left: margin[0],
+            right: margin[1],
+            top: inset as i8,
+            bottom: 0,
+        }))
+        .show(ui, |ui| {
+            let rect = ui.max_rect();
+            ui.painter().hline(
+                rect.x_range(),
+                rect.bottom() - 0.5,
+                Stroke::new(1.0, palette.outline),
+            );
+            ui.horizontal_centered(add).inner
+        })
+        .inner
+}
+
 /// A checkbox whose box shows on a `surface` background. egui fills the
 /// box with the widget colour, which is `surface` too, and the theme gives
 /// widgets no border, so a plain checkbox there showed only its label.

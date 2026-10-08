@@ -1,0 +1,18 @@
+# Writes src/emoji_table.rs from iamcal/emoji-data's emoji.json. Not part
+# of the app's build: the generated table is checked in, so building
+# NoSlacking needs neither the network nor this.
+[package]
+name = "emoji-table-gen"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Fetches the pinned emoji.json when no local copy is given.
+ureq = "3"
+
+# Its own workspace, so the app's never includes it.
+[workspace]

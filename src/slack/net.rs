@@ -23,6 +23,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::http::{HeaderValue, Uri};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
+use crate::sync::write;
+
 /// Which proxy NoSlacking uses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -192,9 +194,7 @@ fn current() -> Arc<Net> {
     if let Some(net) = NET.read().ok().and_then(|net| net.clone()) {
         return net;
     }
-    let mut slot = NET
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut slot = write(&NET);
     slot.get_or_insert_with(|| Arc::new(Net::build(Route::System)))
         .clone()
 }
@@ -218,8 +218,7 @@ pub fn configure(settings: &ProxySettings) -> Result<(), ProxyError> {
         Route::Manual(url) => log::info!("network: proxy {url}"),
     }
     let net = Arc::new(Net::build(route));
-    *NET.write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(net);
+    *write(&NET) = Some(net);
     Ok(())
 }
 

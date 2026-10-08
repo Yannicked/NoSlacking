@@ -1,7 +1,7 @@
 //! Sounds played in the app: carrying out what [`crate::audio::Playback`]
 //! decides, with the worker (fetching), the playing thread and toasts.
 
-use super::App;
+use super::{App, Tone};
 use crate::audio::{Bytes, Effect, Request};
 use crate::backend::Command;
 use crate::failure::Problem;
@@ -56,15 +56,17 @@ impl App {
                 }),
                 Effect::Device(order) => self.audio_device.send(order),
                 Effect::Open { team, url, name } => {
-                    self.toast(tf("Opening {name}…", &[("name", &name)]), false);
+                    self.toast(tf("Opening {name}…", &[("name", &name)]), Tone::Info);
                     self.backend.send(Command::OpenFile { team, url, name });
                 }
                 Effect::Tell(why) => {
                     if let Some(text) = why.message() {
-                        self.toast(text, false);
+                        self.toast(text, Tone::Info);
                     }
                 }
-                Effect::Problem(problem) => self.toast(problem.message(), problem.is_error()),
+                Effect::Problem(problem) => {
+                    self.toast(problem.message(), Tone::error_if(problem.is_error()))
+                }
             }
         }
     }
