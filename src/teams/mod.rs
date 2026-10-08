@@ -11,6 +11,3 @@ pub mod html;
 pub mod probe;
 pub mod socket;
 pub mod types;
-
-pub use auth::{TEAMS_CLIENT_ID, TeamsCredentials};
-pub use client::TeamsClient;

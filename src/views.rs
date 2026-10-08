@@ -570,7 +570,6 @@ pub struct TeamViews {
 /// A schedule request on its way: what to put back if Slack refuses.
 #[derive(Clone, Debug)]
 pub struct Pending {
-    pub team: String,
     /// The composer it came from, and its draft as it was.
     pub draft: Option<LentDraft>,
     /// The scheduled message it replaces.
@@ -1037,7 +1036,6 @@ fn schedule_draft(
     app.views.pending.insert(
         request,
         Pending {
-            team: team.to_owned(),
             draft: Some(LentDraft { key, draft }),
             replace: None,
         },
@@ -1133,7 +1131,6 @@ fn confirm_schedule(app: &mut App, team: &str) {
             app.views.pending.insert(
                 request,
                 Pending {
-                    team: team.to_owned(),
                     draft: None,
                     replace: Some(old.id.clone()),
                 },

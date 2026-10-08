@@ -23,7 +23,7 @@ pub struct DesktopSettings {
     pub sound: bool,
     /// Words that notify wherever they are written, like a mention.
     pub keywords: Vec<String>,
-    /// Your choice per conversation, by [`conversation_key`]. A missing
+    /// Your choice per conversation, by `conversation_key`. A missing
     /// entry follows Slack's preference, or the default for its kind.
     pub levels: BTreeMap<String, Level>,
     /// Conversations muted on this computer, by workspace: for sign-ins
@@ -59,11 +59,6 @@ impl Default for DesktopSettings {
 }
 
 impl DesktopSettings {
-    /// Your own level for a conversation, if you set one here.
-    pub fn level(&self, team: &str, channel: &str) -> Option<Level> {
-        self.levels.get(&conversation_key(team, channel)).copied()
-    }
-
     /// Sets (or with `None` forgets) your level for a conversation.
     pub fn set_level(&mut self, team: &str, channel: &str, level: Option<Level>) {
         let key = conversation_key(team, channel);
@@ -193,12 +188,6 @@ impl TeamState {
                 .is_some_and(|prefs| prefs.muted.contains(channel))
     }
 
-    /// Whether muting goes to Slack (a browser session whose preferences
-    /// arrived) rather than staying on this computer.
-    pub fn mutes_in_slack(&self) -> bool {
-        self.slack.is_some()
-    }
-
     /// Slack's keywords, to add to your own.
     pub fn slack_keywords(&self) -> &[String] {
         self.slack.as_ref().map_or(&[], |prefs| &prefs.keywords)
@@ -207,7 +196,7 @@ impl TeamState {
 
 /// Splits typed keywords at commas and line breaks, trimmed, without empty
 /// ones or repeats (ignoring case).
-pub fn parse_keywords(text: &str) -> Vec<String> {
+fn parse_keywords(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for word in text.split([',', '\n']).map(str::trim) {
         if !word.is_empty() && !out.iter().any(|w| w.eq_ignore_ascii_case(word)) {
@@ -218,7 +207,7 @@ pub fn parse_keywords(text: &str) -> Vec<String> {
 }
 
 /// How a conversation is named in the settings file: `T123/C456`.
-pub fn conversation_key(team: &str, channel: &str) -> String {
+fn conversation_key(team: &str, channel: &str) -> String {
     format!("{team}/{channel}")
 }
 
@@ -249,14 +238,14 @@ mod tests {
         let mut settings = DesktopSettings::default();
         settings.set_level("T1", "C1", Some(Level::All));
         settings.set_level("T2", "C1", Some(Level::Nothing));
-        assert_eq!(settings.level("T1", "C1"), Some(Level::All));
+        assert_eq!(settings.team_state("T1").chosen("C1"), Some(Level::All));
         let team = settings.team_state("T1");
         assert_eq!(team.chosen("C1"), Some(Level::All));
         assert_eq!(team.level("C2", ConversationKind::Channel), Level::Mentions);
         assert_eq!(team.level("D2", ConversationKind::Direct), Level::All);
         settings.forget_workspace("T1");
-        assert_eq!(settings.level("T1", "C1"), None);
-        assert_eq!(settings.level("T2", "C1"), Some(Level::Nothing));
+        assert_eq!(settings.team_state("T1").chosen("C1"), None);
+        assert_eq!(settings.team_state("T2").chosen("C1"), Some(Level::Nothing));
         settings.set_level("T2", "C1", None);
         assert!(settings.levels.is_empty());
     }
@@ -267,7 +256,6 @@ mod tests {
         settings.set_muted("T1", "C1", true);
         let mut team = settings.team_state("T1");
         assert!(team.is_muted("C1"));
-        assert!(!team.mutes_in_slack());
         team.slack = Some(SlackPrefs {
             muted: HashSet::from(["C2".to_owned()]),
             levels: HashMap::from([("C3".to_owned(), Level::All)]),

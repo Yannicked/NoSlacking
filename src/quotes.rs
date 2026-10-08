@@ -40,7 +40,7 @@ pub struct Key {
 
 /// The links to Slack messages in a message's text (in Slack's markup), in
 /// the order they appear, each message once.
-pub fn message_links(text: &str) -> Vec<Link> {
+fn message_links(text: &str) -> Vec<Link> {
     // Most messages have none; skip the word-by-word read for them.
     if !text.contains("slack.com/archives/") {
         return Vec::new();
@@ -198,7 +198,7 @@ impl Cache {
 
 /// Whether a failure to read a message means it cannot be read at all
 /// (gone, or not yours to see), rather than that reading it went wrong.
-pub fn is_unavailable(failure: &Failure) -> bool {
+fn is_unavailable(failure: &Failure) -> bool {
     match failure {
         Failure::ConversationGone | Failure::NotInChannel => true,
         Failure::Slack(code) => matches!(

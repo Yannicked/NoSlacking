@@ -24,7 +24,7 @@ pub use crate::huddle_audio::cameras::{Camera, MAX_TILES, Wish};
 pub use crate::huddle_audio::gallery::Gallery;
 pub use crate::huddle_audio::roster::{Person, Roster};
 #[cfg(feature = "huddle-video")]
-pub use crate::huddle_audio::screen::{Picture, Screen};
+pub use crate::huddle_audio::screen::Screen;
 #[cfg(feature = "huddle-video")]
 pub use crate::huddle_audio::video::Share;
 

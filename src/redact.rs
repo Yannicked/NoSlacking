@@ -22,7 +22,7 @@ const PREFIXES: [&str; 10] = [
 ];
 
 /// Whether `word` holds a token or a socket URL.
-pub fn is_secret(word: &str) -> bool {
+fn is_secret(word: &str) -> bool {
     PREFIXES.iter().any(|prefix| word.contains(prefix))
         || word.contains("wss://")
         || word.contains("sig=")

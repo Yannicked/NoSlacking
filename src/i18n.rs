@@ -289,6 +289,53 @@ mod tests {
         );
     }
 
+    /// Every Rust file under `src/`, as written, with `\` line
+    /// continuations joined so a wrapped literal reads as one.
+    fn source_text() -> String {
+        fn walk(dir: &std::path::Path, out: &mut String) {
+            for entry in std::fs::read_dir(dir).expect("read src").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push_str(&std::fs::read_to_string(&path).expect("read file"));
+                }
+            }
+        }
+        let mut text = String::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut text,
+        );
+        let text = text.replace("\r\n", "\n");
+        let mut joined = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find("\\\n") {
+            joined.push_str(&rest[..at]);
+            rest = rest[at + 2..].trim_start();
+        }
+        joined.push_str(rest);
+        joined
+    }
+
+    #[test]
+    fn every_dutch_translation_is_still_asked_for() {
+        // A message the code no longer asks for lingers in the catalog
+        // unnoticed; this finds it. Both escape `"`, `\` and newlines the
+        // same way, so the msgid is searched for as written.
+        let code = source_text();
+        let po = include_str!("../assets/i18n/nl.po").replace("\r\n", "\n");
+        let stale: Vec<&str> = po
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("msgid ")
+                    .or_else(|| line.strip_prefix("msgid_plural "))
+            })
+            .filter(|quoted| *quoted != "\"\"" && !code.contains(quoted))
+            .collect();
+        assert!(stale.is_empty(), "no longer in the code: {stale:#?}");
+    }
+
     /// `gettext` wants a `'static` message, as the interface's literals are.
     fn leak(message: &str) -> &'static str {
         Box::leak(message.to_owned().into_boxed_str())

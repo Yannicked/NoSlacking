@@ -117,8 +117,6 @@ pub enum Request {
     /// Moves to `fraction` (0 to 1) of the way through, starting the
     /// sound there if another was playing.
     Seek { track: Track, fraction: f32 },
-    /// Stops whatever plays.
-    Stop,
 }
 
 /// Why a sound plays in the system's player instead, or stopped.
@@ -231,11 +229,6 @@ impl Now {
     /// How far through it is, from 0 to 1; 0 while its length is unknown.
     pub fn fraction(&self) -> f32 {
         self.duration.map_or(0.0, |d| fraction(self.position, d))
-    }
-
-    /// Whether it is playing or about to, so the button offers pause.
-    pub fn busy(&self) -> bool {
-        matches!(self.phase, Phase::Loading | Phase::Playing)
     }
 }
 
@@ -375,7 +368,6 @@ impl Playback {
                     _ => self.start(key, track, Some(fraction)),
                 }
             }
-            Request::Stop => self.stop(),
         }
     }
 
