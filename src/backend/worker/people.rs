@@ -13,10 +13,16 @@ use crate::slack::{Client, SlackError, types};
 impl Worker {
     /// Runs a command about people (see [`crate::people`]).
     pub(super) fn people_command(&mut self, team: String, command: crate::people::Command) {
-        // A Teams workspace has presence to watch; the rest (status,
-        // huddles, typing over RTM) is Slack's.
+        // A Teams workspace has presence to watch and calls to make; the
+        // rest (status, huddles, typing over RTM) is Slack's.
         #[cfg(feature = "teams")]
-        if let Some(session) = self.teams_session(&team) {
+        if self.teams_session(&team).is_some() {
+            let Some(command) = control(&mut self.teams_call, command) else {
+                return;
+            };
+            let Some(session) = self.teams_session(&team) else {
+                return;
+            };
             match command {
                 crate::people::Command::Watch { .. } => self.people.command(&team, command),
                 crate::people::Command::Call { channel, user } => {
@@ -55,17 +61,9 @@ impl Worker {
                     self.teams_call.join_meeting(client, team, join, sink);
                 }
                 crate::people::Command::Admit { user } => self.teams_call.admit(&user),
-                #[cfg(feature = "huddle-video")]
-                crate::people::Command::WatchCall { wish } => self.teams_call.watch(&wish),
                 crate::people::Command::DeclineHuddle { room, .. } => {
                     self.teams_call.decline(&team, &room);
                 }
-                crate::people::Command::LeaveHuddle => self.teams_call.stop(),
-                #[cfg(feature = "huddle-camera")]
-                crate::people::Command::CameraHuddle { on } => self.teams_call.set_camera(on),
-                #[cfg(feature = "huddle-share")]
-                crate::people::Command::ShareHuddle { request } => self.teams_call.share(request),
-                crate::people::Command::MuteHuddle { muted } => self.teams_call.set_muted(muted),
                 // Slack's alone (status, away, typing, huddles): said so
                 // where a view waits on it.
                 other => match other.refused(Failure::Unsupported) {
@@ -82,34 +80,14 @@ impl Worker {
             }
             return;
         };
+        let Some(command) = control(&mut self.huddle_audio, command) else {
+            return;
+        };
         let command = match command {
             crate::people::Command::ListenHuddle { channel } => {
                 #[cfg(feature = "teams")]
                 self.teams_call.stop();
                 self.huddle_audio.start(client, team, channel, sink);
-                return;
-            }
-            crate::people::Command::LeaveHuddle => {
-                self.huddle_audio.stop();
-                return;
-            }
-            crate::people::Command::MuteHuddle { muted } => {
-                self.huddle_audio.set_muted(muted);
-                return;
-            }
-            #[cfg(feature = "huddle-video")]
-            crate::people::Command::WatchCall { wish } => {
-                self.huddle_audio.watch_call(wish);
-                return;
-            }
-            #[cfg(feature = "huddle-camera")]
-            crate::people::Command::CameraHuddle { on } => {
-                self.huddle_audio.set_camera(on);
-                return;
-            }
-            #[cfg(feature = "huddle-share")]
-            crate::people::Command::ShareHuddle { request } => {
-                self.huddle_audio.share(request);
                 return;
             }
             other => other,
@@ -214,6 +192,96 @@ impl Worker {
     }
 }
 
+/// The controls of the call going on, whichever service it is on: a
+/// Slack huddle or a Teams call. Each acts only when there is one.
+trait CallControl {
+    /// Leaves the huddle, or hangs up.
+    fn leave(&mut self);
+    /// Mutes or unmutes the microphone.
+    fn mute(&mut self, muted: bool);
+    /// Receives only what the call window wants.
+    #[cfg(feature = "huddle-video")]
+    fn watch(&mut self, wish: crate::huddle_audio::cameras::Wish);
+    /// Turns the camera on or off.
+    #[cfg(feature = "huddle-camera")]
+    fn camera(&mut self, on: bool);
+    /// Starts, picks or stops sharing your screen.
+    #[cfg(feature = "huddle-share")]
+    fn share(&mut self, request: crate::huddle_share::ShareRequest);
+}
+
+impl CallControl for crate::backend::listen::Listener {
+    fn leave(&mut self) {
+        self.stop();
+    }
+
+    fn mute(&mut self, muted: bool) {
+        self.set_muted(muted);
+    }
+
+    #[cfg(feature = "huddle-video")]
+    fn watch(&mut self, wish: crate::huddle_audio::cameras::Wish) {
+        self.watch_call(wish);
+    }
+
+    #[cfg(feature = "huddle-camera")]
+    fn camera(&mut self, on: bool) {
+        self.set_camera(on);
+    }
+
+    #[cfg(feature = "huddle-share")]
+    fn share(&mut self, request: crate::huddle_share::ShareRequest) {
+        crate::backend::listen::Listener::share(self, request);
+    }
+}
+
+#[cfg(feature = "teams")]
+impl CallControl for crate::backend::teams_call::Caller {
+    fn leave(&mut self) {
+        self.stop();
+    }
+
+    fn mute(&mut self, muted: bool) {
+        self.set_muted(muted);
+    }
+
+    #[cfg(feature = "huddle-video")]
+    fn watch(&mut self, wish: crate::huddle_audio::cameras::Wish) {
+        crate::backend::teams_call::Caller::watch(self, &wish);
+    }
+
+    #[cfg(feature = "huddle-camera")]
+    fn camera(&mut self, on: bool) {
+        self.set_camera(on);
+    }
+
+    #[cfg(feature = "huddle-share")]
+    fn share(&mut self, request: crate::huddle_share::ShareRequest) {
+        crate::backend::teams_call::Caller::share(self, request);
+    }
+}
+
+/// Carries out `command` on `call` when it is one of the call's
+/// controls; any other command comes back.
+fn control(
+    call: &mut impl CallControl,
+    command: crate::people::Command,
+) -> Option<crate::people::Command> {
+    use crate::people::Command;
+    match command {
+        Command::LeaveHuddle => call.leave(),
+        Command::MuteHuddle { muted } => call.mute(muted),
+        #[cfg(feature = "huddle-video")]
+        Command::WatchCall { wish } => call.watch(wish),
+        #[cfg(feature = "huddle-camera")]
+        Command::CameraHuddle { on } => call.camera(on),
+        #[cfg(feature = "huddle-share")]
+        Command::ShareHuddle { request } => call.share(request),
+        other => return Some(other),
+    }
+    None
+}
+
 /// What [`Worker::fetch_each`] fetches.
 #[derive(Clone, Copy)]
 pub(super) enum Info {
@@ -265,6 +333,47 @@ async fn bot_info(client: Client, id: String) -> Result<crate::model::Bot, Slack
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A call that writes down what it was asked.
+    #[derive(Default)]
+    struct Recorded(Vec<String>);
+
+    impl CallControl for Recorded {
+        fn leave(&mut self) {
+            self.0.push("leave".into());
+        }
+        fn mute(&mut self, muted: bool) {
+            self.0.push(format!("mute {muted}"));
+        }
+        #[cfg(feature = "huddle-video")]
+        fn watch(&mut self, _: crate::huddle_audio::cameras::Wish) {
+            self.0.push("watch".into());
+        }
+        #[cfg(feature = "huddle-camera")]
+        fn camera(&mut self, on: bool) {
+            self.0.push(format!("camera {on}"));
+        }
+        #[cfg(feature = "huddle-share")]
+        fn share(&mut self, _: crate::huddle_share::ShareRequest) {
+            self.0.push("share".into());
+        }
+    }
+
+    #[test]
+    fn the_call_controls_go_to_the_call_and_the_rest_comes_back() {
+        use crate::people::Command;
+        let mut call = Recorded::default();
+        assert_eq!(
+            control(&mut call, Command::MuteHuddle { muted: true }),
+            None
+        );
+        assert_eq!(control(&mut call, Command::LeaveHuddle), None);
+        assert_eq!(
+            control(&mut call, Command::SetAway(true)),
+            Some(Command::SetAway(true))
+        );
+        assert_eq!(call.0, ["mute true", "leave"]);
+    }
 
     #[test]
     fn each_id_is_asked_for_once_per_workspace() {
