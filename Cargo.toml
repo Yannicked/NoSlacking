@@ -30,6 +30,12 @@ path = "src/lib.rs"
 name = "noslacking"
 path = "src/main.rs"
 
+# The app's side of a decoded picture's way from the helper to egui,
+# timed (docs/research/huddle-video.md §6.12).
+[[example]]
+name = "picture_path"
+required-features = ["huddle-video"]
+
 [dependencies]
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

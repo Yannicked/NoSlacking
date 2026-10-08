@@ -88,6 +88,10 @@ impl App {
         });
 
         let picture = &mut self.huddles.picture;
+        #[cfg(feature = "demo")]
+        {
+            picture.uploaded = 0;
+        }
         if picture.of != key {
             // Another share, or none: not the last one's picture.
             picture.texture = None;
@@ -95,6 +99,10 @@ impl App {
             picture.of.clone_from(&key);
         }
         if let Some(new) = screen.as_ref().and_then(huddles::Screen::take) {
+            #[cfg(feature = "demo")]
+            {
+                picture.uploaded += new.image.pixels.len();
+            }
             let options = egui::TextureOptions::LINEAR;
             match &mut picture.texture {
                 Some(texture) => texture.set(new.image, options),
@@ -115,6 +123,10 @@ impl App {
         {
             if !cameras.iter().any(|c| c.tile && c.key == camera) {
                 continue;
+            }
+            #[cfg(feature = "demo")]
+            {
+                picture.uploaded += new.image.pixels.len();
             }
             let options = egui::TextureOptions::LINEAR;
             match picture.tiles.get_mut(&camera) {
