@@ -712,11 +712,20 @@ pub fn control(
         egui::Button::image(image).min_size(Vec2::splat(look.height))
     };
     let response = ui
-        .add(
-            button
-                .fill(fill)
-                .corner_radius(CornerRadius::same(theme::RADIUS_SMALL + 2)),
-        )
+        .scope(|ui| {
+            // Square when an icon alone: the theme's padding would make
+            // each 10 points wider, and three of them would push the call
+            // bar's row past the sidebar's edge.
+            if !look.labelled {
+                ui.spacing_mut().button_padding.x = ((look.height - look.icon) / 2.0).max(0.0);
+            }
+            ui.add(
+                button
+                    .fill(fill)
+                    .corner_radius(CornerRadius::same(theme::RADIUS_SMALL + 2)),
+            )
+        })
+        .inner
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     if !look.labelled {
         theme::describe(&response, egui::WidgetType::Button, label);
