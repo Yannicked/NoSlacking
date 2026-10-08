@@ -239,7 +239,22 @@ pub enum Command {
     /// Joins the huddle in `channel` and plays it, muted, leaving any
     /// other first (see [`crate::huddle_audio`]).
     ListenHuddle { channel: String },
-    /// Leaves the huddle being listened to.
+    /// Calls `user` from the one-to-one chat `channel`, ending any call
+    /// or huddle first (Microsoft Teams; see [`crate::teams::calling`]).
+    /// Mute and hang up as in a huddle: `MuteHuddle`, `LeaveHuddle`.
+    Call { channel: String, user: String },
+    /// Picks up the incoming call `call` (its invitation's room), shown
+    /// in `channel`, ending any call or huddle first (Microsoft Teams).
+    /// Declined as a huddle invitation is: `DeclineHuddle`.
+    AnswerCall { channel: String, call: String },
+    /// Joins a Teams meeting, ending any call or huddle first; shown in
+    /// [`crate::meetings::MEETING_CHANNEL`]. Left as a huddle is.
+    JoinMeeting { meeting: crate::meetings::Meeting },
+    /// Starts a Teams meeting now, named `subject`, and joins it.
+    MeetNow { subject: String },
+    /// Lets `user` in from the lobby of the meeting going on.
+    Admit { user: String },
+    /// Leaves the huddle being listened to, or hangs up the call.
     LeaveHuddle,
     /// Mutes (closing the microphone) or unmutes (opening it) in the
     /// huddle being listened to.
@@ -336,6 +351,10 @@ pub enum Event {
         channel: Option<String>,
         room: Option<String>,
     },
+    /// An incoming call (Microsoft Teams; its invitation's room is
+    /// `call`) stopped ringing because it was picked up elsewhere: its
+    /// invitation goes, and it was not missed.
+    CallTakenElsewhere { call: String },
     /// A huddle changed, known only by its room.
     HuddleRoom {
         room: String,
@@ -809,6 +828,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
         // Taken by `huddles::handle` above.
         Event::HuddleInvite { .. }
         | Event::HuddleInviteCancelled { .. }
+        | Event::CallTakenElsewhere { .. }
         | Event::HuddleRoom { .. }
         | Event::HuddleChecked { .. }
         | Event::InviteDeclined { .. }
@@ -897,6 +917,7 @@ mod tests {
 
     fn workspace() -> WorkspaceState {
         let mut workspace = WorkspaceState::new(Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: "acme".into(),

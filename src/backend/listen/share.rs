@@ -96,8 +96,9 @@ struct Live {
 }
 
 /// What the interface asked, for the blocking thread that asks the
-/// helper.
-enum Begin {
+/// helper. A Teams call's share starts the same way
+/// (`backend::teams_call`).
+pub(in crate::backend) enum Begin {
     /// Share: the system's dialog, or the list for the call bar.
     Start {
         /// Choose afresh.
@@ -108,7 +109,7 @@ enum Begin {
 }
 
 /// What a start on the blocking thread came to.
-enum Step {
+pub(in crate::backend) enum Step {
     /// No dialog of the system's: these can be picked.
     Choose(Vec<Source>),
     /// The share started in the helper, or why not.
@@ -186,7 +187,7 @@ async fn started(starting: &mut Option<tokio::task::JoinHandle<Step>>) -> Option
 /// Asks the helper for what `begin` says, on a blocking thread: the
 /// sources, the system's dialog, the capture all wait on another process
 /// and on the user.
-fn begin(begin: Begin) -> Step {
+pub(in crate::backend) fn begin(begin: Begin) -> Step {
     let Some(helper) = helper::shared(Lane::Screen).filter(|h| !h.given_up()) else {
         log::warn!("huddle share: no video helper: no sharing");
         return Step::Started(Err(Failure::Huddle(HuddleTrouble::NoVideoHelper)));

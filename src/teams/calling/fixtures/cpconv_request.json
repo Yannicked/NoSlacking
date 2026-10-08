@@ -1,0 +1,119 @@
+{
+  "conversationRequest": {
+    "conversationType": null,
+    "subject": null,
+    "suppressDialout": false,
+    "applicationType": "TFL",
+    "roster": {
+      "type": "Delta",
+      "rosterUpdate": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a0000001/conversation/rosterUpdate/"
+    },
+    "properties": {
+      "allowConversationWithoutHost": true,
+      "enableGroupCallEventMessages": true,
+      "enableGroupCallUpgradeMessage": false,
+      "enableGroupCallMeetupGeneration": false
+    },
+    "links": {
+      "conversationEnd": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a0000002/conversation/conversationEnd/",
+      "conversationUpdate": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a0000003/conversation/conversationUpdate/",
+      "localParticipantUpdate": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a0000004/conversation/localParticipantUpdate/",
+      "addParticipantSuccess": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a0000005/conversation/addParticipantSuccess/",
+      "addParticipantFailure": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a0000006/conversation/addParticipantFailure/",
+      "addModalitySuccess": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a0000007/conversation/addModalitySuccess/",
+      "addModalityFailure": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a0000008/conversation/addModalityFailure/",
+      "confirmUnmute": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a0000009/conversation/confirmUnmute/",
+      "receiveMessage": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a000000a/conversation/receiveMessage/"
+    }
+  },
+  "contentSharing": null,
+  "participants": {
+    "from": {
+      "id": "8:live:me",
+      "displayName": "Me Example",
+      "endpointId": "00000000-0000-4000-8000-000000000002",
+      "participantId": "00000000-0000-4000-8000-000000000003",
+      "languageId": "en-us"
+    },
+    "to": [
+      {
+        "id": "8:live:other",
+        "participantId": "00000000-0000-4000-8000-000000000004"
+      }
+    ]
+  },
+  "capabilities": null,
+  "endpointCapabilities": 73463,
+  "clientEndpointCapabilities": 42876960,
+  "endpointMetadata": {
+    "holographicCapabilities": 3
+  },
+  "groupContext": null,
+  "groupChat": null,
+  "meetingInfo": null,
+  "meetingData": null,
+  "endpointState": {
+    "endpointStateSequenceNumber": 1,
+    "endpointProperties": {
+      "additionalEndpointProperties": {
+        "infoShownInReportMode": "FullInformation"
+      }
+    }
+  },
+  "callInvitation": {
+    "callModalities": [
+      "Audio"
+    ],
+    "replaces": null,
+    "transferor": null,
+    "clientTransferContext": null,
+    "customContext": null,
+    "links": {
+      "progress": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a000000b/call/progress/",
+      "mediaAnswer": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a000000c/call/mediaAnswer/",
+      "acceptance": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a000000d/call/acceptance/",
+      "redirection": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a000000e/call/redirection/",
+      "end": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a000000f/call/end/"
+    },
+    "clientContentForMediaController": {
+      "controlVideoStreaming": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a0000010/call/controlVideoStreaming/",
+      "csrcInfo": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000001/a0000011/call/csrcInfo/"
+    },
+    "pstnContent": {
+      "emergencyCallCountry": "",
+      "platformName": "SkypeSpaces/1415/1/os=linux",
+      "publicApiCall": false
+    },
+    "emergencyContent": null,
+    "mediaContent": {
+      "blob": "v=0 (an SDP, left out of the fixture)",
+      "contentType": "application/sdp-ngc-1.0",
+      "requiredFeatures": "nonByPass",
+      "clientLocation": "NL",
+      "applyChannelParameters": {
+        "multiChannelParameter": {
+          "mids": [
+            "*"
+          ],
+          "mediaParameter": "{\"sendSideBWSeed\":{\"seedValueBitsPerSec\":600000}}"
+        }
+      },
+      "mediaLegId": "00000000000000000000000000000001"
+    },
+    "voicemailSettings": {},
+    "locationContent": null,
+    "networkContent": null,
+    "areaContent": null
+  },
+  "debugContent": {
+    "ecsEtag": "\"etag\""
+  },
+  "participantPropertyBag": {
+    "aiVoiceConsent": {
+      "value": {
+        "aiVoiceConsentValue": "0"
+      },
+      "sequenceNumber": 0
+    }
+  }
+}

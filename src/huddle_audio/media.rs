@@ -174,7 +174,7 @@ struct Relay {
 }
 
 /// The connection to a TURN server.
-enum RelayIo {
+pub(crate) enum RelayIo {
     Udp(tokio::net::UdpSocket),
     Stream {
         stream: Box<dyn Stream>,
@@ -183,11 +183,15 @@ enum RelayIo {
 }
 
 /// A TCP or TLS stream.
-trait Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+pub(crate) trait Stream:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send
+{
+}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Stream for T {}
 
 impl RelayIo {
-    async fn send(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+    /// Writes one message to the server.
+    pub(crate) async fn send(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         match self {
             Self::Udp(socket) => socket.send(bytes).await.map(|_| ()),
             Self::Stream { stream, .. } => stream.write_all(bytes).await,
@@ -195,7 +199,7 @@ impl RelayIo {
     }
 
     /// The next messages from the server.
-    async fn recv(&mut self) -> std::io::Result<Vec<Vec<u8>>> {
+    pub(crate) async fn recv(&mut self) -> std::io::Result<Vec<Vec<u8>>> {
         match self {
             Self::Udp(socket) => {
                 let mut buf = vec![0u8; 2048];
@@ -242,6 +246,20 @@ fn tls_config() -> Result<Arc<tokio_rustls::rustls::ClientConfig>, String> {
 
 /// Opens the connection to `server` and starts an allocation on it.
 async fn open_relay(server: &Server, turn: &TurnCredentials) -> Result<Relay, String> {
+    let (io, local) = connect_relay(server).await?;
+    Ok(Relay {
+        server: server.clone(),
+        client: turn::Client::new(server.transport, &turn.username, &turn.password),
+        io,
+        local,
+        relayed: None,
+    })
+}
+
+/// Opens the connection to a TURN server, over its transport, and says
+/// which local address it left from. Teams calls reach their TURN servers
+/// over TCP and TLS through this too, when UDP gets no answer.
+pub(crate) async fn connect_relay(server: &Server) -> Result<(RelayIo, SocketAddr), String> {
     let address = tokio::net::lookup_host((server.host.as_str(), server.port))
         .await
         .map_err(|e| format!("{}: {e}", server.host))?
@@ -289,13 +307,7 @@ async fn open_relay(server: &Server, turn: &TurnCredentials) -> Result<Relay, St
         }
     };
     log::info!("relay: connected to {server} at {address} from {local}");
-    Ok(Relay {
-        server: server.clone(),
-        client: turn::Client::new(server.transport, &turn.username, &turn.password),
-        io,
-        local,
-        relayed: None,
-    })
+    Ok((io, local))
 }
 
 /// The WebRTC peer, its one candidate the relay at `relayed` (reached

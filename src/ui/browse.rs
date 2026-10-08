@@ -11,7 +11,7 @@ use egui::{CornerRadius, Key, Margin, Modifiers, RichText, Sense, Vec2};
 use crate::app::{App, Page};
 use crate::convos::{Action as Convos, BookmarkProblem, MAX_NAME, MAX_PEOPLE, NameProblem};
 use crate::i18n::{t, tf};
-use crate::model::{Action, Conversation, ConversationKind};
+use crate::model::{Ability, Action, Conversation, ConversationKind};
 use crate::theme::{self, Icon};
 
 /// The shortcuts for these dialogs, while the main page shows and nothing
@@ -20,10 +20,17 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
     if app.page != Page::Main || app.overlay_open() || app.workspaces.is_empty() {
         return;
     }
+    // Where the service has no conversations to start or channels to
+    // browse, those keys are left alone.
+    let offers = |ability| {
+        app.active_workspace()
+            .is_some_and(|w| w.info.offers(ability))
+    };
+    let (may_compose, may_browse) = (offers(Ability::NewMessage), offers(Ability::Channels));
     let (compose, browse) = ctx.input_mut(|i| {
         (
-            i.consume_key(Modifiers::COMMAND, Key::N),
-            i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::L),
+            may_compose && i.consume_key(Modifiers::COMMAND, Key::N),
+            may_browse && i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::L),
         )
     });
     if compose {
@@ -175,6 +182,7 @@ fn new_message(app: &mut App, ctx: &egui::Context) {
         return;
     };
     let found = dialog.suggestions(workspace);
+    let searches = workspace.info.service.searches_people();
     let (down, up, enter, escape) = ctx.input_mut(|input| {
         (
             input.consume_key(Modifiers::NONE, Key::ArrowDown),
@@ -369,6 +377,15 @@ fn new_message(app: &mut App, ctx: &egui::Context) {
         } else {
             pick = pick.or_else(|| found.get(dialog.selected).cloned());
         }
+    }
+    // Where the server has to be asked for people, it is asked as the
+    // query changes; the answers land among the workspace's people and
+    // so in the suggestions.
+    let query = dialog.query.trim().to_owned();
+    if searches && query.chars().count() >= 2 && query != dialog.asked {
+        dialog.asked.clone_from(&query);
+        app.actions
+            .push(Action::Convos(Convos::FindPeople { query }));
     }
     if let Some(id) = pick {
         dialog.pick(id);

@@ -9,7 +9,7 @@ use super::rows;
 use crate::app::App;
 use crate::backend::Socket;
 use crate::i18n::{t, tf};
-use crate::model::{Action, ConversationKind, Ts};
+use crate::model::{Ability, Action, ConversationKind, Ts};
 use crate::theme::{self, Icon};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -31,7 +31,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 empty(ui, app, &text);
                 return;
             };
-            composer::drop_target(ui, &palette, None, true, &mut app.actions);
+            if app
+                .active_workspace()
+                .is_some_and(|w| w.info.offers(Ability::Files))
+            {
+                composer::drop_target(ui, &palette, None, true, &mut app.actions);
+            }
             header(app, ui, &channel);
             footer(app, ui, &team, &channel);
             messages(app, ui, &team, &channel);
@@ -65,6 +70,8 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
     let Some(conversation) = workspace.conversation(channel) else {
         return;
     };
+    // What this workspace's service can do: the rest stays out of the header.
+    let offers = |ability| workspace.info.offers(ability);
     let popped_out = popouts
         .iter()
         .any(|p| p.team == workspace.info.team_id && p.channel == conversation.id);
@@ -118,8 +125,18 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                     }
                     ConversationKind::Group => {
                         let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
-                        Icon::Users.image(palette.secondary, 16.0).paint_at(ui, icon);
+                        let kind = if workspace.is_meeting(conversation) { Icon::Video } else { Icon::Users };
+                        kind.image(palette.secondary, 16.0).paint_at(ui, icon);
                     }
+                }
+                // A Teams channel's team first, dimmed: every team has a
+                // General.
+                if let Some(team) = workspace.team_of(&conversation.id) {
+                    ui.label(
+                        RichText::new(format!("{team} ›"))
+                            .font(theme::regular(15.0))
+                            .color(palette.dim),
+                    );
                 }
                 let name = ui
                     .add(
@@ -138,7 +155,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                     && let Some(user) = &conversation.user
                 {
                     actions.push(Action::OpenProfile(user.clone()));
-                } else if name.clicked() {
+                } else if name.clicked() && offers(Ability::Details) {
                     actions.push(super::browse::details(&conversation.id, crate::convos::Tab::About));
                 }
                 if !conversation.topic.is_empty() {
@@ -155,7 +172,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                 }
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     let tip = tf("Search ({shortcut})", &[("shortcut", &super::keys::command("F"))]);
-                    if theme::icon_button(ui, &palette, Icon::Search, 17.0, &tip).clicked() {
+                    if offers(Ability::Search) && theme::icon_button(ui, &palette, Icon::Search, 17.0, &tip).clicked() {
                         actions.push(Action::OpenSearch);
                     }
                     if !popped_out
@@ -164,14 +181,19 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                         actions.push(Action::PopOut(conversation.id.clone()));
                     }
                     if conversation.kind != ConversationKind::Direct
+                        && offers(Ability::Details)
                         && theme::icon_button(ui, &palette, Icon::Info, 17.0, &t("Details")).clicked()
                     {
                         actions.push(super::browse::details(&conversation.id, crate::convos::Tab::About));
                     }
-                    if theme::icon_button(ui, &palette, Icon::Bookmark, 16.0, &t("Bookmarks")).clicked() {
+                    if offers(Ability::Bookmarks)
+                        && theme::icon_button(ui, &palette, Icon::Bookmark, 16.0, &t("Bookmarks")).clicked()
+                    {
                         actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Bookmarks));
                     }
-                    if theme::icon_button(ui, &palette, Icon::Pin, 16.0, &t("Pinned messages")).clicked() {
+                    if offers(Ability::Pins)
+                        && theme::icon_button(ui, &palette, Icon::Pin, 16.0, &t("Pinned messages")).clicked()
+                    {
                         actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Pins));
                     }
                     match socket {
@@ -213,9 +235,26 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                                 .sense(egui::Sense::click()),
                             )
                             .on_hover_cursor(egui::CursorIcon::PointingHand);
-                        if count.clicked() {
+                        if count.clicked() && offers(Ability::Details) {
                             actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Members));
                         }
+                    }
+                    if offers(Ability::Calls)
+                        && conversation.kind == ConversationKind::Direct
+                        && let Some(user) = &conversation.user
+                    {
+                        super::people::call_button(
+                            ui,
+                            &palette,
+                            workspace,
+                            &conversation.id,
+                            user,
+                            huddles.listening.as_ref(),
+                            actions,
+                        );
+                    }
+                    if !offers(Ability::Huddles) {
+                        return;
                     }
                     super::people::huddle_button(
                         ui,
@@ -269,11 +308,17 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         return;
     };
     let title = workspace.title(conversation);
-    let placeholder = match conversation.kind {
-        ConversationKind::Channel | ConversationKind::Private => {
+    // As each service words it: Teams posts in a channel, and types in
+    // a chat.
+    let placeholder = match (conversation.kind, workspace.info.is_teams()) {
+        (ConversationKind::Channel | ConversationKind::Private, false) => {
             tf("Message #{name}", &[("name", &title)])
         }
-        _ => tf("Message {name}", &[("name", &title)]),
+        (ConversationKind::Channel | ConversationKind::Private, true) => {
+            tf("Post in {name}", &[("name", &title)])
+        }
+        (_, true) => t("Type a message").into_owned(),
+        (_, false) => tf("Message {name}", &[("name", &title)]),
     };
     egui::Panel::bottom("composer")
         .show_separator_line(false)
@@ -863,13 +908,14 @@ fn beginning(
                     title.clone(),
                     t("This is the very beginning of this group conversation.").into_owned(),
                 ),
-                _ => (
-                    format!("#{title}"),
-                    tf(
-                        "This is the very beginning of #{name}.",
-                        &[("name", &title)],
-                    ),
-                ),
+                _ => {
+                    let place = workspace.named_place(conversation);
+                    let line = tf(
+                        "This is the very beginning of {place}.",
+                        &[("place", &place)],
+                    );
+                    (place, line)
+                }
             };
             ui.label(
                 RichText::new(heading)

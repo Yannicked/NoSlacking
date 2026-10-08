@@ -134,8 +134,19 @@ pub enum Failure {
     NeedsSession,
     /// `/invite` with nobody named.
     NoInvitee,
+    /// The workspace's service (Microsoft Teams) cannot do this here yet.
+    Unsupported,
     /// The manual proxy's URL cannot be used.
     BadProxy,
+    /// The person called declined the call, or was busy.
+    CallDeclined,
+    /// Nobody answered the call.
+    CallNotAnswered,
+    /// A call failed; the detail is Microsoft's own phrase (English) or
+    /// its code.
+    CallFailed(String),
+    /// No meeting has that link, or that ID and passcode.
+    MeetingNotFound,
     /// Listening to a huddle failed at this step; the technical detail
     /// went to the log.
     Huddle(HuddleTrouble),
@@ -213,7 +224,7 @@ impl Failure {
             Self::CantLeaveGeneral => t("nobody can leave the general channel"),
             Self::Restricted => t("the workspace does not allow you to do that"),
             Self::WrongKind => t("that cannot be done in this kind of conversation"),
-            Self::RateLimited => t("Slack is rate limiting requests; try again shortly"),
+            Self::RateLimited => t("the server is rate limiting requests; try again shortly"),
             Self::Network(detail) => {
                 return fill(&t("the network failed: {detail}"), &[("detail", detail)]);
             }
@@ -222,11 +233,11 @@ impl Failure {
             }
             Self::Unexpected(detail) => {
                 return fill(
-                    &t("Slack answered unexpectedly: {detail}"),
+                    &t("the server answered unexpectedly: {detail}"),
                     &[("detail", detail)],
                 );
             }
-            Self::NoMessage => t("Slack did not return the message"),
+            Self::NoMessage => t("the server did not return the message"),
             Self::TooLarge => t("it is larger than Slack's 1 GB limit"),
             Self::NotAFile => t("it is not a file"),
             Self::NoDownloadsFolder => t("there is no downloads folder"),
@@ -288,7 +299,14 @@ impl Failure {
             Self::NoUserToken => t("Slack sent no user token; check the app's user scopes."),
             Self::NeedsSession => t("it only works when you sign in with your browser"),
             Self::NoInvitee => t("name someone to invite with @"),
+            Self::Unsupported => t("Microsoft Teams workspaces cannot do that here yet"),
             Self::BadProxy => t("the proxy URL cannot be used; check it in Settings"),
+            Self::CallDeclined => t("the call was declined"),
+            Self::CallNotAnswered => t("nobody answered the call"),
+            Self::MeetingNotFound => t("no meeting has that link, or that ID and passcode"),
+            Self::CallFailed(detail) => {
+                return fill(&t("the call failed: {detail}"), &[("detail", detail)]);
+            }
             Self::Huddle(trouble) => match trouble {
                 HuddleTrouble::NoSound => t("the sound device could not be opened"),
                 HuddleTrouble::Signaling => t("the huddle's server could not be reached"),
@@ -325,7 +343,7 @@ impl Failure {
                     "your camera needs NoSlacking's video helper (noslacking-video), which is missing or keeps failing",
                 ),
                 HuddleTrouble::ViewOnly => {
-                    t("This huddle takes no more video, so your camera stays off")
+                    t("This call takes no more video, so your camera stays off")
                 }
                 HuddleTrouble::ShareCancelled => t("nothing was chosen to share"),
                 // Each system keeps apps from the screen its own way; say
@@ -654,7 +672,12 @@ mod tests {
             Failure::NoUserToken,
             Failure::NeedsSession,
             Failure::NoInvitee,
+            Failure::Unsupported,
             Failure::BadProxy,
+            Failure::CallDeclined,
+            Failure::CallNotAnswered,
+            Failure::CallFailed("ServiceUnavailable".into()),
+            Failure::MeetingNotFound,
             Failure::Huddle(HuddleTrouble::NoSound),
             Failure::Huddle(HuddleTrouble::Signaling),
             Failure::Huddle(HuddleTrouble::Join),

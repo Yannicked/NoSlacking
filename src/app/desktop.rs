@@ -163,8 +163,7 @@ impl App {
         )?;
         let author = workspace.author(message);
         let place = match conversation {
-            Some(c) if !c.kind.is_dm() => format!("#{}", workspace.title(c)),
-            Some(c) => workspace.title(c),
+            Some(c) => workspace.named_place(c),
             None => author.clone(),
         };
         let (title, body) = notify::compose(kind, &place, &author, &plain);
@@ -191,10 +190,22 @@ impl App {
         if workspace.desktop.dnd.quiet(now_seconds()) || workspace.desktop.is_muted(channel) {
             return None;
         }
+        // A Teams call rings: answered here, not in Slack.
+        if workspace.info.offers(crate::model::Ability::Calls) {
+            let (title, body) = crate::huddles::call_text(&workspace.user_label(from));
+            return Some(Note {
+                team: team.to_owned(),
+                channel: channel.to_owned(),
+                title,
+                body,
+                sound: settings.sound,
+                link: None,
+            });
+        }
         let place = workspace
             .conversation(channel)
             .filter(|c| !c.kind.is_dm())
-            .map(|c| format!("#{}", workspace.title(c)));
+            .map(|c| workspace.named_place(c));
         let (title, body) =
             crate::huddles::invite_text(&workspace.user_label(from), place.as_deref());
         Some(Note {
@@ -607,6 +618,7 @@ mod tests {
     #[test]
     fn unread_adds_up_every_workspace() {
         let mut one = WorkspaceState::new(crate::model::Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "One".into(),
             domain: String::new(),
@@ -659,6 +671,7 @@ mod tests {
     #[test]
     fn muted_conversations_are_unread_only_for_mentions() {
         let mut w = WorkspaceState::new(crate::model::Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "One".into(),
             domain: String::new(),
@@ -695,6 +708,7 @@ mod tests {
     #[test]
     fn notifications_name_user_groups_even_without_a_label() {
         let mut w = WorkspaceState::new(crate::model::Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "One".into(),
             domain: String::new(),

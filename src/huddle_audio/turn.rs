@@ -215,6 +215,9 @@ pub mod attr {
     pub const XOR_MAPPED_ADDRESS: u16 = 0x0020;
     /// The sender's software; not sent.
     pub const SOFTWARE: u16 = 0x8022;
+    /// Where to allocate instead (with a 300 Try Alternate), written as a
+    /// plain address, not XORed.
+    pub const ALTERNATE_SERVER: u16 = 0x8023;
     /// A CRC of the message; not sent.
     pub const FINGERPRINT: u16 = 0x8028;
 }
@@ -455,6 +458,24 @@ pub fn read_xor_address(value: &[u8], transaction: &TransactionId) -> Option<Soc
     Some(SocketAddr::new(ip, port))
 }
 
+/// An address as STUN writes one unXORed (`ALTERNATE-SERVER`): a zero, the
+/// family (1 IPv4, 2 IPv6), the port, the address.
+pub fn read_plain_address(value: &[u8]) -> Option<SocketAddr> {
+    let port = u16::from_be_bytes([*value.get(2)?, *value.get(3)?]);
+    let ip = match value.get(1)? {
+        1 => {
+            let b: [u8; 4] = value.get(4..8)?.try_into().ok()?;
+            IpAddr::from(b)
+        }
+        2 => {
+            let b: [u8; 16] = value.get(4..20)?.try_into().ok()?;
+            IpAddr::from(b)
+        }
+        _ => return None,
+    };
+    Some(SocketAddr::new(ip, port))
+}
+
 /// An ERROR-CODE value's code and reason.
 pub fn read_error(value: &[u8]) -> Option<(u16, String)> {
     if value.len() < 4 {
@@ -558,6 +579,8 @@ pub struct Client {
     password: String,
     realm: Option<String>,
     nonce: Option<Vec<u8>>,
+    /// Where the server sent us instead, with a 300 Try Alternate.
+    alternate: Option<SocketAddr>,
     key: Option<[u8; 16]>,
     state: State,
     relayed: Option<SocketAddr>,
@@ -607,6 +630,7 @@ impl Client {
             username: username.to_owned(),
             password: password.to_owned(),
             realm: None,
+            alternate: None,
             nonce: None,
             key: None,
             state: State::Idle,
@@ -821,7 +845,18 @@ impl Client {
                 return;
             }
         }
+        if code == 300 && pending.purpose == Purpose::Allocate {
+            self.alternate = message
+                .get(attr::ALTERNATE_SERVER)
+                .and_then(read_plain_address);
+        }
         self.refused(&pending.purpose, code, &reason);
+    }
+
+    /// The server a 300 Try Alternate sent us to, if one did: the
+    /// allocation failed here and should be asked for there.
+    pub fn alternate(&self) -> Option<SocketAddr> {
+        self.alternate
     }
 
     fn request(&mut self, purpose: Purpose, now: Instant) {
@@ -1155,6 +1190,36 @@ mod tests {
             n += 1;
             [n; 12]
         })
+    }
+
+    #[test]
+    fn a_try_alternate_names_the_server_to_ask_instead() {
+        let now = Instant::now();
+        let mut client = Client::with_transactions(Transport::Udp, "user", "pass", counter());
+        client.allocate(now);
+        let first = client.poll_transmit().expect("an Allocate");
+        let mut error = vec![0, 0, 3, 0];
+        error.extend_from_slice(b"Try Alternate");
+        client.handle_input(
+            &answer(
+                &first,
+                Class::Error,
+                vec![
+                    (attr::ERROR_CODE, error),
+                    (
+                        attr::ALTERNATE_SERVER,
+                        vec![0, 1, 0x0d, 0x96, 203, 0, 113, 9],
+                    ),
+                ],
+                None,
+            ),
+            now,
+        );
+        assert_eq!(
+            client.alternate(),
+            Some("203.0.113.9:3478".parse().expect("an address"))
+        );
+        assert!(matches!(client.poll_event(), Some(Event::Failed(_))));
     }
 
     #[test]

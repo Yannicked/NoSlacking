@@ -353,6 +353,17 @@ impl CameraDecoding {
         self.jobs.1.notify_one();
     }
 
+    /// How many of camera `key`'s frames wait to be decoded: a sender
+    /// whose frames come in bursts holds the rest back while this is
+    /// high, rather than overflow the queue (which costs a keyframe).
+    pub fn waiting(&self, key: &str) -> usize {
+        self.queue()
+            .jobs
+            .iter()
+            .filter(|job| matches!(job, Job::Frame { key: k, .. } if k == key))
+            .count()
+    }
+
     /// The next frame of camera `key`; `contiguous` false when frames
     /// before it were lost.
     pub fn push(&mut self, key: &str, unit: Vec<u8>, contiguous: bool) {

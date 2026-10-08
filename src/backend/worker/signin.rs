@@ -10,8 +10,10 @@ use super::{BROWSER_SIGN_IN_WINDOW, Internal, Worker};
 use crate::auth::{self, Flow, SignedIn};
 use crate::backend::api::failure;
 use crate::backend::{Event, SignIn};
-use crate::credentials::AppCredentials;
+use crate::credentials::{AppCredentials, Credentials};
 use crate::failure::{Doing, Failure, Problem};
+#[cfg(feature = "teams")]
+use crate::model::Workspace;
 use crate::scopes::Request;
 use crate::settings::Redirect;
 use crate::slack::magic::TeamResult;
@@ -32,7 +34,7 @@ impl Worker {
         // their token and refresh lock, which every clone shares, so a
         // refresh in flight cannot race a second one.
         let oauth = app.oauth();
-        for team in self.teams.values() {
+        for (_, team) in self.slack_teams() {
             team.client.set_app(oauth.clone());
         }
         self.app = Some(app);
@@ -271,7 +273,7 @@ impl Worker {
             } else if let Some(link) = crate::links::parse_deep(&url).filter(|link| {
                 link.team
                     .as_ref()
-                    .is_some_and(|t| self.teams.contains_key(t))
+                    .is_some_and(|t| self.workspaces.contains_key(t))
             }) {
                 // A link to a conversation of a workspace signed in here.
                 self.sink.send(Event::DeepLink(link));
@@ -333,13 +335,55 @@ impl Worker {
 
     pub(super) fn sign_out(&mut self, team: &str) {
         self.huddle_audio.signed_out(team);
+        #[cfg(feature = "teams")]
+        self.teams_call.signed_out(team);
         self.stop_rtm(team);
         self.people.forget(team);
-        if let Some(removed) = self.teams.remove(team) {
-            // Before SignedOut goes out: nothing from a task still running
-            // for this workspace can follow it and bring the workspace back.
+        let removed = self.workspaces.remove(team);
+        // Before SignedOut goes out: nothing from a task still running for
+        // this workspace can follow it and bring the workspace back.
+        if let Some(removed) = &removed {
             removed.shut();
-            let credentials = self.credentials.clone();
+        }
+        match removed {
+            Some(super::Backend::Slack(removed)) => {
+                Self::forget_slack(&self.credentials, team, removed);
+            }
+            #[cfg(feature = "teams")]
+            Some(super::Backend::Teams(removed)) => {
+                removed.client.stop_reporting();
+                let credentials = self.credentials.clone();
+                let team = team.to_owned();
+                tokio::spawn(async move {
+                    if let Err(error) = credentials.delete_teams_token(&team).await {
+                        log::warn!("could not delete the Teams token: {error}");
+                    }
+                });
+            }
+            None => {}
+        }
+        self.images.remove_client(team);
+        // Nothing read in the workspace stays on disk after signing out.
+        self.cache.wipe(team);
+        self.remove_plain_cache(team);
+        // A later sign-in to the same workspace fetches everyone afresh.
+        self.users_requested.retain(|(t, _)| t != team);
+        self.bots_requested.retain(|(t, _)| t != team);
+        self.sink.send(Event::SignedOut {
+            team: team.to_owned(),
+            reason: None,
+        });
+        if self.slack_teams().next().is_none() {
+            self.restart_socket();
+        }
+        self.report_socket();
+    }
+
+    /// Deletes a Slack sign-in from the keyring, and revokes it when it is
+    /// the app's own.
+    fn forget_slack(credentials: &Credentials, team: &str, removed: super::Team) {
+        {
+            let credentials = credentials.clone();
             let team = team.to_owned();
             // A session token belongs to the browser login; revoking it would
             // sign the browser out too, so only OAuth tokens are revoked.
@@ -361,21 +405,58 @@ impl Worker {
                 }
             });
         }
-        self.images.remove_client(team);
-        // Nothing read in the workspace stays on disk after signing out.
-        self.cache.wipe(team);
-        self.remove_plain_cache(team);
-        // A later sign-in to the same workspace fetches everyone afresh.
-        self.users_requested.retain(|(t, _)| t != team);
-        self.bots_requested.retain(|(t, _)| t != team);
-        self.sink.send(Event::SignedOut {
-            team: team.to_owned(),
-            reason: None,
+    }
+
+    /// Starts signing in to Microsoft Teams with a device code (see
+    /// [`super::super::teams::sign_in`]); the answer comes back through
+    /// `Internal::TeamsSignedIn`.
+    #[cfg(feature = "teams")]
+    pub(super) fn start_teams_sign_in(&mut self, tenant: Option<String>, personal: bool) {
+        let account = if personal {
+            crate::teams::auth::Account::Personal
+        } else {
+            crate::teams::auth::Account::Work
+        };
+        let sink = self.sink.clone();
+        let internal = self.internal.clone();
+        tokio::spawn(async move {
+            let result = super::super::teams::sign_in(account, tenant, sink).await;
+            let _ = internal.send(Internal::TeamsSignedIn(result));
         });
-        if self.teams.is_empty() {
-            self.restart_socket();
-        }
-        self.report_socket();
+    }
+
+    /// Without Teams in the build there is nothing to sign in to.
+    #[cfg(not(feature = "teams"))]
+    pub(super) fn start_teams_sign_in(&mut self, _tenant: Option<String>, _personal: bool) {
+        self.sink
+            .send(Event::SignIn(SignIn::Failed(Failure::Unsupported)));
+    }
+
+    /// Saves and starts a Teams workspace once its sign-in went through.
+    #[cfg(feature = "teams")]
+    pub(super) fn teams_signed_in(
+        &mut self,
+        result: Result<(Workspace, crate::teams::auth::TeamsCredentials), Failure>,
+    ) {
+        let (workspace, creds) = match result {
+            Ok(signed_in) => signed_in,
+            Err(error) => {
+                log::warn!("Teams sign-in failed: {error:?}");
+                self.sink.send(Event::SignIn(SignIn::Failed(error)));
+                return;
+            }
+        };
+        let credentials = self.credentials.clone();
+        let team = workspace.team_id.clone();
+        let saved = creds.clone();
+        tokio::spawn(async move {
+            if let Err(error) = credentials.save_teams_token(&team, &saved).await {
+                log::warn!("could not store the Teams token: {error}");
+            }
+        });
+        let name = workspace.name.clone();
+        self.add_teams(workspace, creds);
+        self.sink.send(Event::SignIn(SignIn::Done(name)));
     }
 }
 

@@ -1,0 +1,491 @@
+v=0
+o=- 1234567890 1 IN IP4 203.0.113.10
+s=session
+c=IN IP4 203.0.113.13
+b=CT:10000000
+t=0 0
+a=group:BUNDLE 1 2 5 6 7 8 9 10 11 12 13 3 4
+a=x-plaza-msi-range:1000-1100
+a=x-mediabw:main-video send=8100;recv=8100
+a=x-mediabw:applicationsharing-video send=8100;recv=8100
+m=audio 3478 RTP/SAVP 96 113 109 108 104 102 9 103 111 18 0 8 97 101 13 118 120
+c=IN IP4 203.0.113.13
+a=x-signaling-fb:* x-message app send:dsh
+a=x-source-streamid:414
+a=rtcp:3478
+a=setup:passive
+a=ice-ufrag:UfrB
+a=ice-pwd:pwdBpwdBpwdBpwdBpwdBpwdB
+a=rtcp-mux
+a=candidate:1 1 UDP 1849163775 203.0.113.13 3478 typ prflx raddr 203.0.113.14 rport 3478 MTURNID 1001
+a=remote-candidates:1 198.51.100.7 53465 2 198.51.100.7 53465
+a=label:main-audio
+a=mid:1
+a=rtpmap:96 x-much3/48000/2
+a=rtpmap:113 x-much2/48000/2
+a=rtpmap:109 SATINFB/48000/2
+a=rtpmap:108 SATIN/48000
+a=rtpmap:104 SILK/16000
+a=rtpmap:102 OPUS/48000/2
+a=rtpmap:9 G722/8000
+a=rtpmap:103 SILK/8000
+a=rtpmap:111 SIREN/16000
+a=fmtp:111 bitrate=16000
+a=rtpmap:18 G729/8000
+a=fmtp:18 annexb=no
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:97 RED/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+a=rtpmap:13 CN/8000
+a=rtpmap:118 CN/16000
+a=rtpmap:120 CN/48000
+a=ptime:20
+a=fingerprint:sha-256 04:2F:37:36:A4:30:E4:2A:FC:99:D9:C5:F5:C3:46:DB:D4:AA:AF:85:60:AC:C0:60:7C:02:97:34:49:AC:58:75
+a=extmap:1 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+a=extmap:5 http:\\www.ietf.org\id\draft-holmer-rmcat-transport-wide-cc-extensions-01
+a=x-ssrc-range:2201-2201
+m=video 3478 RTP/SAVP 122 107 114 123 99
+c=IN IP4 203.0.113.13
+b=AS:2400
+a=rtcp-rsize
+a=rtcp-fb:* x-message app
+a=rtcp-fb:* nack
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* goog-remb
+a=rtcp-fb:* ccm fir
+a=rtcp-fb:* transport-cc
+a=x-signaling-fb:* x-message app send:src,csrc,vc recv:src
+a=ssrc-group:FID 2202 2252
+a=x-source-streamid:415
+a=rtcp:3478
+a=setup:passive
+a=ice-ufrag:UfrB
+a=ice-pwd:pwdBpwdBpwdBpwdBpwdBpwdB
+a=rtcp-mux
+a=label:main-video
+a=mid:2
+a=rtpmap:122 x-h264uc/90000
+a=fmtp:122 packetization-mode=1;mst-mode=NI-TC
+a=rtpmap:107 H264/90000
+a=fmtp:107 max-mbps=3600;max-fps=1500;profile-level-id=42C02A;max-br=208;packetization-mode=1;max-fs=240
+a=rtpmap:114 H265v2/90000
+a=fmtp:114 profile-level-id=01C099;packetization-mode=1;max-mbps=108000;max-fs=3600;max-br=2000;max-fps=3000
+a=rtpmap:123 x-ulpfecuc/90000
+a=rtpmap:99 rtx/90000
+a=fmtp:99 apt=107
+a=ptime:20
+a=fingerprint:sha-256 04:2F:37:36:A4:30:E4:2A:FC:99:D9:C5:F5:C3:46:DB:D4:AA:AF:85:60:AC:C0:60:7C:02:97:34:49:AC:58:75
+a=extmap:1 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+a=extmap:5 http:\\www.ietf.org\id\draft-holmer-rmcat-transport-wide-cc-extensions-01
+a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid
+a=extmap:8 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id
+a=extmap:9 urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id
+a=extmap:11 http:\\www.webrtc.org\experiments\rtp-hdrext\video-layers-allocation00-non-advertised
+a=x-ssrc-range:2202-2301
+m=video 3478 RTP/SAVP 122 107 114 123 99
+c=IN IP4 203.0.113.13
+b=AS:2400
+a=rtcp-rsize
+a=rtcp-fb:* x-message app
+a=rtcp-fb:* nack
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* goog-remb
+a=rtcp-fb:* ccm fir
+a=rtcp-fb:* transport-cc
+a=x-signaling-fb:* x-message app send:src,csrc,vc recv:src
+a=ssrc-group:FID 2302 2352
+a=x-source-streamid:416
+a=rtcp:3478
+a=setup:passive
+a=ice-ufrag:UfrB
+a=ice-pwd:pwdBpwdBpwdBpwdBpwdBpwdB
+a=rtcp-mux
+a=label:main-video
+a=mid:5
+a=rtpmap:122 x-h264uc/90000
+a=fmtp:122 packetization-mode=1;mst-mode=NI-TC
+a=rtpmap:107 H264/90000
+a=fmtp:107 max-mbps=3600;max-fps=1500;profile-level-id=42C02A;max-br=208;packetization-mode=1;max-fs=240
+a=rtpmap:114 H265v2/90000
+a=fmtp:114 profile-level-id=01C099;packetization-mode=1;max-mbps=108000;max-fs=3600;max-br=2000;max-fps=3000
+a=rtpmap:123 x-ulpfecuc/90000
+a=rtpmap:99 rtx/90000
+a=fmtp:99 apt=107
+a=ptime:20
+a=fingerprint:sha-256 04:2F:37:36:A4:30:E4:2A:FC:99:D9:C5:F5:C3:46:DB:D4:AA:AF:85:60:AC:C0:60:7C:02:97:34:49:AC:58:75
+a=extmap:1 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+a=extmap:5 http:\\www.ietf.org\id\draft-holmer-rmcat-transport-wide-cc-extensions-01
+a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid
+a=extmap:8 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id
+a=extmap:9 urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id
+a=extmap:11 http:\\www.webrtc.org\experiments\rtp-hdrext\video-layers-allocation00-non-advertised
+a=x-ssrc-range:2302-2401
+m=video 3478 RTP/SAVP 122 107 114 123 99
+c=IN IP4 203.0.113.13
+b=AS:2400
+a=rtcp-rsize
+a=rtcp-fb:* x-message app
+a=rtcp-fb:* nack
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* goog-remb
+a=rtcp-fb:* ccm fir
+a=rtcp-fb:* transport-cc
+a=x-signaling-fb:* x-message app send:src,csrc,vc recv:src
+a=ssrc-group:FID 2402 2452
+a=x-source-streamid:417
+a=rtcp:3478
+a=setup:passive
+a=ice-ufrag:UfrB
+a=ice-pwd:pwdBpwdBpwdBpwdBpwdBpwdB
+a=rtcp-mux
+a=label:main-video
+a=mid:6
+a=rtpmap:122 x-h264uc/90000
+a=fmtp:122 packetization-mode=1;mst-mode=NI-TC
+a=rtpmap:107 H264/90000
+a=fmtp:107 max-mbps=3600;max-fps=1500;profile-level-id=42C02A;max-br=208;packetization-mode=1;max-fs=240
+a=rtpmap:114 H265v2/90000
+a=fmtp:114 profile-level-id=01C099;packetization-mode=1;max-mbps=108000;max-fs=3600;max-br=2000;max-fps=3000
+a=rtpmap:123 x-ulpfecuc/90000
+a=rtpmap:99 rtx/90000
+a=fmtp:99 apt=107
+a=ptime:20
+a=fingerprint:sha-256 04:2F:37:36:A4:30:E4:2A:FC:99:D9:C5:F5:C3:46:DB:D4:AA:AF:85:60:AC:C0:60:7C:02:97:34:49:AC:58:75
+a=extmap:1 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+a=extmap:5 http:\\www.ietf.org\id\draft-holmer-rmcat-transport-wide-cc-extensions-01
+a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid
+a=extmap:8 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id
+a=extmap:9 urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id
+a=extmap:11 http:\\www.webrtc.org\experiments\rtp-hdrext\video-layers-allocation00-non-advertised
+a=x-ssrc-range:2402-2501
+m=video 3478 RTP/SAVP 122 107 114 123 99
+c=IN IP4 203.0.113.13
+b=AS:2400
+a=rtcp-rsize
+a=rtcp-fb:* x-message app
+a=rtcp-fb:* nack
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* goog-remb
+a=rtcp-fb:* ccm fir
+a=rtcp-fb:* transport-cc
+a=x-signaling-fb:* x-message app send:src,csrc,vc recv:src
+a=ssrc-group:FID 2502 2552
+a=x-source-streamid:418
+a=rtcp:3478
+a=setup:passive
+a=ice-ufrag:UfrB
+a=ice-pwd:pwdBpwdBpwdBpwdBpwdBpwdB
+a=rtcp-mux
+a=label:main-video
+a=mid:7
+a=rtpmap:122 x-h264uc/90000
+a=fmtp:122 packetization-mode=1;mst-mode=NI-TC
+a=rtpmap:107 H264/90000
+a=fmtp:107 max-mbps=3600;max-fps=1500;profile-level-id=42C02A;max-br=208;packetization-mode=1;max-fs=240
+a=rtpmap:114 H265v2/90000
+a=fmtp:114 profile-level-id=01C099;packetization-mode=1;max-mbps=108000;max-fs=3600;max-br=2000;max-fps=3000
+a=rtpmap:123 x-ulpfecuc/90000
+a=rtpmap:99 rtx/90000
+a=fmtp:99 apt=107
+a=ptime:20
+a=fingerprint:sha-256 04:2F:37:36:A4:30:E4:2A:FC:99:D9:C5:F5:C3:46:DB:D4:AA:AF:85:60:AC:C0:60:7C:02:97:34:49:AC:58:75
+a=extmap:1 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+a=extmap:5 http:\\www.ietf.org\id\draft-holmer-rmcat-transport-wide-cc-extensions-01
+a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid
+a=extmap:8 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id
+a=extmap:9 urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id
+a=extmap:11 http:\\www.webrtc.org\experiments\rtp-hdrext\video-layers-allocation00-non-advertised
+a=x-ssrc-range:2502-2601
+m=video 3478 RTP/SAVP 122 107 114 123 99
+c=IN IP4 203.0.113.13
+b=AS:2400
+a=rtcp-rsize
+a=rtcp-fb:* x-message app
+a=rtcp-fb:* nack
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* goog-remb
+a=rtcp-fb:* ccm fir
+a=rtcp-fb:* transport-cc
+a=x-signaling-fb:* x-message app send:src,csrc,vc recv:src
+a=ssrc-group:FID 2602 2652
+a=x-source-streamid:419
+a=rtcp:3478
+a=setup:passive
+a=ice-ufrag:UfrB
+a=ice-pwd:pwdBpwdBpwdBpwdBpwdBpwdB
+a=rtcp-mux
+a=label:main-video
+a=mid:8
+a=rtpmap:122 x-h264uc/90000
+a=fmtp:122 packetization-mode=1;mst-mode=NI-TC
+a=rtpmap:107 H264/90000
+a=fmtp:107 max-mbps=3600;max-fps=1500;profile-level-id=42C02A;max-br=208;packetization-mode=1;max-fs=240
+a=rtpmap:114 H265v2/90000
+a=fmtp:114 profile-level-id=01C099;packetization-mode=1;max-mbps=108000;max-fs=3600;max-br=2000;max-fps=3000
+a=rtpmap:123 x-ulpfecuc/90000
+a=rtpmap:99 rtx/90000
+a=fmtp:99 apt=107
+a=ptime:20
+a=fingerprint:sha-256 04:2F:37:36:A4:30:E4:2A:FC:99:D9:C5:F5:C3:46:DB:D4:AA:AF:85:60:AC:C0:60:7C:02:97:34:49:AC:58:75
+a=extmap:1 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+a=extmap:5 http:\\www.ietf.org\id\draft-holmer-rmcat-transport-wide-cc-extensions-01
+a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid
+a=extmap:8 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id
+a=extmap:9 urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id
+a=extmap:11 http:\\www.webrtc.org\experiments\rtp-hdrext\video-layers-allocation00-non-advertised
+a=x-ssrc-range:2602-2701
+m=video 3478 RTP/SAVP 122 107 114 123 99
+c=IN IP4 203.0.113.13
+b=AS:2400
+a=rtcp-rsize
+a=rtcp-fb:* x-message app
+a=rtcp-fb:* nack
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* goog-remb
+a=rtcp-fb:* ccm fir
+a=rtcp-fb:* transport-cc
+a=x-signaling-fb:* x-message app send:src,csrc,vc recv:src
+a=ssrc-group:FID 2702 2752
+a=x-source-streamid:420
+a=rtcp:3478
+a=setup:passive
+a=ice-ufrag:UfrB
+a=ice-pwd:pwdBpwdBpwdBpwdBpwdBpwdB
+a=rtcp-mux
+a=label:main-video
+a=mid:9
+a=rtpmap:122 x-h264uc/90000
+a=fmtp:122 packetization-mode=1;mst-mode=NI-TC
+a=rtpmap:107 H264/90000
+a=fmtp:107 max-mbps=3600;max-fps=1500;profile-level-id=42C02A;max-br=208;packetization-mode=1;max-fs=240
+a=rtpmap:114 H265v2/90000
+a=fmtp:114 profile-level-id=01C099;packetization-mode=1;max-mbps=108000;max-fs=3600;max-br=2000;max-fps=3000
+a=rtpmap:123 x-ulpfecuc/90000
+a=rtpmap:99 rtx/90000
+a=fmtp:99 apt=107
+a=ptime:20
+a=fingerprint:sha-256 04:2F:37:36:A4:30:E4:2A:FC:99:D9:C5:F5:C3:46:DB:D4:AA:AF:85:60:AC:C0:60:7C:02:97:34:49:AC:58:75
+a=extmap:1 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+a=extmap:5 http:\\www.ietf.org\id\draft-holmer-rmcat-transport-wide-cc-extensions-01
+a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid
+a=extmap:8 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id
+a=extmap:9 urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id
+a=extmap:11 http:\\www.webrtc.org\experiments\rtp-hdrext\video-layers-allocation00-non-advertised
+a=x-ssrc-range:2702-2801
+m=video 3478 RTP/SAVP 122 107 114 123 99
+c=IN IP4 203.0.113.13
+b=AS:2400
+a=rtcp-rsize
+a=rtcp-fb:* x-message app
+a=rtcp-fb:* nack
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* goog-remb
+a=rtcp-fb:* ccm fir
+a=rtcp-fb:* transport-cc
+a=x-signaling-fb:* x-message app send:src,csrc,vc recv:src
+a=ssrc-group:FID 2802 2852
+a=x-source-streamid:421
+a=rtcp:3478
+a=setup:passive
+a=ice-ufrag:UfrB
+a=ice-pwd:pwdBpwdBpwdBpwdBpwdBpwdB
+a=rtcp-mux
+a=label:main-video
+a=mid:10
+a=sendonly
+a=rtpmap:122 x-h264uc/90000
+a=fmtp:122 packetization-mode=1;mst-mode=NI-TC
+a=rtpmap:107 H264/90000
+a=fmtp:107 max-mbps=3600;max-fps=1500;profile-level-id=42C02A;max-br=208;packetization-mode=1;max-fs=240
+a=rtpmap:114 H265v2/90000
+a=fmtp:114 profile-level-id=01C099;packetization-mode=1;max-mbps=108000;max-fs=3600;max-br=2000;max-fps=3000
+a=rtpmap:123 x-ulpfecuc/90000
+a=rtpmap:99 rtx/90000
+a=fmtp:99 apt=107
+a=ptime:20
+a=fingerprint:sha-256 04:2F:37:36:A4:30:E4:2A:FC:99:D9:C5:F5:C3:46:DB:D4:AA:AF:85:60:AC:C0:60:7C:02:97:34:49:AC:58:75
+a=extmap:1 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+a=extmap:5 http:\\www.ietf.org\id\draft-holmer-rmcat-transport-wide-cc-extensions-01
+a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid
+a=extmap:8 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id
+a=extmap:9 urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id
+a=extmap:11 http:\\www.webrtc.org\experiments\rtp-hdrext\video-layers-allocation00-non-advertised
+a=x-ssrc-range:2802-2901
+m=video 3478 RTP/SAVP 122 107 114 123 99
+c=IN IP4 203.0.113.13
+b=AS:2400
+a=rtcp-rsize
+a=rtcp-fb:* x-message app
+a=rtcp-fb:* nack
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* goog-remb
+a=rtcp-fb:* ccm fir
+a=rtcp-fb:* transport-cc
+a=x-signaling-fb:* x-message app send:src,csrc,vc recv:src
+a=ssrc-group:FID 2902 2952
+a=x-source-streamid:422
+a=rtcp:3478
+a=setup:passive
+a=ice-ufrag:UfrB
+a=ice-pwd:pwdBpwdBpwdBpwdBpwdBpwdB
+a=rtcp-mux
+a=label:main-video
+a=mid:11
+a=sendonly
+a=rtpmap:122 x-h264uc/90000
+a=fmtp:122 packetization-mode=1;mst-mode=NI-TC
+a=rtpmap:107 H264/90000
+a=fmtp:107 max-mbps=3600;max-fps=1500;profile-level-id=42C02A;max-br=208;packetization-mode=1;max-fs=240
+a=rtpmap:114 H265v2/90000
+a=fmtp:114 profile-level-id=01C099;packetization-mode=1;max-mbps=108000;max-fs=3600;max-br=2000;max-fps=3000
+a=rtpmap:123 x-ulpfecuc/90000
+a=rtpmap:99 rtx/90000
+a=fmtp:99 apt=107
+a=ptime:20
+a=fingerprint:sha-256 04:2F:37:36:A4:30:E4:2A:FC:99:D9:C5:F5:C3:46:DB:D4:AA:AF:85:60:AC:C0:60:7C:02:97:34:49:AC:58:75
+a=extmap:1 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+a=extmap:5 http:\\www.ietf.org\id\draft-holmer-rmcat-transport-wide-cc-extensions-01
+a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid
+a=extmap:8 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id
+a=extmap:9 urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id
+a=extmap:11 http:\\www.webrtc.org\experiments\rtp-hdrext\video-layers-allocation00-non-advertised
+a=x-ssrc-range:2902-3001
+m=video 3478 RTP/SAVP 122 107 114 123 99
+c=IN IP4 203.0.113.13
+b=AS:2400
+a=rtcp-rsize
+a=rtcp-fb:* x-message app
+a=rtcp-fb:* nack
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* goog-remb
+a=rtcp-fb:* ccm fir
+a=rtcp-fb:* transport-cc
+a=x-signaling-fb:* x-message app send:src,csrc,vc recv:src
+a=ssrc-group:FID 3002 3052
+a=x-source-streamid:423
+a=rtcp:3478
+a=setup:passive
+a=ice-ufrag:UfrB
+a=ice-pwd:pwdBpwdBpwdBpwdBpwdBpwdB
+a=rtcp-mux
+a=label:main-video
+a=mid:12
+a=sendonly
+a=rtpmap:122 x-h264uc/90000
+a=fmtp:122 packetization-mode=1;mst-mode=NI-TC
+a=rtpmap:107 H264/90000
+a=fmtp:107 max-mbps=3600;max-fps=1500;profile-level-id=42C02A;max-br=208;packetization-mode=1;max-fs=240
+a=rtpmap:114 H265v2/90000
+a=fmtp:114 profile-level-id=01C099;packetization-mode=1;max-mbps=108000;max-fs=3600;max-br=2000;max-fps=3000
+a=rtpmap:123 x-ulpfecuc/90000
+a=rtpmap:99 rtx/90000
+a=fmtp:99 apt=107
+a=ptime:20
+a=fingerprint:sha-256 04:2F:37:36:A4:30:E4:2A:FC:99:D9:C5:F5:C3:46:DB:D4:AA:AF:85:60:AC:C0:60:7C:02:97:34:49:AC:58:75
+a=extmap:1 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+a=extmap:5 http:\\www.ietf.org\id\draft-holmer-rmcat-transport-wide-cc-extensions-01
+a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid
+a=extmap:8 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id
+a=extmap:9 urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id
+a=extmap:11 http:\\www.webrtc.org\experiments\rtp-hdrext\video-layers-allocation00-non-advertised
+a=x-ssrc-range:3002-3101
+m=video 3478 RTP/SAVP 122 107 114 123 99
+c=IN IP4 203.0.113.13
+b=AS:2400
+a=rtcp-rsize
+a=rtcp-fb:* x-message app
+a=rtcp-fb:* nack
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* goog-remb
+a=rtcp-fb:* ccm fir
+a=rtcp-fb:* transport-cc
+a=x-signaling-fb:* x-message app send:src,csrc,vc recv:src
+a=ssrc-group:FID 3102 3152
+a=x-source-streamid:424
+a=rtcp:3478
+a=setup:passive
+a=ice-ufrag:UfrB
+a=ice-pwd:pwdBpwdBpwdBpwdBpwdBpwdB
+a=rtcp-mux
+a=label:main-video
+a=mid:13
+a=sendonly
+a=rtpmap:122 x-h264uc/90000
+a=fmtp:122 packetization-mode=1;mst-mode=NI-TC
+a=rtpmap:107 H264/90000
+a=fmtp:107 max-mbps=3600;max-fps=1500;profile-level-id=42C02A;max-br=208;packetization-mode=1;max-fs=240
+a=rtpmap:114 H265v2/90000
+a=fmtp:114 profile-level-id=01C099;packetization-mode=1;max-mbps=108000;max-fs=3600;max-br=2000;max-fps=3000
+a=rtpmap:123 x-ulpfecuc/90000
+a=rtpmap:99 rtx/90000
+a=fmtp:99 apt=107
+a=ptime:20
+a=fingerprint:sha-256 04:2F:37:36:A4:30:E4:2A:FC:99:D9:C5:F5:C3:46:DB:D4:AA:AF:85:60:AC:C0:60:7C:02:97:34:49:AC:58:75
+a=extmap:1 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+a=extmap:5 http:\\www.ietf.org\id\draft-holmer-rmcat-transport-wide-cc-extensions-01
+a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid
+a=extmap:8 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id
+a=extmap:9 urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id
+a=extmap:11 http:\\www.webrtc.org\experiments\rtp-hdrext\video-layers-allocation00-non-advertised
+a=x-ssrc-range:3102-3201
+m=video 3478 RTP/SAVP 122 107 116 114 123 99 101
+c=IN IP4 203.0.113.13
+b=AS:4000
+a=rtcp-rsize
+a=rtcp-fb:* x-message app
+a=rtcp-fb:* nack
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* goog-remb
+a=rtcp-fb:* ccm fir
+a=rtcp-fb:* transport-cc
+a=x-signaling-fb:* x-message app send:src,csrc,vc recv:src
+a=ssrc-group:FID 23102 23152
+a=x-source-streamid:425
+a=rtcp:3478
+a=setup:passive
+a=ice-ufrag:UfrB
+a=ice-pwd:pwdBpwdBpwdBpwdBpwdBpwdB
+a=rtcp-mux
+a=label:applicationsharing-video
+a=mid:3
+a=rtpmap:122 x-h264uc/90000
+a=fmtp:122 packetization-mode=1;mst-mode=NI-TC
+a=rtpmap:107 H264/90000
+a=fmtp:107 max-mbps=30600;max-fps=375;profile-level-id=42C02A;max-br=3333;packetization-mode=1;max-fs=8160
+a=rtpmap:116 AV1/90000
+a=fmtp:116 profile=0;level-idx=4;tier=0
+a=rtpmap:114 H265v2/90000
+a=fmtp:114 profile-level-id=01C099;packetization-mode=1;max-mbps=108000;max-fs=3600;max-br=2000;max-fps=3000
+a=rtpmap:123 x-ulpfecuc/90000
+a=rtpmap:99 rtx/90000
+a=fmtp:99 apt=107
+a=rtpmap:101 rtx/90000
+a=fmtp:101 apt=116
+a=ptime:20
+a=fingerprint:sha-256 04:2F:37:36:A4:30:E4:2A:FC:99:D9:C5:F5:C3:46:DB:D4:AA:AF:85:60:AC:C0:60:7C:02:97:34:49:AC:58:75
+a=extmap:1 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+a=extmap:5 http:\\www.ietf.org\id\draft-holmer-rmcat-transport-wide-cc-extensions-01
+a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid
+a=extmap:8 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id
+a=extmap:9 urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id
+a=extmap:11 http:\\www.webrtc.org\experiments\rtp-hdrext\video-layers-allocation00-non-advertised
+a=x-ssrc-range:23102-23201
+m=x-data 3478 RTP/SAVP 127 126
+c=IN IP4 203.0.113.13
+a=ssrc-group:FID 24102 24152
+a=x-source-streamid:426
+a=rtcp:3478
+a=setup:passive
+a=ice-ufrag:UfrB
+a=ice-pwd:pwdBpwdBpwdBpwdBpwdBpwdB
+a=rtcp-mux
+a=label:data
+a=mid:4
+a=rtpmap:127 x-data/90000
+a=rtpmap:126 rtx/90000
+a=fmtp:126 apt=127
+a=fingerprint:sha-256 04:2F:37:36:A4:30:E4:2A:FC:99:D9:C5:F5:C3:46:DB:D4:AA:AF:85:60:AC:C0:60:7C:02:97:34:49:AC:58:75
+a=x-ssrc-range:24102-24201
+a=x-data-protocol:sctp

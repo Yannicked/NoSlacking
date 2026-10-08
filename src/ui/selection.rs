@@ -16,7 +16,7 @@
 use egui::{Event, Key, Modifiers};
 
 use crate::app::{App, Selected, WorkspaceState};
-use crate::model::{Action, Delivery, Message};
+use crate::model::{Ability, Action, Delivery, Message};
 
 pub fn keys(app: &mut App, ctx: &egui::Context) {
     if let Some(selected) = &mut app.selected {
@@ -85,6 +85,7 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
     let mine = message.user.as_deref() == Some(workspace.info.user_id.as_str());
     let channel = selected.channel.clone();
     let ts = message.ts.clone();
+    let offers = |ability| workspace.info.offers(ability);
     let mut actions = Vec::new();
     let mut next = Some(selected.clone());
     if up || down {
@@ -100,19 +101,19 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
             None => {}
         }
     }
-    if react {
+    if react && offers(Ability::Reactions) {
         actions.push(Action::PickReaction {
             channel: channel.clone(),
             ts: ts.clone(),
         });
     }
-    if thread && !selected.in_thread {
+    if thread && !selected.in_thread && workspace.threads_in(&channel) {
         actions.push(Action::OpenThread {
             channel: channel.clone(),
             ts: message.thread_ts.clone().unwrap_or_else(|| ts.clone()),
         });
     }
-    if edit && mine {
+    if edit && mine && offers(Ability::Edit) {
         actions.push(if selected.in_thread {
             Action::StartEditInThread {
                 channel: channel.clone(),
@@ -131,7 +132,7 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
             ts: ts.clone(),
         });
     }
-    if unread && !selected.in_thread {
+    if unread && !selected.in_thread && offers(Ability::MarkUnread) {
         actions.push(Action::MarkUnread {
             channel: channel.clone(),
             ts: ts.clone(),
@@ -140,7 +141,7 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
     if copy {
         actions.push(Action::Copy(super::message::plain_text(workspace, message)));
     }
-    if share && !ts.is_local() {
+    if share && !ts.is_local() && offers(Ability::Share) {
         actions.push(Action::Share {
             channel: channel.clone(),
             ts: ts.clone(),

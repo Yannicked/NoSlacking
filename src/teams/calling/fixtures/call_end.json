@@ -1,0 +1,19 @@
+{
+  "callEnd": {
+    "reason": "noError",
+    "sender": {
+      "id": "8:live:other",
+      "displayName": "Other Example",
+      "endpointId": "00000000-0000-4000-8000-000000000006",
+      "languageId": null,
+      "participantId": "00000000-0000-4000-8000-000000000012",
+      "hidden": false,
+      "propertyBag": null
+    },
+    "code": 0,
+    "subCode": 0,
+    "phrase": "LocalUserInitiated",
+    "resultCategories": []
+  },
+  "debugContent": null
+}

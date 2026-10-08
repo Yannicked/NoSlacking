@@ -1,0 +1,62 @@
+{
+  "conversationController": "https://fp.example/api/v2/cp/conv.example/conv/ID2?i=192-0-2-1&e=1",
+  "sequenceNumber": 1,
+  "subject": "",
+  "activeModalities": {
+    "realTimeActivityFeed": {
+      "links": {}
+    }
+  },
+  "state": {
+    "isMultiParty": false,
+    "groupCallInitiator": null,
+    "isBroadcast": false,
+    "isMeetingActivated": false
+  },
+  "links": {
+    "leave": "https://fp.example/api/v2/cp/conv.example/conv/ID2/leave?i=192-0-2-1&e=1",
+    "addParticipant": "https://fp.example/api/v2/cp/conv.example/conv/ID2/addParticipant?i=192-0-2-1&e=1",
+    "removeParticipant": "https://fp.example/api/v2/cp/conv.example/conv/ID2/removeParticipant?i=192-0-2-1&e=1",
+    "addModality": "https://fp.example/api/v2/cp/conv.example/conv/ID2/addModality?i=192-0-2-1&e=1",
+    "addParticipantAndModality": "https://fp.example/api/v2/cp/conv.example/conv/ID2/add?i=192-0-2-1&e=1",
+    "removeModality": "https://fp.example/api/v2/cp/conv.example/conv/ID2/removeModality?i=192-0-2-1&e=1",
+    "mute": "https://fp.example/api/v2/cp/conv.example/conv/ID2/mute?i=192-0-2-1&e=1",
+    "unmute": "https://fp.example/api/v2/cp/conv.example/conv/ID2/unmute?i=192-0-2-1&e=1",
+    "notificationLinks": "https://fp.example/api/v2/cp/conv.example/conv/ID2/notificationLinks?i=192-0-2-1&e=1",
+    "merge": "https://fp.example/api/v2/cp/conv.example/conv/ID2/merge?i=192-0-2-1&e=1",
+    "updateEndpointMetadata": "https://fp.example/api/v2/cp/conv.example/conv/ID2/updateEndpointMetadata?i=192-0-2-1&e=1",
+    "updateEndpointState": "https://fp.example/api/v2/cp/conv.example/conv/ID2/updateEndpointState?i=192-0-2-1&e=1",
+    "admit": "https://fp.example/api/v2/cp/conv.example/conv/ID2/admit?i=192-0-2-1&e=1",
+    "subscribe": "https://fp.example/api/v2/cp/broker.example/api/v1/subscribe/00000000-0000-4000-8000-000000000005/0?i=192-0-2-1",
+    "brokerPublish": "https://fp.example/api/v2/cp/broker.example/api/v1/publish/00000000-0000-4000-8000-000000000005?i=192-0-2-1",
+    "brokerHttpTransport": "http://192.0.2.10/enc",
+    "conversationHttpTransport": "http://192.0.2.10/enc",
+    "setMeetingLayout": "https://fp.example/api/v2/cp/conv.example/conv/ID2/setMeetingLayout?i=192-0-2-1&e=1",
+    "updateParticipantProperties": "https://fp.example/api/v2/cp/conv.example/conv/ID2/updateParticipantProperties?i=192-0-2-1&e=1",
+    "reportSyntheticMedia": "https://fp.example/api/v2/cp/conv.example/conv/ID2/reportSyntheticMedia?i=192-0-2-1&e=1",
+    "publishState": "https://fp.example/api/v2/cp/conv.example/conv/ID2/publishState?i=192-0-2-1&e=1",
+    "removeState": "https://fp.example/api/v2/cp/conv.example/conv/ID2/removeState?i=192-0-2-1&e=1",
+    "updateMeetingSettings": "https://fp.example/api/v2/cp/conv.example/conv/ID2/updateMeetingSettings?i=192-0-2-1&e=1",
+    "searchParticipants": "https://fp.example/api/v2/cp/conv.example/conv/ID2/searchParticipants?i=192-0-2-1&e=1",
+    "getAllParticipants": "https://fp.example/api/v2/cp/conv.example/conv/ID2/getAllParticipants?i=192-0-2-1&e=1",
+    "admitAll": "https://fp.example/api/v2/cp/conv.example/conv/ID2/admitAll?i=192-0-2-1&e=1",
+    "updateMeetingGroups": "https://fp.example/api/v2/cp/conv.example/conv/ID2/meeting/updateMeetingGroups?i=192-0-2-1&e=1",
+    "updateParticipantMapping": "https://fp.example/api/v2/cp/conv.example/conv/ID2/updateParticipantMapping?i=192-0-2-1&e=1",
+    "joinMeetingGroup": "https://fp.example/api/v2/cp/conv.example/conv/ID2/meeting/joinMeetingGroup?i=192-0-2-1&e=1",
+    "leaveMeetingGroup": "https://fp.example/api/v2/cp/conv.example/conv/ID2/meeting/leaveMeetingGroup?i=192-0-2-1&e=1",
+    "sendMessage": "https://fp.example/api/v2/cp/conv.example/conv/ID2/sendMessage?i=192-0-2-1&e=1",
+    "updateMeetingStates": "https://fp.example/api/v2/cp/conv.example/conv/ID2/updateMeetingStates?i=192-0-2-1&e=1"
+  },
+  "callLimits": {
+    "remainingDurationInMinutes": 60,
+    "maxAllowedParticipants": 100,
+    "sponsor": "",
+    "enforcePaywallLimits": false
+  },
+  "streamingSetupFailureDebugInfo": null,
+  "layoutDetails": null,
+  "compositionServiceDetails": null,
+  "originalGroupCallInitiator": null,
+  "creatorClientVersion": null,
+  "conversationStartTime": "2026-01-01T00:00:00Z"
+}

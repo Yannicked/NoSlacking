@@ -185,6 +185,10 @@ pub struct SetupForm {
     pub session_link: String,
     /// Whether the "use your own Slack app" section is expanded.
     pub show_app: bool,
+    /// Microsoft Teams tenant domain or ID (optional).
+    pub teams_tenant: String,
+    /// Whether the Teams sign-in is for a personal account (Teams free).
+    pub teams_personal: bool,
 }
 
 /// The form holds secrets as they are typed; only the plain fields print.
@@ -194,6 +198,8 @@ impl std::fmt::Debug for SetupForm {
             .field("client_id", &self.client_id)
             .field("show_manual", &self.show_manual)
             .field("show_app", &self.show_app)
+            .field("teams_tenant", &self.teams_tenant)
+            .field("teams_personal", &self.teams_personal)
             .finish_non_exhaustive()
     }
 }
@@ -363,6 +369,8 @@ pub struct App {
     /// The "Add emoji" dialog, when open.
     pub add_emoji: Option<crate::custom_emoji::Dialog>,
     pub section_dialog: Option<SectionDialog>,
+    /// The meetings dialog, while open.
+    pub meeting_dialog: Option<crate::meetings::Dialog>,
     /// Whether the keyboard shortcut sheet is open.
     pub shortcuts: bool,
     /// The "Share message" dialog, when open.
@@ -488,6 +496,7 @@ impl App {
         let mut workspaces = Vec::new();
         for meta in &settings.workspaces {
             let mut state = WorkspaceState::new(Workspace {
+                service: meta.service,
                 team_id: meta.team_id.clone(),
                 name: meta.name.clone(),
                 domain: meta.domain.clone(),
@@ -561,6 +570,7 @@ impl App {
             confirm_delete_file: None,
             add_emoji: None,
             section_dialog: None,
+            meeting_dialog: None,
             shortcuts: false,
             share: None,
             convos: crate::convos::State::default(),
@@ -1304,6 +1314,7 @@ impl App {
             Action::SendEmoji => self.send_emoji(),
             Action::DeleteFile { file, name } => self.delete_file(file, name),
             Action::NameSection { rename, channel } => self.name_section(rename, channel),
+            Action::OpenMeetings => self.open_meetings(""),
             Action::Preview { uri, name } => {
                 let picture = crate::lightbox::Picture {
                     uri,
@@ -1440,6 +1451,11 @@ impl App {
                 self.settings_changed();
                 self.page = Page::SignIn;
                 self.start_sign_in();
+            }
+            Action::StartTeamsSignIn { tenant, personal } => {
+                self.sign_in = None;
+                self.backend
+                    .send(Command::StartTeamsSignIn { tenant, personal });
             }
             Action::CancelSignIn => {
                 self.backend.send(Command::CancelSignIn);
@@ -1720,8 +1736,28 @@ impl App {
         });
     }
 
+    /// Opens the meetings dialog for the workspace shown, with `link` in
+    /// it, if its service has meetings.
+    fn open_meetings(&mut self, link: &str) {
+        let Some(team) = self
+            .active_workspace()
+            .filter(|w| w.info.offers(crate::model::Ability::Meetings))
+            .map(|w| w.info.team_id.clone())
+        else {
+            return;
+        };
+        self.focus_overlay = true;
+        self.meeting_dialog = Some(crate::meetings::Dialog::new(&team, link));
+    }
+
     pub(crate) fn open_url(&mut self, url: &str) {
-        if crate::links::parse_web(url).is_some_and(|link| self.follow(&link)) {
+        let meetings = self
+            .active_workspace()
+            .is_some_and(|w| w.info.offers(crate::model::Ability::Meetings));
+        if meetings && crate::meetings::Meeting::parse(url, "").is_ok() {
+            // A meeting link is joined here, once asked.
+            self.open_meetings(url);
+        } else if crate::links::parse_web(url).is_some_and(|link| self.follow(&link)) {
             // A link into a signed-in workspace opens here.
         } else if !mrkdwn::is_openable(url) {
             // Attachments and blocks carry URLs a bot chose.
@@ -1944,6 +1980,7 @@ impl App {
             || self.confirm_delete_file.is_some()
             || self.add_emoji.is_some()
             || self.section_dialog.is_some()
+            || self.meeting_dialog.is_some()
             || self.shortcuts
             || self.share.is_some()
             || self.search.open

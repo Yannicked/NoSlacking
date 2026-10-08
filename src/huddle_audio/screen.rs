@@ -318,6 +318,17 @@ impl Decoding {
         self.send(Job::Start, true);
     }
 
+    /// How many frames wait to be decoded: a sender whose frames come in
+    /// bursts holds the rest back while this is high, rather than
+    /// overflow the queue (which costs a keyframe).
+    pub fn waiting(&self) -> usize {
+        self.queue()
+            .jobs
+            .iter()
+            .filter(|job| matches!(job, Job::Frame { .. }))
+            .count()
+    }
+
     /// The next frame of the watched stream; `contiguous` false when
     /// frames before it were lost.
     pub fn push(&mut self, unit: Vec<u8>, contiguous: bool) {
@@ -363,9 +374,14 @@ fn next(jobs: &Jobs) -> Option<Job> {
     }
 }
 
+/// How many of the first frames' outcomes are logged.
+const FIRST_TOLD: u32 = 5;
+
 /// What the decoder did since its timings were last logged.
 #[derive(Default)]
 struct Timings {
+    /// How many outcomes were logged one by one.
+    told: u32,
     since: Option<Instant>,
     pictures: u32,
     decoding: Duration,
@@ -432,6 +448,19 @@ fn show(
     started: Instant,
     timings: &mut Timings,
 ) {
+    // What the first frames come to, which the timings leave out while
+    // nothing decodes.
+    if timings.told < FIRST_TOLD {
+        timings.told += 1;
+        let what = match &decoded {
+            Ok(decode::Outcome::Picture(_)) => "a picture".to_owned(),
+            Ok(decode::Outcome::Kept) => "kept back".to_owned(),
+            Ok(decode::Outcome::Unchanged) => "unchanged".to_owned(),
+            Ok(decode::Outcome::Nothing) => "nothing".to_owned(),
+            Err(trouble) => format!("{trouble}"),
+        };
+        log::debug!("video: the share's decoder: {what}");
+    }
     let took = started.elapsed();
     match decoded {
         Ok(Outcome::Picture(picture)) => {
@@ -482,6 +511,7 @@ fn run(jobs: &Jobs, screen: &Screen) {
     while let Some(job) = next(jobs) {
         match job {
             Job::Start => {
+                log::info!("video: the share's decoder starts over");
                 let fresh = H264::new(Lane::Share);
                 screen.set_no_video(fresh.no_helper());
                 decoder = Some(fresh);
@@ -502,7 +532,22 @@ fn run(jobs: &Jobs, screen: &Screen) {
                 }
                 let started = Instant::now();
                 decoder.set_fit(screen.fit().0, screen.fit().1);
+                let keyframe = decode::is_keyframe(&unit);
                 let decoded = decoder.decode(&unit, screen.wants_picture());
+                if keyframe {
+                    log::debug!(
+                        "video: the share's decoder on a keyframe ({} bytes, NAL units {:?}): {}",
+                        unit.len(),
+                        super::bitstream::nal_types(&unit),
+                        match &decoded {
+                            Ok(decode::Outcome::Picture(_)) => "a picture".to_owned(),
+                            Ok(decode::Outcome::Kept) => "kept back".to_owned(),
+                            Ok(decode::Outcome::Unchanged) => "unchanged".to_owned(),
+                            Ok(decode::Outcome::Nothing) => "nothing".to_owned(),
+                            Err(trouble) => format!("{trouble}"),
+                        }
+                    );
+                }
                 show(screen, decoded, started, &mut timings);
             }
             Job::Fetch => {

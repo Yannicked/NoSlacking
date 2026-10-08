@@ -56,6 +56,36 @@ mention). Mentions are `<at id="n">` tags plus a `mentions[]` array.
 Replies exist only in channels ("posts with replies"); chats have
 quote-replies (`replyWithQuote`) but no threads.
 
+In the chat service the Teams clients use (not Graph), a mention is
+`<span itemtype="http://schema.skype.com/Mention" itemscope=""
+itemid="n">Name</span>` and `properties.mentions` is a JSON array as
+text: `[{"@type":"http://schema.skype.com/Mention","itemid":n,
+"mri":"8:…","mentionType":"person","displayName":"Name"}]`; the web
+client splits a name into one span per word, each its own entry with the
+same MRI (recorded, received). A channel reply lives in its post's
+reply chain, `19:…@thread.tacv2;messageid={post}` (in a message's
+`conversationLink`; live events also say `parentmessageid`, which a post
+gives as its own id); its replies are read from and posted to
+`conversations/{channel};messageid={post}/messages`, the `;messageid=`
+left unencoded (from the web client's code; no work-account traffic has
+been recorded yet).
+
+Recorded since (work web client, `teams.cloud.microsoft.har`): a channel
+is read through the CSA, `GET {csa}/api/v1/containers/{channel}/posts?
+modality=post&pageSize=20&teamId={team}&filterSystemMessage=true`
+(HTTP 207): `posts[].message` and `posts[].replies{messages,totalCount}`,
+camel case (`messageType`, `imDisplayName`, `parentMessageId`, bare-MRI
+`from`; a deleted post's `content` is `null`). The chat service's own
+history of a channel is mostly `ThreadActivity/*` lines, has no
+`backwardLink`, writes `conversationid` in lower case and names a reply's
+post as `rootMessageId` beside the `;messageid=` link. The teams list's
+channels carry `consumptionHorizon` as an object of numbers and
+`lastMessage` with a string `id` (its `parentMessageId` is not to be
+trusted); `isMessageRead` is a flag of its own. A team's picture is
+`{mt}/beta/users/{own object id}/profilepicturev2/teams/{groupId}?etag=
+"{pictureETag}"&displayName=…`, `groupId` from `teamSiteInformation`.
+Mentions were not in the capture.
+
 Sources:
 [chatMessage](https://learn.microsoft.com/graph/api/resources/chatmessage),
 [list chats](https://learn.microsoft.com/graph/api/chat-list),
@@ -263,3 +293,206 @@ organisation can see and approve.
   approve it.
 - **Before any Teams code:** the multi-service worker refactor (4.3, step
   1) is useful on its own and lowers the risk for Slack users.
+
+---
+
+## 6. Since then (feat/teams, 2026-10-07)
+
+The chat route was built after all, behind the `teams` cargo feature, by
+signing in as Microsoft's Teams desktop client. Notes for the next steps.
+
+### 6.1 Personal accounts (Teams free)
+
+Feasible but unproven. What has to change:
+
+- Sign in with the consumer client id `8ec6bc83-69c8-4392-8f08-b3c986009232`
+  (tenant `consumers`), chosen *before* the device code: a first-party id
+  is bound to its audience, so detecting a personal account afterwards
+  (`tid` 9188040d-6c67-4c5b-b112-36a304b66dad) only works as a check.
+  Refreshes must use the same client id and scope.
+- The skype token comes from `https://teams.live.com/api/auth/v1.0/authz/consumer`.
+  ost asks for `https://api.spaces.skype.com/.default`; purple-teams, which
+  ships a personal build, asks for
+  `service::api.fl.spaces.skype.com::MBI_SSL openid profile offline_access`
+  and sends `X-MS-Client-Consumer-Type: teams4life`.
+- Personal access tokens may be opaque rather than JWTs, so who you are
+  should come from the skype token's `skypeid` claim; MRIs are
+  `8:live:…`, not `8:orgid:…`.
+- There are no teams or channels (no CSA); chats only. The chat-service
+  host and Trouter registration for consumers are unknown.
+- ost declares a personal configuration but never uses it.
+
+**Confirmed with `--teams-probe` against a real account (2026-10-07):**
+the consumer client id on tenant `consumers` with scope
+`service::api.fl.spaces.skype.com::MBI_SSL openid profile offline_access`
+signs in (the `.default` scope is AADSTS70011); the access token is
+opaque (`EwA…`); the consumer `authz` answers with the skype token at
+`skypeToken.skypetoken` (24 h) and a `regionGtms` whose `chatService` is
+`https://msgapi.teams.live.com` and `middleTier`
+`https://teams.live.com/api/mt`; the skype token is a JWT whose `skypeid`
+is `live:.cid.…`; the chat list, messages and Trouter negotiation all
+work with it. One-to-one chats are `19:uni01_…@thread.v2` here too.
+This is what the "Personal account (Teams free)" sign-in now does.
+Sending works (with a numeric `clientmessageid`). The personal middle
+tier's `fetchShortProfile` refuses every token we hold (401 with the
+access token, the skype token, both, and the consumer headers), and a
+thread's members (`/v1/threads/{id}`) carry ids only, so names come from
+messages' `imdisplayname`: chats without a topic are named after their
+recent writers.
+
+A recording of teams.live.com showed why: the web client signs in with its
+own client id (`4b3e8f46-56d3-427f-b1e2-d239b2ea6bca`) and calls the
+middle tier with a token for
+`https://mtsvc.fl.teams.microsoft.com/teams.mt.readwrite` plus the skype
+token. It names personal people with `fetchShortProfile` and the work
+people in personal chats with `fetchFederated`, and yourself with
+`/beta/users/me`. Its chat token comes from `api/auth/v2.0/authz/consumer`.
+`--teams-probe` showed the consumer device-code client may have it, and
+the groups service's scope too (2026-10-07): the middle tier answers
+`fetchShortProfile` with that token, where it refused every other.
+
+### 6.2 Audio and video calls
+
+ost (MIT) implements 1:1 and channel calls. Its flow: an IC3 token
+(`https://ic3.teams.office.com/.default`); Trouter registration of
+`NextGenCalling` / `DesktopNgc_2.5:SkypeNgc`; an SDP offer POSTed to the
+epconv service from `regionGtms`, with callbacks to Trouter URLs.
+
+The media is the Skype/Lync dialect, not WebRTC: SDES-SRTP (no DTLS), one
+ICE session per m-line, PCMU audio, `X-H264UC` video, and SDP compressed with
+a dictionary taken from Microsoft's binaries. str0m does DTLS-SRTP only,
+so the huddle stack's audio pipeline (capture, AEC, jitter buffer,
+speaker), TURN client, H.264 decode and call UI carry over, but the
+transport does not. Either write a small SDES/ICE/RTP stack (ost's is
+about 3k lines) or prove that Teams accepts the browser dialect (DTLS,
+BUNDLE, Opus) through str0m.
+
+Rough plan: a spike calling the Echo bot (3–5 days) to pick the
+transport; outgoing 1:1 audio (2 weeks); talking (1 week); incoming
+calls via Trouter (1–1.5 weeks); meetings (1–2 weeks); video receive
+(2–3 weeks); camera and screen share (4+ weeks). The risks are policy
+(it rests entirely on the first-party client id), protocol churn
+(scraped version strings and capability masks), and codecs (Microsoft's
+servers prefer SILK and X-H264UC).
+
+### 6.3 What other clients taught
+
+- **ost:** its personal-account scope is refused. Asking a device code
+  for `https://api.spaces.skype.com/.default` with the consumer client id
+  gives AADSTS70011 (invalid scope); `service::api.fl.spaces.skype.com::MBI_SSL
+  openid profile offline_access` is accepted (`--teams-probe`, 2026-10-07).
+- **teams-for-linux:** runs the web app and reads its page, so it has
+  almost no protocol knowledge. Its tested Graph results with the web
+  app's token: `/me`, calendar, mail and `/me/people` work; presence,
+  `/me/chats` and creating chats are 403. Graph's `getByIds` is 403 for
+  our token too, which is why people are looked up through the middle
+  tier's `fetchShortProfile`. Work one-to-one chats are either
+  `19:…@unq.gbl.spaces` or `19:uni01_…@thread.v2`. They saw a chat
+  service send answer 201 and never arrive, so check sends end to end.
+
+### 6.4 What the web clients do (recordings, 2026-10-07)
+
+Three recordings of the Teams web client, of a personal account and of a
+work account signed in as a guest of another organisation, summarised;
+the recordings themselves held live tokens and were deleted.
+
+**Sign-in.** Work web client `5e3ce6c0-2b1f-4285-8d4b-75ee78787346`,
+personal web client `4b3e8f46-56d3-427f-b1e2-d239b2ea6bca`. A guest signs
+in at the home tenant and then mints every token with the host tenant in
+the token URL (`login.microsoftonline.com/{host tenant}/oauth2/v2.0/token`),
+which is what entering the organisation at sign-in does here. Scopes the
+work client mints: `api.spaces.skype.com`, `chatsvcagg.teams.microsoft.com`,
+`ic3.teams.office.com`, `presence.teams.microsoft.com`, Graph, Outlook,
+Substrate, SharePoint. Personal: `auth.fl.teams.microsoft.com/teams.auth.readwrite`,
+`mtsvc.fl.teams.microsoft.com/teams.mt.readwrite`,
+`groupssvc.fl.teams.microsoft.com/teams.readwrite`.
+
+**Endpoints by feature** (work host `teams.cloud.microsoft/api/…/{region}`,
+personal `teams.live.com/api/…`):
+
+| Feature | Work | Personal |
+|---|---|---|
+| Chat service | `chatsvc/{region}/v1/…`, Bearer **IC3** token | `chatsvc/consumer/v1/…`, skype token |
+| People | `mt/{region}/beta/users/fetchShortProfile` and `users/fetch` (spaces token); `fetchFederated` 401 for a guest | `mt/beta/users/fetchShortProfile`, `fetchFederated` (mtsvc token + skype token) |
+| Avatars | `mt/{region}/beta/users/{mri}/profilepicturev2/…`, cookie from `POST …/users/{id}/cookiev2` | `mt/beta/users/{mri}/profilepicturev2?displayname=…&imageUri=…&size=HR64x64` (`imageUri` from the profile's own field, for someone with a photo), cookie from `POST mt/beta/imageauth/cookie`, asked with `Referer: https://teams.live.com/v2/` and an image `Accept` (without them a photo is refused 401); groups `groups/v1/threads/{id}/profilepicturev2` |
+| Inline images (`<img itemtype="…/AMSImage">`) | `{region}-prod.asyncgw.teams.microsoft.com/v1/objects/{id}/views/imgo`, Bearer IC3 | `*-api.asm.skype.com/v1/objects/{id}/views/imgo`, cookie from `POST …/v1/skypetokenauth` (form `skypetoken=…`) |
+| Presence | `ups/{region}/v1/presence/getpresence/`, `me/endpoints`, `pubsub/subscriptions` (presence token) | `ups/global/v1/…` (same shapes) |
+| Read receipts | `chatsvc/…/v1/threads/{id}/consumptionhorizons` | the same |
+| Channels | CSA `api/v1/containers/{id}/posts`, `teams/{id}/channels/{id}/pins`, `…/systemmessages`, `pinnedChannels` | none |
+| Custom emoji | CSA `api/v1/customemoji/metadata` | none |
+| Activity | chat `conversations/48:notifications/messages` | `users/ME/streams/notifications/messages` |
+| Other (personal) | | rename `PUT threads/{id}/properties?name=topic` `{"topic"}`; mute `PUT conversations/{id}/properties?name=alerts` `{"alerts"}`; favourites `PUT users/ME/properties?name=favorites`; people search `POST mt/beta/users/searchUsers` `{"searchKeyWord"}`; calendar `mt/v2.0/me/calendars/default/calendarView` |
+
+**Messages.** Reactions arrive as `properties.emotions` (and
+`deltaEmotions`): `[{key, users: [{mri, time, value}]}]`. Emoji are
+`<img itemtype="http://schema.skype.com/Emoji" alt="🙁">`; quote replies are
+`<blockquote itemtype="http://schema.skype.com/Reply" itemid="{message id}">`
+with the author's MRI in `<strong itemprop="mri" itemid=…>` and
+`<p itemprop="preview">`. `Event/Call` carries `callEventType`,
+`duration`, `partlist` and, for meetings, `meetingDetails`. The web
+client's send adds `imdisplayname`, `fromUserId`, `composetime` and
+`properties` (`importance`, `subject`, `mentions`, `files`, `links`,
+`cards`, `formatVariant: "TEAMS"`). Not yet recorded: sending reactions
+and edits.
+
+**Starting a chat and sending a picture** (personal, recorded):
+`POST teams.live.com/api/groups/v1/threads` with
+`{"members":[{"id":"8:live:…","role":"User"},…],"properties":{"threadType":"chat","isStickyThread":"true"}}`
+answers `{"value":{"threadId":"19:uni01_…@thread.v2"}}`, with a groups
+service token (`groupssvc.fl.teams.microsoft.com/teams.readwrite`) and
+`x-skypetoken`; the first message is then an ordinary send. People are
+found by name or address with `POST mt/beta/users/searchUsers`
+(`{"searchKeyWord"}` or `{"emails":[…]}`). A picture is
+`POST {asm}/v1/objects/` with `{"type":"pish/image","permissions":{"{chat}":["read"]},"sharingMode":"Attached","filename"}`
+then `PUT {asm}/v1/objects/{id}/content/imgpsh` with the bytes, both with
+`Authorization: skype_token {skype token}`; other files go to the
+personal OneDrive through Graph. The web client marks read with
+`consumptionhorizon: "{message id};{now, ms};{client message id}"`.
+
+### 6.5 Calls, as the personal web client makes them (recorded)
+
+A "Meet now" call joined alone, recorded in Firefox (2026-10-07). It
+overturns §6.2's main worry: **the web client speaks the browser's media
+dialect**, so str0m and the huddle media stack fit; ost's Skype/Lync
+dialect (SDES, PCMU, X-H264UC) is the desktop client's.
+
+**Signalling**, all through `https://api.flightproxy.skype.com/api/v2/…`
+with callbacks to our Trouter URLs (`{surl}callAgent/{endpoint}/…`):
+
+1. `POST cpconv` with `conversationRequest` (`applicationType: "TFL"`,
+   a Delta `roster` callback, `properties`, `links`: conversationEnd,
+   conversationUpdate, localParticipantUpdate, addParticipantSuccess…)
+   answers `conversationController` and `links` (leave, …).
+2. `POST cp/{conv host}/conv/{id}` joins, with `callInvitation`:
+   `callModalities`, `links`, and `mediaContent {contentType:
+   "application/sdp-ngc-1.0", blob: <SDP offer>}`; answers the roster and
+   `activeModalities.call.links.participants` (a `cc…cc.skype.com` call
+   hub) and `groupChat.threadId` (`19:meeting_…@thread.v2`).
+3. `POST …/conv/{id}/updateEndpointState`, `PUT …/updateEndpointMetadata`
+   with `from {id, displayName, endpointId, participantId, languageId}`.
+4. Media control on the call hub: `POST …/cc/v1/active/…/updateMediaDescriptions`
+   (`mid`s with `sendrecv`/`recvonly`, `label: "main-video"`,
+   `negotiationTag`) and `…/mcProxy/…/applyChannelParameters`
+   (`maxVideoSendCapabilities`).
+5. `POST …/sendMessage` for in-call reactions; `POST …/leave` with
+   `conversationTransactionEnd` and `callTransactionEnd`.
+6. Events: a broker long-poll, `GET …/broker…/api/v1/subscribe/{id}/0`
+   (`nextSubscribeUrl`, 30 s), besides Trouter.
+
+**Media (the SDP offer):** `a=group:BUNDLE` over 13 m-lines, `rtcp-mux`,
+`a=setup:actpass` with a SHA-256 `a=fingerprint` (DTLS-SRTP), trickle
+ICE with one `typ relay` UDP candidate. Audio: `opus/48000/2` first, then
+G722, PCMU, PCMA, CN, telephone-event; `ssrc-audio-level`, `mid`,
+transport-wide CC. Video (12 m-lines, one `sendrecv` main video and
+receivers): H264 (several profiles), AV1, rtx; abs-send-time, toffset,
+video-orientation, AV1 dependency descriptor. Data: `m=x-data` over SCTP.
+Microsoft's own lines: `a=x-ssrc-range`, `a=x-signaling-fb:* x-message
+app …`, `b=CT:4000`.
+
+**Relays:** `GET https://edge.skype.com/trap/tokens` with `X-Skypetoken`
+answers `{tokens: [{realm: "rtcmedia", username, password}], expires}`
+(TURN credentials).
+
+**Not in a Firefox recording:** the SDP answer and incoming call
+invitations arrive over Trouter, and Firefox leaves WebSocket messages
+out of its HAR; Chrome and Edge include them (`_webSocketMessages`).

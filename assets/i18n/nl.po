@@ -1852,6 +1852,9 @@ msgstr "Slack stuurde geen gebruikerstoken; controleer de gebruikersscopes van d
 msgid "it only works when you sign in with your browser"
 msgstr "dat werkt alleen als je je aanmeldt met je browser"
 
+msgid "Microsoft Teams workspaces cannot do that here yet"
+msgstr "Microsoft Teams-werkruimtes kunnen dat hier nog niet"
+
 msgid "name someone to invite with @"
 msgstr "noem met @ wie je wilt uitnodigen"
 
@@ -2588,6 +2591,15 @@ msgstr "De huddle verlaten"
 msgid "the sound device could not be opened"
 msgstr "het geluidsapparaat kon niet worden geopend"
 
+msgid "the call was declined"
+msgstr "de oproep werd geweigerd"
+
+msgid "nobody answered the call"
+msgstr "niemand nam de oproep aan"
+
+msgid "the call failed: {detail}"
+msgstr "de oproep is mislukt: {detail}"
+
 msgid "the huddle's server could not be reached"
 msgstr "de server van de huddle was niet bereikbaar"
 
@@ -2964,3 +2976,170 @@ msgstr "voor scherm delen is de videohulp van NoSlacking (noslacking-video) nodi
 
 msgid "NoSlacking's video helper stopped"
 msgstr "de videohulp van NoSlacking is gestopt"
+
+# Microsoft Teams sign-in
+msgid "Sign in to Microsoft Teams"
+msgstr "Aanmelden bij Microsoft Teams"
+
+msgid "Connect your Microsoft Teams account using official Microsoft device code authentication."
+msgstr "Verbind je Microsoft Teams-account met officiële Microsoft-apparaatcode-authenticatie."
+
+msgid "Sign in with Microsoft Teams"
+msgstr "Aanmelden met Microsoft Teams"
+
+msgid "Enter code {code} at {url}"
+msgstr "Voer code {code} in op {url}"
+
+msgid "Code:"
+msgstr "Code:"
+
+msgid "Open Microsoft Login"
+msgstr "Microsoft-aanmelding openen"
+
+msgid "Personal account (Teams free)"
+msgstr "Persoonlijk account (Teams gratis)"
+
+msgid "Organization / Tenant (optional):"
+msgstr "Organisatie / Tenant (optioneel):"
+
+msgid "e.g. company.onmicrosoft.com or Tenant ID"
+msgstr "bijv. bedrijf.onmicrosoft.com of Tenant-ID"
+
+msgid "Required for guest accounts: enter the inviting company's domain or tenant ID."
+msgstr "Vereist voor gastaccounts: voer het domein of de tenant-ID van het uitnodigende bedrijf in."
+
+msgid "Call {name}"
+msgstr "{name} bellen"
+
+msgid "Calling {name}"
+msgstr "{name} bellen…"
+
+msgid "In a call with {name}"
+msgstr "In gesprek met {name}"
+
+msgid "Ringing…"
+msgstr "Gaat over…"
+
+msgid "Call ended: {error}"
+msgstr "Gesprek beëindigd: {error}"
+
+msgid "The call ended"
+msgstr "Het gesprek is beëindigd"
+
+msgid "Hang up"
+msgstr "Ophangen"
+
+msgid "Accept"
+msgstr "Opnemen"
+
+msgid "Microsoft Teams call"
+msgstr "Microsoft Teams-gesprek"
+
+msgid "Missed call from {name}"
+msgstr "Gemiste oproep van {name}"
+
+msgid "Pick up the call here"
+msgstr "Neem het gesprek hier op"
+
+msgid "{name} is calling you"
+msgstr "{name} belt je"
+
+# Microsoft Teams wording
+msgid "Leave the huddle or hang up"
+msgstr "De huddle verlaten of ophangen"
+
+msgid "Call with {name}"
+msgstr "Gesprek met {name}"
+
+msgid "Calls and huddles"
+msgstr "Gesprekken en huddles"
+
+msgid "Chat"
+msgstr "Chat"
+
+msgid "Hang up ({shortcut})"
+msgstr "Ophangen ({shortcut})"
+
+msgid "Post in {name}"
+msgstr "Plaatsen in {name}"
+
+msgid "This call takes no more video, so your camera stays off"
+msgstr "Dit gesprek neemt geen video meer aan, dus je camera blijft uit"
+
+msgid "This is the very beginning of {place}."
+msgstr "Dit is het allereerste begin van {place}."
+
+msgid "Type a message"
+msgstr "Typ een bericht"
+
+msgid "the server answered unexpectedly: {detail}"
+msgstr "de server gaf een onverwacht antwoord: {detail}"
+
+msgid "the server did not return the message"
+msgstr "de server gaf het bericht niet terug"
+
+msgid "the server is rate limiting requests; try again shortly"
+msgstr "de server beperkt het aantal verzoeken; probeer het zo opnieuw"
+
+msgid "A meeting ID needs its passcode."
+msgstr "Een vergader-ID heeft een wachtwoordcode nodig."
+
+msgid "Admit"
+msgstr "Toelaten"
+
+msgid "Copy the link others join the meeting with"
+msgstr "De link kopiëren waarmee anderen aan de vergadering deelnemen"
+
+msgid "In the lobby"
+msgstr "In de lobby"
+
+msgid "Invite others with the meeting's link"
+msgstr "Nodig anderen uit met de link van de vergadering"
+
+msgid "Join a meeting"
+msgstr "Deelnemen aan een vergadering"
+
+msgid "Joining a meeting"
+msgstr "Deelnemen aan een vergadering…"
+
+msgid "Leave the meeting ({shortcut})"
+msgstr "De vergadering verlaten ({shortcut})"
+
+msgid "Links of this kind cannot be joined here yet."
+msgstr "Aan dit soort links kun je hier nog niet deelnemen."
+
+msgid "Meet now"
+msgstr "Nu vergaderen"
+
+msgid "Meeting"
+msgstr "Vergadering"
+
+msgid "Meeting link or ID"
+msgstr "Vergaderlink of -ID"
+
+msgid "Meeting with {name}"
+msgstr "Vergadering met {name}"
+
+msgid "Meetings"
+msgstr "Vergaderingen"
+
+msgid "Passcode, for a meeting ID"
+msgstr "Wachtwoordcode, bij een vergader-ID"
+
+msgid "Start a meeting, then invite others with its link."
+msgstr "Begin een vergadering en nodig anderen uit met de link."
+
+msgid "That is not a meeting link or ID."
+msgstr "Dat is geen vergaderlink of -ID."
+
+msgid "The meeting ended"
+msgstr "De vergadering is afgelopen"
+
+msgid "Waiting for someone to let you in…"
+msgstr "Wachten tot iemand je toelaat…"
+
+msgid "no meeting has that link, or that ID and passcode"
+msgstr "er is geen vergadering met die link, of met die ID en wachtwoordcode"
+
+msgid "{name} is waiting in the lobby"
+msgstr "{name} wacht in de lobby"

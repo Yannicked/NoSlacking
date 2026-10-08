@@ -9,7 +9,7 @@ use egui::{CornerRadius, Key, Margin, Modifiers, RichText, Sense, Vec2};
 use crate::app::{App, WorkspaceState};
 use crate::failure::Failure;
 use crate::i18n::{t, tf, tn};
-use crate::model::{Action, ConversationKind};
+use crate::model::Action;
 use crate::search::{Heading, Hit, Query, Scope, Sort};
 use crate::theme::{self, Icon, Palette};
 
@@ -31,7 +31,11 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         actions,
         ..
     } = app;
-    let Some(workspace) = crate::app::active_in(workspaces, settings) else {
+    // Left open from a workspace that searches, it closes in one that
+    // does not.
+    let Some(workspace) = crate::app::active_in(workspaces, settings)
+        .filter(|w| w.info.offers(crate::model::Ability::Search))
+    else {
         search.open = false;
         return;
     };
@@ -276,12 +280,7 @@ fn heading(
 /// person or people for a direct message.
 fn conversation_label(workspace: &WorkspaceState, id: Option<&str>, name: &str) -> String {
     match id.and_then(|id| workspace.conversation(id)) {
-        Some(conversation) => match conversation.kind {
-            ConversationKind::Channel | ConversationKind::Private => {
-                format!("#{}", workspace.title(conversation))
-            }
-            _ => workspace.title(conversation),
-        },
+        Some(conversation) => workspace.named_place(conversation),
         // Slack names a DM by the other person's id.
         None if name.starts_with('U') && workspace.user(name).is_some() => {
             workspace.user_label(name)

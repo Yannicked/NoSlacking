@@ -36,6 +36,11 @@ pub struct Person {
     pub muted: bool,
     /// Whether they are speaking now.
     pub speaking: bool,
+    /// The name the call itself gives them, for someone the workspace
+    /// does not know (a Teams meeting's guest).
+    pub name: Option<String>,
+    /// Waiting to be let in (a Teams meeting's lobby), not yet in.
+    pub waiting: bool,
 }
 
 /// Who is in the huddle, as the interface shows it.
@@ -144,6 +149,8 @@ pub fn roster(
             me: attendee.attendee_id == me,
             muted: attendee.muted,
             speaking: !attendee.muted && voices.speaking(stream, now),
+            name: None,
+            waiting: false,
         })
         .collect();
     Roster { people, count }
@@ -257,6 +264,8 @@ mod tests {
             me: true,
             muted: true,
             speaking: false,
+            name: None,
+            waiting: false,
         };
         let other = Person {
             me: false,

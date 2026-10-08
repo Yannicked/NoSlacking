@@ -467,6 +467,7 @@ mod tests {
     #[test]
     fn group_mentions_show_their_handle() {
         let mut w = WorkspaceState::new(Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: "acme".into(),

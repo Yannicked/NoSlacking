@@ -1,0 +1,37 @@
+{
+  "participants": {
+    "8:live:organizer": {
+      "version": 3, "state": "active", "advancedMeetingRole": "organizer",
+      "details": {"id": "8:live:organizer", "displayName": "Olga Organizer", "participantType": "inTenant", "endpointId": "11111111-1111-1111-1111-111111111111", "participantId": null, "languageId": null, "hidden": false},
+      "endpoints": {
+        "11111111-1111-1111-1111-111111111111": {
+          "call": {"mediaStreams": [{"type": "audio", "label": "main-audio", "sourceId": 201, "direction": "sendrecv", "serverMuted": false}], "serverMuteVersion": 1, "appliedInteractivityLevel": "interactive"},
+          "participantId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "endpointState": {"endpointStateSequenceNumber": 2, "state": {"isMuted": true}},
+          "modalityJoined": "Call", "endpointMeetingRoles": ["organizer"]
+        }
+      },
+      "role": "admin", "meetingRole": "organizer", "meetingRoles": ["organizer"]
+    },
+    "8:live:waiting": {
+      "version": 5, "state": "active", "advancedMeetingRole": "presenter",
+      "details": {"id": "8:live:waiting", "displayName": "Wim Waiting", "participantType": "inTenant", "endpointId": "22222222-2222-2222-2222-222222222222", "participantId": null, "languageId": null, "hidden": false},
+      "endpoints": {
+        "22222222-2222-2222-2222-222222222222": {
+          "lobby": {"mediaStreams": [{"type": "audio", "label": "main-audio", "sourceId": 201, "direction": "sendrecv", "serverMuted": true}]},
+          "participantId": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+          "modalityJoined": "Lobby", "endpointMeetingRoles": ["presenter"]
+        }
+      },
+      "role": "guest", "meetingRole": "presenter", "meetingRoles": ["presenter"]
+    },
+    "8:live:gone": {
+      "version": 9, "state": "inactive",
+      "details": {"id": "8:live:gone", "displayName": "Gert Gone", "propertyBag": null, "hidden": false},
+      "endpoints": {}, "role": "admin", "meetingRole": "presenter"
+    }
+  },
+  "type": "Delta",
+  "sequenceNumber": 5,
+  "participantCounts": {"totalParticipants": 2, "preheatedParticipants": 0, "lobbyParticipants": 1, "totalPresenters": 1, "totalOrganizers": 1}
+}

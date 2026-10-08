@@ -207,6 +207,7 @@ mod tests {
         use crate::model::{SignInKind, Workspace};
         let older = Scopes::parse(&Request::Older.scopes().join(","));
         let workspace = |sign_in, scopes| Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: String::new(),

@@ -134,9 +134,141 @@ fn plain_dot(ts: &str) -> Option<usize> {
     ((1..=19).contains(&dot) && fraction.iter().all(u8::is_ascii_digit)).then_some(dot)
 }
 
+/// The chat service backing a workspace.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum Service {
+    /// Slack, via Web API and RTM / Socket Mode.
+    #[default]
+    Slack,
+    /// Microsoft Teams, via native Skype Spaces / Trouter APIs.
+    Teams,
+}
+
+impl Service {
+    /// The human-readable name of the service.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Slack => "Slack",
+            Self::Teams => "Microsoft Teams",
+        }
+    }
+
+    /// Whether the New message dialog asks the server for people as you
+    /// type: a Teams workspace knows only the people met in its chats,
+    /// where a Slack one has everyone already.
+    pub fn searches_people(self) -> bool {
+        self == Self::Teams
+    }
+
+    /// Whether workspaces of this service can do `ability` here. Slack
+    /// does everything but calls, which are its huddles; Teams reads, sends, edits, deletes, reacts and
+    /// marks read so far, so the interface leaves the rest out rather than
+    /// offer what would only fail.
+    pub fn offers(self, ability: Ability) -> bool {
+        match self {
+            Self::Slack => !matches!(ability, Ability::Calls | Ability::Meetings),
+            Self::Teams => match ability {
+                // Seen in recordings of the Teams web client and built.
+                Ability::Reactions
+                | Ability::Edit
+                | Ability::NewMessage
+                | Ability::Calls
+                | Ability::Meetings => true,
+                Ability::Huddles
+                | Ability::CustomEmoji
+                | Ability::Threads
+                | Ability::Files
+                | Ability::Pins
+                | Ability::Later
+                | Ability::Bookmarks
+                | Ability::Channels
+                | Ability::Describe
+                | Ability::Sections
+                | Ability::SlashCommands
+                | Ability::Snooze
+                | Ability::Status
+                | Ability::Search
+                | Ability::MarkUnread
+                | Ability::Reminders
+                | Ability::Scheduled
+                | Ability::Views
+                | Ability::Cards
+                | Ability::Details
+                | Ability::Links
+                | Ability::Share => false,
+            },
+        }
+    }
+}
+
+/// Something a workspace may or may not be able to do, by its service
+/// (see [`Service::offers`]). Not to be confused with
+/// [`crate::scopes::Feature`], which is what a Slack sign-in was granted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Ability {
+    /// Starting, joining and listening to huddles.
+    Huddles,
+    /// Calling someone from a one-to-one chat (Teams; Slack has huddles).
+    Calls,
+    /// Joining a meeting by its link or ID, and starting one now (Teams).
+    Meetings,
+    /// Adding custom emoji.
+    CustomEmoji,
+    /// Adding and removing reactions.
+    Reactions,
+    /// Editing your messages.
+    Edit,
+    /// Replying in threads.
+    Threads,
+    /// Uploading and deleting files.
+    Files,
+    /// Pinning messages and the pinned list.
+    Pins,
+    /// Saving messages for later.
+    Later,
+    /// A conversation's bookmarks.
+    Bookmarks,
+    /// Browsing, creating, joining and leaving channels.
+    Channels,
+    /// Starting a conversation with people (the New message dialog).
+    NewMessage,
+    /// Renaming a conversation and setting its topic.
+    Describe,
+    /// Editing sidebar sections.
+    Sections,
+    /// Slash commands.
+    SlashCommands,
+    /// Snoozing notifications (Do Not Disturb).
+    Snooze,
+    /// Setting your status and being away.
+    Status,
+    /// Searching messages.
+    Search,
+    /// Marking a message unread.
+    MarkUnread,
+    /// Reminders about messages.
+    Reminders,
+    /// Scheduling messages to send later.
+    Scheduled,
+    /// The Activity, Unreads, Threads, Later and Scheduled views.
+    Views,
+    /// Pressing buttons in Block Kit cards and opening them in Slack.
+    Cards,
+    /// A conversation's details panel: about, members and files.
+    Details,
+    /// Copying a link to a message.
+    Links,
+    /// Sharing a message to another conversation.
+    Share,
+}
+
 /// A signed-in workspace.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Workspace {
+    /// Which service backs this workspace.
+    pub service: Service,
     pub team_id: String,
     pub name: String,
     pub domain: String,
@@ -151,10 +283,28 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Whether this workspace is backed by Microsoft Teams.
+    pub fn is_teams(&self) -> bool {
+        self.service == Service::Teams
+    }
+
+    /// Whether this workspace is backed by Slack.
+    pub fn is_slack(&self) -> bool {
+        self.service == Service::Slack
+    }
+
+    /// Whether this workspace's service can do `ability` here.
+    pub fn offers(&self, ability: Ability) -> bool {
+        self.service.offers(ability)
+    }
+
     /// Whether this sign-in may use `feature`: always for a session, and
     /// for an app sign-in when Slack granted its scope (or when what it
     /// granted is not known yet, so the call is tried).
     pub fn can(&self, feature: crate::scopes::Feature) -> bool {
+        if self.service == Service::Teams {
+            return false;
+        }
         crate::scopes::allows(
             self.scopes.as_ref(),
             self.sign_in == SignInKind::Session,
@@ -316,6 +466,11 @@ pub enum SectionKind {
     Apps,
 }
 
+/// The id of a Microsoft Teams workspace's chat section: the catch-all
+/// for its 1:1, group and meeting chats, a direct-message section titled
+/// "Chat" as Teams calls it.
+pub const TEAMS_CHAT_SECTION: &str = "teams:chat";
+
 /// One section of your Slack sidebar, in your order.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SidebarSection {
@@ -328,6 +483,9 @@ pub struct SidebarSection {
     /// The conversations placed in it explicitly. Slack's catch-all
     /// sections leave this empty.
     pub channel_ids: Vec<String>,
+    /// A picture for its header: a Microsoft Teams team's.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 /// An app or integration that posts messages.
@@ -1470,6 +1628,9 @@ pub enum Action {
     SearchMore,
     /// Changes the sidebar here and in Slack.
     Sidebar(crate::sidebar::SidebarEdit),
+    /// Opens the meetings dialog for the workspace shown: "Meet now", or
+    /// join by link or ID (Teams).
+    OpenMeetings,
     /// Asks for a section name: a new section (taking `channel` along), or
     /// a new name for `rename`.
     NameSection {
@@ -1598,6 +1759,11 @@ pub enum Action {
     /// Starts OAuth asking for every scope again, after you updated your
     /// app from the current manifest.
     SignInUpdated,
+    /// Starts Microsoft Teams Device Code sign-in with an optional tenant domain or ID.
+    StartTeamsSignIn {
+        tenant: Option<String>,
+        personal: bool,
+    },
     CancelSignIn,
     /// Opens a folder in the system's file manager.
     OpenFolder(PathBuf),

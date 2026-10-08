@@ -1,0 +1,44 @@
+{
+  "callAcceptance": {
+    "acceptedBy": {
+      "id": "8:live:other",
+      "displayName": "Other Example",
+      "endpointId": "00000000-0000-4000-8000-000000000006",
+      "languageId": "en-GB",
+      "participantId": "00000000-0000-4000-8000-000000000004",
+      "hidden": false
+    },
+    "acceptedCallModalities": [
+      "audio"
+    ],
+    "links": {
+      "acknowledgement": "https://fp.example/api/v2/cp/cc.example/cc/v1/callAcceptance/00000000-0000-4000-8000-000000000007/13/a3/1140/acknowledge?i=192-0-2-1",
+      "callLeg": "https://fp.example/api/v2/cp/cc.example/cc/v1/active/00000000-0000-4000-8000-000000000007/13/a3/1140?i=192-0-2-1&e=1",
+      "callControllerHttpTransport": "http://192.0.2.10/enc",
+      "mediaRenegotiation": "https://fp.example/api/v2/cp/cc.example/cc/v1/active/00000000-0000-4000-8000-000000000007/13/a3/1140/renegotiate?i=192-0-2-1&e=1",
+      "transfer": "https://fp.example/api/v2/cp/cc.example/cc/v1/active/00000000-0000-4000-8000-000000000007/13/a3/1140/transfer?i=192-0-2-1&e=1",
+      "replacement": "https://cc.example:443/cc/v1/callParticipant/00000000-0000-4000-8000-000000000007/27/k2/353/replacement?rt=x&rc=x&i=192-0-2-1&e=1",
+      "retargetCompletion": "https://fp.example/api/v2/cp/cc.example/cc/v1/active/00000000-0000-4000-8000-000000000007/13/a3/1140/retargetCompletion?i=192-0-2-1&e=1",
+      "startOutgoingNegotiation": "https://fp.example/api/v2/cp/cc.example/cc/v1/active/00000000-0000-4000-8000-000000000007/13/a3/1140/startOutgoingNegotiation?i=192-0-2-1&e=1",
+      "hold": "https://fp.example/api/v2/cp/cc.example/cc/v1/active/00000000-0000-4000-8000-000000000007/13/a3/1140/hold?i=192-0-2-1&e=1",
+      "monitor": "https://fp.example/api/v2/cp/cc.example/cc/v1/active/00000000-0000-4000-8000-000000000007/13/a3/1140/monitor?i=192-0-2-1&e=1",
+      "updateCallState": "https://fp.example/api/v2/cp/cc.example/cc/v1/active/00000000-0000-4000-8000-000000000007/13/a3/1140/updateCallState?i=192-0-2-1&e=1"
+    },
+    "mediaContent": {
+      "contentType": "application/sdp",
+      "blob": "v=0 (an SDP, left out of the fixture)",
+      "mediaLegId": "00000000000000000000000000000001",
+      "escalationOccurring": false,
+      "newOffer": false,
+      "clientLocation": "NL"
+    },
+    "callKeepAliveInterval": 2700,
+    "clientEndpointCapabilities": 799843,
+    "applicationType": "TFL",
+    "endpointCapabilities": 226559
+  },
+  "debugContent": {
+    "ecsEtag": "\"etag\"",
+    "ProcessingCallControllerInstance": "https://cc.example/"
+  }
+}

@@ -55,6 +55,8 @@ pub enum Redirect {
 /// A signed-in workspace, minus its token.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceMeta {
+    #[serde(default)]
+    pub service: crate::model::Service,
     pub team_id: String,
     pub name: String,
     #[serde(default)]
@@ -787,6 +789,7 @@ mod tests {
             ..Settings::default()
         };
         settings.upsert_workspace(WorkspaceMeta {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: String::new(),
@@ -817,6 +820,7 @@ mod tests {
         let mut settings = Settings::default();
         for id in ["T1", "T2"] {
             settings.upsert_workspace(WorkspaceMeta {
+                service: crate::model::Service::Slack,
                 team_id: id.into(),
                 name: id.into(),
                 domain: String::new(),

@@ -177,6 +177,10 @@ csv = { version = "1.4", default-features = false }
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 quick-xml = { version = "0.41", default-features = false }
 
+# Microsoft Teams sends some live events gzip-compressed (`teams`); already
+# in the build as zip's.
+flate2 = { version = "1.1", optional = true }
+
 # Desktop notifications: D-Bus on Linux and the BSDs, the notification
 # center on macOS, toasts on Windows. Elsewhere there are none.
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly", target_os = "macos", windows))'.dependencies]
@@ -306,6 +310,11 @@ huddle-camera = ["dep:yuv", "dep:bytemuck", "dep:noslacking-video-ipc"]
 # sends the H.264 the helper hands it. Off until it has been tried
 # against Slack.
 huddle-share = ["huddle-camera"]
+# Microsoft Teams workspaces (src/teams/, src/backend/teams.rs): off
+# until it has been tried more widely. Signs in as Microsoft's own Teams
+# client, which an organisation's app policies do not see; see
+# docs/research/microsoft-teams.md before turning it on.
+teams = ["dep:flate2"]
 # Colours code blocks that name their language (```` ```rust ````). Our own
 # small lexer, a few kilobytes; turn it off for plain code blocks.
 highlight = []

@@ -5,7 +5,7 @@ use egui::{Color32, Margin, Rect, RichText, Stroke, Vec2};
 
 use crate::app::App;
 use crate::i18n::t;
-use crate::model::Action;
+use crate::model::{Ability, Action};
 use crate::people::{self, Presence};
 use crate::theme::{self, Palette};
 
@@ -128,40 +128,43 @@ pub fn me_button(
         if let Some(status) = &status {
             ui.label(RichText::new(status).color(palette.secondary));
         }
-        ui.separator();
-        let edit = if status.is_some() {
-            t("Edit status…")
-        } else {
-            t("Set a status…")
-        };
-        if ui.button(edit).clicked() {
-            actions.push(Action::People(people::Action::EditStatus));
-            ui.close();
-        }
-        if status.is_some() && ui.button(t("Clear status")).clicked() {
-            actions.push(clear());
-            ui.close();
-        }
-        let away = presence == Some(Presence::Away);
-        let toggle = if away {
-            t("Set yourself as active")
-        } else {
-            t("Set yourself as away")
-        };
-        if ui.button(toggle).clicked() {
-            actions.push(Action::People(people::Action::SetAway(!away)));
-            ui.close();
-        }
-        let mut always = stay_active;
-        if ui
-            .checkbox(&mut always, t("Always show as active"))
-            .on_hover_text(t(
-                "While NoSlacking is connected, even when you are not using it. Browser sign-ins only.",
-            ))
-            .changed()
-        {
-            actions.push(Action::People(people::Action::StayActive(always)));
-            ui.close();
+        // Status and away are Slack's; elsewhere the menu only shows who you are.
+        if workspace.info.offers(Ability::Status) {
+            ui.separator();
+            let edit = if status.is_some() {
+                t("Edit status…")
+            } else {
+                t("Set a status…")
+            };
+            if ui.button(edit).clicked() {
+                actions.push(Action::People(people::Action::EditStatus));
+                ui.close();
+            }
+            if status.is_some() && ui.button(t("Clear status")).clicked() {
+                actions.push(clear());
+                ui.close();
+            }
+            let away = presence == Some(Presence::Away);
+            let toggle = if away {
+                t("Set yourself as active")
+            } else {
+                t("Set yourself as away")
+            };
+            if ui.button(toggle).clicked() {
+                actions.push(Action::People(people::Action::SetAway(!away)));
+                ui.close();
+            }
+            let mut always = stay_active;
+            if ui
+                .checkbox(&mut always, t("Always show as active"))
+                .on_hover_text(t(
+                    "While NoSlacking is connected, even when you are not using it. Browser sign-ins only.",
+                ))
+                .changed()
+            {
+                actions.push(Action::People(people::Action::StayActive(always)));
+                ui.close();
+            }
         }
         ui.separator();
         if ui.button(t("View profile")).clicked() {
@@ -412,6 +415,34 @@ pub fn listen_button(
     }
 }
 
+/// A phone in a one-to-one chat's header: calls `user`, or hangs up
+/// while in a call here.
+pub fn call_button(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    workspace: &crate::app::WorkspaceState,
+    channel: &str,
+    user: &str,
+    listening: Option<&crate::huddles::Listening>,
+    actions: &mut Vec<Action>,
+) {
+    let team = &workspace.info.team_id;
+    if listening.is_some_and(|l| l.is_call() && l.is(team, channel)) {
+        if theme::icon_button(ui, palette, theme::Icon::PhoneOff, 15.0, &t("Hang up")).clicked() {
+            actions.push(Action::Huddle(crate::huddles::Action::Leave));
+        }
+        return;
+    }
+    let tip = crate::i18n::tf("Call {name}", &[("name", &workspace.user_label(user))]);
+    if theme::icon_button(ui, palette, theme::Icon::Phone, 15.0, &tip).clicked() {
+        actions.push(Action::Huddle(crate::huddles::Action::Call {
+            team: team.clone(),
+            channel: channel.to_owned(),
+            user: user.to_owned(),
+        }));
+    }
+}
+
 /// A headphones menu in a conversation's header while no huddle goes on
 /// there: start one here (in a browser sign-in's workspace, joining
 /// muted), or else in Slack. A menu rather than one click, so a huddle
@@ -507,7 +538,9 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
     }
     let palette = app.palette;
     let several = app.workspaces.len() > 1;
-    let cards: Vec<(String, String, String, String, bool)> = app
+    // Each card: team, room, title, body, whether a browser sign-in
+    // joins here, and whether it is a call.
+    let cards: Vec<(String, String, String, String, bool, bool)> = app
         .huddles
         .invites
         .list()
@@ -518,13 +551,19 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
             let workspace = app
                 .workspaces
                 .iter()
-                .find(|w| w.info.team_id == invite.team)?;
+                .find(|w| w.info.team_id == invite.team)
+                .filter(|w| w.info.offers(Ability::Huddles) || w.info.offers(Ability::Calls))?;
+            let call = workspace.info.offers(Ability::Calls);
             let place = workspace
                 .conversation(&invite.channel)
                 .filter(|c| !c.kind.is_dm())
-                .map(|c| format!("#{}", workspace.title(c)));
-            let (title, mut body) =
-                crate::huddles::invite_text(&workspace.user_label(&invite.from), place.as_deref());
+                .map(|c| workspace.named_place(c));
+            let name = workspace.user_label(&invite.from);
+            let (title, mut body) = if call {
+                crate::huddles::call_text(&name)
+            } else {
+                crate::huddles::invite_text(&name, place.as_deref())
+            };
             if several {
                 body = format!("{body} · {}", workspace.info.name);
             }
@@ -536,9 +575,13 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
                 title,
                 body,
                 session,
+                call,
             ))
         })
         .collect();
+    if cards.is_empty() {
+        return;
+    }
     let mut answers = Vec::new();
     egui::Area::new(egui::Id::new("huddle-invites"))
         .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-16.0, 64.0))
@@ -546,7 +589,7 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
         .interactable(true)
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
-            for (team, room, title, body, session) in cards {
+            for (team, room, title, body, session, call) in cards {
                 egui::Frame::new()
                     .fill(palette.overlay)
                     .stroke(Stroke::new(1.5, ACTIVE))
@@ -561,7 +604,12 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
                     .show(ui, |ui| {
                         ui.set_width(300.0);
                         ui.horizontal(|ui| {
-                            ui.add(theme::Icon::Headphones.image(ACTIVE, 20.0));
+                            let icon = if call {
+                                theme::Icon::Phone
+                            } else {
+                                theme::Icon::Headphones
+                            };
+                            ui.add(icon.image(ACTIVE, 20.0));
                             ui.add_space(4.0);
                             ui.vertical(|ui| {
                                 ui.label(
@@ -580,13 +628,18 @@ pub fn invites(app: &mut App, ctx: &egui::Context) {
                         ui.horizontal(|ui| {
                             // A browser sign-in joins here (see
                             // `huddles::Action::Join`); else Slack does.
-                            let hint = if session {
-                                t("Join the huddle here, with your microphone off")
+                            let (label, hint) = if call {
+                                (t("Accept"), t("Pick up the call here"))
+                            } else if session {
+                                (
+                                    t("Join"),
+                                    t("Join the huddle here, with your microphone off"),
+                                )
                             } else {
-                                t("Join the huddle in Slack")
+                                (t("Join"), t("Join the huddle in Slack"))
                             };
                             let join = egui::Button::new(
-                                RichText::new(t("Join"))
+                                RichText::new(label)
                                     .font(theme::medium(14.0))
                                     .color(Color32::WHITE),
                             )

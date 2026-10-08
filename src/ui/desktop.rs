@@ -206,6 +206,11 @@ pub fn dnd_button(
     workspace: &WorkspaceState,
     actions: &mut Vec<Action>,
 ) {
+    // Pausing notifications is the service's own; without it there is
+    // nothing for the bell to say or do.
+    if !workspace.info.offers(crate::model::Ability::Snooze) {
+        return;
+    }
     let now = jiff::Zoned::now();
     let seconds = now.timestamp().as_second();
     let dnd = &workspace.desktop.dnd;

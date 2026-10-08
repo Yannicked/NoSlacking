@@ -72,7 +72,7 @@ use crate::people;
 use crate::slack::Client;
 
 #[cfg(feature = "huddle-share")]
-mod share;
+pub(super) mod share;
 
 /// The shortest time between two rosters sent to the interface. Chime
 /// sends volumes several times a second; the window need not wake for
@@ -258,7 +258,7 @@ async fn next_choice(
 /// `chosen` says, until `done`, telling the session through `effective`
 /// and the interface through `tell`; closes it at the end whatever
 /// happened.
-async fn microphone(
+pub(super) async fn microphone(
     mut wanted: watch::Receiver<bool>,
     chosen: watch::Receiver<Chosen>,
     effective: watch::Sender<bool>,
@@ -362,10 +362,10 @@ async fn microphone(
 /// What the camera's task needs: where the encoded frames go, what the
 /// session tells the sender, and the call bar's self-preview.
 #[cfg(feature = "huddle-camera")]
-struct CameraWiring {
-    frames: mpsc::Sender<crate::huddle_audio::camera_send::VideoFrame>,
-    control: crate::huddle_audio::camera_send::SendControl,
-    preview: crate::huddle_camera::Preview,
+pub(super) struct CameraWiring {
+    pub(super) frames: mpsc::Sender<crate::huddle_audio::camera_send::VideoFrame>,
+    pub(super) control: crate::huddle_audio::camera_send::SendControl,
+    pub(super) preview: crate::huddle_camera::Preview,
 }
 
 /// The camera while it is on: its sending thread (dropping it closes the
@@ -501,7 +501,7 @@ async fn camera_off(live: Option<CameraOn>) {
 /// (`refusals`), when it stops by itself, and at the end whatever
 /// happened.
 #[cfg(feature = "huddle-camera")]
-async fn camera(
+pub(super) async fn camera(
     mut wanted: watch::Receiver<bool>,
     chosen: watch::Receiver<Chosen>,
     on: watch::Sender<bool>,

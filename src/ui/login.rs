@@ -163,6 +163,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             session_card(app, ui, &palette);
                             keyring_note(app, ui, &palette);
                             ui.add_space(28.0);
+                            #[cfg(feature = "teams")]
+                            {
+                                teams_card(app, ui, &palette);
+                                ui.add_space(28.0);
+                            }
                             app_card(app, ui, &palette);
                             ui.add_space(48.0);
                         });
@@ -207,7 +212,93 @@ fn header(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
 }
 
 fn busy(app: &App) -> bool {
-    matches!(app.sign_in, Some(SignIn::Waiting(_) | SignIn::Exchanging))
+    matches!(
+        app.sign_in,
+        Some(SignIn::Waiting(_) | SignIn::Exchanging | SignIn::TeamsDeviceCode { .. })
+    )
+}
+
+/// Signing in to Microsoft Teams, in builds with the `teams` feature.
+#[cfg(feature = "teams")]
+fn teams_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
+    card(palette).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 8.0;
+        ui.label(
+            RichText::new(t("Sign in to Microsoft Teams"))
+                .font(theme::semibold(17.0))
+                .color(palette.text),
+        );
+        ui.label(
+            RichText::new(t("Connect your Microsoft Teams account using official Microsoft device code authentication."))
+                .font(theme::regular(13.5))
+                .color(palette.secondary),
+        );
+        ui.add_space(2.0);
+        ui.add_enabled_ui(!busy(app), |ui| {
+            ui.checkbox(
+                &mut app.setup.teams_personal,
+                t("Personal account (Teams free)"),
+            );
+        });
+        // A personal account has no organisation to name.
+        if !app.setup.teams_personal {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(t("Organization / Tenant (optional):"))
+                    .font(theme::medium(13.0))
+                    .color(palette.secondary),
+            );
+            ui.add_enabled_ui(!busy(app), |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.setup.teams_tenant)
+                        .hint_text(t("e.g. company.onmicrosoft.com or Tenant ID"))
+                        .desired_width(260.0),
+                );
+            });
+        });
+        ui.label(
+            RichText::new(t("Required for guest accounts: enter the inviting company's domain or tenant ID."))
+                .font(theme::regular(11.5))
+                .color(palette.dim),
+        );
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!busy(app), |ui| {
+                if theme::primary_button(ui, palette, &t("Sign in with Microsoft Teams")).clicked() {
+                    let tenant = if app.setup.teams_tenant.trim().is_empty() {
+                        None
+                    } else {
+                        Some(app.setup.teams_tenant.trim().to_owned())
+                    };
+                    app.actions.push(Action::StartTeamsSignIn {
+                        tenant,
+                        personal: app.setup.teams_personal,
+                    });
+                }
+            });
+            if busy(app) && theme::secondary_button(ui, palette, &t("Cancel")).clicked() {
+                app.actions.push(Action::CancelSignIn);
+            }
+            sign_in_status(app, ui, palette);
+        });
+        if let Some(SignIn::TeamsDeviceCode { user_code, verification_uri, .. }) = &app.sign_in {
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t("Code:")).font(theme::medium(13.0)).color(palette.secondary));
+                ui.label(RichText::new(user_code).font(theme::bold(16.0)).color(palette.accent));
+                if theme::secondary_button(ui, palette, &t("Copy code")).clicked() {
+                    app.actions.push(Action::Copy(user_code.clone()));
+                }
+                if theme::primary_button(ui, palette, &t("Open Microsoft Login")).clicked() {
+                    app.actions.push(Action::OpenUrl(verification_uri.clone()));
+                }
+            });
+        }
+    });
 }
 
 fn session_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
@@ -280,6 +371,21 @@ fn sign_in_status(app: &App, ui: &mut egui::Ui, palette: &Palette) {
                 RichText::new(t("Signing in…"))
                     .font(theme::regular(13.0))
                     .color(palette.secondary),
+            );
+        }
+        Some(SignIn::TeamsDeviceCode {
+            user_code,
+            verification_uri,
+            ..
+        }) => {
+            ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
+            ui.label(
+                RichText::new(tf(
+                    "Enter code {code} at {url}",
+                    &[("code", user_code), ("url", verification_uri)],
+                ))
+                .font(theme::medium(13.0))
+                .color(palette.accent),
             );
         }
         Some(SignIn::Failed(error)) => {

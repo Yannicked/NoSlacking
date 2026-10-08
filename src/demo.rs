@@ -1465,6 +1465,8 @@ pub fn sharing() -> crate::huddles::Listening {
         me: false,
         muted,
         speaking: false,
+        name: None,
+        waiting: false,
     };
     // Bob, Dev and Lee are in it too, Lee muted.
     let me = listening.roster.people.pop();
@@ -1554,6 +1556,8 @@ pub fn listening() -> crate::huddles::Listening {
         me,
         muted,
         speaking,
+        name: None,
+        waiting: false,
     };
     let since = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(134))
@@ -1614,6 +1618,7 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
         ("TDEMO2", "Open Source", SignInKind::App),
     ] {
         sink.send(Event::WorkspaceReady(Workspace {
+            service: crate::model::Service::Slack,
             team_id: id.into(),
             name: name.into(),
             domain: name.to_lowercase().replace(' ', "-"),
@@ -1671,6 +1676,7 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
             name: name.into(),
             emoji: emoji.into(),
             channel_ids: ids.iter().map(|s| (*s).to_owned()).collect(),
+            icon: None,
         };
     sink.send(Event::Sections {
         team: TEAM.into(),

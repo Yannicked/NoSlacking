@@ -183,9 +183,12 @@ impl App {
         }
         let picture = &mut self.huddles.picture;
         let view = CallView {
-            title: sharer
-                .as_deref()
-                .map_or_else(call_window::cameras_title, call_window::title),
+            title: match (sharer.as_deref(), listening.is_call()) {
+                (Some(sharer), _) => call_window::title(sharer),
+                (None, true) if listening.meeting => crate::i18n::t("Meeting").into_owned(),
+                (None, true) => call_window::call_title(&controls.name),
+                (None, false) => call_window::cameras_title(),
+            },
             shares,
             current: key,
             picture: picture.texture.as_ref().map(|t| (t.id(), picture.source)),
@@ -268,18 +271,21 @@ fn controls(
     let name = match conversation {
         Some((true, name)) => name,
         Some((false, name)) => format!("#{name}"),
+        None if listening.meeting => crate::i18n::t("Meeting").into_owned(),
         None => listening.channel.clone(),
     };
     let (live, time) = match listening.phase {
         huddles::Phase::Live { since } => {
             (true, huddles::clock(now.saturating_duration_since(since)))
         }
+        huddles::Phase::Ringing => (false, crate::i18n::t("Ringing…").into_owned()),
         _ => (false, crate::i18n::t("Joining…").into_owned()),
     };
     call_window::Controls {
         name,
         time,
         live,
+        leaving: crate::ui::call_bar::Leaving::of(listening),
         mic: listening.mic,
         #[cfg(feature = "huddle-camera")]
         camera: listening.camera,

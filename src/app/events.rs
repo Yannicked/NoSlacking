@@ -436,6 +436,7 @@ impl App {
     fn workspace_ready(&mut self, info: Workspace) {
         let team = info.team_id.clone();
         self.settings.upsert_workspace(WorkspaceMeta {
+            service: info.service,
             team_id: info.team_id.clone(),
             name: info.name.clone(),
             domain: info.domain.clone(),

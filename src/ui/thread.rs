@@ -8,7 +8,7 @@ use super::message::{self, Lead, Row};
 use super::rows;
 use crate::app::App;
 use crate::i18n::{t, tn};
-use crate::model::Action;
+use crate::model::{Ability, Action};
 use crate::theme::{self, Icon};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -55,12 +55,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // parent that does not say is taken as not followed. The parent shows
     // in the conversation too, where history may not say: any copy that
     // does counts.
-    let following = crate::views::can_follow(workspace.info.sign_in).then(|| {
+    let following = (workspace.info.offers(Ability::Threads)
+        && crate::views::can_follow(workspace.info.sign_in))
+    .then(|| {
         workspace
             .timelines_for(&channel)
             .find_map(|t| t.messages.iter().find(|m| m.ts == ts)?.subscribed)
             .unwrap_or(false)
     });
+    let files = workspace.info.offers(Ability::Files);
     let response = egui::Panel::right("thread")
         .resizable(true)
         .default_size(width)
@@ -68,7 +71,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .show_separator_line(false)
         .frame(egui::Frame::new().fill(palette.window))
         .show(ui, |ui| {
-            composer::drop_target(ui, &palette, Some(ts.clone()), false, actions);
+            if files {
+                composer::drop_target(ui, &palette, Some(ts.clone()), false, actions);
+            }
             let rect = ui.max_rect();
             ui.painter().vline(
                 rect.left() + 0.5,
@@ -141,7 +146,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         thread: Some(ts.clone()),
                         enter_sends: settings.enter_sends,
                         focus,
-                        channel_name: Some(channel_name.clone()),
+                        // Teams has no "also send to the channel".
+                        channel_name: (!workspace.info.is_teams()).then(|| channel_name.clone()),
                         uploads: transfers,
                     };
                     let before = taken.draft.text.clone();

@@ -190,9 +190,40 @@ fn retry_delay(failure: &Failure, failures: u32) -> Option<Duration> {
     }
 }
 
+/// What fetches a workspace's private images: its Slack client, or its
+/// Teams client, which knows which of Microsoft's hosts take which
+/// sign-in.
+#[derive(Clone)]
+enum Fetcher {
+    Slack(slack::Client),
+    #[cfg(feature = "teams")]
+    Teams(crate::teams::client::TeamsClient),
+}
+
+impl Fetcher {
+    async fn get_bytes(&self, url: &str, max: usize) -> Result<Vec<u8>, Failure> {
+        match self {
+            Self::Slack(client) => client.get_bytes(url, max).await.map_err(failure_for),
+            #[cfg(feature = "teams")]
+            Self::Teams(client) => client
+                .get_media(url, max)
+                .await
+                .map_err(|error| match error {
+                    crate::failure::Failure::Http(status)
+                        if (400..500).contains(&status) && status != 408 && status != 429 =>
+                    {
+                        Failure::Refused(format!("HTTP {status}"))
+                    }
+                    crate::failure::Failure::TooLarge => Failure::Refused("too large".into()),
+                    error => Failure::Fetch(format!("{error:?}")),
+                }),
+        }
+    }
+}
+
 struct Inner {
     entries: Mutex<HashMap<String, Entry>>,
-    clients: RwLock<HashMap<String, slack::Client>>,
+    clients: RwLock<HashMap<String, Fetcher>>,
     runtime: tokio::runtime::Handle,
     cache_dir: PathBuf,
 }
@@ -223,7 +254,18 @@ impl ImageLoader {
     /// Lets the loader fetch `team`'s files, including those asked for
     /// before the workspace was ready.
     pub fn set_client(&self, team: &str, client: slack::Client) {
-        write(&self.inner.clients).insert(team.to_owned(), client);
+        self.set_fetcher(team, Fetcher::Slack(client));
+    }
+
+    /// Lets the loader fetch a Teams workspace's pictures (avatars and
+    /// pictures in messages), as [`Self::set_client`] does for Slack.
+    #[cfg(feature = "teams")]
+    pub fn set_teams_client(&self, team: &str, client: crate::teams::client::TeamsClient) {
+        self.set_fetcher(team, Fetcher::Teams(client));
+    }
+
+    fn set_fetcher(&self, team: &str, fetcher: Fetcher) {
+        write(&self.inner.clients).insert(team.to_owned(), fetcher);
         let prefix = authed(team, "");
         lock(&self.inner.entries).retain(|uri, entry| {
             !(uri.starts_with(&prefix)
@@ -318,15 +360,16 @@ impl Inner {
             Some(team) => {
                 let client = read(&self.clients).get(team).cloned();
                 let client = client.ok_or(Failure::SignedOut)?;
-                client.get_bytes(url, MAX_IMAGE_BYTES).await
+                client.get_bytes(url, MAX_IMAGE_BYTES).await?
             }
             // The shared client, taken now so it follows the proxy setting.
             None => {
                 let http = slack::net::api();
-                slack::client::get_bytes(&http, url, None, None, MAX_IMAGE_BYTES).await
+                slack::client::get_bytes(&http, url, None, None, MAX_IMAGE_BYTES)
+                    .await
+                    .map_err(failure_for)?
             }
-        }
-        .map_err(failure_for)?;
+        };
         check_decoded_size(&bytes).map_err(Failure::Refused)?;
         // A workspace's files are as private as its messages: their folder
         // and the files in it are yours alone. Public images need no such

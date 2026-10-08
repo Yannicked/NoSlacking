@@ -34,6 +34,11 @@ pub enum Action {
     Open {
         users: Vec<String>,
     },
+    /// Asks the server for people matching what is typed in the New
+    /// message dialog (see [`crate::model::Service::searches_people`]).
+    FindPeople {
+        query: String,
+    },
     /// Shows the channel browser and lists the public channels.
     Browse,
     /// Joins a public channel and opens it.
@@ -104,6 +109,8 @@ pub enum Action {
 pub enum Command {
     /// `conversations.open` with these people, then opens the result.
     Open { users: Vec<String> },
+    /// Finds people by name or address; they arrive as `Event::Users`.
+    FindPeople { query: String },
     /// Lists the public channels you are not in.
     Browse,
     /// `conversations.join`, then opens the channel.
@@ -142,7 +149,7 @@ impl Command {
     /// What failed, should this command fail.
     pub fn failure(&self) -> Failure {
         match self {
-            Self::Open { .. } => Failure::Open,
+            Self::Open { .. } | Self::FindPeople { .. } => Failure::Open,
             Self::Browse => Failure::Browse,
             Self::Join { .. } => Failure::Join,
             Self::Leave { .. } => Failure::Leave,
@@ -560,6 +567,9 @@ pub struct NewMessage {
     pub selected: usize,
     /// Waiting for Slack to open the conversation.
     pub busy: bool,
+    /// The last query sent to the server for people, so each is asked
+    /// once.
+    pub asked: String,
     /// The last query's matches: a workspace can have tens of thousands
     /// of people, too many to search on every frame.
     found: Option<FoundPeople>,
@@ -952,6 +962,11 @@ pub fn apply(app: &mut App, action: Action) {
             app.convos.new_message = Some(NewMessage::default());
         }
         Action::Open { users } => open(app, users),
+        Action::FindPeople { query } => {
+            if let Some(team) = app.active_team() {
+                send(app, team, Command::FindPeople { query });
+            }
+        }
         Action::Browse => {
             app.focus_overlay = true;
             app.convos.browse = Some(Browse {
@@ -1185,6 +1200,16 @@ pub fn set_pinned(
 /// Opens the details panel on `tab`, in place of a thread, and asks for
 /// what the tab shows unless it is loaded already.
 fn details(app: &mut App, team: String, channel: String, tab: Tab) {
+    // Everything the panel shows comes from Slack; for a service without
+    // it, every tab would only say so.
+    let offered = app
+        .workspaces
+        .iter()
+        .find(|w| w.info.team_id == team)
+        .is_some_and(|w| w.info.offers(crate::model::Ability::Details));
+    if !offered {
+        return;
+    }
     app.thread = None;
     let editing = app
         .convos
@@ -1549,6 +1574,7 @@ mod tests {
     #[test]
     fn suggestions_follow_the_query_and_new_people() {
         let mut workspace = WorkspaceState::new(Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: "acme".into(),
@@ -1577,6 +1603,7 @@ mod tests {
     #[test]
     fn one_person_reuses_the_dm_you_have() {
         let mut workspace = WorkspaceState::new(Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: "acme".into(),
@@ -1613,6 +1640,7 @@ mod tests {
     #[test]
     fn pinning_marks_every_loaded_copy() {
         let mut workspace = WorkspaceState::new(Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: "acme".into(),
@@ -1706,6 +1734,7 @@ mod tests {
     #[test]
     fn a_name_you_already_have_is_taken() {
         let mut workspace = WorkspaceState::new(Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: "acme".into(),
@@ -1984,6 +2013,7 @@ mod tests {
     #[test]
     fn the_fingerprint_follows_what_pickers_list() {
         let mut workspace = WorkspaceState::new(Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "Acme".into(),
             domain: "acme".into(),

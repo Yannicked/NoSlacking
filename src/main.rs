@@ -58,6 +58,21 @@ fn main() -> eframe::Result<()> {
         release_slack_links(&dirs.state);
         return Ok(());
     }
+    #[cfg(feature = "teams")]
+    if let Some([team, callee]) = &cli.teams_call_probe {
+        std::process::exit(noslacking::teams::call_probe::run(
+            &noslacking::teams::call_probe::Options {
+                team: team.clone(),
+                callee: callee.clone(),
+                seconds: cli.seconds,
+                settings: dirs.settings_file(),
+            },
+        ));
+    }
+    #[cfg(feature = "teams")]
+    if cli.teams_probe {
+        std::process::exit(noslacking::teams::probe::run(&dirs.settings_file()));
+    }
     if let Some([team, channel]) = &cli.huddle_probe {
         let code =
             noslacking::huddle_audio::probe::run(&noslacking::huddle_audio::probe::Options {

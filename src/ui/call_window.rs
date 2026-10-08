@@ -122,6 +122,8 @@ pub struct Controls {
     /// Live: the microphone and camera can be used; before that, only
     /// Leave.
     pub live: bool,
+    /// What leaving is: a call's says "Hang up".
+    pub leaving: call_bar::Leaving,
     /// Your microphone.
     pub mic: Mic,
     /// Your camera.
@@ -200,6 +202,11 @@ pub fn title(name: &str) -> String {
 /// The window's title without a share.
 pub fn cameras_title() -> String {
     t("Huddle video").into_owned()
+}
+
+/// A call's window's title without a share: "Call with Ana".
+pub fn call_title(name: &str) -> String {
+    tf("Call with {name}", &[("name", name)])
 }
 
 /// Where a `source`-sized picture goes in `stage`: as large as fits,
@@ -539,7 +546,7 @@ fn control_bar(
             actions.push(Action::Huddle(huddles::Action::Share(action)));
         }
     }
-    let leave = call_bar::leave_button(&mut row, palette, look);
+    let leave = call_bar::leave_button(&mut row, palette, look, controls.leaving);
     let used = row.min_rect().right() - start;
     if (used - width).abs() > 0.5 {
         ui.data_mut(|d| d.insert_temp(id, used));
@@ -964,6 +971,7 @@ mod tests {
                 name: "#design".into(),
                 time: "2:17".into(),
                 live,
+                leaving: call_bar::Leaving::Huddle,
                 mic,
                 #[cfg(feature = "huddle-camera")]
                 camera: crate::huddle_camera::Cam::Off,

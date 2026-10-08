@@ -430,6 +430,8 @@ pub struct Shown<'a> {
     pub id: Option<String>,
     pub kind: SectionKind,
     pub title: String,
+    /// A picture for its header, if the section has one.
+    pub icon: Option<String>,
     pub conversations: Vec<&'a Conversation>,
     /// For each of `conversations`, in the same order, whether it has gone
     /// quiet and is hidden until the section is expanded.
@@ -450,6 +452,9 @@ pub fn title(section: &SidebarSection) -> String {
         }
         SectionKind::Starred => crate::i18n::t("Starred").into_owned(),
         SectionKind::Channels => crate::i18n::t("Channels").into_owned(),
+        SectionKind::DirectMessages if section.id == crate::model::TEAMS_CHAT_SECTION => {
+            crate::i18n::t("Chat").into_owned()
+        }
         SectionKind::DirectMessages => crate::i18n::t("Direct messages").into_owned(),
         SectionKind::Apps => crate::i18n::t("Apps").into_owned(),
     }
@@ -525,6 +530,7 @@ pub fn layout<'a>(
                 id: None,
                 kind: SectionKind::Channels,
                 title: crate::i18n::t("Channels").into_owned(),
+                icon: None,
                 inactive: inactive(&channels, SectionKind::Channels),
                 conversations: channels,
             },
@@ -532,6 +538,7 @@ pub fn layout<'a>(
                 id: None,
                 kind: SectionKind::DirectMessages,
                 title: crate::i18n::t("Direct messages").into_owned(),
+                icon: None,
                 inactive: inactive(&direct, SectionKind::DirectMessages),
                 conversations: direct,
             },
@@ -598,6 +605,7 @@ pub fn layout<'a>(
                 id: Some(section.id.clone()),
                 kind: section.kind,
                 title: title(section),
+                icon: section.icon.clone(),
                 inactive: inactive(&rows, section.kind),
                 conversations: rows,
             }
@@ -610,6 +618,7 @@ pub fn layout<'a>(
             id: None,
             kind: SectionKind::Channels,
             title: crate::i18n::t("Other").into_owned(),
+            icon: None,
             inactive: inactive(&stray, SectionKind::Channels),
             conversations: stray,
         });
@@ -720,6 +729,7 @@ struct Placed {
     id: Option<String>,
     kind: SectionKind,
     title: String,
+    icon: Option<String>,
     rows: Vec<usize>,
     inactive: Vec<bool>,
 }
@@ -862,6 +872,7 @@ impl Memo {
                     id: placed.id.clone(),
                     kind: placed.kind,
                     title: placed.title.clone(),
+                    icon: placed.icon.clone(),
                     conversations,
                     inactive,
                 }
@@ -907,6 +918,7 @@ impl Memo {
                         id: shown.id,
                         kind: shown.kind,
                         title: shown.title,
+                        icon: shown.icon,
                         rows,
                         inactive,
                     }
@@ -937,6 +949,7 @@ pub fn apply(sections: &mut Vec<SidebarSection>, edit: &SidebarEdit) {
                 name: name.clone(),
                 emoji: String::new(),
                 channel_ids: Vec::new(),
+                icon: None,
             };
             if let Some(channel) = channel {
                 remove_everywhere(sections, channel, false);
@@ -994,6 +1007,7 @@ pub fn apply(sections: &mut Vec<SidebarSection>, edit: &SidebarEdit) {
                                 name: String::new(),
                                 emoji: String::new(),
                                 channel_ids: Vec::new(),
+                                icon: None,
                             },
                         );
                         0
@@ -1049,6 +1063,20 @@ pub fn targets(sections: &[SidebarSection], from: Option<&str>) -> Vec<(String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_teams_chat_section_is_called_chat() {
+        let section = |id: &str| SidebarSection {
+            id: id.to_owned(),
+            kind: SectionKind::DirectMessages,
+            name: String::new(),
+            emoji: String::new(),
+            channel_ids: Vec::new(),
+            icon: None,
+        };
+        assert_eq!(title(&section(crate::model::TEAMS_CHAT_SECTION)), "Chat");
+        assert_eq!(title(&section("L04")), "Direct messages");
+    }
     use crate::model::{ConversationKind, Ts};
 
     fn conversation(id: &str, name: &str, kind: ConversationKind, latest: &str) -> Conversation {
@@ -1091,6 +1119,7 @@ mod tests {
             name: name.into(),
             emoji: String::new(),
             channel_ids: ids.iter().map(|s| (*s).to_owned()).collect(),
+            icon: None,
         }
     }
 

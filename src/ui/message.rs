@@ -6,7 +6,7 @@ use egui::{Align, CornerRadius, Layout, Margin, RichText, Sense, Stroke, UiBuild
 use super::rich::{self, Rich};
 use crate::app::{Editing, Selected, WorkspaceState};
 use crate::i18n::{t, tf, tn};
-use crate::model::{Action, Delivery, Message};
+use crate::model::{Ability, Action, Delivery, Message};
 use crate::settings::Density;
 use crate::theme::{self, Icon, Palette};
 
@@ -694,6 +694,14 @@ fn edit(
 fn reactions(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<Action>) {
     let palette = row.palette;
     let me = &row.workspace.info.user_id;
+    // Where reacting is not offered, the reactions still show, but only
+    // for reading.
+    let reacts = row.workspace.info.offers(Ability::Reactions);
+    let sense = if reacts {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
         for reaction in &message.reactions {
@@ -728,8 +736,12 @@ fn reactions(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
                     });
                 })
                 .response
-                .interact(Sense::click())
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                .interact(sense);
+            let response = if reacts {
+                response.on_hover_cursor(egui::CursorIcon::PointingHand)
+            } else {
+                response
+            };
             let spoken = crate::i18n::fill(
                 &tn(
                     "{count} reaction with :{emoji}:",
@@ -760,13 +772,16 @@ fn reactions(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
                     &[("names", &names.join(", ")), ("emoji", &reaction.name)],
                 ));
             });
-            if response.clicked() {
+            if reacts && response.clicked() {
                 actions.push(Action::React {
                     channel: row.channel.to_owned(),
                     ts: message.ts.clone(),
                     name: reaction.name.clone(),
                 });
             }
+        }
+        if !reacts {
+            return;
         }
         let add = egui::Frame::new()
             .fill(palette.surface)
@@ -856,6 +871,7 @@ mod tests {
     #[test]
     fn copied_text_names_user_groups() {
         let mut w = WorkspaceState::new(crate::model::Workspace {
+            service: crate::model::Service::Slack,
             team_id: "T1".into(),
             name: "One".into(),
             domain: String::new(),

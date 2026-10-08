@@ -18,6 +18,12 @@ pub mod listen;
 pub mod people;
 mod poll;
 mod search;
+#[cfg(feature = "teams")]
+pub mod teams;
+#[cfg(feature = "teams")]
+pub mod teams_call;
+#[cfg(feature = "teams")]
+pub mod teams_translate;
 mod translate;
 pub mod views;
 pub mod worker;
@@ -61,6 +67,12 @@ pub enum Command {
     /// Opens Slack's sign-in page in the browser and, for a while, accepts
     /// the `slack://` link it hands back through the desktop.
     StartBrowserSignIn,
+    /// Starts Microsoft Teams Device Code sign-in, to the tenant if given,
+    /// or to a personal account.
+    StartTeamsSignIn {
+        tenant: Option<String>,
+        personal: bool,
+    },
     SignOut(String),
     /// The conversation on screen, for polling when Socket Mode is down.
     Focus {
@@ -321,6 +333,10 @@ impl std::fmt::Debug for Command {
             Self::PasteToken(_) => f.debug_tuple("PasteToken").field(&REDACTED).finish(),
             Self::SignInLink(_) => f.debug_tuple("SignInLink").field(&REDACTED).finish(),
             Self::StartBrowserSignIn => f.write_str("StartBrowserSignIn"),
+            Self::StartTeamsSignIn { personal, .. } => f
+                .debug_struct("StartTeamsSignIn")
+                .field("personal", personal)
+                .finish_non_exhaustive(),
             Self::SignOut(team) => f.debug_tuple("SignOut").field(team).finish(),
             Self::Focus { team, channel } => f
                 .debug_struct("Focus")
@@ -633,6 +649,12 @@ pub enum Change {
 pub enum SignIn {
     /// The browser is open on this URL.
     Waiting(String),
+    /// Microsoft Teams Device Code flow prompt.
+    TeamsDeviceCode {
+        user_code: String,
+        verification_uri: String,
+        message: String,
+    },
     Exchanging,
     Failed(Failure),
     Done(String),
@@ -1007,6 +1029,18 @@ impl Sink {
     /// A sink for one workspace's tasks, and the gate that silences it when
     /// the workspace signs out. A task that is still running then cannot
     /// bring the workspace back with a late event.
+    /// A sink whose events go nowhere, for what runs without an
+    /// interface (a probe).
+    #[cfg(feature = "teams")]
+    pub fn nowhere() -> Sink {
+        let (sender, _) = mpsc::channel();
+        Sink {
+            sender,
+            waker: Waker::default(),
+            gate: Some(Arc::new(Mutex::new(false))),
+        }
+    }
+
     pub fn gated(&self) -> (Sink, Gate) {
         let gate = Arc::new(Mutex::new(true));
         let sink = Sink {

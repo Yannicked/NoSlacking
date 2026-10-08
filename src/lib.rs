@@ -36,6 +36,7 @@ pub mod images;
 pub mod jump;
 pub mod lightbox;
 pub mod links;
+pub mod meetings;
 pub mod model;
 pub mod mrkdwn;
 pub mod notice;
@@ -59,6 +60,8 @@ pub mod slack;
 pub mod slack_links;
 pub mod slash;
 pub mod spell;
+#[cfg(feature = "teams")]
+pub mod teams;
 pub mod theme;
 pub mod tray;
 mod ui;

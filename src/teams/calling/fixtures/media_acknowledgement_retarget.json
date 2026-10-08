@@ -1,0 +1,8 @@
+{
+  "mediaAcknowledgement": {"reason": "noError", "code": 0, "subCode": 10109, "phrase": "Participant retarget was successful.", "resultCategories": ["Success"]},
+  "links": {
+    "callLeg": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc.example/cc/v1/forked/595/a4/callLeg",
+    "mediaRenegotiation": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc.example/cc/v1/forked/595/a4/renegotiate",
+    "transfer": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc.example/cc/v1/forked/595/a4/transfer"
+  }
+}

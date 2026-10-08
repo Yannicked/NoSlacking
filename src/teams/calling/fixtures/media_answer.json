@@ -1,0 +1,30 @@
+{
+  "mediaAnswer": {
+    "sender": {
+      "id": "8:live:other",
+      "displayName": "Other Example",
+      "endpointId": "00000000-0000-4000-8000-000000000006",
+      "languageId": null,
+      "participantId": "00000000-0000-4000-8000-000000000004",
+      "hidden": false
+    },
+    "mediaContent": {
+      "contentType": "application/sdp",
+      "blob": "v=0 (an SDP, left out of the fixture)",
+      "mediaLegId": "00000000000000000000000000000001",
+      "escalationOccurring": false,
+      "newOffer": false,
+      "clientLocation": "NL"
+    },
+    "callModalities": [
+      "audio",
+      "video"
+    ],
+    "links": {
+      "mediaAcknowledgement": "https://fp.example/api/v2/cp/cc.example/cc/v1/mediaAnswers/00000000-0000-4000-8000-000000000007/13/t/889/acknowledge?i=192-0-2-1"
+    }
+  },
+  "debugContent": {
+    "ProcessingCallControllerInstance": "https://cc.example/"
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "participants": {
+    "8:live:me": {
+      "version": 4,
+      "state": "active",
+      "details": {
+        "id": "8:live:me",
+        "displayName": "Me Example",
+        "displayNameSource": "unknown",
+        "propertyBag": {
+          "aiVoiceConsent": {
+            "value": {
+              "aiVoiceConsentValue": "0"
+            },
+            "sequenceNumber": 1
+          }
+        },
+        "resourceId": null,
+        "participantType": "inTenant",
+        "endpointId": "00000000-0000-0000-0000-000000000000",
+        "participantId": null,
+        "languageId": null,
+        "hidden": false
+      },
+      "endpoints": {
+        "00000000-0000-4000-8000-000000000002": {
+          "call": {
+            "serverMuteVersion": 0
+          },
+          "endpointCapabilities": 579,
+          "clientEndpointCapabilities": 9322496,
+          "participantId": "00000000-0000-4000-8000-000000000010",
+          "clientVersion": "SkypeSpaces/1415/1/os=linux",
+          "endpointMetadata": {
+            "holographicCapabilities": 3
+          },
+          "endpointState": {
+            "endpointStateSequenceNumber": 3,
+            "state": {
+              "isMuted": true
+            }
+          },
+          "languageId": "en-us",
+          "endpointJoinTime": "2026-01-01T00:00:00Z",
+          "modalityJoined": "Call",
+          "endpointMeetingRoles": [
+            "none"
+          ]
+        }
+      },
+      "role": "admin",
+      "meetingRoles": [],
+      "enforceConsentToJoin": false
+    }
+  },
+  "type": "Delta",
+  "sequenceNumber": 4,
+  "participantCounts": {
+    "totalParticipants": 2,
+    "preheatedParticipants": 0,
+    "lobbyParticipants": 0,
+    "totalPresenters": 0,
+    "requestingAttentionPresenters": 0,
+    "totalAttendees": 0,
+    "requestingAttentionAttendees": 0,
+    "overflowAttendeeCount": 0,
+    "totalInterpreters": 0,
+    "requestingAttentionInterpreters": 0,
+    "streamingClients": 0,
+    "totalOrganizers": 0
+  }
+}

@@ -1,0 +1,1223 @@
+//! Translates Microsoft Teams data structures into NoSlacking model types.
+//!
+//! Converts Teams message IDs to/from [`Ts`], HTML message content to rich text blocks,
+//! and Teams conversations, users, and teams into [`Conversation`], [`User`], and [`SidebarSection`].
+
+use std::sync::Arc;
+
+use crate::model::{
+    Conversation, ConversationKind, Delivery, KitBlock, Message, Reaction, SectionKind,
+    SidebarSection, Ts, User,
+};
+use crate::teams::html::{html_to_blocks, strip_tags};
+use crate::teams::types;
+
+/// Converts a Teams message ID (epoch milliseconds or string) into a [`Ts`].
+pub fn teams_id_to_ts(id: &str) -> Ts {
+    if let Ok(millis) = id.parse::<u64>() {
+        let secs = millis / 1000;
+        let micros = (millis % 1000) * 1000;
+        return Ts::new(format!("{secs}.{micros:06}"));
+    }
+    // Fall back to numeric extraction if possible
+    let digits: String = id.chars().filter(|c| c.is_ascii_digit()).collect();
+    if let Ok(millis) = digits.parse::<u64>() {
+        let secs = millis / 1000;
+        let micros = (millis % 1000) * 1000;
+        return Ts::new(format!("{secs}.{micros:06}"));
+    }
+    // As last resort, wrap id in Ts
+    Ts::new(id)
+}
+
+/// Converts a [`Ts`] back into a Teams millisecond epoch ID string.
+pub fn ts_to_teams_id(ts: &Ts) -> String {
+    if let Some((secs_str, frac_str)) = ts.as_str().split_once('.')
+        && let Ok(secs) = secs_str.parse::<u64>()
+    {
+        let micros = frac_str
+            .bytes()
+            .chain(std::iter::repeat(b'0'))
+            .take(6)
+            .fold(0u64, |m, d| m * 10 + u64::from(d.saturating_sub(b'0')));
+        let millis = secs * 1000 + micros / 1000;
+        return millis.to_string();
+    }
+    ts.as_str().to_string()
+}
+
+/// Extracts a clean user ID from a Teams `from` field (which may be a contacts URL or MRI).
+/// Returns `None` if the sender is a thread, channel, or system entity.
+pub fn clean_teams_user_id(from: &str) -> Option<String> {
+    if from.contains("@thread") || from.starts_with("19:") {
+        return None;
+    }
+    let after_path = if let Some((_, last)) = from.rsplit_once("/contacts/") {
+        last
+    } else if let Some((_, last)) = from.rsplit_once('/') {
+        last
+    } else {
+        from
+    };
+
+    if after_path.contains("@thread") || after_path.starts_with("19:") {
+        return None;
+    }
+
+    let stripped = after_path
+        .trim_start_matches("8:orgid:")
+        .trim_start_matches("8:teamsvisitor:")
+        .trim_start_matches("8:guest:")
+        .trim_start_matches("8:");
+
+    if stripped.is_empty() {
+        None
+    } else {
+        Some(stripped.to_string())
+    }
+}
+
+/// Translates Teams message content and message_type into display text,
+/// an optional system subtype, and blocks; `None` for a message with
+/// nothing to show (an activity Teams records that has no wording here).
+pub fn translate_teams_content(
+    msg: &types::Message,
+) -> Option<(String, Option<String>, Vec<KitBlock>)> {
+    let msg_type = msg.message_type.as_deref().unwrap_or("");
+    let raw_content = msg.content.trim();
+
+    // 1. Thread activity: who joined, renamed, changed what.
+    if let Some(kind) = msg_type.strip_prefix("ThreadActivity/") {
+        return thread_activity(kind, raw_content)
+            .map(|(text, subtype)| (text, Some(subtype.to_owned()), Vec::new()));
+    }
+    // The same changes sometimes arrive without the type, as bare JSON.
+    if raw_content.starts_with('{')
+        && let Some(activity) = Activity::json(raw_content)
+        && activity.value.is_some()
+        && (raw_content.contains("\"newValue\"") || raw_content.contains("\"oldValue\""))
+    {
+        return Some((
+            format!(
+                "{} changed a setting to “{}”",
+                activity.who(),
+                mrkdwn_escape(&activity.value.unwrap_or_default())
+            ),
+            Some("channel_purpose".to_owned()),
+            Vec::new(),
+        ));
+    }
+    if raw_content.starts_with("{\"eventtime\":") || raw_content.starts_with("{\"eventTime\":") {
+        return thread_activity("MemberJoined", raw_content)
+            .map(|(text, subtype)| (text, Some(subtype.to_owned()), Vec::new()));
+    }
+
+    // 2. Check for Event/Call or meeting events
+    if msg_type.starts_with("Event/Call")
+        || raw_content.contains("<systemMessage")
+        || raw_content.contains("<partlist")
+    {
+        let text = if raw_content.contains("Ended") || raw_content.contains("ended") {
+            "Meeting ended.".to_string()
+        } else if raw_content.contains("Started") || raw_content.contains("started") {
+            "Meeting started.".to_string()
+        } else if raw_content.contains("Scheduled") || raw_content.contains("scheduled") {
+            "Meeting scheduled.".to_string()
+        } else {
+            "Call event.".to_string()
+        };
+        return Some((text, Some("channel_join".to_string()), Vec::new()));
+    }
+
+    // 3. Fallback: Check if content is a JSON blob starting with {"eventtime
+    if raw_content.starts_with('{')
+        && raw_content.ends_with('}')
+        && let Ok(val) = serde_json::from_str::<serde_json::Value>(raw_content)
+        && (val.get("eventtime").is_some() || val.get("eventTime").is_some())
+    {
+        return Some((
+            "Meeting event.".to_string(),
+            Some("channel_join".to_string()),
+            Vec::new(),
+        ));
+    }
+
+    // A file, picture or recording: its XML says what it is called, and
+    // the name is what shows until such files can be opened here.
+    if msg_type.starts_with("RichText/Media_") || msg_type == "RichText/UriObject" {
+        let title = tag_texts(raw_content, "Title")
+            .into_iter()
+            .chain(attribute(raw_content, "OriginalName", "v"))
+            .next()?;
+        return Some((format!("📎 {}", mrkdwn_escape(&title)), None, Vec::new()));
+    }
+
+    // Anything else that is not a message (calls' signalling, typing,
+    // cards Teams only shows itself) is left out rather than shown raw.
+    if !(msg_type.is_empty() || msg_type.starts_with("Text") || msg_type.starts_with("RichText")) {
+        log::debug!("leaving out a Teams message of type {msg_type}");
+        return None;
+    }
+
+    // 4. Regular chat message
+    let plain_text = strip_tags(&msg.content);
+    let mut blocks = html_to_blocks(&msg.content);
+    let people: Vec<(String, String)> = msg
+        .properties
+        .as_ref()
+        .and_then(|p| p.mentions.as_ref())
+        .into_iter()
+        .flatten()
+        .filter_map(|m| Some((m.item(), clean_teams_user_id(&m.mri)?)))
+        .collect();
+    if !people.is_empty() {
+        blocks = crate::teams::html::resolve_mentions(blocks, &people);
+    }
+    let mut kit_blocks = Vec::new();
+    if !blocks.is_empty() {
+        kit_blocks.push(KitBlock::RichText(Arc::from(blocks)));
+    }
+
+    Some((plain_text, None, kit_blocks))
+}
+
+/// The people and value a thread activity names, in either shape Teams
+/// writes it: JSON (`{"user": …, "newValue": …, "members": […]}`) or XML
+/// (`<initiator>…</initiator><value>…</value><target>…</target>`).
+#[derive(Debug, Default, PartialEq)]
+struct Activity {
+    /// Who did it, as a user id.
+    initiator: Option<String>,
+    /// What a setting became.
+    value: Option<String>,
+    /// Whom it was done to, as user ids.
+    targets: Vec<String>,
+    /// The names Teams gave with them, for meeting guests who have no id
+    /// to look up.
+    names: Vec<String>,
+}
+
+impl Activity {
+    fn parse(content: &str) -> Self {
+        Self::json(content)
+            .unwrap_or_else(|| Self::xml(content))
+            .tidied()
+    }
+
+    /// Each person once, and the one who did it left out of whom it was
+    /// done to, unless they are all of it: a new chat's record names its
+    /// creator among the members it added.
+    fn tidied(mut self) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        self.targets.retain(|id| seen.insert(id.clone()));
+        if let Some(initiator) = &self.initiator
+            && self.targets.iter().any(|t| t != initiator)
+        {
+            self.targets.retain(|t| t != initiator);
+        }
+        self
+    }
+
+    fn json(content: &str) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_str(content).ok()?;
+        let text = |key: &str| match value.get(key)? {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Null => None,
+            other => Some(other.to_string()),
+        };
+        let members = value
+            .get("members")
+            .and_then(|m| m.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Some(Self {
+            initiator: text("user")
+                .or_else(|| text("initiator"))
+                .and_then(|id| clean_teams_user_id(&id)),
+            value: text("newValue").or_else(|| text("value")),
+            targets: members
+                .iter()
+                .filter_map(|m| m.get("id").and_then(|id| id.as_str()))
+                .filter_map(clean_teams_user_id)
+                .collect(),
+            names: members
+                .iter()
+                .filter_map(|m| {
+                    m.get("friendlyname")
+                        .or_else(|| m.get("friendlyName"))
+                        .and_then(|f| f.as_str())
+                })
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        })
+    }
+
+    fn xml(content: &str) -> Self {
+        Self {
+            initiator: tag_texts(content, "initiator")
+                .first()
+                .and_then(|id| clean_teams_user_id(id)),
+            value: tag_texts(content, "value").into_iter().next(),
+            // Only `<target>`: `<detailedtargetinfo>` names each again in
+            // an `<id>`.
+            targets: tag_texts(content, "target")
+                .iter()
+                .filter_map(|id| clean_teams_user_id(id))
+                .collect(),
+            names: tag_texts(content, "friendlyname"),
+        }
+    }
+
+    /// The one who did it, as a mention the interface names.
+    fn who(&self) -> String {
+        self.initiator
+            .as_ref()
+            .map_or_else(|| "Someone".to_owned(), |id| format!("<@{id}>"))
+    }
+
+    /// Whom it was done to: names where Teams gave them, else mentions.
+    fn whom(&self) -> String {
+        let people: Vec<String> = if self.names.is_empty() {
+            self.targets.iter().map(|id| format!("<@{id}>")).collect()
+        } else {
+            self.names.iter().map(|n| mrkdwn_escape(n)).collect()
+        };
+        match people.as_slice() {
+            [] => "someone".to_owned(),
+            [one] => one.clone(),
+            [first, second] => format!("{first} and {second}"),
+            [first, second, rest @ ..] => format!("{first}, {second} and {} others", rest.len()),
+        }
+    }
+
+    /// Whether the change was made to the one who made it: joining or
+    /// leaving, rather than adding or removing someone.
+    fn by_themselves(&self) -> bool {
+        self.initiator.is_none()
+            || self
+                .targets
+                .iter()
+                .all(|t| Some(t) == self.initiator.as_ref())
+    }
+}
+
+/// The pictures in a message's HTML (`<img itemtype="…/AMSImage">`, on
+/// Teams' media service), as files the interface shows as images. Their
+/// addresses need the workspace's sign-in, which the image loader adds.
+fn pictures(html: &str) -> Vec<crate::model::File> {
+    let mut found = Vec::new();
+    let mut rest = html;
+    while let Some(start) = rest.find("<img") {
+        let tail = &rest[start..];
+        let Some(end) = tail.find('>') else {
+            break;
+        };
+        let tag = &tail[..end];
+        rest = &tail[end..];
+        if !tag.contains("schema.skype.com/AMSImage") {
+            continue;
+        }
+        let attr = |name: &str| {
+            let key = format!(" {name}=\"");
+            let at = tag.find(&key)? + key.len();
+            let value = &tag[at..];
+            Some(crate::teams::html::unescape_html(
+                &value[..value.find('"')?],
+            ))
+        };
+        let Some(src) = attr("src").filter(|s| s.starts_with("https://")) else {
+            continue;
+        };
+        let size = match (
+            attr("width").and_then(|w| w.parse::<f32>().ok()),
+            attr("height").and_then(|h| h.parse::<f32>().ok()),
+        ) {
+            (Some(w), Some(h)) if w > 0.0 && h > 0.0 => Some([w, h]),
+            _ => None,
+        };
+        let id = attr("itemid").unwrap_or_else(|| src.clone());
+        found.push(crate::model::File {
+            name: "image".into(),
+            title: attr("alt")
+                .filter(|a| !a.is_empty())
+                .unwrap_or_else(|| "image".into()),
+            mimetype: "image/jpeg".into(),
+            filetype: "jpg".into(),
+            thumb: Some(src.clone()),
+            thumb_size: size,
+            original_size: size,
+            url_private: Some(src),
+            id,
+            ..Default::default()
+        });
+    }
+    found
+}
+
+/// A thread activity (`ThreadActivity/{kind}`) as a system line and its
+/// subtype, or `None` for one with nothing worth a line.
+fn thread_activity(kind: &str, content: &str) -> Option<(String, &'static str)> {
+    let activity = Activity::parse(content);
+    let value = activity.value.as_deref().map(mrkdwn_escape);
+    Some(match kind {
+        "AddMember" | "MemberJoined" if activity.by_themselves() || !activity.names.is_empty() => {
+            (format!("{} joined", activity.whom()), "channel_join")
+        }
+        "AddMember" | "MemberJoined" => (
+            format!("{} added {}", activity.who(), activity.whom()),
+            "channel_join",
+        ),
+        "DeleteMember" | "MemberLeft" if activity.by_themselves() => {
+            (format!("{} left", activity.whom()), "channel_leave")
+        }
+        "DeleteMember" | "MemberLeft" => (
+            format!("{} removed {}", activity.who(), activity.whom()),
+            "channel_leave",
+        ),
+        "TopicUpdate" => match value.filter(|v| !v.trim().is_empty()) {
+            Some(topic) => (
+                format!("{} renamed the conversation to “{topic}”", activity.who()),
+                "channel_name",
+            ),
+            None => (
+                format!("{} removed the conversation's name", activity.who()),
+                "channel_name",
+            ),
+        },
+        "HistoryDisabled" => ("Chat history was turned off".to_owned(), "channel_purpose"),
+        other => {
+            // `PictureUpdate`, `DescriptionUpdate` and the like: "changed
+            // the picture", with the new value when it is readable text.
+            let setting = other.strip_suffix("Update")?;
+            let words = camel_to_words(setting);
+            match value.filter(|v| !v.trim().is_empty() && v.len() < 200) {
+                Some(value) => (
+                    format!("{} changed the {words} to “{value}”", activity.who()),
+                    "channel_purpose",
+                ),
+                None => (
+                    format!("{} changed the {words}", activity.who()),
+                    "channel_purpose",
+                ),
+            }
+        }
+    })
+}
+
+/// The text inside every `<tag>…</tag>` of `xml`, unescaped.
+fn tag_texts(xml: &str, tag: &str) -> Vec<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut found = Vec::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find(&open) {
+        rest = &rest[start + open.len()..];
+        let Some(end) = rest.find(&close) else {
+            break;
+        };
+        let text = crate::teams::html::unescape_html(rest[..end].trim());
+        if !text.is_empty() {
+            found.push(text);
+        }
+        rest = &rest[end + close.len()..];
+    }
+    found
+}
+
+/// The `attr` of the first `<tag …>` in `xml`, as Teams writes a file's
+/// name: `<OriginalName v="report.pdf"/>`.
+fn attribute(xml: &str, tag: &str, attr: &str) -> Option<String> {
+    let start = xml.find(&format!("<{tag} "))?;
+    let rest = &xml[start..];
+    let rest = &rest[..rest.find('>')?];
+    let key = format!("{attr}=\"");
+    let value = &rest[rest.find(&key)? + key.len()..];
+    let value = crate::teams::html::unescape_html(&value[..value.find('"')?]);
+    (!value.is_empty()).then_some(value)
+}
+
+/// `DescriptionUpdate`'s setting in words: `PictureUrl` → `picture url`.
+fn camel_to_words(name: &str) -> String {
+    let mut words = String::new();
+    for c in name.chars() {
+        if c.is_uppercase() && !words.is_empty() {
+            words.push(' ');
+        }
+        words.extend(c.to_lowercase());
+    }
+    words
+}
+
+/// Text made safe to put in a message's mrkdwn, where `<` starts a
+/// mention or link.
+fn mrkdwn_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// A work channel's posts as the interface shows them: each post, then
+/// the replies it came with, the post carrying its thread's count (all of
+/// its replies, though only the newest few come with it), its people and
+/// its latest reply.
+pub fn channel_posts(posts: &[crate::teams::client::Post]) -> Vec<Message> {
+    let mut out = Vec::new();
+    for post in posts {
+        let Some(mut root) = translate_message(&post.message) else {
+            continue;
+        };
+        let replies: Vec<Message> = post
+            .replies
+            .iter()
+            .filter_map(translate_message)
+            .map(|mut reply| {
+                reply.thread_ts = Some(root.ts.clone());
+                reply
+            })
+            .collect();
+        if post.reply_count > 0 || !replies.is_empty() {
+            root.thread_ts = Some(root.ts.clone());
+            root.reply_count = post
+                .reply_count
+                .max(u32::try_from(replies.len()).unwrap_or(u32::MAX));
+            root.reply_users = Vec::new();
+            for user in replies.iter().filter_map(|r| r.user.clone()) {
+                if !root.reply_users.contains(&user) {
+                    root.reply_users.push(user);
+                }
+            }
+            root.latest_reply = replies.iter().map(|r| r.ts.clone()).max();
+            root.replies_known = true;
+        }
+        out.push(root);
+        out.extend(replies);
+    }
+    out
+}
+
+/// Gives each channel post in `messages` what its replies there say: the
+/// thread's counts, the people in it and its latest reply, as Slack gives
+/// a thread's parent. A Teams history holds a channel's replies among
+/// its posts; posts with no reply here are left as they are.
+pub fn thread_posts(messages: &mut [Message]) {
+    let mut threads: std::collections::HashMap<Ts, (u32, Vec<String>, Ts)> =
+        std::collections::HashMap::new();
+    for reply in messages.iter().filter(|m| m.is_reply()) {
+        let Some(post) = reply.thread_ts.clone() else {
+            continue;
+        };
+        let entry = threads
+            .entry(post)
+            .or_insert_with(|| (0, Vec::new(), reply.ts.clone()));
+        entry.0 += 1;
+        if let Some(user) = &reply.user
+            && !entry.1.contains(user)
+        {
+            entry.1.push(user.clone());
+        }
+        if reply.ts > entry.2 {
+            entry.2 = reply.ts.clone();
+        }
+    }
+    for post in messages.iter_mut().filter(|m| !m.is_reply()) {
+        if let Some((count, users, latest)) = threads.remove(&post.ts) {
+            post.thread_ts = Some(post.ts.clone());
+            post.reply_count = count;
+            post.reply_users = users;
+            post.latest_reply = Some(latest);
+            post.replies_known = true;
+        }
+    }
+}
+
+/// Translates a Teams [`types::Conversation`] into a [`Conversation`].
+pub fn translate_conversation(conv: &types::Conversation) -> Conversation {
+    let name = conv.display_name();
+    let kind = if conv.is_channel() {
+        ConversationKind::Channel
+    } else if conv.is_meeting() {
+        ConversationKind::Group
+    } else if conv.id.contains("@unq.gbl.spaces") || conv.id.starts_with("19:uni01_") {
+        // One-to-one chats come in both shapes in work tenants.
+        ConversationKind::Direct
+    } else {
+        // Every other thread is a chat of several people; only `tacv2`
+        // threads are channels.
+        ConversationKind::Group
+    };
+
+    let latest = conv
+        .last_message
+        .as_ref()
+        .and_then(|m| m.id.as_deref())
+        .map(teams_id_to_ts);
+
+    let raw_topic = conv
+        .thread_properties
+        .as_ref()
+        .and_then(|p| p.topic.clone())
+        .unwrap_or_default();
+
+    // Do not duplicate topic if it matches the conversation display name
+    let topic = if raw_topic == name {
+        String::new()
+    } else {
+        raw_topic
+    };
+
+    Conversation {
+        id: conv.id.clone(),
+        name,
+        kind,
+        user: None,
+        topic,
+        purpose: String::new(),
+        members: None,
+        archived: false,
+        last_read: conv.last_read_id().map(teams_id_to_ts),
+        latest,
+        unread: 0,
+        mentions: 0,
+        external: false,
+        is_open: Some(true),
+        empty: false,
+    }
+}
+
+/// The other person in a one-to-one chat whose id names both
+/// (`19:{a}_{b}@unq.gbl.spaces`), as the id messages name them by.
+pub fn other_in_pair(chat_id: &str, me: &str) -> Option<String> {
+    let pair = chat_id
+        .strip_prefix("19:")?
+        .strip_suffix("@unq.gbl.spaces")?;
+    let (a, b) = pair.split_once('_')?;
+    [a, b]
+        .into_iter()
+        .filter_map(clean_teams_user_id)
+        .find(|id| id != me)
+}
+
+/// Translates a Teams [`types::Message`] into a [`Message`].
+/// `None` for a message with nothing to show (see
+/// [`translate_teams_content`]).
+pub fn translate_message(msg: &types::Message) -> Option<Message> {
+    let ts = teams_id_to_ts(&msg.id);
+    let (plain_text, subtype, kit_blocks) = translate_teams_content(msg)?;
+
+    let (user, username) = if subtype.is_some() {
+        (None, None)
+    } else {
+        let user = msg.from.as_deref().and_then(clean_teams_user_id);
+        // `username` is Slack's name for an app posting under a name of
+        // its own, which the interface marks APP. A person is named
+        // through the people the history reports instead; the name the
+        // message carries stands in only when there is no one to name.
+        let username = match user {
+            Some(_) => None,
+            None => msg.im_display_name.clone().filter(|n| !n.trim().is_empty()),
+        };
+        (user, username)
+    };
+
+    let mut reactions = Vec::new();
+    if let Some(props) = &msg.properties
+        && let Some(emotions) = &props.emotions
+    {
+        for emotion in emotions {
+            let name = map_emotion_to_reaction_name(&emotion.key);
+            let users: Vec<String> = emotion
+                .users
+                .iter()
+                .filter_map(|u| clean_teams_user_id(&u.mri))
+                .collect();
+            // Teams keeps a reaction everyone took back, with nobody in it.
+            if users.is_empty() {
+                continue;
+            }
+            let count = users.len() as u32;
+            reactions.push(Reaction { name, count, users });
+        }
+    }
+
+    let edited = msg.properties.as_ref().is_some_and(|p| p.is_edited());
+    let files = pictures(&msg.content);
+
+    Some(Message {
+        ts,
+        user,
+        username,
+        bot_icon: None,
+        bot_id: None,
+        text: plain_text,
+        // A reply in a channel belongs to its post's thread.
+        thread_ts: msg.post_id().map(|post| teams_id_to_ts(&post)),
+        reply_count: 0,
+        replies_known: msg.post_id().is_none(),
+        reply_users: Vec::new(),
+        latest_reply: None,
+        reactions,
+        files,
+        attachments: Vec::new(),
+        blocks: kit_blocks,
+        edited,
+        subtype,
+        delivery: Delivery::Sent,
+        broadcast: false,
+        pinned: false,
+        client_msg_id: msg.client_message_id.clone(),
+        subscribed: None,
+    })
+}
+
+/// Translates a Teams [`types::UserDetails`] into a [`User`].
+pub fn translate_user(user: &types::UserDetails) -> User {
+    let display_name = user.display_name.clone().unwrap_or_else(|| user.id.clone());
+    let name = user
+        .user_principal_name
+        .clone()
+        .unwrap_or_else(|| display_name.clone());
+
+    User {
+        id: user.id.clone(),
+        name,
+        real_name: display_name.clone(),
+        display_name,
+        avatar: None,
+        // Bots are `28:` MRIs; people `8:`.
+        is_bot: user.id.starts_with("28:"),
+        deleted: false,
+        title: String::new(),
+        status_text: String::new(),
+        status_emoji: String::new(),
+        tz: None,
+        team: String::new(),
+        enterprise: String::new(),
+        stranger: false,
+    }
+}
+
+/// Translates a Teams [`types::Team`] into a [`SidebarSection`] and child [`Conversation`]s.
+pub fn translate_team(team: &types::Team) -> (SidebarSection, Vec<Conversation>) {
+    let channel_ids: Vec<String> = team.channels.iter().map(|c| c.id.clone()).collect();
+    let section = SidebarSection {
+        id: team.id.clone(),
+        kind: SectionKind::Custom,
+        name: team.display_name.clone(),
+        emoji: String::new(),
+        channel_ids: channel_ids.clone(),
+        icon: None,
+    };
+
+    let conversations = team
+        .channels
+        .iter()
+        .map(|c| Conversation {
+            id: c.id.clone(),
+            name: c.display_name.clone(),
+            kind: ConversationKind::Channel,
+            user: None,
+            topic: c.description.clone().unwrap_or_default(),
+            purpose: String::new(),
+            members: None,
+            archived: false,
+            // Read state as the teams list gives it; a channel whose
+            // newest message is past it is unread.
+            last_read: c.last_read_id().map(|id| teams_id_to_ts(&id)),
+            latest: c.latest_id().map(|id| teams_id_to_ts(&id)),
+            unread: 0,
+            mentions: 0,
+            external: false,
+            is_open: Some(true),
+            empty: false,
+        })
+        .collect();
+
+    (section, conversations)
+}
+
+/// The Teams key of a reaction by the name the interface knows it by:
+/// the reverse of how reactions are read, so a reaction sent from
+/// here reads back as itself.
+pub fn reaction_key(name: &str) -> String {
+    match name {
+        "thumbsup" | "+1" => "like".into(),
+        "heart" => "heart".into(),
+        "joy" => "laugh".into(),
+        "open_mouth" => "surprised".into(),
+        "cry" => "sad".into(),
+        "rage" => "angry".into(),
+        // Any other emoji as Teams writes it: its code points, then a name.
+        other => {
+            let (base, tone) = crate::emoji::split_tone(other);
+            match crate::emoji::unicode(base, tone) {
+                Some(emoji) => {
+                    let points: Vec<String> = emoji
+                        .chars()
+                        .filter(|&c| c != '\u{fe0f}')
+                        .map(|c| format!("{:x}", u32::from(c)))
+                        .collect();
+                    format!("{}_{base}", points.join("-"))
+                }
+                None => other.to_owned(),
+            }
+        }
+    }
+}
+
+fn map_emotion_to_reaction_name(key: &str) -> String {
+    match key {
+        "like" => "thumbsup".into(),
+        "heart" => "heart".into(),
+        "laugh" => "joy".into(),
+        "surprised" => "open_mouth".into(),
+        "sad" => "cry".into(),
+        "angry" => "rage".into(),
+        other => emoji_key_name(other).unwrap_or_else(|| other.to_owned()),
+    }
+}
+
+/// The shortcode for a key in Teams' newer form, `{code points}_{name}`
+/// (`1f440_eyes`, `1f44d-1f3fd_thumbsup`): found by the emoji itself, so
+/// it is the name the interface knows whatever Teams calls it, with a skin
+/// tone as Slack writes one. `None` for any other key.
+fn emoji_key_name(key: &str) -> Option<String> {
+    let (points, name) = key.split_once('_')?;
+    let chars: Vec<char> = points
+        .split('-')
+        .map(|p| u32::from_str_radix(p, 16).ok().and_then(char::from_u32))
+        .collect::<Option<_>>()?;
+    let is_tone = |c: char| (0x1f3fb..=0x1f3ff).contains(&u32::from(c));
+    // Skin tones (U+1F3FB to U+1F3FF) are Slack's tones 2 to 6.
+    let tone = chars
+        .iter()
+        .find(|&&c| is_tone(c))
+        .map(|&c| u32::from(c) - 0x1f3fb + 2);
+    let base: String = chars.iter().filter(|&&c| !is_tone(c)).collect();
+    let found = emojis::get(&base)
+        .or_else(|| emojis::get(&format!("{base}\u{fe0f}")))
+        .and_then(crate::emoji::shortcode)
+        .map(str::to_owned)
+        .or_else(|| crate::emoji::unicode(name, None).map(|_| name.to_owned()))?;
+    Some(match tone {
+        Some(tone) => format!("{found}::skin-tone-{tone}"),
+        None => found,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn team_channels_carry_how_far_you_read() {
+        let team: types::Team = serde_json::from_value(serde_json::json!({
+            "id": "19:team@thread.tacv2",
+            "displayName": "Design",
+            "channels": [
+                {
+                    "id": "19:general@thread.tacv2",
+                    "displayName": "General",
+                    "consumptionHorizon": {"originalArrivalTime": 1_700_000_000_000_u64, "timeStamp": 1, "clientMessageId": "0"},
+                    "lastMessage": {"id": "1700000000500"}
+                },
+                {
+                    "id": "19:ideas@thread.tacv2",
+                    "displayName": "Ideas",
+                    "consumptionHorizon": "1700000000900;1700000000999;0"
+                },
+                {"id": "19:quiet@thread.tacv2", "displayName": "Quiet"}
+            ]
+        }))
+        .expect("a team reads");
+        let (_, channels) = translate_team(&team);
+        assert_eq!(channels[0].last_read, Some(teams_id_to_ts("1700000000000")));
+        assert_eq!(channels[0].latest, Some(teams_id_to_ts("1700000000500")));
+        assert_eq!(channels[1].last_read, Some(teams_id_to_ts("1700000000900")));
+        assert_eq!(channels[1].latest, None);
+        assert_eq!(channels[2].last_read, None);
+    }
+
+    fn channel_message(id: &str, link: &str) -> types::Message {
+        types::Message {
+            id: id.into(),
+            from: Some("8:orgid:ann".into()),
+            content: "<p>hi</p>".into(),
+            message_type: Some("RichText/Html".into()),
+            conversation_link: Some(link.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn channel_replies_belong_to_their_post_and_posts_count_them() {
+        let channel = "https://x/v1/users/ME/conversations/19:c@thread.tacv2";
+        let post = channel_message("1700000000000", channel);
+        let reply = channel_message(
+            "1700000000500",
+            &format!("{channel};messageid=1700000000000"),
+        );
+        // Live events name the post as `parentmessageid`; a post names
+        // itself.
+        let live = types::Message {
+            parent_message_id: Some(serde_json::json!(1_700_000_000_000_u64)),
+            ..channel_message("1700000000900", channel)
+        };
+        let itself = types::Message {
+            parent_message_id: Some(serde_json::json!("1700000000000")),
+            ..channel_message("1700000000000", channel)
+        };
+        assert_eq!(post.post_id(), None);
+        assert_eq!(itself.post_id(), None);
+        assert_eq!(reply.post_id().as_deref(), Some("1700000000000"));
+        assert_eq!(live.post_id().as_deref(), Some("1700000000000"));
+
+        let mut page: Vec<Message> = [post, reply, live]
+            .iter()
+            .filter_map(translate_message)
+            .collect();
+        thread_posts(&mut page);
+        let root = &page[0];
+        assert_eq!(root.thread_ts, Some(root.ts.clone()));
+        assert_eq!(root.reply_count, 2);
+        assert_eq!(root.reply_users, ["ann"]);
+        assert_eq!(root.latest_reply, Some(teams_id_to_ts("1700000000900")));
+        assert!(page[1].is_reply() && page[2].is_reply());
+        assert!(!page[1].in_channel(), "a reply stays in its thread");
+    }
+
+    #[test]
+    fn reactions_round_trip_through_their_teams_keys() {
+        for name in [
+            "thumbsup",
+            "heart",
+            "joy",
+            "open_mouth",
+            "cry",
+            "rage",
+            "tada",
+            "eyes",
+        ] {
+            assert_eq!(map_emotion_to_reaction_name(&reaction_key(name)), name);
+        }
+        assert_eq!(reaction_key("+1"), "like");
+        assert_eq!(reaction_key("eyes"), "1f440_eyes");
+    }
+
+    #[test]
+    fn a_reaction_everyone_took_back_is_gone() {
+        let message = types::Message {
+            id: "1".into(),
+            from: Some("8:orgid:a".into()),
+            content: "<p>hi</p>".into(),
+            properties: Some(types::MessageProperties {
+                emotions: Some(vec![
+                    types::Emotion {
+                        key: "like".into(),
+                        users: Vec::new(),
+                    },
+                    types::Emotion {
+                        key: "heart".into(),
+                        users: vec![types::EmotionUser {
+                            mri: "8:orgid:b".into(),
+                            time: None,
+                        }],
+                    },
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let reactions = translate_message(&message).expect("a message").reactions;
+        let names: Vec<&str> = reactions.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["heart"]);
+    }
+
+    #[test]
+    fn newer_teams_keys_read_as_their_emoji() {
+        assert_eq!(map_emotion_to_reaction_name("1f440_eyes"), "eyes");
+        // Named by the emoji, whatever Teams calls it.
+        assert_eq!(map_emotion_to_reaction_name("1f389_partypopper"), "tada");
+        assert_eq!(
+            map_emotion_to_reaction_name("1f44d-1f3fd_thumbsup"),
+            "+1::skin-tone-4"
+        );
+        // Not a code point: left as it came.
+        assert_eq!(map_emotion_to_reaction_name("zz_unknown"), "zz_unknown");
+    }
+
+    #[test]
+    fn timestamp_lossless_round_trip() {
+        let teams_id = "1728287364123";
+        let ts = teams_id_to_ts(teams_id);
+        assert_eq!(ts.as_str(), "1728287364.123000");
+        let back = ts_to_teams_id(&ts);
+        assert_eq!(back, teams_id);
+    }
+
+    #[test]
+    fn translates_conversation_and_message() {
+        let teams_conv = types::Conversation {
+            id: "19:ch123@thread.tacv2".into(),
+            conversation_type: Some("Thread".into()),
+            thread_properties: Some(types::ThreadProperties {
+                topic: Some("Project Alpha".into()),
+                ..Default::default()
+            }),
+            last_message: Some(types::MessagePreview {
+                id: Some("1728287364000".into()),
+                im_display_name: Some("Alice".into()),
+                content: Some("<p>Hello</p>".into()),
+                ..Default::default()
+            }),
+            properties: Some(types::ConversationProperties {
+                consumption_horizon: Some("1728287300000;1728287300001;0".into()),
+            }),
+        };
+
+        let conv = translate_conversation(&teams_conv);
+        assert_eq!(conv.name, "Project Alpha");
+        assert_eq!(conv.kind, ConversationKind::Channel);
+        assert_eq!(conv.last_read, Some(teams_id_to_ts("1728287300000")));
+        assert!(conv.has_unread(), "read up to before the last message");
+        assert_eq!(
+            conv.latest.as_ref().map(|t| t.as_str()),
+            Some("1728287364.000000")
+        );
+
+        let teams_msg = types::Message {
+            id: "1728287364000".into(),
+            from: Some("8:orgid:alice-id".into()),
+            im_display_name: Some("Alice".into()),
+            content: "<p>Hello <b>team</b></p>".into(),
+            properties: Some(types::MessageProperties {
+                emotions: Some(vec![types::Emotion {
+                    key: "like".into(),
+                    users: vec![types::EmotionUser {
+                        mri: "8:orgid:bob-id".into(),
+                        time: Some(1728287370000),
+                    }],
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let msg = translate_message(&teams_msg).expect("a message");
+        assert_eq!(msg.user.as_deref(), Some("alice-id"));
+        // A person is named through the people list, not as an app is.
+        assert_eq!(msg.username, None);
+        assert_eq!(msg.text, "Hello team");
+        assert!(msg.rich_text().is_some());
+        assert_eq!(msg.reactions.len(), 1);
+        assert_eq!(msg.reactions[0].name, "thumbsup");
+        assert_eq!(msg.reactions[0].users, ["bob-id"]);
+    }
+
+    #[test]
+    fn cleans_teams_user_id_from_urls_and_mris() {
+        assert_eq!(
+            clean_teams_user_id(
+                "https://fr.ng.msg.teams.microsoft.com/v1/users/ME/contacts/8:orgid:75e42c8f-3a75-4e3d-890e-890082762a57"
+            ),
+            Some("75e42c8f-3a75-4e3d-890e-890082762a57".into())
+        );
+        assert_eq!(
+            clean_teams_user_id("8:orgid:alice-uuid"),
+            Some("alice-uuid".into())
+        );
+        assert_eq!(
+            clean_teams_user_id("8:teamsvisitor:visitor-uuid"),
+            Some("visitor-uuid".into())
+        );
+        assert_eq!(
+            clean_teams_user_id(
+                "https://fr.ng.msg.teams.microsoft.com/v1/users/ME/contacts/19:meeting_12345@thread.v2"
+            ),
+            None
+        );
+        assert_eq!(clean_teams_user_id("19:meeting_12345@thread.v2"), None);
+    }
+
+    #[test]
+    fn translates_system_activity_messages() {
+        let add_member_msg = types::Message {
+            id: "1702370363757".into(),
+            message_type: Some("ThreadActivity/AddMember".into()),
+            content: r#"{"eventtime":1702370363757,"initiator":"8:orgid:host-id","members":[{"id":"8:teamsvisitor:visitor-id","friendlyname":"Alexandra Ioan - IC"}]}"#.into(),
+            from: Some(
+                "https://fr.ng.msg.teams.microsoft.com/v1/users/ME/contacts/19:meeting_123@thread.v2"
+                    .into(),
+            ),
+            ..Default::default()
+        };
+
+        let msg = translate_message(&add_member_msg).expect("a message");
+        assert_eq!(msg.text, "Alexandra Ioan - IC joined");
+        assert_eq!(msg.subtype.as_deref(), Some("channel_join"));
+        assert!(msg.is_system());
+        assert!(msg.user.is_none());
+        assert!(msg.username.is_none());
+
+        let call_ended_msg = types::Message {
+            id: "1702370363758".into(),
+            message_type: Some("Event/Call".into()),
+            content: "Started 09:55:28 Ended 10:00:00".into(),
+            from: Some("8:orgid:some-user".into()),
+            ..Default::default()
+        };
+
+        let msg2 = translate_message(&call_ended_msg).expect("a message");
+        assert_eq!(msg2.text, "Meeting ended.");
+        assert_eq!(msg2.subtype.as_deref(), Some("channel_join"));
+        assert!(msg2.is_system());
+    }
+
+    fn activity(kind: &str, content: &str) -> Option<Message> {
+        translate_message(&types::Message {
+            id: "1732698120000".into(),
+            message_type: Some(kind.into()),
+            content: content.into(),
+            from: Some("19:abc@thread.tacv2".into()),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_setting_change_reads_as_a_line_not_json() {
+        // As the Teams web client's own "All IO Collaborators" channel had it.
+        let content = r#"{"oldValue":null,"newValue":"All Collaborators of the ITER Organization","user":"8:orgid:01f9b9bc-5d21-4b48-9df6-84ac2ceb0ba9"}"#;
+        for kind in ["ThreadActivity/DescriptionUpdate", "RichText/Html"] {
+            let msg = activity(kind, content).expect("a line");
+            assert!(msg.is_system(), "{kind}");
+            assert!(
+                msg.text
+                    .starts_with("<@01f9b9bc-5d21-4b48-9df6-84ac2ceb0ba9> changed"),
+                "{kind}: {}",
+                msg.text
+            );
+            assert!(
+                msg.text
+                    .contains("“All Collaborators of the ITER Organization”")
+            );
+            assert!(!msg.text.contains("oldValue"));
+        }
+    }
+
+    #[test]
+    fn renames_and_membership_name_who_did_what() {
+        let renamed = activity(
+            "ThreadActivity/TopicUpdate",
+            "<topicupdate><eventtime>1</eventtime><initiator>8:orgid:a</initiator><value>Plans &amp; more</value></topicupdate>",
+        )
+        .expect("a line");
+        assert_eq!(
+            renamed.text,
+            "<@a> renamed the conversation to “Plans &amp; more”"
+        );
+        assert_eq!(renamed.subtype.as_deref(), Some("channel_name"));
+
+        let added = activity(
+            "ThreadActivity/AddMember",
+            "<addmember><eventtime>1</eventtime><initiator>8:orgid:a</initiator><target>8:orgid:b</target><target>8:orgid:c</target></addmember>",
+        )
+        .expect("a line");
+        assert_eq!(added.text, "<@a> added <@b> and <@c>");
+
+        let left = activity(
+            "ThreadActivity/DeleteMember",
+            "<deletemember><initiator>8:orgid:b</initiator><target>8:orgid:b</target></deletemember>",
+        )
+        .expect("a line");
+        assert_eq!(left.text, "<@b> left");
+        assert_eq!(left.subtype.as_deref(), Some("channel_leave"));
+    }
+
+    #[test]
+    fn pictures_in_messages_become_files() {
+        let html = r#"<p>look</p><p><img itemscope="png" itemtype="http://schema.skype.com/AMSImage" src="https://eu-api.asm.skype.com/v1/objects/0-weu-d18-097b/views/imgo" width="346.02" height="250" alt="image" id="x_0-weu-d18-097b" itemid="0-weu-d18-097b"></p><p><img itemtype="http://schema.skype.com/Emoji" alt="🙁" src="https://statics.teams.cdn.office.net/x"></p>"#;
+        let files = pictures(html);
+        assert_eq!(files.len(), 1, "the emoji is text, not a file");
+        let file = &files[0];
+        assert_eq!(file.id, "0-weu-d18-097b");
+        assert_eq!(
+            file.thumb.as_deref(),
+            Some("https://eu-api.asm.skype.com/v1/objects/0-weu-d18-097b/views/imgo")
+        );
+        assert_eq!(file.thumb_size, Some([346.02, 250.0]));
+        assert!(file.is_image());
+    }
+
+    #[test]
+    fn a_new_chat_says_who_was_added_once() {
+        // As Teams records starting a one-to-one chat.
+        let added = activity(
+            "ThreadActivity/AddMember",
+            "<addmember><eventtime>1</eventtime><initiator>8:live:.cid.me</initiator><target>8:live:.cid.me</target><target>8:live:other</target><detailedtargetinfo><id>8:live:.cid.me</id><id>8:live:other</id></detailedtargetinfo><rosterVersion>1</rosterVersion></addmember>",
+        )
+        .expect("a line");
+        assert_eq!(added.text, "<@live:.cid.me> added <@live:other>");
+    }
+
+    #[test]
+    fn what_has_no_wording_is_left_out() {
+        assert!(activity("ThreadActivity/SomethingNew", "<x/>").is_none());
+        assert!(activity("Control/Typing", "").is_none());
+        assert!(activity("RichText/Media_CallRecording", "<URIObject/>").is_none());
+        let file = activity(
+            "RichText/Media_GenericFile",
+            r#"<URIObject type="File.1"><Title>Plan.docx</Title><OriginalName v="Plan.docx"/></URIObject>"#,
+        )
+        .expect("a file");
+        assert_eq!(file.text, "📎 Plan.docx");
+        assert!(!file.is_system());
+        assert!(activity("Text", "hello").is_some());
+        assert!(activity("RichText/Html", "<p>hello</p>").is_some());
+    }
+
+    #[test]
+    fn both_shapes_of_one_to_one_chat_are_direct() {
+        for id in ["19:a_b@unq.gbl.spaces", "19:uni01_abc123@thread.v2"] {
+            let conv = types::Conversation {
+                id: id.into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                translate_conversation(&conv).kind,
+                ConversationKind::Direct,
+                "{id}"
+            );
+        }
+        let group = types::Conversation {
+            id: "19:0123abcd@thread.v2".into(),
+            ..Default::default()
+        };
+        assert_eq!(translate_conversation(&group).kind, ConversationKind::Group);
+    }
+
+    #[test]
+    fn the_other_in_a_pair_is_not_me() {
+        assert_eq!(
+            other_in_pair("19:aaa_bbb@unq.gbl.spaces", "aaa").as_deref(),
+            Some("bbb")
+        );
+        assert_eq!(
+            other_in_pair("19:aaa_bbb@unq.gbl.spaces", "bbb").as_deref(),
+            Some("aaa")
+        );
+        assert_eq!(other_in_pair("19:uni01_xyz@thread.v2", "aaa"), None);
+    }
+
+    #[test]
+    fn a_conversation_without_a_read_marker_is_read_nowhere() {
+        let conv = types::Conversation {
+            id: "19:a@thread.v2".into(),
+            properties: Some(types::ConversationProperties {
+                consumption_horizon: Some("0;0;0".into()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(translate_conversation(&conv).last_read, None);
+    }
+}

@@ -1,0 +1,40 @@
+{
+  "mediaAnswer": {
+    "callModalities": [
+      "Audio",
+      "Video"
+    ],
+    "sender": {
+      "id": "8:live:me",
+      "displayName": "Me Example",
+      "endpointId": "00000000-0000-4000-8000-000000000002",
+      "participantId": "00000000-0000-4000-8000-000000000010",
+      "languageId": "en-us"
+    },
+    "links": {
+      "mediaAcknowledgement": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000009/a0000013/call/mediaAcknowledgement/"
+    },
+    "clientContentForMediaController": {
+      "controlVideoStreaming": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000009/a0000014/call/controlVideoStreaming/",
+      "csrcInfo": "https://trouter.example:3443/v4/f/ID1/callAgent/00000000-0000-4000-8000-000000000009/a0000015/call/csrcInfo/"
+    },
+    "mediaContent": {
+      "blob": "v=0 (an SDP, left out of the fixture)",
+      "contentType": "application/sdp-ngc-1.0",
+      "clientLocation": "NL",
+      "applyChannelParameters": {
+        "multiChannelParameter": {
+          "mids": [
+            "*"
+          ],
+          "mediaParameter": "{\"sendSideBWSeed\":{\"seedValueBitsPerSec\":600000}}"
+        }
+      },
+      "mediaLegId": "00000000000000000000000000000002"
+    }
+  },
+  "debugContent": {
+    "callId": "00000000-0000-4000-8000-000000000011",
+    "endpointId": "00000000-0000-4000-8000-000000000002"
+  }
+}
