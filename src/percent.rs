@@ -18,6 +18,13 @@ pub fn encode(text: &str) -> Cow<'_, str> {
     utf8_percent_encode(text, ESCAPED).into()
 }
 
+/// `text` with everything but ASCII letters and digits escaped, `-`, `_`,
+/// `.` and `~` too. Teams' services were first spoken to this way, so its
+/// ids (`19:…@thread.v2`) keep being sent exactly as they always were.
+pub fn encode_strict(text: &str) -> Cow<'_, str> {
+    utf8_percent_encode(text, NON_ALPHANUMERIC).into()
+}
+
 /// `text` with its escapes undone, or an error when they spell bytes that
 /// are not UTF-8. A `+` stays a `+`.
 pub fn decode(text: &str) -> Result<Cow<'_, str>, std::str::Utf8Error> {
@@ -60,6 +67,15 @@ mod tests {
         assert_eq!(encode("a-b_c.d~e"), "a-b_c.d~e");
         assert_eq!(encode("a b/c?d=e&f+g"), "a%20b%2Fc%3Fd%3De%26f%2Bg");
         assert_eq!(encode("é"), "%C3%A9");
+    }
+
+    #[test]
+    fn strict_encoding_keeps_only_letters_and_digits() {
+        assert_eq!(
+            encode_strict("19:ab-c_d@thread.v2~"),
+            "19%3Aab%2Dc%5Fd%40thread%2Ev2%7E"
+        );
+        assert_eq!(encode_strict("é"), "%C3%A9");
     }
 
     #[test]
