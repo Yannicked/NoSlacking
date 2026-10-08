@@ -1345,8 +1345,10 @@ way (§1.4), under the call's agent id.
 ### H.1 Meet now
 
 `POST https://teams.live.com/api/mt/beta/me/calendarEvents/privateMeeting/schedulingService/create`
-with `x-skypetoken` (no bearer), `x-ms-client-type: web`, the web client's
-origin and referer, and
+with `x-skypetoken`, `x-ms-client-type: web`, the web client's origin and
+referer, and (left out of the recording, which was exported without
+`Authorization` headers, but refused with 401 without it) the middle
+tier's bearer token (`https://mtsvc.fl.teams.microsoft.com`), and
 `{"meetingType":"MeetNow","isStreamEnabled":false,"subject":"Meeting with {name}","unhideChatThread":true}`.
 Answered 201: `value.links.join` is the meeting link,
 `https://teams.live.com/meet/{13 digits}?p={token}`, and

@@ -1317,7 +1317,7 @@ impl TeamsClient {
     }
 
     /// Makes a meeting to start now ("Meet now") named `subject`, as the
-    /// personal web client does (recorded). Work accounts schedule
+    /// personal web client does (recorded, but for its sign-in header). Work accounts schedule
     /// theirs another way, not yet recorded.
     pub async fn meet_now(&self, subject: &str) -> Result<MadeMeeting, Failure> {
         let creds = self.ensure_fresh_tokens().await?;
@@ -1330,15 +1330,22 @@ impl TeamsClient {
             "subject": subject,
             "unhideChatThread": true,
         });
+        // The middle tier's own token as well as the skype token, as its
+        // other requests take: the recording was exported without its
+        // `Authorization` header, and the skype token alone is refused.
+        let skype = creds.skype_token.clone().unwrap_or_default();
         let resp = self
-            .plain_skype_request(|http, token| {
-                http.post(PERSONAL_MEET_NOW_URL)
-                    .header("x-skypetoken", token)
-                    .header("x-ms-client-type", "web")
-                    .header("x-ms-client-version", "1415/26091713344")
-                    .header(reqwest::header::ORIGIN, PERSONAL_ORIGIN)
-                    .header(reqwest::header::REFERER, format!("{PERSONAL_ORIGIN}/v2/"))
-                    .json(&body)
+            .bearer(RESOURCE_MT_PERSONAL, |http, token| {
+                crate::teams::auth::consumer_headers(
+                    http.post(PERSONAL_MEET_NOW_URL)
+                        .bearer_auth(token)
+                        .header("x-skypetoken", &skype)
+                        .header("x-ms-client-type", "web")
+                        .header("x-ms-client-version", "1415/26091713344")
+                        .header(reqwest::header::ORIGIN, PERSONAL_ORIGIN)
+                        .header(reqwest::header::REFERER, format!("{PERSONAL_ORIGIN}/v2/"))
+                        .json(&body),
+                )
             })
             .await?;
         if !resp.status().is_success() {
