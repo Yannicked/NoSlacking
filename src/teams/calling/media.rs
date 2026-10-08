@@ -278,6 +278,44 @@ pub struct Audio {
     pub video: super::video::Video,
 }
 
+/// A call's sound and pictures, taken back from a media session that
+/// stopped ([`MediaSession::release`]) for the next session of the same
+/// call: a meeting moves you to another media server when you are let in
+/// from its lobby, with new keys, which takes a new session (§H.4).
+#[derive(Default)]
+pub struct Held {
+    feed: Option<Feed>,
+    uplink: Option<Uplink>,
+    camera: super::video::Ends,
+    share: super::video::Ends,
+}
+
+impl std::fmt::Debug for Held {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Held")
+            .field("feed", &self.feed.is_some())
+            .field("uplink", &self.uplink.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<Audio> for Held {
+    fn from(audio: Audio) -> Self {
+        let Audio {
+            feed,
+            uplink,
+            video,
+        } = audio;
+        let (camera, share) = video.split();
+        Self {
+            feed,
+            uplink,
+            camera,
+            share,
+        }
+    }
+}
+
 /// The probe's quiet 440 Hz tone in place of the microphone, through the
 /// same Opus encoder, so a call can be heard working without anyone
 /// talking. The tone stops when this is dropped.
@@ -457,6 +495,8 @@ enum Command {
     Apply(Box<Plan>),
     Muted(bool),
     Stop,
+    /// Stop, and hand back the sound and pictures.
+    Release(oneshot::Sender<Held>),
 }
 
 /// A running media session. Dropping it stops the session too, without
@@ -487,12 +527,21 @@ impl MediaSession {
         config: MediaConfig,
         audio: Audio,
     ) -> Result<(MediaSession, LocalMedia), Failure> {
+        Self::resume(config, Held::from(audio)).await
+    }
+
+    /// Starts a session as [`Self::start`] does, on the sound and
+    /// pictures an earlier session of the call handed back.
+    pub async fn resume(
+        config: MediaConfig,
+        held: Held,
+    ) -> Result<(MediaSession, LocalMedia), Failure> {
         let (commands, commands_in) = mpsc::unbounded_channel();
         let (tell, events) = mpsc::unbounded_channel();
         let (gathered, gathering) = oneshot::channel();
         let counters = Arc::new(Counters::default());
         let opus_pt = config.opus_pt;
-        let session = Session::open(config, audio, tell, gathered, counters.clone()).await?;
+        let session = Session::open(config, held, tell, gathered, counters.clone()).await?;
         tokio::spawn(run(session, commands_in));
         let local = gathering
             .await
@@ -529,6 +578,15 @@ impl MediaSession {
     /// Asks the session to stop; [`MediaEvent::Stopped`] follows.
     pub fn stop(&self) {
         let _ = self.commands.send(Command::Stop);
+    }
+
+    /// Stops the session and waits for its sound and pictures, for
+    /// [`Self::resume`]; `None` if it had already ended, taking them
+    /// with it.
+    pub async fn release(&self) -> Option<Held> {
+        let (give, given) = oneshot::channel();
+        self.commands.send(Command::Release(give)).ok()?;
+        given.await.ok()
     }
 
     /// The next event, or `None` once the session is over and every event
@@ -1140,13 +1198,15 @@ struct Session {
     /// Unmuted and the microphone's frames have started: silence stops.
     flowing: bool,
     over: Option<Result<(), Failure>>,
+    /// Where the sound and pictures go back once stopped, if asked.
+    release: Option<oneshot::Sender<Held>>,
 }
 
 impl Session {
     /// Binds the socket and builds the peer, with the host candidate.
     async fn open(
         config: MediaConfig,
-        audio: Audio,
+        held: Held,
         tell: mpsc::UnboundedSender<MediaEvent>,
         gathered: oneshot::Sender<Result<LocalMedia, Failure>>,
         counters: Arc<Counters>,
@@ -1170,12 +1230,12 @@ impl Session {
         // Any but zero, which libwebrtc keeps for its bandwidth probes.
         let ssrc = rand::random::<u32>().max(1);
         declare_audio(&mut rtc, mid, ssrc);
-        let Audio {
+        let Held {
             feed,
             uplink,
-            video,
-        } = audio;
-        let (camera_ends, share_ends) = video.split();
+            camera: camera_ends,
+            share: share_ends,
+        } = held;
         let fresh_ssrc = || loop {
             let candidate = rand::random::<u32>().max(1);
             if candidate != ssrc {
@@ -1283,6 +1343,7 @@ impl Session {
             forced_muted: false,
             flowing: false,
             over: None,
+            release: None,
         })
     }
 
@@ -1823,6 +1884,11 @@ impl Session {
                 log::info!("media: stopping");
                 self.over.get_or_insert(Ok(()));
             }
+            Some(Command::Release(give)) => {
+                log::info!("media: stopping, the sound and pictures handed on");
+                self.release = Some(give);
+                self.over.get_or_insert(Ok(()));
+            }
         }
     }
 
@@ -1955,6 +2021,15 @@ impl Session {
         }
         self.flush_relay().await;
         let result = self.over.take().unwrap_or(Ok(()));
+        if let Some(give) = self.release.take() {
+            let uplink = self.frames.take().zip(self.muted_rx.take());
+            let _ = give.send(Held {
+                feed: self.feed.take(),
+                uplink: uplink.map(|(frames, muted)| Uplink { frames, muted }),
+                camera: self.video.take().map(|v| v.into_ends()).unwrap_or_default(),
+                share: self.share.take().map(|v| v.into_ends()).unwrap_or_default(),
+            });
+        }
         if let Some(gathered) = self.gathered.take() {
             let _ = gathered.send(Err(match &result {
                 Err(failed) => failed.clone(),
@@ -2679,5 +2754,23 @@ mod tests {
             Some(config.audio_mid.as_str()),
             offer.audio().map(|l| l.mid.as_str())
         );
+    }
+
+    #[test]
+    fn a_meetings_media_server_is_answered_by_a_session_of_its_own() {
+        let remote =
+            super::super::sdp::read(include_str!("fixtures/meeting_retarget.sdp")).expect("reads");
+        let config = MediaConfig::answer(None, &remote);
+        assert!(!config.controlling);
+        assert_eq!(config.opus_pt, 102);
+        assert_eq!(config.audio_mid, "1");
+        if HAS_VIDEO {
+            assert_eq!(config.video.as_ref().map(|v| v.mid.as_str()), Some("2"));
+            assert_eq!(config.share.as_ref().map(|v| v.mid.as_str()), Some("3"));
+        }
+        let plan = plan(&remote, config.opus_pt).expect("a usable offer");
+        // No `a=setup`: we are the DTLS client, as the web client was.
+        assert!(plan.active);
+        assert!(!plan.candidates.is_empty());
     }
 }

@@ -1,6 +1,8 @@
 //! `noslacking --teams-call-probe TEAM MRI [--seconds N]`: an outgoing
 //! Teams call from the command line, for trying calls against a real
-//! account and sending the log back.
+//! account and sending the log back. Given a meeting link in place of
+//! the MRI, it joins that meeting instead (waiting in its lobby, if it
+//! has one, until someone lets it in).
 //!
 //! It signs in as the app does at start (the saved Teams sign-in of
 //! workspace `TEAM`, from the keyring), opens the live connection, calls
@@ -12,8 +14,9 @@
 
 use std::time::Duration;
 
-use super::calling::call::{CallEvent, Control, outgoing};
+use super::calling::call::{CallEvent, Control, meeting, outgoing};
 use super::calling::media::{Audio, Tone};
+use crate::meetings::Meeting;
 
 /// What the probe was asked to do.
 #[derive(Clone, Debug)]
@@ -110,15 +113,22 @@ async fn probe(options: &Options, handle: tokio::runtime::Handle) -> i32 {
     };
     let (control, steer) = tokio::sync::mpsc::unbounded_channel();
     let (events, mut told) = tokio::sync::mpsc::unbounded_channel();
-    let call = tokio::spawn(outgoing(
-        client.clone(),
-        options.callee.clone(),
-        audio,
-        steer,
-        move |event| {
-            let _ = events.send(event);
-        },
-    ));
+    let tell = move |event| {
+        let _ = events.send(event);
+    };
+    let call = match Meeting::parse(&options.callee, "") {
+        Ok(link) => {
+            log::info!("teams call probe: joining a meeting");
+            tokio::spawn(meeting(client.clone(), link, audio, steer, tell))
+        }
+        Err(_) => tokio::spawn(outgoing(
+            client.clone(),
+            options.callee.clone(),
+            audio,
+            steer,
+            tell,
+        )),
+    };
 
     let mut was_live = false;
     let mut flowing = false;
@@ -139,6 +149,15 @@ async fn probe(options: &Options, handle: tokio::runtime::Handle) -> i32 {
                     log::info!("teams call probe: audio flows both ways");
                 }
                 Some(CallEvent::AnsweredElsewhere) => {}
+                Some(CallEvent::Lobby) => log::info!("teams call probe: waiting in the meeting's lobby"),
+                Some(CallEvent::Admitted) => log::info!("teams call probe: let in from the lobby"),
+                Some(CallEvent::People(people)) => {
+                    log::info!(
+                        "teams call probe: {} others in the meeting, {} waiting",
+                        people.iter().filter(|p| !p.waiting).count(),
+                        people.iter().filter(|p| p.waiting).count()
+                    );
+                }
                 Some(CallEvent::FarEndShare(on)) => {
                     log::info!("teams call probe: the far end's screen share {}", if on { "shows" } else { "stopped" });
                 }

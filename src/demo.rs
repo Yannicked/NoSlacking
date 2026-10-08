@@ -1465,6 +1465,8 @@ pub fn sharing() -> crate::huddles::Listening {
         me: false,
         muted,
         speaking: false,
+        name: None,
+        waiting: false,
     };
     // Bob, Dev and Lee are in it too, Lee muted.
     let me = listening.roster.people.pop();
@@ -1554,6 +1556,8 @@ pub fn listening() -> crate::huddles::Listening {
         me,
         muted,
         speaking,
+        name: None,
+        waiting: false,
     };
     let since = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(134))

@@ -247,6 +247,13 @@ pub enum Command {
     /// in `channel`, ending any call or huddle first (Microsoft Teams).
     /// Declined as a huddle invitation is: `DeclineHuddle`.
     AnswerCall { channel: String, call: String },
+    /// Joins a Teams meeting, ending any call or huddle first; shown in
+    /// [`crate::meetings::MEETING_CHANNEL`]. Left as a huddle is.
+    JoinMeeting { meeting: crate::meetings::Meeting },
+    /// Starts a Teams meeting now, named `subject`, and joins it.
+    MeetNow { subject: String },
+    /// Lets `user` in from the lobby of the meeting going on.
+    Admit { user: String },
     /// Leaves the huddle being listened to, or hangs up the call.
     LeaveHuddle,
     /// Mutes (closing the microphone) or unmutes (opening it) in the

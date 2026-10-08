@@ -200,7 +200,7 @@ pub fn check_due(last: Option<&Check>, now: Instant) -> Instant {
 mod listen;
 pub use listen::{
     ALONE_FOR, FAILED_FOR, Left, Listen, Listening, Person, Phase, Place, Roster, alone_since,
-    call_title_text, clock, faces, leave_alone, quit, status_text, title_text,
+    call_title_text, clock, faces, leave_alone, meeting_title_text, quit, status_text, title_text,
 };
 #[cfg(feature = "huddle-video")]
 pub use listen::{
@@ -317,6 +317,14 @@ pub enum Action {
         channel: String,
         user: String,
     },
+    /// Joins a Teams meeting in `team` or, with none, starts one now,
+    /// ending any other call or huddle.
+    JoinMeeting {
+        team: String,
+        meeting: Option<crate::meetings::Meeting>,
+    },
+    /// Lets `user` in from the lobby of the meeting going on.
+    Admit { user: String },
     /// Leaves the huddle being listened to, or hangs up the call.
     Leave,
     /// Mutes or unmutes the microphone in the huddle being listened to.
@@ -388,6 +396,8 @@ pub fn apply(app: &mut App, action: Action) {
             channel,
             user,
         } => listen::call(app, team, channel, user),
+        Action::JoinMeeting { team, meeting } => listen::join_meeting(app, team, meeting),
+        Action::Admit { user } => listen::admit(app, user),
         Action::Microphone(action) => crate::huddle_mic::apply(app, action),
         Action::Leave => listen::leave(app),
         #[cfg(feature = "huddle-video")]

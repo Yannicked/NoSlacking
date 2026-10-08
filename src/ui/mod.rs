@@ -3,7 +3,7 @@
 
 mod add_emoji;
 mod browse;
-mod call_bar;
+pub(crate) mod call_bar;
 #[cfg(feature = "huddle-video")]
 pub(crate) mod call_window;
 mod composer;
@@ -22,6 +22,7 @@ mod huddle_share;
 mod keys;
 mod lightbox;
 mod login;
+mod meetings;
 mod message;
 pub use message::plain_text;
 mod overlays;

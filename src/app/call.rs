@@ -173,6 +173,7 @@ impl App {
         let view = CallView {
             title: match (sharer.as_deref(), listening.is_call()) {
                 (Some(sharer), _) => call_window::title(sharer),
+                (None, true) if listening.meeting => crate::i18n::t("Meeting").into_owned(),
                 (None, true) => call_window::call_title(&controls.name),
                 (None, false) => call_window::cameras_title(),
             },
@@ -253,6 +254,7 @@ fn controls(
     let name = match conversation {
         Some((true, name)) => name,
         Some((false, name)) => format!("#{name}"),
+        None if listening.meeting => crate::i18n::t("Meeting").into_owned(),
         None => listening.channel.clone(),
     };
     let (live, time) = match listening.phase {
@@ -266,7 +268,7 @@ fn controls(
         name,
         time,
         live,
-        call: listening.is_call(),
+        leaving: crate::ui::call_bar::Leaving::of(listening),
         mic: listening.mic,
         #[cfg(feature = "huddle-camera")]
         camera: listening.camera,

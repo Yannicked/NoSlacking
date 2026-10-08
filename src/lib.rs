@@ -36,6 +36,7 @@ pub mod images;
 pub mod jump;
 pub mod lightbox;
 pub mod links;
+pub mod meetings;
 pub mod model;
 pub mod mrkdwn;
 pub mod notice;

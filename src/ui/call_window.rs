@@ -122,9 +122,8 @@ pub struct Controls {
     /// Live: the microphone and camera can be used; before that, only
     /// Leave.
     pub live: bool,
-    /// A call (Microsoft Teams) rather than a huddle: Leave says
-    /// "Hang up".
-    pub call: bool,
+    /// What leaving is: a call's says "Hang up".
+    pub leaving: call_bar::Leaving,
     /// Your microphone.
     pub mic: Mic,
     /// Your camera.
@@ -547,7 +546,7 @@ fn control_bar(
             actions.push(Action::Huddle(huddles::Action::Share(action)));
         }
     }
-    let leave = call_bar::leave_button(&mut row, palette, look, controls.call);
+    let leave = call_bar::leave_button(&mut row, palette, look, controls.leaving);
     let used = row.min_rect().right() - start;
     if (used - width).abs() > 0.5 {
         ui.data_mut(|d| d.insert_temp(id, used));
@@ -972,7 +971,7 @@ mod tests {
                 name: "#design".into(),
                 time: "2:17".into(),
                 live,
-                call: false,
+                leaving: call_bar::Leaving::Huddle,
                 mic,
                 #[cfg(feature = "huddle-camera")]
                 camera: crate::huddle_camera::Cam::Off,

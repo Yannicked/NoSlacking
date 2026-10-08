@@ -168,10 +168,14 @@ impl Service {
     /// offer what would only fail.
     pub fn offers(self, ability: Ability) -> bool {
         match self {
-            Self::Slack => ability != Ability::Calls,
+            Self::Slack => !matches!(ability, Ability::Calls | Ability::Meetings),
             Self::Teams => match ability {
                 // Seen in recordings of the Teams web client and built.
-                Ability::Reactions | Ability::Edit | Ability::NewMessage | Ability::Calls => true,
+                Ability::Reactions
+                | Ability::Edit
+                | Ability::NewMessage
+                | Ability::Calls
+                | Ability::Meetings => true,
                 Ability::Huddles
                 | Ability::CustomEmoji
                 | Ability::Threads
@@ -208,6 +212,8 @@ pub enum Ability {
     Huddles,
     /// Calling someone from a one-to-one chat (Teams; Slack has huddles).
     Calls,
+    /// Joining a meeting by its link or ID, and starting one now (Teams).
+    Meetings,
     /// Adding custom emoji.
     CustomEmoji,
     /// Adding and removing reactions.
@@ -1622,6 +1628,9 @@ pub enum Action {
     SearchMore,
     /// Changes the sidebar here and in Slack.
     Sidebar(crate::sidebar::SidebarEdit),
+    /// Opens the meetings dialog for the workspace shown: "Meet now", or
+    /// join by link or ID (Teams).
+    OpenMeetings,
     /// Asks for a section name: a new section (taking `channel` along), or
     /// a new name for `rename`.
     NameSection {

@@ -2064,6 +2064,19 @@ impl Worker {
                         });
                     }
                 }
+                crate::people::Command::JoinMeeting { meeting } => {
+                    let (client, sink) = (session.client.clone(), session.sink.clone());
+                    self.huddle_audio.stop();
+                    let join = super::teams_call::Join::Meeting(meeting);
+                    self.teams_call.join_meeting(client, team, join, sink);
+                }
+                crate::people::Command::MeetNow { subject } => {
+                    let (client, sink) = (session.client.clone(), session.sink.clone());
+                    self.huddle_audio.stop();
+                    let join = super::teams_call::Join::Now(subject);
+                    self.teams_call.join_meeting(client, team, join, sink);
+                }
+                crate::people::Command::Admit { user } => self.teams_call.admit(&user),
                 crate::people::Command::DeclineHuddle { room, .. } => {
                     self.teams_call.decline(&team, &room);
                 }

@@ -206,6 +206,108 @@ pub fn cpconv_request(
     }
 }
 
+/// The `meetingData` of a meeting's first `cpconv` (§H.2): what was
+/// typed, or the link's parts.
+pub fn meeting_data(meeting: &crate::meetings::Meeting) -> serde_json::Value {
+    serde_json::json!({
+        "meetingCode": meeting.code(),
+        "passcode": meeting.passcode(),
+        "meetingUrl": meeting.url(),
+    })
+}
+
+/// What a meeting's `cpconv` sends (§H.2): first without an offer, a
+/// "preheat" that asks the meeting service for the conversation, then,
+/// to `conversationController`, with our SDP `offer` to join the call.
+/// `meeting_data` is the meeting's code, passcode and link: as typed for
+/// the first, as the first answered for the second (recorded).
+pub fn meeting_request(
+    me: &Participant,
+    ids: &CallIds,
+    callbacks: &Callbacks,
+    meeting_data: &serde_json::Value,
+    offer: Option<&str>,
+) -> serde_json::Value {
+    // The join hands over the callbacks of one in the call; the preheat
+    // those of one joining a conversation.
+    let events = if offer.is_some() {
+        CONVERSATION_EVENTS
+    } else {
+        JOIN_EVENTS
+    };
+    let mut conversation = serde_json::json!({
+        "subject": null,
+        "applicationType": "TFL",
+        "roster": {
+            "type": "Delta",
+            "rosterUpdate": callbacks.link(Scope::Conversation, "rosterUpdate"),
+        },
+        "properties": {
+            "allowConversationWithoutHost": true,
+            "enableGroupCallEventMessages": true,
+            "enableGroupCallUpgradeMessage": false,
+            "enableGroupCallMeetupGeneration": false,
+        },
+        "links": callbacks.links(Scope::Conversation, events),
+    });
+    let mut endpoint_properties = serde_json::json!({
+        "additionalEndpointProperties": {"infoShownInReportMode": "FullInformation"},
+    });
+    let mut body = serde_json::json!({
+        "groupContext": null,
+        "groupChat": null,
+        "participants": {"from": me},
+        "capabilities": null,
+        "endpointCapabilities": ENDPOINT_CAPABILITIES,
+        "clientEndpointCapabilities": CLIENT_ENDPOINT_CAPABILITIES,
+        "endpointMetadata": {"holographicCapabilities": 3},
+        "meetingInfo": null,
+        "meetingData": meeting_data,
+        "meetingPreferences": {"shouldResurrect": "resurrect"},
+    });
+    if let Some(offer) = offer {
+        conversation["suppressDialout"] = true.into();
+        // Joined "preheated": the call is set up before you are shown in
+        // it, which `preheat_done` then ends.
+        endpoint_properties["preheatProperties"] = 1.into();
+        body["participants"]["to"] = serde_json::json!([]);
+        let mut media_content = MediaContent::ours(offer.to_owned(), ids.media_leg_id.clone());
+        media_content.client_location = Some("NL".to_owned());
+        body["callInvitation"] = serde_json::json!({
+            "callModalities": crate::teams::calling::sdp::modalities(offer),
+            "links": callbacks.links(Scope::Call, CALL_EVENTS),
+            "clientContentForMediaController": callbacks.links(Scope::Call, MEDIA_CONTROLLER_EVENTS),
+            "pstnContent": {
+                "emergencyCallCountry": "",
+                "platformName": client_header(),
+                "publicApiCall": false,
+            },
+            "mediaContent": media_content,
+            "voicemailSettings": {},
+        });
+        body["participantPropertyBag"] = serde_json::json!({
+            "aiVoiceConsent": {"value": {"aiVoiceConsentValue": "0"}, "sequenceNumber": 0}
+        });
+    }
+    body["conversationRequest"] = conversation;
+    body["endpointState"] = serde_json::json!({
+        "endpointStateSequenceNumber": 0,
+        "endpointProperties": endpoint_properties,
+    });
+    body
+}
+
+/// What `POST {admit}` sends to let `mri` in from a meeting's lobby
+/// (recorded; answered 202, then `admitParticipantSuccess` and a roster
+/// with them in the call).
+pub fn admit_body(me: &Participant, callbacks: &Callbacks, mri: &str) -> serde_json::Value {
+    serde_json::json!({
+        "participants": {"from": me, "to": [{"id": mri}]},
+        "links": callbacks.links(Scope::Conversation, &["admitFailure", "admitSuccess"]),
+        "debugContent": {"causeId": crate::model::new_client_msg_id()},
+    })
+}
+
 /// Our answer to a renegotiation offer (C.1), for the media leg
 /// `media_leg_id` the offer named.
 pub fn renegotiation_answer(
@@ -441,6 +543,13 @@ impl CallApi {
         }
     }
 
+    /// For a meeting, whose `cpconv`s number the endpoint state 0: the
+    /// first state sent after is 1.
+    #[must_use]
+    pub fn meeting(self) -> Self {
+        self.incoming()
+    }
+
     /// The call's ids.
     pub fn ids(&self) -> &CallIds {
         &self.ids
@@ -504,6 +613,88 @@ impl CallApi {
         resp.json::<CpconvAnswer>()
             .await
             .map_err(|e| Failure::Unexpected(e.without_url().to_string()))
+    }
+
+    /// Asks the meeting service for `meeting`'s conversation, without
+    /// joining its call yet (§H.2): answers its controller, its links and
+    /// the meeting's own data, which [`Self::join_meeting`] takes.
+    pub async fn preheat(
+        &self,
+        meeting: &crate::meetings::Meeting,
+    ) -> Result<CpconvAnswer, Failure> {
+        let body = meeting_request(
+            &self.me,
+            &self.ids,
+            &self.callbacks,
+            &meeting_data(meeting),
+            None,
+        );
+        let resp = self
+            .send(
+                reqwest::Method::POST,
+                CPCONV_URL,
+                Some(body),
+                "find a meeting",
+            )
+            .await?;
+        resp.json::<CpconvAnswer>()
+            .await
+            .map_err(|e| Failure::Unexpected(e.without_url().to_string()))
+    }
+
+    /// Joins the call of the meeting `preheated` found, with our SDP
+    /// `offer` (§H.3). The meeting's answer comes as a `call/acceptance`
+    /// push: from its lobby, or from the call itself.
+    pub async fn join_meeting(
+        &self,
+        preheated: &CpconvAnswer,
+        offer: &str,
+    ) -> Result<CpconvAnswer, Failure> {
+        let meeting_data = preheated.meeting_data.clone().unwrap_or_default();
+        let body = meeting_request(
+            &self.me,
+            &self.ids,
+            &self.callbacks,
+            &meeting_data,
+            Some(offer),
+        );
+        let resp = self
+            .send(
+                reqwest::Method::POST,
+                &preheated.conversation_controller,
+                Some(body),
+                "join a meeting",
+            )
+            .await?;
+        resp.json::<CpconvAnswer>()
+            .await
+            .map_err(|e| Failure::Unexpected(e.without_url().to_string()))
+    }
+
+    /// Ends the "preheat" of a meeting just joined, at the conversation's
+    /// `updateEndpointState` link: shown in it from now on (recorded,
+    /// sent right after the join).
+    pub async fn preheat_done(&self, url: &str) -> Result<(), Failure> {
+        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        let body = serde_json::json!({
+            "from": self.me,
+            "endpointState": {
+                "endpointStateSequenceNumber": sequence,
+                "endpointProperties": {"preheatProperties": 0},
+            },
+        });
+        self.send(reqwest::Method::POST, url, Some(body), "end the preheat")
+            .await
+            .map(drop)
+    }
+
+    /// Lets `mri` in from the meeting's lobby, at the conversation's
+    /// `admit` link.
+    pub async fn admit(&self, url: &str, mri: &str) -> Result<(), Failure> {
+        let body = admit_body(&self.me, &self.callbacks, mri);
+        self.send(reqwest::Method::POST, url, Some(body), "admit someone")
+            .await
+            .map(drop)
     }
 
     /// Answers a renegotiation offer with our SDP `answer`, at the
@@ -1108,5 +1299,85 @@ mod tests {
         assert_eq!(servers.realm, "rtcmedia");
 
         assert_eq!(read_relay_servers(&serde_json::json!({"Other": {}})), None);
+    }
+
+    #[test]
+    fn a_meeting_is_found_first_then_joined_with_the_offer() {
+        let ids = ids();
+        let me = me(&ids);
+        let callbacks = Callbacks::new(SURL, &ids.call_agent_id);
+        let typed =
+            serde_json::json!({"meetingCode": "123", "passcode": "token", "meetingUrl": "u"});
+        let preheat = meeting_request(&me, &ids, &callbacks, &typed, None);
+        assert_eq!(preheat["meetingData"], typed);
+        assert!(preheat.get("callInvitation").is_none());
+        assert!(preheat["participants"].get("to").is_none());
+        assert!(
+            preheat["conversationRequest"]
+                .get("suppressDialout")
+                .is_none()
+        );
+        let state = &preheat["endpointState"];
+        assert_eq!(state["endpointStateSequenceNumber"], 0);
+        assert!(
+            state["endpointProperties"]
+                .get("preheatProperties")
+                .is_none()
+        );
+        // The preheat's callbacks are those of one joining.
+        let links = preheat["conversationRequest"]["links"]
+            .as_object()
+            .expect("links");
+        assert_eq!(links.len(), JOIN_EVENTS.len());
+
+        let answered =
+            serde_json::json!({"meetingCode": "123", "passcode": "123456", "meetingUrl": "u2"});
+        let offer = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=label:main-audio\r\n";
+        let join = meeting_request(&me, &ids, &callbacks, &answered, Some(offer));
+        assert_eq!(join["meetingData"], answered);
+        assert_eq!(join["participants"]["to"], serde_json::json!([]));
+        assert_eq!(join["conversationRequest"]["suppressDialout"], true);
+        assert_eq!(
+            join["endpointState"]["endpointProperties"]["preheatProperties"],
+            1
+        );
+        let invitation = &join["callInvitation"];
+        assert_eq!(invitation["callModalities"][0], "Audio");
+        assert_eq!(invitation["mediaContent"]["blob"], offer);
+        assert_eq!(
+            invitation["mediaContent"]["mediaLegId"],
+            ids.media_leg_id.as_str()
+        );
+        let acceptance = invitation["links"]["acceptance"].as_str().expect("link");
+        let pushed = read_push_path(acceptance).expect("a callback of this call");
+        assert_eq!(pushed.event, "acceptance");
+    }
+
+    #[test]
+    fn a_typed_meeting_is_sent_as_its_parts() {
+        let meeting = crate::meetings::Meeting::parse("9312345678901", "a1B2c3").expect("an id");
+        let data = meeting_data(&meeting);
+        assert_eq!(data["meetingCode"], "9312345678901");
+        assert_eq!(data["passcode"], "a1B2c3");
+        assert_eq!(
+            data["meetingUrl"],
+            "https://teams.live.com/meet/9312345678901?p=a1B2c3"
+        );
+    }
+
+    #[test]
+    fn admitting_names_who_and_where_to_say_so() {
+        let ids = ids();
+        let me = me(&ids);
+        let callbacks = Callbacks::new(SURL, &ids.call_agent_id);
+        let body = admit_body(&me, &callbacks, "8:live:waiting");
+        assert_eq!(body["participants"]["to"][0]["id"], "8:live:waiting");
+        assert_eq!(body["participants"]["from"]["id"], "8:live:me");
+        assert!(
+            body["links"]["admitSuccess"]
+                .as_str()
+                .expect("link")
+                .contains("/conversation/admitSuccess")
+        );
     }
 }

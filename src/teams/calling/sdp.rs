@@ -1063,6 +1063,15 @@ mod tests {
     const RENEGOTIATION_010: &str = include_str!("fixtures/renegotiation_010.sdp");
     const RENEGOTIATION_029: &str = include_str!("fixtures/renegotiation_029_data_own_ice.sdp");
     const OUR_ANSWER_024: &str = include_str!("fixtures/our_answer_024.sdp");
+    /// A meeting's media server, letting us in from its lobby (§H.4):
+    /// SDES-era SDP (`RTP/AVP`, `a=crypto`, no `a=setup`), an ICE session
+    /// per kind of line, Opus at 102, the mids renumbered.
+    const MEETING_RETARGET: &str = include_str!("fixtures/meeting_retarget.sdp");
+    /// The lobby's answer to our join, from another media server.
+    const MEETING_LOBBY: &str = include_str!("fixtures/meeting_lobby.sdp");
+    /// The meeting's media server again, a few seconds later: the same
+    /// transport, in BUNDLE.
+    const MEETING_CONFIRM: &str = include_str!("fixtures/meeting_confirm.sdp");
 
     fn fingerprint(first: &str) -> String {
         format!(
@@ -1699,5 +1708,65 @@ mod tests {
         remote.opus_pt = None;
         let sdp = answer(&local(), &remote);
         assert!(sdp.contains("m=audio 0 RTP/SAVP 0\r\n"));
+    }
+
+    #[test]
+    fn a_meetings_media_server_offer_reads_by_its_audio_lines_transport() {
+        let remote = read(MEETING_RETARGET).expect("reads");
+        // The bundle's first line, audio (mid 1), carries the transport.
+        assert_eq!(remote.ice_ufrag, "UfrB");
+        assert_eq!(remote.setup, Setup::Unsaid);
+        assert!(remote.fingerprint.is_some());
+        assert_eq!(remote.opus_pt, Some(102));
+        assert_eq!(remote.lines.len(), 13);
+        assert_eq!(remote.audio().map(|l| l.mid.as_str()), Some("1"));
+        assert_eq!(remote.camera().map(|l| l.mid.as_str()), Some("2"));
+        assert_eq!(remote.share().map(|l| l.mid.as_str()), Some("3"));
+        assert_eq!(remote.video.map(|v| v.pt), Some(107));
+        assert!(
+            remote
+                .candidates
+                .iter()
+                .all(|c| c.kind == CandidateKind::Relay)
+        );
+        assert!(!remote.candidates.is_empty());
+        // The lobby and the confirmation that follows read too.
+        let lobby = read(MEETING_LOBBY).expect("the lobby's answer reads");
+        let confirm = read(MEETING_CONFIRM).expect("the confirmation reads");
+        assert_ne!(lobby.fingerprint, remote.fingerprint);
+        assert_eq!(confirm.fingerprint, remote.fingerprint);
+        assert_eq!(confirm.ice_ufrag, remote.ice_ufrag);
+    }
+
+    #[test]
+    fn a_meetings_media_server_offer_is_answered_line_for_line() {
+        let remote = read(MEETING_RETARGET).expect("reads");
+        let local = LocalMedia {
+            opus_pt: 102,
+            ..local()
+        };
+        let sdp = answer(&local, &remote);
+        let media = read(&sdp).expect("our answer reads back");
+        assert_eq!(media.lines.len(), remote.lines.len());
+        for (ours, theirs) in media.lines.iter().zip(&remote.lines) {
+            assert_eq!(ours.kind, theirs.kind);
+            if ours.port != 0 {
+                assert_eq!(ours.mid, theirs.mid);
+            }
+        }
+        // DTLS, as the web client answers it, not the offer's SDES.
+        assert_eq!(media.setup, Setup::Active);
+        assert!(!sdp.contains("a=crypto"));
+        assert!(sdp.contains("RTP/SAVP"));
+        assert_eq!(media.opus_pt, Some(102));
+        let audio = media.audio().expect("audio");
+        assert_eq!(audio.mid, "1");
+        assert_ne!(audio.port, 0);
+        // The bundle names the kept lines in the offer's order.
+        let bundle = sdp
+            .lines()
+            .find(|l| l.starts_with("a=group:BUNDLE"))
+            .expect("a bundle");
+        assert!(bundle.starts_with("a=group:BUNDLE 1"), "{bundle}");
     }
 }

@@ -201,6 +201,12 @@ pub struct CpconvAnswer {
     pub conversation_controller: String,
     #[serde(deserialize_with = "nullable")]
     pub links: ConversationLinks,
+    /// A meeting's code, passcode and link, as the meeting service
+    /// knows them: a `cpconv` that joins a meeting answers them, and
+    /// joining it for real sends them back as they came (recorded; the
+    /// passcode comes back as the meeting's own, not the link's token).
+    /// Holds the passcode: never logged.
+    pub meeting_data: Option<serde_json::Value>,
 }
 
 /// The conversation's links we use; the rest are for group calls.
@@ -213,6 +219,24 @@ pub struct ConversationLinks {
     pub update_endpoint_state: Option<String>,
     /// A.4.
     pub update_endpoint_metadata: Option<String>,
+    /// Letting someone in from a meeting's lobby, for those who may.
+    pub admit: Option<String>,
+}
+
+impl ConversationLinks {
+    /// These links, with any that `newer` has taking their place: a
+    /// meeting's conversation hands out more of them once you are in.
+    #[must_use]
+    pub fn merged(self, newer: Self) -> Self {
+        Self {
+            leave: newer.leave.or(self.leave),
+            update_endpoint_state: newer.update_endpoint_state.or(self.update_endpoint_state),
+            update_endpoint_metadata: newer
+                .update_endpoint_metadata
+                .or(self.update_endpoint_metadata),
+            admit: newer.admit.or(self.admit),
+        }
+    }
 }
 
 // ---------------------------------------------------------------- A.2, A.3
@@ -265,6 +289,16 @@ pub struct CallAcceptance {
     pub media_content: Option<MediaContent>,
     /// In seconds.
     pub call_keep_alive_interval: Option<u64>,
+    /// Which controller took the call: `lobby` while a meeting keeps
+    /// you waiting to be let in (recorded); otherwise none.
+    pub controller_name: Option<String>,
+}
+
+impl CallAcceptance {
+    /// Whether this acceptance only puts you in a meeting's lobby.
+    pub fn is_lobby(&self) -> bool {
+        self.controller_name.as_deref() == Some("lobby")
+    }
 }
 
 /// The live call leg's links we keep.
@@ -349,6 +383,11 @@ pub struct AnswerDebug {
 pub struct MediaAcknowledgementPush {
     #[serde(deserialize_with = "nullable")]
     pub media_acknowledgement: Outcome,
+    /// A new call leg's links, when the answer moved the call to another
+    /// media server: a meeting's, once you are let in (recorded, with
+    /// sub-code 10109, "Participant retarget was successful").
+    #[serde(deserialize_with = "nullable")]
+    pub links: AcceptanceLinks,
 }
 
 /// How something ended or was answered: an acknowledgement, a call's
@@ -404,6 +443,10 @@ pub struct RosterParticipant {
     /// By endpoint id.
     #[serde(deserialize_with = "nullable")]
     pub endpoints: BTreeMap<String, RosterEndpoint>,
+    /// In a meeting: `admin` once in (everyone, in a personal account's
+    /// meetings), `guest` while waiting.
+    #[serde(deserialize_with = "nullable")]
+    pub role: String,
 }
 
 impl RosterParticipant {
@@ -432,6 +475,15 @@ impl RosterParticipant {
     pub fn is_active(&self) -> bool {
         self.state == "active"
     }
+
+    /// Whether they wait in a meeting's lobby: a device of theirs is
+    /// there and none is in the call (recorded: a waiting endpoint has
+    /// `lobby` where one in the call has `call`).
+    pub fn is_waiting(&self) -> bool {
+        self.is_active()
+            && self.endpoints.values().any(|e| e.lobby.is_some())
+            && !self.endpoints.values().any(|e| e.call.is_some())
+    }
 }
 
 /// One device of a [`RosterParticipant`].
@@ -440,6 +492,53 @@ impl RosterParticipant {
 pub struct RosterEndpoint {
     pub participant_id: Option<String>,
     pub endpoint_state: Option<EndpointState>,
+    /// Its media in the call, while it is in it.
+    pub call: Option<serde_json::Value>,
+    /// Its media in a meeting's lobby, while it waits there.
+    pub lobby: Option<serde_json::Value>,
+}
+
+// ---------------------------------------------------------------- meetings
+
+/// The `conversation/conversationUpdate` push: what a conversation has
+/// now. In a meeting it says when you are let in from the lobby (the
+/// call modality comes, the lobby goes) and hands out the links of one
+/// who is in, `admit` among them (recorded).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ConversationUpdate {
+    #[serde(deserialize_with = "nullable")]
+    pub active_modalities: ActiveModalities,
+    #[serde(deserialize_with = "nullable")]
+    pub links: ConversationLinks,
+}
+
+impl ConversationUpdate {
+    /// Whether you are in the call rather than its lobby.
+    pub fn in_call(&self) -> bool {
+        self.active_modalities.call.is_some() && self.active_modalities.lobby.is_none()
+    }
+}
+
+/// What a conversation has going on.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ActiveModalities {
+    /// The call, once you are in it.
+    pub call: Option<serde_json::Value>,
+    /// The lobby, while you wait in it.
+    pub lobby: Option<serde_json::Value>,
+    /// The meeting's chat.
+    pub group_chat: Option<GroupChat>,
+}
+
+/// A meeting's chat.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GroupChat {
+    /// `19:meeting_…@thread.v2`.
+    #[serde(deserialize_with = "nullable")]
+    pub thread_id: String,
 }
 
 // ---------------------------------------------------------------- C.3
@@ -677,12 +776,15 @@ pub enum Push {
     MediaAnswer(MediaAnswer),
     Acceptance(CallAcceptance),
     MediaNegotiation(MediaNegotiation),
-    MediaAcknowledgement(Outcome),
+    /// Whether an answer of ours was taken, and the new call leg's links
+    /// when it moved the call.
+    MediaAcknowledgement(Outcome, AcceptanceLinks),
     RosterUpdate(RosterUpdate),
     CallEnd(Outcome),
     ConversationEnd(ConversationEnd),
-    /// A callback a call does not act on (`progress`, `conversationUpdate`,
-    /// …), by its event name.
+    ConversationUpdate(ConversationUpdate),
+    /// A callback a call does not act on (`progress`,
+    /// `admitParticipantSuccess`, …), by its event name.
     Other(String),
 }
 
@@ -698,9 +800,13 @@ impl Push {
             "mediaRenegotiation" => {
                 Self::MediaNegotiation(MediaNegotiationPush::deserialize(body)?.media_negotiation)
             }
-            "mediaAcknowledgement" => Self::MediaAcknowledgement(
-                MediaAcknowledgementPush::deserialize(body)?.media_acknowledgement,
-            ),
+            "mediaAcknowledgement" => {
+                let push = MediaAcknowledgementPush::deserialize(body)?;
+                Self::MediaAcknowledgement(push.media_acknowledgement, push.links)
+            }
+            "conversationUpdate" => {
+                Self::ConversationUpdate(ConversationUpdate::deserialize(body)?)
+            }
             "rosterUpdate" => Self::RosterUpdate(RosterUpdate::deserialize(body)?),
             "end" => Self::CallEnd(CallEndPush::deserialize(body)?.call_end),
             "conversationEnd" => Self::ConversationEnd(ConversationEnd::deserialize(body)?),
@@ -729,6 +835,11 @@ mod tests {
             "update_endpoint_state" => include_str!("fixtures/update_endpoint_state.json"),
             "update_endpoint_metadata" => include_str!("fixtures/update_endpoint_metadata.json"),
             "call_notification" => include_str!("fixtures/call_notification.json"),
+            "conversation_update" => include_str!("fixtures/conversation_update.json"),
+            "roster_lobby" => include_str!("fixtures/roster_lobby.json"),
+            "media_acknowledgement_retarget" => {
+                include_str!("fixtures/media_acknowledgement_retarget.json")
+            }
             _ => panic!("no fixture {name}"),
         };
         serde_json::from_str(text).expect("fixture is JSON")
@@ -841,7 +952,7 @@ mod tests {
     fn an_acknowledgement_is_a_success() {
         match Push::read("mediaAcknowledgement", &fixture("media_acknowledgement")).expect("reads")
         {
-            Push::MediaAcknowledgement(outcome) => {
+            Push::MediaAcknowledgement(outcome, _) => {
                 assert_eq!(outcome.code, 0);
                 assert_eq!(outcome.phrase, "Success");
                 assert_eq!(outcome.reason, "noError");
@@ -948,5 +1059,92 @@ mod tests {
             links.decline(),
             Some("https://fp.example/cc/v1/incoming/x/reject")
         );
+    }
+
+    #[test]
+    fn a_meetings_conversation_update_says_you_are_in_and_how_to_admit() {
+        match Push::read("conversationUpdate", &fixture("conversation_update")).expect("reads") {
+            Push::ConversationUpdate(update) => {
+                assert!(update.in_call());
+                assert!(update.links.admit.expect("admit").contains("/admit?"));
+                assert_eq!(
+                    update.active_modalities.group_chat.expect("chat").thread_id,
+                    "19:meeting_ZmFrZQ@thread.v2"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        // While waiting, the lobby is there and the call is not.
+        let waiting: ConversationUpdate = serde_json::from_value(serde_json::json!({
+            "activeModalities": {"lobby": {}, "call": null},
+            "links": {"leave": "https://example.test/leave"}
+        }))
+        .expect("reads");
+        assert!(!waiting.in_call());
+    }
+
+    #[test]
+    fn newer_conversation_links_take_the_place_of_older_ones() {
+        let older = ConversationLinks {
+            leave: Some("old-leave".into()),
+            update_endpoint_state: Some("state".into()),
+            ..ConversationLinks::default()
+        };
+        let newer = ConversationLinks {
+            leave: Some("new-leave".into()),
+            admit: Some("admit".into()),
+            ..ConversationLinks::default()
+        };
+        let merged = older.merged(newer);
+        assert_eq!(merged.leave.as_deref(), Some("new-leave"));
+        assert_eq!(merged.update_endpoint_state.as_deref(), Some("state"));
+        assert_eq!(merged.admit.as_deref(), Some("admit"));
+    }
+
+    #[test]
+    fn the_roster_tells_who_waits_in_the_lobby() {
+        let Push::RosterUpdate(roster) =
+            Push::read("rosterUpdate", &fixture("roster_lobby")).expect("reads")
+        else {
+            panic!("not a roster");
+        };
+        let who = |mri: &str| &roster.participants[mri];
+        assert!(!who("8:live:organizer").is_waiting());
+        assert!(who("8:live:organizer").is_muted());
+        assert!(who("8:live:waiting").is_waiting());
+        assert_eq!(who("8:live:waiting").name(), Some("Wim Waiting"));
+        assert_eq!(who("8:live:waiting").role, "guest");
+        assert!(!who("8:live:gone").is_active());
+        assert!(!who("8:live:gone").is_waiting());
+    }
+
+    #[test]
+    fn a_lobby_acceptance_and_a_retarget_read_as_recorded() {
+        let lobby: CallAcceptancePush = serde_json::from_value(serde_json::json!({
+            "callAcceptance": {
+                "acceptedCallModalities": [],
+                "links": {"callLeg": "https://example.test/leg"},
+                "mediaContent": {"blob": "v=0", "contentType": "application/sdp-ngc-1.0",
+                                 "mediaLegId": "AB", "callLabel": "lobby", "fromMixer": true},
+                "callKeepAliveInterval": 2700,
+                "controllerName": "lobby"
+            }
+        }))
+        .expect("reads");
+        assert!(lobby.call_acceptance.is_lobby());
+        assert!(!CallAcceptance::default().is_lobby());
+        match Push::read(
+            "mediaAcknowledgement",
+            &fixture("media_acknowledgement_retarget"),
+        )
+        .expect("reads")
+        {
+            Push::MediaAcknowledgement(outcome, links) => {
+                assert_eq!((outcome.code, outcome.sub_code), (0, 10109));
+                assert!(links.call_leg.expect("leg").ends_with("/callLeg"));
+                assert!(links.media_renegotiation.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

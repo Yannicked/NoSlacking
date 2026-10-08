@@ -50,6 +50,12 @@ pub enum Listen {
     Joining,
     /// A call placed: it rings at the far end.
     Ringing,
+    /// A meeting keeps you in its lobby until someone lets you in.
+    Lobby,
+    /// Let in from a meeting's lobby: joining its call.
+    Admitted,
+    /// The meeting's join link, to invite others with.
+    Invite(crate::meetings::MeetingLink),
     /// The audio is connected and playing.
     Live,
     /// Who is in the huddle and speaking now. Sent when it changes, at
@@ -81,6 +87,8 @@ pub enum Phase {
     Joining,
     /// Ringing the one called, for a call.
     Ringing,
+    /// Waiting in a meeting's lobby to be let in.
+    Lobby,
     /// Listening since `since`.
     Live { since: Instant },
     /// It failed at `at`; the bar shows why for a while.
@@ -106,6 +114,10 @@ pub struct Listening {
     pub callee: Option<String>,
     /// Whether the call was answered here rather than placed.
     pub answered: bool,
+    /// Whether this is a Teams meeting rather than a huddle or a call.
+    pub meeting: bool,
+    /// The meeting's join link, once known.
+    pub invite: Option<crate::meetings::MeetingLink>,
     /// Who shares their screen, as last told.
     #[cfg(feature = "huddle-video")]
     pub shares: Vec<Share>,
@@ -154,6 +166,8 @@ impl Listening {
             mic: crate::huddle_mic::Mic::Muted,
             callee: None,
             answered: false,
+            meeting: false,
+            invite: None,
             #[cfg(feature = "huddle-video")]
             shares: Vec::new(),
             #[cfg(feature = "huddle-video")]
@@ -188,9 +202,23 @@ impl Listening {
         }
     }
 
-    /// Whether this is a call rather than a huddle.
+    /// Joining a Teams meeting in `team`: unmuted, as a call is.
+    pub fn meeting(team: &str) -> Self {
+        Self {
+            mic: crate::huddle_mic::Mic::Opening,
+            meeting: true,
+            ..Self::new(team, crate::meetings::MEETING_CHANNEL)
+        }
+    }
+
+    /// Whether this is a call (a meeting is one) rather than a huddle.
     pub fn is_call(&self) -> bool {
-        self.callee.is_some()
+        self.callee.is_some() || self.meeting
+    }
+
+    /// Who waits in the meeting's lobby, as last told.
+    pub fn waiting(&self) -> impl Iterator<Item = &Person> {
+        self.roster.people.iter().filter(|p| p.waiting)
     }
 
     /// What the call window wants, given room for `tiles` tiles of
@@ -287,11 +315,23 @@ pub fn call_title_text(name: &str, phase: &Phase, answered: bool) -> String {
     }
 }
 
+/// The call bar's title for a meeting: "Joining a meeting", "In the
+/// lobby" while waiting to be let in, "In a meeting" once in.
+pub fn meeting_title_text(phase: &Phase) -> String {
+    match phase {
+        Phase::Joining | Phase::Ringing => t("Joining a meeting"),
+        Phase::Lobby => t("In the lobby"),
+        Phase::Live { .. } | Phase::Failed { .. } => t("In a meeting"),
+    }
+    .into_owned()
+}
+
 /// What the call bar says of where listening, or a `call`, is at `now`.
 pub fn status_text(phase: &Phase, call: bool, now: Instant) -> String {
     match phase {
         Phase::Joining => t("Joining…").into_owned(),
         Phase::Ringing => t("Ringing…").into_owned(),
+        Phase::Lobby => t("Waiting for someone to let you in…").into_owned(),
         Phase::Live { since } => tf(
             "Live · {time}",
             &[("time", &clock(now.saturating_duration_since(*since)))],
@@ -307,10 +347,10 @@ pub fn status_text(phase: &Phase, call: bool, now: Instant) -> String {
 
 /// The faces the call bar shows: one per person, however many devices
 /// they are in on (you in Slack and here, say), the others first in the
-/// order they came, you last.
+/// order they came, you last. Those waiting in a lobby are not in yet.
 pub fn faces(roster: &Roster) -> Vec<Person> {
     let mut faces: Vec<Person> = Vec::new();
-    for person in &roster.people {
+    for person in roster.people.iter().filter(|p| !p.waiting) {
         let same = faces
             .iter_mut()
             .find(|f| f.user.is_some() && f.user == person.user);
@@ -366,6 +406,50 @@ pub fn call(app: &mut App, team: String, channel: String, user: String) {
     app.backend.send(backend::Command::People {
         team,
         command: people::Command::Call { channel, user },
+    });
+}
+
+/// Joins `meeting` (or, with none, starts one now) in `team`, ending any
+/// other call or huddle.
+pub fn join_meeting(app: &mut App, team: String, meeting: Option<crate::meetings::Meeting>) {
+    if let Some(last) = app.huddles.listening.take()
+        && last.team != team
+        && last.in_huddle()
+    {
+        app.backend.send(backend::Command::People {
+            team: last.team,
+            command: people::Command::LeaveHuddle,
+        });
+    }
+    app.huddles.listening = Some(Listening::meeting(&team));
+    let command = match meeting {
+        Some(meeting) => people::Command::JoinMeeting { meeting },
+        None => people::Command::MeetNow {
+            subject: tf("Meeting with {name}", &[("name", &own_name(app, &team))]),
+        },
+    };
+    app.backend.send(backend::Command::People { team, command });
+}
+
+/// Your name in `team`, as a meeting started here is named after you.
+fn own_name(app: &App, team: &str) -> String {
+    app.workspaces
+        .iter()
+        .find(|w| w.info.team_id == team)
+        .map(|w| w.user_label(&w.info.user_id))
+        .unwrap_or_default()
+}
+
+/// Lets `user` (by the id the interface knows them by) in from the
+/// meeting's lobby.
+pub fn admit(app: &mut App, user: String) {
+    let Some(listening) = app.huddles.listening.as_ref().filter(|l| l.meeting) else {
+        return;
+    };
+    let team = listening.team.clone();
+    app.backend.send(backend::Command::People {
+        team,
+        command: people::Command::Admit { user },
     });
 }
 
@@ -522,6 +606,13 @@ pub fn heard(app: &mut App, team: &str, channel: &str, state: Listen) {
                 listening.phase = Phase::Ringing;
             }
         }
+        Listen::Lobby => listening.phase = Phase::Lobby,
+        Listen::Admitted => {
+            if listening.phase == Phase::Lobby {
+                listening.phase = Phase::Joining;
+            }
+        }
+        Listen::Invite(link) => listening.invite = Some(link),
         Listen::Live => {
             if !matches!(listening.phase, Phase::Live { .. }) {
                 listening.phase = Phase::Live { since: now };
@@ -557,16 +648,15 @@ pub fn heard(app: &mut App, team: &str, channel: &str, state: Listen) {
         Listen::Gallery(gallery) => listening.gallery = Some(gallery),
         Listen::Ended(Ok(Left::Asked)) => app.huddles.listening = None,
         Listen::Ended(Ok(Left::Ended)) => {
-            let call = listening.is_call();
+            let ended = if listening.meeting {
+                t("The meeting ended")
+            } else if listening.is_call() {
+                t("The call ended")
+            } else {
+                t("The huddle ended")
+            };
             app.huddles.listening = None;
-            app.toast(
-                if call {
-                    t("The call ended")
-                } else {
-                    t("The huddle ended")
-                },
-                false,
-            );
+            app.toast(ended, false);
         }
         Listen::Ended(Err(error)) => {
             listening.phase = Phase::Failed { error, at: now };
@@ -672,6 +762,8 @@ mod tests {
             me,
             muted,
             speaking,
+            name: None,
+            waiting: false,
         }
     }
 
@@ -768,6 +860,8 @@ mod tests {
                     me: false,
                     muted: false,
                     speaking: false,
+                    name: None,
+                    waiting: false,
                 },
             ],
             count: Some(5),

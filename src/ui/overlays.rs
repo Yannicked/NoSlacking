@@ -20,6 +20,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     confirm_delete_file(app, ctx);
     super::add_emoji::dialog(app, ctx);
     section_dialog(app, ctx);
+    super::meetings::dialog(app, ctx);
     super::share::dialog(app, ctx);
     super::people::status_dialog(app, ctx);
     super::shortcuts::show(app, ctx);

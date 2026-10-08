@@ -197,6 +197,43 @@ struct PresenceState {
     availability: Option<String>,
 }
 
+/// Where a personal account's "Meet now" meetings are made (recorded).
+const PERSONAL_MEET_NOW_URL: &str =
+    "https://teams.live.com/api/mt/beta/me/calendarEvents/privateMeeting/schedulingService/create";
+
+/// A meeting just made: where it is joined (and others invited), and its
+/// chat.
+#[derive(Clone, PartialEq, Eq)]
+pub struct MadeMeeting {
+    /// `https://teams.live.com/meet/{code}?p={token}`: lets anyone ask
+    /// to join, so `Debug` does not show it.
+    pub join: String,
+    /// `19:meeting_…@thread.v2`.
+    pub thread_id: String,
+}
+
+impl std::fmt::Debug for MadeMeeting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MadeMeeting")
+            .field("join", &crate::redact::REDACTED)
+            .field("thread_id", &self.thread_id)
+            .finish()
+    }
+}
+
+/// Reads what making a meeting answered: `{value: {links: {join},
+/// groupContext: {threadId}}}` (recorded).
+fn made_meeting(answer: &serde_json::Value) -> Option<MadeMeeting> {
+    let value = answer.get("value")?;
+    let join = value.pointer("/links/join")?.as_str()?.to_owned();
+    let thread_id = value
+        .pointer("/groupContext/threadId")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    Some(MadeMeeting { join, thread_id })
+}
+
 /// Where a personal account's chats are started.
 const PERSONAL_THREADS_URL: &str = "https://teams.live.com/api/groups/v1/threads";
 
@@ -1279,6 +1316,41 @@ impl TeamsClient {
             .collect())
     }
 
+    /// Makes a meeting to start now ("Meet now") named `subject`, as the
+    /// personal web client does (recorded). Work accounts schedule
+    /// theirs another way, not yet recorded.
+    pub async fn meet_now(&self, subject: &str) -> Result<MadeMeeting, Failure> {
+        let creds = self.ensure_fresh_tokens().await?;
+        if creds.account != Account::Personal {
+            return Err(Failure::Unsupported);
+        }
+        let body = serde_json::json!({
+            "meetingType": "MeetNow",
+            "isStreamEnabled": false,
+            "subject": subject,
+            "unhideChatThread": true,
+        });
+        let resp = self
+            .plain_skype_request(|http, token| {
+                http.post(PERSONAL_MEET_NOW_URL)
+                    .header("x-skypetoken", token)
+                    .header("x-ms-client-type", "web")
+                    .header("x-ms-client-version", "1415/26091713344")
+                    .header(reqwest::header::ORIGIN, PERSONAL_ORIGIN)
+                    .header(reqwest::header::REFERER, format!("{PERSONAL_ORIGIN}/v2/"))
+                    .json(&body)
+            })
+            .await?;
+        if !resp.status().is_success() {
+            return Err(refused(resp, "make a meeting").await);
+        }
+        let answer: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| Failure::Unexpected(e.without_url().to_string()))?;
+        made_meeting(&answer).ok_or_else(|| Failure::Unexpected("no meeting in the answer".into()))
+    }
+
     /// Starts a chat with `others` and you, answering its id: one other
     /// person makes a one-to-one chat, more a group.
     pub async fn create_chat(&self, me: &str, others: &[String]) -> Result<String, Failure> {
@@ -2253,5 +2325,26 @@ mod tests {
         let posted: PostedMessage =
             serde_json::from_str(r#"{"OriginalArrivalTime": 1700000000123}"#).expect("valid");
         assert_eq!(posted.original_arrival_time, Some(1700000000123));
+    }
+
+    #[test]
+    fn a_meeting_made_now_answers_its_link_and_chat() {
+        let answer = serde_json::json!({
+            "value": {
+                "subject": "Meeting with Ana",
+                "groupContext": {"threadId": "19:meeting_ZmFrZQ@thread.v2"},
+                "meetingUrl": "https://api.scheduler.teams.microsoft.com/teamsforlife/123",
+                "links": {"join": "https://teams.live.com/meet/9312345678901?p=Fake", "update": "x"}
+            },
+            "type": "x"
+        });
+        let made = made_meeting(&answer).expect("a meeting");
+        assert_eq!(
+            made.join,
+            "https://teams.live.com/meet/9312345678901?p=Fake"
+        );
+        assert_eq!(made.thread_id, "19:meeting_ZmFrZQ@thread.v2");
+        assert!(!format!("{made:?}").contains("Fake"));
+        assert_eq!(made_meeting(&serde_json::json!({"value": {}})), None);
     }
 }

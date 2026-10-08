@@ -3080,3 +3080,66 @@ msgstr "de server gaf het bericht niet terug"
 
 msgid "the server is rate limiting requests; try again shortly"
 msgstr "de server beperkt het aantal verzoeken; probeer het zo opnieuw"
+
+msgid "A meeting ID needs its passcode."
+msgstr "Een vergader-ID heeft een wachtwoordcode nodig."
+
+msgid "Admit"
+msgstr "Toelaten"
+
+msgid "Copy the link others join the meeting with"
+msgstr "De link kopiëren waarmee anderen aan de vergadering deelnemen"
+
+msgid "In the lobby"
+msgstr "In de lobby"
+
+msgid "Invite others with the meeting's link"
+msgstr "Nodig anderen uit met de link van de vergadering"
+
+msgid "Join a meeting"
+msgstr "Deelnemen aan een vergadering"
+
+msgid "Joining a meeting"
+msgstr "Deelnemen aan een vergadering…"
+
+msgid "Leave the meeting ({shortcut})"
+msgstr "De vergadering verlaten ({shortcut})"
+
+msgid "Links of this kind cannot be joined here yet."
+msgstr "Aan dit soort links kun je hier nog niet deelnemen."
+
+msgid "Meet now"
+msgstr "Nu vergaderen"
+
+msgid "Meeting"
+msgstr "Vergadering"
+
+msgid "Meeting link or ID"
+msgstr "Vergaderlink of -ID"
+
+msgid "Meeting with {name}"
+msgstr "Vergadering met {name}"
+
+msgid "Meetings"
+msgstr "Vergaderingen"
+
+msgid "Passcode, for a meeting ID"
+msgstr "Wachtwoordcode, bij een vergader-ID"
+
+msgid "Start a meeting, then invite others with its link."
+msgstr "Begin een vergadering en nodig anderen uit met de link."
+
+msgid "That is not a meeting link or ID."
+msgstr "Dat is geen vergaderlink of -ID."
+
+msgid "The meeting ended"
+msgstr "De vergadering is afgelopen"
+
+msgid "Waiting for someone to let you in…"
+msgstr "Wachten tot iemand je toelaat…"
+
+msgid "no meeting has that link, or that ID and passcode"
+msgstr "er is geen vergadering met die link, of met die ID en wachtwoordcode"
+
+msgid "{name} is waiting in the lobby"
+msgstr "{name} wacht in de lobby"

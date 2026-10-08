@@ -2,12 +2,14 @@
 //! `docs/research/teams-calls.md` §A (outgoing), §B (incoming) and §C
 //! driving a [`MediaSession`].
 //!
-//! [`outgoing`] and [`incoming`] run the whole call on its task. What
+//! [`outgoing`], [`incoming`] and [`meeting`] run the whole call on its
+//! task. What
 //! happens is told through a callback as [`CallEvent`]s, and the caller
 //! steers it with [`Control`]s (mute, hang up); an incoming call also
 //! waits for an [`Answer`]. It never waits on the network to stop:
 //! hanging up closes the media at once and sends `leave` on the way out.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
@@ -16,11 +18,12 @@ use super::api::{CallApi, CallIds, own_participant, relay_credentials, relay_ser
 use super::codes::{self, Ending};
 use super::media::{self, Audio, MediaConfig, MediaEvent, MediaSession, Relay};
 use super::types::{
-    CpconvAnswer, IncomingInvitation, IncomingNotification, MediaContent, Participant, Push,
-    RosterUpdate,
+    CpconvAnswer, IncomingInvitation, IncomingNotification, MediaContent, MediaNegotiation,
+    Participant, Push, RosterUpdate,
 };
 use super::{LocalMedia, RemoteMedia, sdp};
 use crate::failure::Failure;
+use crate::meetings::Meeting;
 use crate::teams::client::TeamsClient;
 
 /// How long an unanswered call rings before we give up.
@@ -32,13 +35,15 @@ const RINGS_HERE_FOR: Duration = Duration::from_secs(60);
 const LEAVE_WITHIN: Duration = Duration::from_secs(5);
 
 /// What the caller asks of a running call.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Control {
     /// Mute (or unmute) the microphone, and tell the far end.
     Mute(bool),
     /// Start (or stop) sending our screen share: a renegotiation of
     /// ours turns the share line on or off (§C.6).
     Share(bool),
+    /// Let the one with this MRI in from the meeting's lobby.
+    Admit(String),
     /// End the call.
     HangUp,
 }
@@ -58,6 +63,13 @@ pub enum CallEvent {
     FarEndVideo(bool),
     /// The far end's screen share started (`true`) or stopped showing.
     FarEndShare(bool),
+    /// A meeting keeps you in its lobby until someone lets you in.
+    Lobby,
+    /// Let in from the lobby: the call is joined, and [`Self::Live`]
+    /// follows once its media is up.
+    Admitted,
+    /// Who else is in the meeting, or waits in its lobby, now.
+    People(Vec<Attendee>),
     /// An incoming call stopped ringing because another device of yours
     /// (or another delivery of the same call here) picked it up: not a
     /// missed call.
@@ -68,6 +80,131 @@ pub enum CallEvent {
         /// What went over the wire, for a probe's summary.
         counts: media::Counts,
     },
+}
+
+/// Someone in a meeting, or waiting to be let in, as its roster says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attendee {
+    /// `8:live:…`, `8:orgid:…`, or a guest's id.
+    pub mri: String,
+    /// The name the meeting shows; guests are known by nothing else.
+    pub name: Option<String>,
+    /// Waiting in the lobby, not yet in the call.
+    pub waiting: bool,
+    pub muted: bool,
+}
+
+/// Who is in a meeting, from its roster's deltas.
+#[derive(Debug, Default)]
+struct People {
+    /// By MRI: the roster version last taken, and the attendee.
+    by_mri: BTreeMap<String, (u64, Attendee)>,
+}
+
+impl People {
+    /// Takes in a roster delta, leaving out `me`; answers whether anyone
+    /// shown changed.
+    fn take(&mut self, update: &RosterUpdate, me: &str) -> bool {
+        let mut changed = false;
+        for (mri, them) in &update.participants {
+            if mri.eq_ignore_ascii_case(me) {
+                continue;
+            }
+            if self
+                .by_mri
+                .get(mri)
+                .is_some_and(|(version, _)| them.version < *version)
+            {
+                continue;
+            }
+            if !them.is_active() {
+                changed |= self.by_mri.remove(mri).is_some();
+                continue;
+            }
+            let attendee = Attendee {
+                mri: mri.clone(),
+                name: them.name().map(str::to_owned),
+                waiting: them.is_waiting(),
+                muted: them.is_muted(),
+            };
+            let was = self
+                .by_mri
+                .insert(mri.clone(), (them.version, attendee.clone()));
+            changed |= was.map(|(_, a)| a).as_ref() != Some(&attendee);
+        }
+        changed
+    }
+
+    /// Everyone, by MRI.
+    fn list(&self) -> Vec<Attendee> {
+        self.by_mri.values().map(|(_, a)| a.clone()).collect()
+    }
+}
+
+/// The relay for a call, if Teams hands out credentials for it.
+async fn relay_for(client: &TeamsClient) -> Option<Relay> {
+    // The relay is how a far end behind another network reaches us; a
+    // call on the same network still works without it.
+    match relay_credentials(client).await {
+        Ok(credentials) => Some(Relay::new(&relay_servers(client).await, credentials)),
+        Err(error) => {
+            log::warn!("no Teams relay for the call: {error:?}");
+            None
+        }
+    }
+}
+
+/// Joins `meeting` with `audio`, and runs the call until it ends: through
+/// its lobby if it has you wait, and onto the meeting's own media server
+/// once you are let in (§H). Every step is told through `tell`; `control`
+/// steers it. Needs the account's live connection up.
+pub async fn meeting(
+    client: TeamsClient,
+    meeting: Meeting,
+    audio: Audio,
+    control: mpsc::UnboundedReceiver<Control>,
+    tell: impl Fn(CallEvent) + Send,
+) {
+    let mut counts = media::Counts::default();
+    let result = run_meeting(&client, &meeting, audio, control, &tell, &mut counts).await;
+    if let Err(error) = &result {
+        log::warn!("Teams meeting ended with a failure: {error:?}");
+    }
+    tell(CallEvent::Ended { result, counts });
+}
+
+async fn run_meeting(
+    client: &TeamsClient,
+    meeting: &Meeting,
+    audio: Audio,
+    mut control: mpsc::UnboundedReceiver<Control>,
+    tell: &(impl Fn(CallEvent) + Send),
+    counts: &mut media::Counts,
+) -> Result<(), Failure> {
+    let surl = client
+        .calls()
+        .surl()
+        .ok_or_else(|| Failure::CallFailed("the live connection is not up".into()))?;
+    let endpoint = client
+        .endpoint_id()
+        .unwrap_or_else(crate::model::new_client_msg_id);
+    let ids = CallIds::new(&endpoint);
+    let me = own_participant(client, &ids)
+        .ok_or_else(|| Failure::CallFailed("who you are is not known".into()))?;
+    let mut inbox = client.calls().register(&ids.call_agent_id);
+    let agent = ids.call_agent_id.clone();
+    let mut call = Call::with(CallApi::new(client.clone(), ids, me.clone(), &surl).meeting());
+    call.meeting = Some(InMeeting {
+        me: me.id,
+        lobby: false,
+        people: People::default(),
+    });
+    call.relay = relay_for(client).await;
+    let ended = call
+        .join(meeting, audio, &mut inbox, &mut control, tell, counts)
+        .await;
+    client.calls().forget(&agent);
+    ended
 }
 
 /// Calls `callee` (an MRI, `8:live:…` or `8:orgid:…`, or the id the
@@ -111,16 +248,8 @@ async fn run(
     let me = own_participant(client, &ids)
         .ok_or_else(|| Failure::CallFailed("who you are is not known".into()))?;
 
-    // The relay is how a far end behind another network reaches us; a
-    // call on the same network still works without it.
-    let relay = match relay_credentials(client).await {
-        Ok(credentials) => Some(Relay::new(&relay_servers(client).await, credentials)),
-        Err(error) => {
-            log::warn!("no Teams relay for the call: {error:?}");
-            None
-        }
-    };
-    let (mut session, mut local) = MediaSession::start(MediaConfig::offer(relay), audio)
+    let relay = relay_for(client).await;
+    let (mut session, mut local) = MediaSession::start(MediaConfig::offer(relay.clone()), audio)
         .await
         .map_err(media_failure)?;
     log::info!(
@@ -130,7 +259,8 @@ async fn run(
 
     let mut inbox = client.calls().register(&ids.call_agent_id);
     let agent = ids.call_agent_id.clone();
-    let call = Call::new(client, ids, me, &surl);
+    let mut call = Call::new(client, ids, me, &surl);
+    call.relay = relay;
     let ended = call
         .ring_and_talk(
             callee,
@@ -283,6 +413,24 @@ struct Call {
     leg: String,
     /// Our screen share as renegotiated.
     share: ShareState,
+    /// Whether we asked to be muted: a new media session of the call
+    /// starts so too.
+    muted: bool,
+    /// The relay the media was started with, for a new session of the
+    /// call.
+    relay: Option<Relay>,
+    /// A meeting's side of the call, when it is one.
+    meeting: Option<InMeeting>,
+}
+
+/// What a call that is a meeting keeps.
+#[derive(Debug)]
+struct InMeeting {
+    /// Our MRI, which the roster lists too.
+    me: String,
+    /// Whether the meeting keeps us in its lobby.
+    lobby: bool,
+    people: People,
 }
 
 /// Where our screen share's renegotiation stands.
@@ -355,7 +503,71 @@ impl Call {
             renegotiation: None,
             leg: String::new(),
             share: ShareState::default(),
+            muted: false,
+            relay: None,
+            meeting: None,
         }
+    }
+
+    /// Finds the meeting, starts the media and joins with our offer
+    /// (§H.2, §H.3), then talks until the end.
+    async fn join(
+        &mut self,
+        meeting: &Meeting,
+        audio: Audio,
+        inbox: &mut mpsc::UnboundedReceiver<Push>,
+        control: &mut mpsc::UnboundedReceiver<Control>,
+        tell: &(impl Fn(CallEvent) + Send),
+        counts: &mut media::Counts,
+    ) -> Result<(), Failure> {
+        let preheated = self
+            .api
+            .preheat(meeting)
+            .await
+            .map_err(|error| match error {
+                // A link or passcode the meeting service does not know.
+                Failure::Http(status) if (400..500).contains(&status) && status != 401 => {
+                    Failure::MeetingNotFound
+                }
+                other => other,
+            })?;
+        log::info!("Teams meeting: found");
+        let (mut session, mut local) =
+            MediaSession::start(MediaConfig::offer(self.relay.clone()), audio)
+                .await
+                .map_err(media_failure)?;
+        self.leg = self.api.ids().media_leg_id.clone();
+        let offer = sdp::offer(&local);
+        let joined = match self.api.join_meeting(&preheated, &offer).await {
+            Ok(joined) => joined,
+            Err(error) => {
+                session.stop();
+                return Err(error);
+            }
+        };
+        let links = preheated.links.clone().merged(joined.links);
+        if let Some(url) = &links.update_endpoint_state
+            && let Err(error) = self.api.preheat_done(url).await
+        {
+            log::info!("Teams meeting: the preheat not ended: {error:?}");
+        }
+        self.conversation = Some(CpconvAnswer {
+            conversation_controller: preheated.conversation_controller,
+            links,
+            meeting_data: None,
+        });
+        log::info!("Teams meeting: joined, waiting for its answer");
+        let ended = self
+            .talk(&mut session, &mut local, inbox, control, tell)
+            .await;
+        session.stop();
+        *counts = session.counts();
+        ended
+    }
+
+    /// Whether we wait in a meeting's lobby.
+    fn in_lobby(&self) -> bool {
+        self.meeting.as_ref().is_some_and(|m| m.lobby)
     }
 
     async fn ring_and_talk(
@@ -402,7 +614,7 @@ impl Call {
                     Some(MediaEvent::Connected) => {
                         log::info!("Teams call: media connected");
                         self.connected = true;
-                        if self.accepted {
+                        if self.accepted && !self.in_lobby() {
                             tell(CallEvent::Live);
                         }
                     }
@@ -425,6 +637,7 @@ impl Call {
                         self.share.retried = false;
                         self.offer_share(local).await;
                     }
+                    Some(Control::Admit(mri)) => self.admit(&mri).await,
                     // Asked to stop, or whoever steered the call is gone.
                     Some(Control::HangUp) | None => {
                         session.stop();
@@ -464,6 +677,7 @@ impl Call {
         self.conversation = Some(CpconvAnswer {
             conversation_controller: call.conversation.clone(),
             links: attached.conversation().cloned().unwrap_or_default(),
+            meeting_data: None,
         });
         if let Some(url) = &invitation.links.progress
             && let Err(error) = self.api.ringing(url).await
@@ -517,13 +731,8 @@ impl Call {
             log::warn!("Teams call: unreadable SDP from the caller: {error}");
             Failure::CallFailed("the caller's media could not be used".into())
         })?;
-        let relay = match relay_credentials(client).await {
-            Ok(credentials) => Some(Relay::new(&relay_servers(client).await, credentials)),
-            Err(error) => {
-                log::warn!("no Teams relay for the call: {error:?}");
-                None
-            }
-        };
+        let relay = relay_for(client).await;
+        self.relay.clone_from(&relay);
         let (mut session, mut local) =
             MediaSession::start(MediaConfig::answer(relay, &remote), audio)
                 .await
@@ -624,7 +833,7 @@ impl Call {
     async fn on_push(
         &mut self,
         push: Push,
-        session: &MediaSession,
+        session: &mut MediaSession,
         local: &mut LocalMedia,
         tell: &(impl Fn(CallEvent) + Send),
     ) -> Option<Result<(), Failure>> {
@@ -651,7 +860,18 @@ impl Call {
                 }
             }
             Push::Acceptance(acceptance) => {
-                log::info!("Teams call: picked up");
+                let lobby = acceptance.is_lobby();
+                if let Some(meeting) = &mut self.meeting {
+                    meeting.lobby = lobby;
+                }
+                log::info!(
+                    "Teams call: {}",
+                    if lobby {
+                        "in the meeting's lobby"
+                    } else {
+                        "picked up"
+                    }
+                );
                 self.accepted = true;
                 if let Some(url) = &acceptance.links.acknowledgement
                     && let Err(error) = self.api.acknowledge_acceptance(url).await
@@ -675,7 +895,9 @@ impl Call {
                     self.last_remote = Some(remote);
                 }
                 self.renegotiation = acceptance.links.media_renegotiation.clone();
-                if self.connected {
+                if lobby {
+                    tell(CallEvent::Lobby);
+                } else if self.connected {
                     tell(CallEvent::Live);
                 }
                 if let Some(url) = self
@@ -688,6 +910,17 @@ impl Call {
                 }
             }
             Push::MediaNegotiation(negotiation) => {
+                // An offer from another media server (a meeting letting
+                // us in from its lobby) needs a session of its own.
+                if let Ok(remote) = sdp::read(&negotiation.media_content.blob)
+                    && moves(self.last_remote.as_ref(), &remote)
+                {
+                    return self
+                        .move_media(&negotiation, &remote, session, local, tell)
+                        .await
+                        .err()
+                        .map(Err);
+                }
                 // Unusable offers are logged by `apply`; the call goes on.
                 let remote = apply(session, &negotiation.media_content.blob)?;
                 self.last_remote = Some(remote.clone());
@@ -708,9 +941,26 @@ impl Call {
                 // answered all the same; ours, if refused, says so on its
                 // rejection link.
             }
-            Push::MediaAcknowledgement(ack) => {
+            Push::MediaAcknowledgement(ack, links) => {
                 if let Err(error) = codes::acknowledgement(&ack) {
                     log::warn!("Teams call: an answer of ours was refused: {error:?}");
+                }
+                // Moved to another media server: its leg from now on.
+                if let Some(url) = links.media_renegotiation {
+                    log::info!("Teams call: on a new call leg");
+                    self.renegotiation = Some(url);
+                }
+                if let (Some(call_leg), Some(keep_alive)) = (links.call_leg, &mut self.keep_alive) {
+                    keep_alive.call_leg = call_leg;
+                }
+            }
+            Push::ConversationUpdate(update) => {
+                if self.in_lobby() && update.in_call() {
+                    log::info!("Teams meeting: let in from the lobby");
+                }
+                if let Some(conversation) = &mut self.conversation {
+                    conversation.links =
+                        std::mem::take(&mut conversation.links).merged(update.links);
                 }
             }
             Push::CallEnd(end) => {
@@ -725,6 +975,13 @@ impl Call {
                     Ending::Normal => Ok(()),
                     Ending::Failed(failure) => Err(failure),
                 });
+            }
+            Push::RosterUpdate(update) if self.meeting.is_some() => {
+                if let Some(meeting) = &mut self.meeting
+                    && meeting.people.take(&update, &meeting.me)
+                {
+                    tell(CallEvent::People(meeting.people.list()));
+                }
             }
             Push::RosterUpdate(update) => {
                 if let Some(muted) = self.far_end_change(&update) {
@@ -809,7 +1066,8 @@ impl Call {
         }
     }
 
-    async fn mute(&self, session: &MediaSession, muted: bool) {
+    async fn mute(&mut self, session: &MediaSession, muted: bool) {
+        self.muted = muted;
         session.set_muted(muted);
         if let Some(url) = self
             .conversation
@@ -818,6 +1076,80 @@ impl Call {
             && let Err(error) = self.api.update_endpoint_state(&url, muted).await
         {
             log::info!("Teams call: mute not told to the far end: {error:?}");
+        }
+    }
+
+    /// Moves the call to the media server whose `remote` offer came
+    /// with `negotiation`: the old session hands its sound and pictures
+    /// to a new one, which answers the offer (§H.4: the web client, let
+    /// in from a meeting's lobby, builds a new transport too). Fails the
+    /// call when the new session cannot start.
+    async fn move_media(
+        &mut self,
+        negotiation: &MediaNegotiation,
+        remote: &RemoteMedia,
+        session: &mut MediaSession,
+        local: &mut LocalMedia,
+        tell: &(impl Fn(CallEvent) + Send),
+    ) -> Result<(), Failure> {
+        log::info!("Teams call: moving to another media server");
+        let Some(url) = negotiation.links.media_answer.as_deref() else {
+            log::warn!("Teams call: a new media server's offer without an answer link");
+            return Ok(());
+        };
+        // Without them (the session had ended) the call goes on silent.
+        let held = session.release().await.unwrap_or_default();
+        let started =
+            MediaSession::resume(MediaConfig::answer(self.relay.clone(), remote), held).await;
+        let (fresh, fresh_local) = match started {
+            Ok(started) => started,
+            Err(failure) => {
+                self.leave().await;
+                return Err(media_failure(failure));
+            }
+        };
+        *session = fresh;
+        *local = fresh_local;
+        session.set_muted(self.muted);
+        if let Err(failure) = session.apply_remote(remote) {
+            self.leave().await;
+            return Err(media_failure(failure));
+        }
+        self.connected = false;
+        self.last_remote = Some(remote.clone());
+        self.leg = negotiation.media_content.media_leg_id.clone();
+        // Whatever was shared went with the old session.
+        self.share.agreed = false;
+        self.share.offered = None;
+        if let Some(meeting) = &mut self.meeting
+            && std::mem::take(&mut meeting.lobby)
+        {
+            log::info!("Teams meeting: in the call");
+            tell(CallEvent::Admitted);
+        }
+        let answer = sdp::answer(local, remote);
+        match self.api.answer_renegotiation(url, &answer, &self.leg).await {
+            Ok(()) => log::info!("Teams call: the new media server's offer answered"),
+            Err(error) => {
+                log::warn!("Teams call: the new media server's offer not answered: {error:?}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Lets `mri` in from the meeting's lobby.
+    async fn admit(&self, mri: &str) {
+        let Some(url) = self
+            .conversation
+            .as_ref()
+            .and_then(|c| c.links.admit.clone())
+        else {
+            log::info!("Teams meeting: no way to let anyone in");
+            return;
+        };
+        match self.api.admit(&url, mri).await {
+            Ok(()) => log::info!("Teams meeting: asked to let someone in"),
+            Err(error) => log::warn!("Teams meeting: could not let someone in: {error:?}"),
         }
     }
 
@@ -838,6 +1170,13 @@ impl Call {
             Err(_) => log::info!("Teams call: leave took too long"),
         }
     }
+}
+
+/// Whether the far end's `remote` description comes from another media
+/// server than `last`: a DTLS certificate of its own, which takes a new
+/// session (str0m keeps one per peer).
+fn moves(last: Option<&RemoteMedia>, remote: &RemoteMedia) -> bool {
+    last.is_some_and(|last| last.fingerprint.is_some() && last.fingerprint != remote.fingerprint)
 }
 
 /// Reads the far end's SDP and hands it to the media; answers what was
@@ -936,5 +1275,49 @@ mod tests {
     fn the_keep_alive_goes_a_little_before_it_runs_out() {
         assert_eq!(keep_alive_every(2700), Duration::from_secs(2430));
         assert!(keep_alive_every(0) > Duration::ZERO);
+    }
+
+    #[test]
+    fn a_new_media_servers_certificate_moves_the_call() {
+        let read = |text: &str| sdp::read(text).expect("reads");
+        let lobby = read(include_str!("fixtures/meeting_lobby.sdp"));
+        let meeting = read(include_str!("fixtures/meeting_retarget.sdp"));
+        let confirm = read(include_str!("fixtures/meeting_confirm.sdp"));
+        assert!(moves(Some(&lobby), &meeting));
+        // The same server again, in BUNDLE: a renegotiation like any.
+        assert!(!moves(Some(&meeting), &confirm));
+        assert!(!moves(None, &meeting));
+    }
+
+    #[test]
+    fn a_meetings_roster_keeps_who_is_in_and_who_waits() {
+        let update: RosterUpdate =
+            serde_json::from_str(include_str!("fixtures/roster_lobby.json")).expect("reads");
+        let mut people = People::default();
+        assert!(people.take(&update, "8:live:ORGANIZER"));
+        // You are not among the others; the one gone is not shown.
+        let shown = people.list();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].mri, "8:live:waiting");
+        assert!(shown[0].waiting);
+        assert_eq!(shown[0].name.as_deref(), Some("Wim Waiting"));
+        // The same again changes nothing; an older version is ignored.
+        assert!(!people.take(&update, "8:live:organizer"));
+        let mut older = update.clone();
+        if let Some(them) = older.participants.get_mut("8:live:waiting") {
+            them.version = 1;
+            them.endpoints.clear();
+        }
+        assert!(!people.take(&older, "8:live:organizer"));
+        // Let in: in the call, no longer waiting.
+        let mut admitted = update;
+        if let Some(them) = admitted.participants.get_mut("8:live:waiting") {
+            them.version = 6;
+            for endpoint in them.endpoints.values_mut() {
+                endpoint.call = endpoint.lobby.take();
+            }
+        }
+        assert!(people.take(&admitted, "8:live:organizer"));
+        assert!(!people.list()[0].waiting);
     }
 }

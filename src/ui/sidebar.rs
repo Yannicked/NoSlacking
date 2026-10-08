@@ -244,6 +244,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             if workspace.info.offers(Ability::Channels) {
                                 super::browse::header_buttons(ui, &palette, actions);
                             }
+                            if workspace.info.offers(Ability::Meetings) {
+                                super::meetings::header_button(ui, &palette, actions);
+                            }
                             if workspace.sections.is_some()
                                 && workspace.info.offers(Ability::Sections)
                                 && theme::icon_button(

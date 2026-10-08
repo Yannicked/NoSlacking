@@ -50,8 +50,38 @@ pub const ARROW_GAP: f32 = 2.0;
 /// palette's own red is too light for it).
 pub const LEAVE: Color32 = Color32::from_rgb(0xcc, 0x2e, 0x45);
 /// Watch's green: the call's own colour, deep enough for white text.
-#[cfg(feature = "huddle-video")]
 const ACTIVE_BUTTON: Color32 = Color32::from_rgb(0x00, 0x7a, 0x5a);
+
+/// What leaving is called.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Leaving {
+    /// Leave the huddle.
+    Huddle,
+    /// Hang up.
+    Call,
+    /// Leave the meeting.
+    Meeting,
+}
+
+impl Leaving {
+    /// What leaving `listening` is.
+    pub fn of(listening: &Listening) -> Self {
+        if listening.meeting {
+            Self::Meeting
+        } else if listening.is_call() {
+            Self::Call
+        } else {
+            Self::Huddle
+        }
+    }
+}
+
+/// Someone waiting in a meeting's lobby, as the bar lists them.
+struct Waiting {
+    /// The id the interface knows them by, which Admit sends.
+    user: String,
+    text: String,
+}
 
 /// One person as the bar draws them.
 struct Face {
@@ -77,11 +107,18 @@ struct ShareRow {
 struct Bar {
     team: String,
     channel: String,
+    /// Whether the conversation is here to open: a meeting joined by
+    /// link has none until its chat comes.
+    openable: bool,
     title: String,
     status: String,
     /// The workspace's name, when more than one is signed in.
     workspace: Option<String>,
     faces: Vec<Face>,
+    /// Who waits in the meeting's lobby.
+    waiting: Vec<Waiting>,
+    /// The meeting's join link, to copy.
+    invite: Option<String>,
     #[cfg(feature = "huddle-video")]
     shares: Vec<ShareRow>,
     /// How many others have a camera on.
@@ -103,6 +140,11 @@ fn gather(
         .find(|w| w.info.team_id == listening.team)?;
     let conversation = workspace.conversation(&listening.channel);
     let name = conversation.map_or_else(|| listening.channel.clone(), |c| workspace.title(c));
+    // The workspace's name for someone it knows; the call's for a guest.
+    let label = |person: &huddles::Person, id: &str| match (&person.name, workspace.user(id)) {
+        (Some(name), None) => name.clone(),
+        _ => workspace.user_label(id),
+    };
     let place = match conversation {
         Some(c) if c.kind.is_dm() => Place::Direct(&name),
         _ => Place::Channel(&name),
@@ -126,8 +168,11 @@ fn gather(
                     "{name} (you, listening here)",
                     &[("name", &workspace.user_label(&workspace.info.user_id))],
                 ),
-                (Some(id), false) => workspace.user_label(id),
-                (None, false) => t("Someone").into_owned(),
+                (Some(id), false) => label(&person, id),
+                (None, false) => person
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| t("Someone").into_owned()),
             };
             Face {
                 name,
@@ -148,7 +193,10 @@ fn gather(
     Some(Bar {
         team: listening.team.clone(),
         channel: listening.channel.clone(),
-        title: if listening.is_call() {
+        openable: conversation.is_some(),
+        title: if listening.meeting {
+            huddles::meeting_title_text(&listening.phase)
+        } else if listening.is_call() {
             huddles::call_title_text(&name, &listening.phase, listening.answered)
         } else {
             huddles::title_text(place, listening.mic == crate::huddle_mic::Mic::Live)
@@ -156,6 +204,22 @@ fn gather(
         status: huddles::status_text(&listening.phase, listening.is_call(), now),
         workspace: (workspaces.len() > 1).then(|| workspace.info.name.clone()),
         faces,
+        waiting: listening
+            .waiting()
+            .filter_map(|person| {
+                let user = person.user.clone()?;
+                let name = label(person, &user);
+                Some(Waiting {
+                    text: tf("{name} is waiting in the lobby", &[("name", &name)]),
+                    user,
+                })
+            })
+            .collect(),
+        invite: listening
+            .invite
+            .as_ref()
+            .filter(|_| listening.in_huddle())
+            .map(|link| link.0.clone()),
         #[cfg(feature = "huddle-video")]
         shares: listening
             .shares
@@ -249,6 +313,14 @@ fn bar(
             if !bar.faces.is_empty() {
                 ui.horizontal(|ui| faces(ui, palette, &bar.faces));
             }
+            if !failed {
+                for waiting in &bar.waiting {
+                    waiting_row(ui, palette, waiting, actions);
+                }
+                if let Some(link) = &bar.invite {
+                    invite_row(ui, palette, link, actions);
+                }
+            }
             #[cfg(feature = "huddle-video")]
             if !failed {
                 for share in &bar.shares {
@@ -282,7 +354,10 @@ fn bar(
                         if theme::icon_button(ui, palette, Icon::X, 14.0, &t("Close")).clicked() {
                             actions.push(Action::Huddle(huddles::Action::Leave));
                         }
-                        if small_button(ui, palette, &t("Try again"), None).clicked() {
+                        // A meeting is joined again from its dialog.
+                        if !listening.meeting
+                            && small_button(ui, palette, &t("Try again"), None).clicked()
+                        {
                             let (team, channel) = (bar.team.clone(), bar.channel.clone());
                             actions.push(Action::Huddle(match listening.callee.clone() {
                                 Some(user) => huddles::Action::Call {
@@ -296,7 +371,7 @@ fn bar(
                     } else {
                         // Right to left, so they read Mute, Video, Share,
                         // Leave, as in the call window.
-                        if leave_button(ui, palette, Look::BAR, listening.is_call()) {
+                        if leave_button(ui, palette, Look::BAR, Leaving::of(listening)) {
                             actions.push(Action::Huddle(huddles::Action::Leave));
                         }
                         // Four worded controls do not fit a narrow sidebar:
@@ -376,6 +451,62 @@ fn bar(
                 });
             });
         });
+}
+
+/// Someone waiting in the meeting's lobby, and Admit, which lets them in.
+fn waiting_row(ui: &mut egui::Ui, palette: &Palette, waiting: &Waiting, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if small_button(ui, palette, &t("Admit"), Some(ACTIVE_BUTTON))
+                .on_hover_text(&waiting.text)
+                .clicked()
+            {
+                actions.push(Action::Huddle(huddles::Action::Admit {
+                    user: waiting.user.clone(),
+                }));
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(Icon::Clock.image(ACTIVE, 14.0));
+                ui.vertical(|ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&waiting.text)
+                                .font(theme::regular(12.0))
+                                .color(palette.text),
+                        )
+                        .wrap(),
+                    );
+                });
+            });
+        });
+    });
+}
+
+/// The meeting's join link, and Copy, so others can be invited.
+fn invite_row(ui: &mut egui::Ui, palette: &Palette, link: &str, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if small_button(ui, palette, &t("Copy link"), None)
+                .on_hover_text(t("Copy the link others join the meeting with"))
+                .clicked()
+            {
+                actions.push(Action::Copy(link.to_owned()));
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(Icon::Link.image(palette.secondary, 14.0));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(t("Invite others with the meeting's link"))
+                            .font(theme::regular(12.0))
+                            .color(palette.secondary),
+                    )
+                    .wrap(),
+                );
+            });
+        });
+    });
 }
 
 /// Someone's screen share: who, and Watch (or, while it is open in the
@@ -469,16 +600,18 @@ fn title_row(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add(Icon::Headphones.image(tint, 16.0));
+                let label = egui::Label::new(
+                    RichText::new(&bar.title)
+                        .font(theme::semibold(13.5))
+                        .color(palette.text),
+                )
+                .truncate();
+                if !bar.openable {
+                    ui.add(label);
+                    return;
+                }
                 let title = ui
-                    .add(
-                        egui::Label::new(
-                            RichText::new(&bar.title)
-                                .font(theme::semibold(13.5))
-                                .color(palette.text),
-                        )
-                        .truncate()
-                        .sense(Sense::click()),
-                    )
+                    .add(label.sense(Sense::click()))
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .on_hover_text(t("Open the conversation"));
                 theme::describe(&title, egui::WidgetType::Button, &bar.title);
@@ -499,7 +632,7 @@ fn status_row(ui: &mut egui::Ui, palette: &Palette, bar: &Bar, phase: &Phase, ti
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         match phase {
-            Phase::Joining | Phase::Ringing => {
+            Phase::Joining | Phase::Ringing | Phase::Lobby => {
                 ui.add(egui::Spinner::new().size(10.0).color(palette.secondary));
             }
             Phase::Live { .. } => {
@@ -594,18 +727,21 @@ pub fn control(
 /// Leave, in red, in `look` ("Hang up" for a `call`); whether it was
 /// clicked. Its chord is [`super::keys::leave_chord`], taken by the
 /// window with the focus.
-pub fn leave_button(ui: &mut egui::Ui, palette: &Palette, look: Look, call: bool) -> bool {
+pub fn leave_button(ui: &mut egui::Ui, palette: &Palette, look: Look, leaving: Leaving) -> bool {
     let shortcut = super::shortcuts::spell("Cmd+Shift+H", cfg!(target_os = "macos"));
-    let (tip, label) = if call {
-        (
+    let (tip, label) = match leaving {
+        Leaving::Call => (
             tf("Hang up ({shortcut})", &[("shortcut", &shortcut)]),
             t("Hang up"),
-        )
-    } else {
-        (
+        ),
+        Leaving::Meeting => (
+            tf("Leave the meeting ({shortcut})", &[("shortcut", &shortcut)]),
+            t("Leave"),
+        ),
+        Leaving::Huddle => (
             tf("Leave the huddle ({shortcut})", &[("shortcut", &shortcut)]),
             t("Leave"),
-        )
+        ),
     };
     let response = if look.labelled && !look.leave_icon {
         small_button(ui, palette, &label, Some(LEAVE))

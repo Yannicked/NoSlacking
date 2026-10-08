@@ -10,7 +10,10 @@
 //! shows a huddle. Unlike a huddle, a call starts unmuted: you are in it
 //! to talk. An incoming call rings as a huddle invitation does
 //! ([`crate::people::Event::HuddleInvite`], the call id as its room), and
-//! stops ringing as one is cancelled.
+//! stops ringing as one is cancelled. A meeting is joined (or started
+//! with "Meet now") the same way, shown in
+//! [`crate::meetings::MEETING_CHANNEL`], with who waits in its lobby in
+//! the roster.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -30,7 +33,9 @@ use crate::huddle_audio::speaker::Speaker;
 use crate::huddle_audio::uplink::Outgoing;
 use crate::huddles::{Left, Listen};
 use crate::people;
-use crate::teams::calling::call::{Answer, CallEvent, Control, Incoming, incoming, outgoing};
+use crate::teams::calling::call::{
+    Answer, Attendee, CallEvent, Control, Incoming, incoming, meeting, outgoing,
+};
 use crate::teams::calling::media::Audio;
 use crate::teams::client::TeamsClient;
 
@@ -233,6 +238,25 @@ impl Caller {
         });
     }
 
+    /// Joins a meeting in `team` (or makes one first, "Meet now"),
+    /// ending the last call first.
+    pub fn join_meeting(&mut self, client: TeamsClient, team: String, join: Join, sink: Sink) {
+        self.stop();
+        let (mut running, controls, wanted) = controls(&self.chosen);
+        running.team.clone_from(&team);
+        tokio::spawn(run_meeting(client, team, join, controls, wanted, sink));
+        self.running = Some(running);
+    }
+
+    /// Lets `user` (by the id the interface knows them by) in from the
+    /// meeting's lobby.
+    pub fn admit(&mut self, user: &str) {
+        if let Some(running) = &self.running {
+            let mri = crate::teams::client::user_mri(user);
+            let _ = running.control.send(Control::Admit(mri));
+        }
+    }
+
     /// Picks up the incoming call `call_id` of `team`, shown in `channel`,
     /// ending any other call first. Answers whether it was still ringing.
     pub fn answer(&mut self, team: &str, call_id: &str, channel: String) -> bool {
@@ -312,6 +336,15 @@ impl Caller {
     }
 }
 
+/// Which meeting to join.
+#[derive(Debug)]
+pub enum Join {
+    /// One with this link, or ID and passcode.
+    Meeting(crate::meetings::Meeting),
+    /// One made now, named this.
+    Now(String),
+}
+
 /// Where a call is, and with whom.
 struct Place {
     team: String,
@@ -343,15 +376,52 @@ fn roster(callee: &str, far: FarEnd) -> Roster {
                 me: false,
                 muted: far.muted,
                 speaking: far.speaking,
+                name: None,
+                waiting: false,
             },
             Person {
                 user: None,
                 me: true,
                 muted: false,
                 speaking: far.me_speaking,
+                name: None,
+                waiting: false,
             },
         ],
         count: Some(2),
+    }
+}
+
+/// Who is in a meeting with you: the others as `people` says (by the ids
+/// the interface knows people by, their names for any it does not), and
+/// you, speaking as `me_speaking` says.
+fn meeting_roster(people: &[Attendee], me_speaking: bool) -> Roster {
+    let mut everyone: Vec<Person> = people
+        .iter()
+        .map(|attendee| Person {
+            user: Some(
+                crate::backend::teams_translate::clean_teams_user_id(&attendee.mri)
+                    .unwrap_or_else(|| attendee.mri.clone()),
+            ),
+            me: false,
+            muted: attendee.muted,
+            speaking: false,
+            name: attendee.name.clone(),
+            waiting: attendee.waiting,
+        })
+        .collect();
+    everyone.push(Person {
+        user: None,
+        me: true,
+        muted: false,
+        speaking: me_speaking,
+        name: None,
+        waiting: false,
+    });
+    let count = everyone.iter().filter(|p| !p.waiting).count();
+    Roster {
+        people: everyone,
+        count: u32::try_from(count).ok(),
     }
 }
 
@@ -797,6 +867,8 @@ fn teller(place: &Place, sink: &Sink) -> impl Fn(Listen) + Clone + Send + 'stati
 struct Shown<'a, T: Fn(Listen)> {
     far: FarEnd,
     callee: &'a str,
+    /// Who else is in the meeting, for a meeting.
+    people: Option<Vec<Attendee>>,
     tell: &'a T,
     /// How the call ended, once it has.
     ended: Option<Result<(), Failure>>,
@@ -810,7 +882,7 @@ impl<T: Fn(Listen)> Shown<'_, T> {
             let cameras = if on {
                 vec![crate::huddle_audio::cameras::Camera {
                     key: crate::teams::calling::video::FAR_CAMERA.to_owned(),
-                    user: Some(self.callee.to_owned()),
+                    user: self.far_user(),
                     paused: false,
                     tile: true,
                 }]
@@ -831,7 +903,7 @@ impl<T: Fn(Listen)> Shown<'_, T> {
             let shares = if on {
                 vec![crate::huddle_audio::video::Share {
                     key: FAR_SHARE.to_owned(),
-                    user: Some(self.callee.to_owned()),
+                    user: self.far_user(),
                 }]
             } else {
                 Vec::new()
@@ -842,13 +914,28 @@ impl<T: Fn(Listen)> Shown<'_, T> {
         let _ = on;
     }
 
+    /// Whose picture the far end's media is: the one called; in a
+    /// meeting, whoever its media server shows, which it does not say.
+    #[cfg(feature = "huddle-video")]
+    fn far_user(&self) -> Option<String> {
+        (self.people.is_none() && !self.callee.is_empty()).then(|| self.callee.to_owned())
+    }
+
+    /// Who is in the call, as the bar shows it.
+    fn roster(&self) -> Roster {
+        match &self.people {
+            Some(people) => meeting_roster(people, self.far.me_speaking),
+            None => roster(self.callee, self.far),
+        }
+    }
+
     /// Changes what is shown of who is in the call, telling the bar the
     /// whole of it if that changed anything.
     fn change(&mut self, change: impl FnOnce(&mut FarEnd)) {
         let was = self.far;
         change(&mut self.far);
         if self.far != was {
-            (self.tell)(Listen::Roster(roster(self.callee, self.far)));
+            (self.tell)(Listen::Roster(self.roster()));
         }
     }
 
@@ -863,6 +950,12 @@ impl<T: Fn(Listen)> Shown<'_, T> {
             CallEvent::FarEndShare(on) => self.far_share(on),
             // Only an incoming call's ringing says this, and that is over.
             CallEvent::AnsweredElsewhere => {}
+            CallEvent::Lobby => (self.tell)(Listen::Lobby),
+            CallEvent::Admitted => (self.tell)(Listen::Admitted),
+            CallEvent::People(people) => {
+                self.people = Some(people);
+                (self.tell)(Listen::Roster(self.roster()));
+            }
             CallEvent::Ended { result, .. } => self.ended = Some(result),
         }
     }
@@ -880,6 +973,7 @@ async fn follow(
     let mut shown = Shown {
         far: FarEnd::default(),
         callee,
+        people: None,
         tell,
         ended: None,
     };
@@ -940,6 +1034,58 @@ async fn run(
     let result = follow(call, &mut events, &devices, &place.callee, &tell).await;
     // The end is told only once the devices are closed, so nothing of
     // this call follows it.
+    devices.close().await;
+    tell(Listen::Ended(ending(result)));
+}
+
+/// One meeting, from joining (or making it) to its end.
+async fn run_meeting(
+    client: TeamsClient,
+    team: String,
+    join: Join,
+    controls: mpsc::UnboundedReceiver<Control>,
+    wanted: Wanted,
+    sink: Sink,
+) {
+    let place = Place {
+        team,
+        channel: crate::meetings::MEETING_CHANNEL.to_owned(),
+        callee: String::new(),
+    };
+    let tell = teller(&place, &sink);
+    tell(Listen::Joining);
+    let found = match join {
+        Join::Meeting(found) => found,
+        Join::Now(subject) => {
+            let made = client.meet_now(&subject).await.and_then(|made| {
+                log::info!("Teams meeting: made one to start now");
+                crate::meetings::Meeting::parse(&made.join, "")
+                    .map_err(|_| Failure::Unexpected("the meeting made has no link".into()))
+            });
+            match made {
+                Ok(made) => made,
+                Err(failure) => {
+                    tell(Listen::Ended(Err(failure)));
+                    return;
+                }
+            }
+        }
+    };
+    tell(Listen::Invite(crate::meetings::MeetingLink(found.url())));
+    tell(Listen::Roster(meeting_roster(&[], false)));
+    let (devices, audio) = match Devices::open(&place, wanted, &sink, &tell).await {
+        Ok(opened) => opened,
+        Err(failure) => {
+            tell(Listen::Ended(Err(failure)));
+            return;
+        }
+    };
+    let (told, mut events) = mpsc::unbounded_channel();
+    let call = meeting(client, found, audio, controls, move |event| {
+        let _ = told.send(event);
+    });
+    tokio::pin!(call);
+    let result = follow(call, &mut events, &devices, "", &tell).await;
     devices.close().await;
     tell(Listen::Ended(ending(result)));
 }

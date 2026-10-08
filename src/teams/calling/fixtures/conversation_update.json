@@ -1,0 +1,22 @@
+{
+  "conversationController": "https://api.flightproxy.skype.com/api/v2/cp/conv.example/conv/abc",
+  "sequenceNumber": 3,
+  "subject": "",
+  "activeModalities": {
+    "call": {"links": {"participants": "https://api.flightproxy.skype.com/api/v2/cp/conv.example/conv/abc/participants"}},
+    "groupChat": {"threadId": "19:meeting_ZmFrZQ@thread.v2", "messageId": "0"},
+    "lobby": null,
+    "realTimeActivityFeed": {"links": {}}
+  },
+  "state": {"isMultiParty": true, "groupCallInitiator": "8:live:organizer", "isHostless": true, "conversationType": "scheduledMeeting", "isBroadcast": false, "isMeetingActivated": true},
+  "links": {
+    "leave": "https://api.flightproxy.skype.com/api/v2/cp/conv.example/conv/abc/leave?i=1",
+    "addParticipant": "https://api.flightproxy.skype.com/api/v2/cp/conv.example/conv/abc/addParticipant?i=1",
+    "mute": "https://api.flightproxy.skype.com/api/v2/cp/conv.example/conv/abc/mute?i=1",
+    "updateEndpointMetadata": "https://api.flightproxy.skype.com/api/v2/cp/conv.example/conv/abc/updateEndpoint?i=1",
+    "updateEndpointState": "https://api.flightproxy.skype.com/api/v2/cp/conv.example/conv/abc/updateEndpointState?i=1",
+    "admit": "https://api.flightproxy.skype.com/api/v2/cp/conv.example/conv/abc/admit?i=1",
+    "admitAll": "https://api.flightproxy.skype.com/api/v2/cp/conv.example/conv/abc/admitAll?i=1"
+  },
+  "meetingDetails": {"meetingType": "MeetNow", "threadType": "meeting", "meetingCapability": {"disableLobby": false, "autoAdmittedUsers": "InvitedUsers"}}
+}

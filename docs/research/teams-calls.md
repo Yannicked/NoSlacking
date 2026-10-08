@@ -1331,3 +1331,147 @@ WebSocket frames) before the code that depends on it is written:
 "udpPort": 3478, "tcpPort": 443, "tlsPort": 443}`, with the credentials
 from `trap/tokens`. The same file names a `DedicatedRelay`
 (`dr-eu.skype-cr.akadns.net`, ports 50000–50007), not needed to start.
+
+## H. Meetings (recorded: `teams.live.com5.har` to `teams.live.com8.har`)
+
+Personal (Teams free) meetings, from the web client. Four sessions: Meet
+now as organizer, alone (5) and admitting someone from the lobby (6, 8);
+joining someone else's meeting by ID and passcode (5) and by link (7),
+waiting in the lobby, being let in, leaving. 7 and 8 have the Trouter
+traffic. Every request carries `x-skypetoken` and the `x-microsoft-skype-*`
+headers of §1.2, as a 1:1 call's do; the callback links are made the same
+way (§1.4), under the call's agent id.
+
+### H.1 Meet now
+
+`POST https://teams.live.com/api/mt/beta/me/calendarEvents/privateMeeting/schedulingService/create`
+with `x-skypetoken` (no bearer), `x-ms-client-type: web`, the web client's
+origin and referer, and
+`{"meetingType":"MeetNow","isStreamEnabled":false,"subject":"Meeting with {name}","unhideChatThread":true}`.
+Answered 201: `value.links.join` is the meeting link,
+`https://teams.live.com/meet/{13 digits}?p={token}`, and
+`value.groupContext.threadId` its chat (`19:meeting_…@thread.v2`). The
+link is then joined as anyone's (H.2), and is what others are invited
+with.
+
+### H.2 Finding the meeting: the "preheat"
+
+`POST {fp}/cpconv` without `callInvitation`:
+
+- `meetingData`: `{meetingCode, passcode, meetingUrl}`. From a link, the
+  code is its path's digits and the passcode its `p=` token. By ID, the
+  code is the ID typed (spaces dropped) and the passcode the one typed,
+  and `meetingUrl` is the link that would have had it:
+  `https://teams.live.com/meet/{id}?p={passcode}`.
+- `meetingPreferences: {shouldResurrect: "resurrect"}`, `groupContext`,
+  `groupChat` and `meetingInfo` null.
+- `conversationRequest` with the joining callbacks (`conversationEnd`,
+  `conversationUpdate`, `localParticipantUpdate`,
+  `addParticipantSuccess/Failure`, `receiveMessage`) and the roster
+  callback.
+- `endpointState`: sequence 0, `additionalEndpointProperties:
+  {infoShownInReportMode: "FullInformation"}`.
+- `participants`: `from` only.
+
+The answer is the conversation: `conversationController`, `links`
+(`leave`, `updateEndpointState`, `updateEndpointMetadata`, `subscribe`,
+…), `state.conversationType: "scheduledMeeting"`, `meetingDetails`, and
+`meetingData` with the meeting's own passcode (6 characters) in place of
+a link's token.
+
+### H.3 Joining
+
+`POST {conversationController}` with the preheat's body plus:
+
+- `meetingData` exactly as the preheat answered it.
+- `conversationRequest.suppressDialout: true`, and the in-call callbacks
+  (adding `addModalitySuccess/Failure`, `confirmUnmute`).
+- `participants.to: []`.
+- `endpointState.endpointProperties.preheatProperties: 1`.
+- `callInvitation`: as a 1:1 call's (A.1), `callModalities` `["Audio",
+  "ScreenViewer"]`, 13 m-lines in the web client's offer, plus
+  `mediaDescriptions` (the receive-only video lines) and
+  `applyChannelParameters` (a bandwidth seed). We send our own offer
+  without those two; whether the meeting wants them is not known yet.
+
+Then `POST {updateEndpointState}` with
+`{from, endpointState: {endpointStateSequenceNumber: 1, endpointProperties: {preheatProperties: 0}}}`.
+
+### H.4 The lobby, and being let in
+
+- The meeting answers with a `call/acceptance` push, as a callee would.
+  - For the organizer it comes from the call.
+  - For anyone it keeps waiting, it says `controllerName: "lobby"` and
+    `mediaContent.callLabel: "lobby"`. It carries an answer from a lobby
+    media server, which mutes you.
+- The web client acknowledges the acceptance in its Trouter reply's body
+  (`callAcceptanceAcknowledgement` with its links). We post the same to
+  the `acknowledgement` link, as for a 1:1 call.
+- While you wait, the roster lists you with a `lobby` endpoint (H.5). The
+  counts it gives are all zero, and you do not see the organizer.
+- **Being let in** comes in four steps:
+  1. A `conversation/conversationUpdate`: `activeModalities.call` set,
+     `lobby` null, the meeting's chat in `activeModalities.groupChat`, and
+     the links of one in the call, `admit` among them.
+  2. A `call/mediaRenegotiation` (`originator: "mcGvc"`, `newOffer: true`)
+     from the meeting's own media server. It has **a new DTLS certificate
+     and new ICE credentials**, and is written in the older dialect
+     (`application/sdp-ngc-0.5`):
+     - every line `RTP/AVP` with `a=crypto` offers and a fingerprint, and
+       no `a=setup`;
+     - an ICE session per kind of line (audio, video, share, data);
+     - Opus at 102 among 17 audio codecs;
+     - the mids renumbered (`BUNDLE 1 2 5 … 13 3 4`).
+  3. The web client answers on a **new transport**: new ufrag, certificate
+     and port, DTLS `active`, `RTP/SAVP`, line for line.
+  4. A `call/mediaAcknowledgement` (sub-code 10109, "Participant retarget
+     was successful") carrying a whole new call leg's `links` (`callLeg`,
+     `mediaRenegotiation`, …), which are used from then on.
+- About six seconds later a second renegotiation (`newOffer: false`,
+  `ngc-1.0`) offers the same server again in BUNDLE, on the audio line's
+  credentials. It is answered as usual.
+
+We do the same: an offer whose certificate differs from the far end's
+last one moves the call. The media session hands its speaker, microphone
+and video over to a new session, which answers the offer. The
+acknowledgement's links then replace the old leg's.
+
+### H.5 Who is waiting, and admitting
+
+- In `rosterUpdate`, a participant waiting in the lobby has an endpoint
+  with `lobby: {mediaStreams}` and no `call`, `modalityJoined: "Lobby"`,
+  `role: "guest"`, and `participantCounts.lobbyParticipants` counts them.
+- Once in, the endpoint has `call: {mediaStreams, serverMuteVersion}`,
+  `modalityJoined: "Lobby,Call"`, and `role: "admin"` (in a personal
+  meeting everyone admitted is one).
+- A participant who left is `state: "inactive"` with no endpoints.
+- To admit someone, `POST {links.admit}` (from the conversation update)
+  with:
+
+  ```json
+  {"participants": {"from": me, "to": [{"id": mri}]},
+   "links": {"admitFailure": cb, "admitSuccess": cb},
+   "debugContent": {"causeId": uuid}}
+  ```
+
+  It is answered 202, then a `conversation/admitParticipantSuccess` push
+  (`participants`, `participantInfos`) and the roster with them in the
+  call.
+
+### H.6 Leaving
+
+`POST {leave}` with the 1:1 call's body (C.5, connected), answered 204,
+then a `call/end` push (`CallEndReasonLocalUserInitiated`). No
+`conversationEnd` came.
+
+### H.7 Not known yet
+
+- Whether the meeting takes our 4-line offer, or needs the web client's
+  13 lines and `mediaDescriptions` before it sends video.
+- How a wrong link or passcode is refused (we take a 4xx to the preheat
+  as "no such meeting").
+- Joining a work account's meeting: its links in the old form
+  (`/l/meetup-join/…`) carry the thread and organizer instead, and were
+  not recorded.
+- Whether the second renegotiation always comes, and whether the new
+  leg's keep-alive matters within a meeting's length.

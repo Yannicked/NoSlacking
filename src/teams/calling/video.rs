@@ -361,6 +361,18 @@ impl CallVideo {
         }
     }
 
+    /// The line's ends, for the next session of the call.
+    pub(super) fn into_ends(self) -> Ends {
+        #[cfg(not(any(feature = "huddle-video", feature = "huddle-camera")))]
+        let _ = self;
+        Ends {
+            #[cfg(feature = "huddle-video")]
+            shown: self.shown,
+            #[cfg(feature = "huddle-camera")]
+            feed: self.camera,
+        }
+    }
+
     /// Our camera's SSRC.
     pub(super) fn ssrc(&self) -> u32 {
         self.ssrc

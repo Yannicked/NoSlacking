@@ -145,6 +145,8 @@ pub enum Failure {
     /// A call failed; the detail is Microsoft's own phrase (English) or
     /// its code.
     CallFailed(String),
+    /// No meeting has that link, or that ID and passcode.
+    MeetingNotFound,
     /// Listening to a huddle failed at this step; the technical detail
     /// went to the log.
     Huddle(HuddleTrouble),
@@ -301,6 +303,7 @@ impl Failure {
             Self::BadProxy => t("the proxy URL cannot be used; check it in Settings"),
             Self::CallDeclined => t("the call was declined"),
             Self::CallNotAnswered => t("nobody answered the call"),
+            Self::MeetingNotFound => t("no meeting has that link, or that ID and passcode"),
             Self::CallFailed(detail) => {
                 return fill(&t("the call failed: {detail}"), &[("detail", detail)]);
             }
@@ -674,6 +677,7 @@ mod tests {
             Failure::CallDeclined,
             Failure::CallNotAnswered,
             Failure::CallFailed("ServiceUnavailable".into()),
+            Failure::MeetingNotFound,
             Failure::Huddle(HuddleTrouble::NoSound),
             Failure::Huddle(HuddleTrouble::Signaling),
             Failure::Huddle(HuddleTrouble::Join),
