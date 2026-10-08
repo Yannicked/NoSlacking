@@ -222,11 +222,16 @@ impl App {
                 return false;
             }
             let shown = call_window::show(ui, &palette, &view, &mut actions);
+            // Minimised or covered, as far as the system says: the helper
+            // then sends no pictures until it can be seen again.
+            let visible = ui.input(|i| i.viewport().visible()).unwrap_or(true);
             if let Some(screen) = &screen {
                 screen.set_fit(shown.share[0], shown.share[1]);
+                screen.set_visible(visible);
             }
             if let Some(gallery) = &gallery {
                 gallery.set_fit(shown.tile[0] as usize, shown.tile[1] as usize);
+                gallery.set_visible(visible);
             }
             room = Some((shown.room, shown.tile));
             true

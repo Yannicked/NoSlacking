@@ -172,6 +172,7 @@ impl Backend for Vaapi {
             // NOSLACKING_VIDEO_GPU_SCALE=0 shrinks on the CPU instead,
             // to compare the two (examples/bench.rs).
             no_scaler: std::env::var_os("NOSLACKING_VIDEO_GPU_SCALE").is_some_and(|v| v == "0"),
+            last: None,
         }))
     }
 }
@@ -203,6 +204,17 @@ struct VaapiDecoder {
     scaler: Option<Scaler>,
     /// The driver cannot scale: shrink on the CPU.
     no_scaler: bool,
+    /// The last frame's surface and region, until its picture is taken.
+    last: Option<(u32, Region)>,
+}
+
+/// Where a decoded picture is on its surface.
+#[derive(Clone, Copy, Debug)]
+struct Region {
+    /// The surface's coded size.
+    coded: (u32, u32),
+    /// The part shown: left, top, width, height.
+    crop: (u32, u32, u32, u32),
 }
 
 impl VaapiDecoder {
@@ -264,10 +276,12 @@ impl VaapiDecoder {
         Ok(self.session.insert(Session { shape, context }))
     }
 
-    fn decode_picture(&mut self, picture: &Picture<'_>) -> Result<(u32, Planes), Failure> {
+    /// Decodes `picture` into a free surface: which one, and the region
+    /// of it shown. Nothing is read back: the GPU may still be working
+    /// on it when this returns.
+    fn decode_picture(&mut self, picture: &Picture<'_>) -> Result<(u32, Region), Failure> {
         let crop = picture.visible()?;
         let in_use: Vec<u32> = self.front.surfaces_in_use().collect();
-        let display = Rc::clone(&self.display);
         let session = self.session_for(picture)?;
         let target = session
             .context
@@ -297,15 +311,24 @@ impl VaapiDecoder {
             .render(target, &buffers)
             .map_err(Failure::broken)?;
         let coded = session.shape.coded;
+        Ok((target, Region { coded, crop }))
+    }
+
+    /// `region` of decoded surface `surface` scaled to the output box and
+    /// read back: on the GPU where it can, else read whole and shrunk
+    /// here, so the pipe still carries no more than is shown.
+    fn read_picture(&mut self, surface: u32, region: Region) -> Result<Planes, Failure> {
+        let crop = region.crop;
         let shown = (crop.2, crop.3);
         let size = output_size(shown, self.fit);
         if size != shown
-            && let Some(planes) = self.scaled(target, crop, size)
+            && let Some(planes) = self.scaled(surface, crop, size)
         {
-            return Ok((target, planes));
+            return Ok(planes);
         }
-        let (y, u, v) = display
-            .read_i420(target, coded, crop)
+        let (y, u, v) = self
+            .display
+            .read_i420(surface, region.coded, crop)
             .map_err(Failure::device)?;
         let planes = Planes {
             width: crop.2,
@@ -314,9 +337,7 @@ impl VaapiDecoder {
             u,
             v,
         };
-        // No scaling on the GPU: shrunk here, so the pipe still carries
-        // no more than is shown.
-        Ok((target, shrink::shrink(planes, self.fit)))
+        Ok(shrink::shrink(planes, self.fit))
     }
 
     /// `crop` of decoded surface `target` scaled to `size` on the GPU
@@ -365,10 +386,11 @@ impl Decoder for VaapiDecoder {
         self.fit = (width, height);
     }
 
-    fn decode(&mut self, frame: &[u8], _keyframe: bool) -> Result<Option<Decoded>, Failure> {
+    fn decode_frame(&mut self, frame: &[u8], _keyframe: bool) -> Result<bool, Failure> {
+        self.last = None;
         let picture = match self.front.begin(frame) {
             Ok(Some(picture)) => picture,
-            Ok(None) => return Ok(None),
+            Ok(None) => return Ok(false),
             Err(failure) => {
                 if failure.kind != FailKind::Unsupported {
                     self.front.reset();
@@ -377,23 +399,33 @@ impl Decoder for VaapiDecoder {
             }
         };
         match self.decode_picture(&picture) {
-            Ok((surface, planes)) => {
+            Ok((surface, region)) => {
                 if let Err(failure) = self.front.finish(&picture, surface) {
                     self.front.reset();
                     return Err(failure);
                 }
-                let (_, _, width, height) = picture.visible()?;
-                Ok(Some(Decoded {
-                    planes,
-                    source: (width, height),
-                    hardware: true,
-                }))
+                // The surface keeps the picture until the next frame
+                // decodes: none is chosen for a frame before then.
+                self.last = Some((surface, region));
+                Ok(true)
             }
             Err(failure) => {
                 self.front.reset();
                 Err(failure)
             }
         }
+    }
+
+    fn picture(&mut self) -> Result<Option<Decoded>, Failure> {
+        let Some((surface, region)) = self.last.take() else {
+            return Ok(None);
+        };
+        let planes = self.read_picture(surface, region)?;
+        Ok(Some(Decoded {
+            planes,
+            source: (region.crop.2, region.crop.3),
+            hardware: true,
+        }))
     }
 }
 
@@ -623,6 +655,36 @@ mod tests {
             );
             let hex: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
             assert_eq!(hex, expected, "{}x{}", size.0, size.1);
+        }
+    }
+
+    /// Frames decoded without their picture leave the stream as it was:
+    /// a picture taken only now and then (scaled or not) is the one taking
+    /// every picture gives.
+    /// `cargo test -p noslacking-video -- --ignored vaapi`
+    #[test]
+    #[ignore = "needs a GPU with VA-API"]
+    fn vaapi_pictures_taken_now_and_then_are_those_of_every_frame() {
+        let mut backend = Vaapi::open().expect("VA-API with H.264");
+        let stream =
+            &include_bytes!("../../../../src/huddle_audio/fixtures/screen-1920x1080.h264")[..];
+        for fit in [(0, 0), (960, 540)] {
+            let mut every = backend
+                .open_decoder(Codec::H264, 1920, 1080)
+                .expect("a decoder");
+            let mut some = backend
+                .open_decoder(Codec::H264, 1920, 1080)
+                .expect("a decoder");
+            every.set_output_size(fit.0, fit.1);
+            some.set_output_size(fit.0, fit.1);
+            for (n, frame) in crate::h264::tests::frames(stream).iter().enumerate() {
+                let expected = every.decode(frame, false).expect("decodes");
+                assert!(some.decode_frame(frame, false).expect("decodes"));
+                if n % 4 == 3 {
+                    assert_eq!(some.picture().expect("read back"), expected, "frame {n}");
+                    assert_eq!(some.picture().expect("taken"), None);
+                }
+            }
         }
     }
 

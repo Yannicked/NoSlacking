@@ -52,8 +52,13 @@ pub const MAGIC: [u8; 4] = *b"NSVH";
 /// encodes it ([`Request::StartShare`], [`Request::NextFrame`]); version
 /// 5 moved the camera there too ([`Request::ListCameras`],
 /// [`Request::StartCamera`], a self-view picture with each frame), and
-/// dropped encoding pictures the app sends, since it no longer has any.
-pub const VERSION: u16 = 5;
+/// dropped encoding pictures the app sends, since it no longer has any;
+/// version 6 sends only pictures the app will show: a frame can be
+/// decoded without its picture ([`Request::Decode`]'s `show`, answered
+/// [`Reply::Kept`]), which [`Request::Fetch`] asks for later, and a
+/// picture the same as the last one sent is answered
+/// [`Reply::Unchanged`] instead of being sent again.
+pub const VERSION: u16 = 6;
 
 /// The largest frame either side accepts, in bytes: room for an I420
 /// picture at [`MAX_SIDE`] square (24 MiB) and its header.
@@ -754,14 +759,30 @@ pub enum Request {
         hardware: bool,
     },
     /// One frame (an access unit, Annex B) for decoder `id`; the reply is
-    /// a picture, no picture (parameter sets only), or a failure.
+    /// a picture, [`Reply::Unchanged`] (the same picture as the last
+    /// sent), [`Reply::Kept`] (decoded, not sent: `show` was off), no
+    /// picture (parameter sets only), or a failure.
     Decode {
         /// The decoder.
         id: u32,
         /// Whether the frame holds an IDR slice.
         keyframe: bool,
+        /// Send its picture. Off when the app would not show it (it has
+        /// not drawn the last one yet, or its window is hidden): the
+        /// frame is still decoded, as the frames after it need, but its
+        /// picture is neither shrunk, read back from the GPU nor sent;
+        /// it is kept for a [`Request::Fetch`] until the next frame.
+        show: bool,
         /// The frame.
         data: Vec<u8>,
+    },
+    /// Decoder `id`'s newest picture, kept back by a `Decode` without
+    /// `show`: the reply is that picture (shrunk to the output size as it
+    /// is now), [`Reply::Unchanged`], or no picture when every picture
+    /// decoded has been sent (or the frame since gave none).
+    Fetch {
+        /// The decoder.
+        id: u32,
     },
     /// A new target bit rate for capture `id` (a share or the camera),
     /// from its next picture on; the reply is [`Reply::Done`].
@@ -897,9 +918,16 @@ pub enum Reply {
     },
     /// A decoded picture.
     Picture(Decoded),
-    /// The frame decoded to no picture (it held parameter sets only), or
-    /// a capture had nothing new in time.
+    /// The frame decoded to no picture (it held parameter sets only), a
+    /// fetch found no picture not yet sent, or a capture had nothing new
+    /// in time.
     NoPicture,
+    /// The frame decoded to a picture, kept back as asked
+    /// ([`Request::Decode`]'s `show` off) for a [`Request::Fetch`].
+    Kept,
+    /// The picture is exactly the last one sent for this decoder (its
+    /// size, source and every byte): the app shows what it has.
+    Unchanged,
     /// Done, nothing to say.
     Done,
     /// The request failed.
@@ -1079,9 +1107,15 @@ impl Request {
                 .u32(*height)
                 .u8(u8::from(*hardware))
                 .done(),
-            Self::Decode { id, keyframe, data } => Out::new(3)
+            Self::Decode {
+                id,
+                keyframe,
+                show,
+                data,
+            } => Out::new(3)
                 .u32(*id)
                 .u8(u8::from(*keyframe))
+                .u8(u8::from(*show))
                 .bytes(data)
                 .done(),
             // 4 and 5 were the app's own pictures to encode (version 4).
@@ -1120,6 +1154,7 @@ impl Request {
                 .u32(*wait_ms)
                 .done(),
             Self::ListCameras => Out::new(12).done(),
+            Self::Fetch { id } => Out::new(14).u32(*id).done(),
             Self::StartCamera {
                 choice,
                 hardware,
@@ -1159,6 +1194,7 @@ impl Request {
             3 => Self::Decode {
                 id: input.u32()?,
                 keyframe: input.flag()?,
+                show: input.flag()?,
                 data: input.bytes(MAX_MESSAGE)?,
             },
             6 => Self::SetBitrate {
@@ -1209,6 +1245,7 @@ impl Request {
                     _ => return Err(Error::BadValue("preview")),
                 },
             },
+            14 => Self::Fetch { id: input.u32()? },
             tag => return Err(Error::UnknownTag(tag)),
         };
         input.end()?;
@@ -1279,6 +1316,8 @@ impl Reply {
             Self::Problem { problem, detail } => {
                 Out::new(11).u8(problem.to_byte()).text(detail).done()
             }
+            Self::Kept => Out::new(12).done(),
+            Self::Unchanged => Out::new(13).done(),
         }
     }
 
@@ -1376,6 +1415,8 @@ impl Reply {
                 problem: CaptureProblem::from_byte(input.u8()?)?,
                 detail: input.text()?,
             },
+            12 => Self::Kept,
+            13 => Self::Unchanged,
             tag => return Err(Error::UnknownTag(tag)),
         };
         input.end()?;
@@ -1421,8 +1462,16 @@ mod tests {
             Request::Decode {
                 id: 7,
                 keyframe: true,
+                show: true,
                 data: vec![0, 0, 0, 1, 0x65, 1, 2, 3],
             },
+            Request::Decode {
+                id: 7,
+                keyframe: false,
+                show: false,
+                data: vec![0, 0, 0, 1, 0x41, 9],
+            },
+            Request::Fetch { id: 7 },
             Request::SetBitrate {
                 id: 2,
                 bitrate: 900_000,
@@ -1495,6 +1544,8 @@ mod tests {
             Reply::Opened { id: 1 },
             Reply::Picture(decoded(picture(3, 3))),
             Reply::NoPicture,
+            Reply::Kept,
+            Reply::Unchanged,
             Reply::Done,
             Reply::Failed {
                 kind: FailKind::Broken,
@@ -1792,13 +1843,22 @@ mod tests {
         let mut decode = Request::Decode {
             id: 1,
             keyframe: false,
+            show: true,
             data: vec![],
         }
         .encode();
-        decode[5] = 2;
+        for flag in [5, 6] {
+            let mut bad = decode.clone();
+            bad[flag] = 2;
+            assert!(matches!(
+                Request::decode(&bad),
+                Err(Error::BadValue("flag"))
+            ));
+        }
+        decode[6] = 0;
         assert!(matches!(
             Request::decode(&decode),
-            Err(Error::BadValue("flag"))
+            Ok(Request::Decode { show: false, .. })
         ));
         let open = Request::OpenDecoder {
             codec: Codec::H264,
@@ -1821,7 +1881,7 @@ mod tests {
         ));
         // A byte string claiming more than there is.
         assert!(matches!(
-            Request::decode(&[3, 1, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0x00]),
+            Request::decode(&[3, 1, 0, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0x00]),
             Err(Error::Truncated)
         ));
     }

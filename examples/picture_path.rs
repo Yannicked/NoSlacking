@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use noslacking::huddle_audio::bitstream;
-use noslacking::huddle_audio::decode::{self, H264, Yuv};
+use noslacking::huddle_audio::decode::{self, H264, Outcome, Yuv};
 use noslacking::huddle_audio::helper::{Helper, ProcessLauncher};
 use noslacking_video_ipc::{self as ipc, Reply};
 
@@ -83,28 +83,31 @@ fn round_trip(
     let rounds = 10;
     // The decoder opens (the GPU's context made) before the clock starts;
     // each round starts again at the fixture's first frame, a keyframe.
-    let _ = decoder.decode(&frames[0]);
-    let (started, before, helper_before) = (Instant::now(), cpu("self"), children_cpu());
-    for round in 0..rounds {
-        for frame in &frames {
-            if let Ok(Some(picture)) = decoder.decode(frame)
-                && round == 0
-            {
-                pictures.push(picture.yuv);
+    let _ = decoder.decode(&frames[0], true);
+    for show in [true, false] {
+        let (started, before, helper_before) = (Instant::now(), cpu("self"), children_cpu());
+        for round in 0..rounds {
+            for frame in &frames {
+                if let Ok(Outcome::Picture(picture)) = decoder.decode(frame, show)
+                    && round == 0
+                {
+                    pictures.push(picture.yuv);
+                }
             }
         }
+        let count = rounds * frames.len();
+        let app_cpu = (cpu("self") - before) * 1000.0 / count as f64;
+        let helper_cpu = (children_cpu() - helper_before) * 1000.0 / count as f64;
+        let size = pictures.first().map_or((0, 0), |p| (p.width, p.height));
+        println!(
+            "  {name} ({}x{}){}: round trip {:.2} ms, app CPU {app_cpu:.2} ms, helper CPU \
+             {helper_cpu:.2} ms a frame",
+            size.0,
+            size.1,
+            if show { "" } else { ", decoded unseen" },
+            per(started.elapsed(), count),
+        );
     }
-    let count = rounds * frames.len();
-    let app_cpu = (cpu("self") - before) * 1000.0 / count as f64;
-    let helper_cpu = (children_cpu() - helper_before) * 1000.0 / count as f64;
-    let size = pictures.first().map_or((0, 0), |p| (p.width, p.height));
-    println!(
-        "  {name} ({}x{}): round trip {:.2} ms, app CPU {app_cpu:.2} ms, helper CPU \
-         {helper_cpu:.2} ms a picture",
-        size.0,
-        size.1,
-        per(started.elapsed(), count),
-    );
     pictures
 }
 

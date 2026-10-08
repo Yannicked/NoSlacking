@@ -49,6 +49,7 @@ pub fn serve(
         decoders: HashMap::new(),
         captures: HashMap::new(),
         next_id: 1,
+        answering: None,
     };
     let Some((first, hello)) = ipc::read_request(input)? else {
         return Ok(());
@@ -76,6 +77,7 @@ pub fn serve(
         };
         // A decoded picture goes from its planes into the pipe.
         ipc::write_reply(output, seq, &reply)?;
+        server.sent(reply);
     }
     Ok(())
 }
@@ -98,16 +100,58 @@ fn problem(trouble: Trouble) -> Reply {
     }
 }
 
+/// One stream's decoder, and what of it the app has.
+struct Stream {
+    decoder: Box<dyn Decoder>,
+    /// The last frame's picture was kept back (`Decode` without `show`):
+    /// a `Fetch` reads it.
+    kept: bool,
+    /// The last picture sent: the same again is answered `Unchanged`
+    /// rather than sent, converted and uploaded again (a still screen
+    /// sent once a second, a share's keepalive).
+    sent: Option<ipc::Decoded>,
+}
+
+impl Stream {
+    /// The last frame's picture as a reply: the picture, `Unchanged` if
+    /// it is the one last sent, or none.
+    fn picture(&mut self) -> Reply {
+        match self.decoder.picture() {
+            Ok(Some(picture)) => match picture.check() {
+                Ok(()) if self.sent.as_ref() == Some(&picture) => Reply::Unchanged,
+                Ok(()) => Reply::Picture(picture),
+                // Our own bug, but the app must not get it.
+                Err(error) => failed(FailKind::Device, &error.to_string()),
+            },
+            Ok(None) => Reply::NoPicture,
+            Err(failure) => failed(failure.kind, &failure.detail),
+        }
+    }
+}
+
 struct Server<'a> {
     backend: &'a mut dyn Backend,
     screens: &'a mut dyn Screens,
     cameras: &'a mut dyn Cameras,
-    decoders: HashMap<u32, Box<dyn Decoder>>,
+    decoders: HashMap<u32, Stream>,
     captures: HashMap<u32, Capture>,
     next_id: u32,
+    /// The decoder the reply being written is about.
+    answering: Option<u32>,
 }
 
 impl Server<'_> {
+    /// `reply` was written: a picture is remembered as its decoder's
+    /// last sent (moved, not copied).
+    fn sent(&mut self, reply: Reply) {
+        let id = self.answering.take();
+        if let Reply::Picture(picture) = reply
+            && let Some(stream) = id.and_then(|id| self.decoders.get_mut(&id))
+        {
+            stream.sent = Some(picture);
+        }
+    }
+
     fn id(&mut self) -> u32 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
@@ -144,22 +188,48 @@ impl Server<'_> {
                 }
                 let decoder = backend::open_decoder(self.backend, codec, width, height, hardware);
                 let id = self.id();
-                self.decoders.insert(id, decoder);
+                self.decoders.insert(
+                    id,
+                    Stream {
+                        decoder,
+                        kept: false,
+                        sent: None,
+                    },
+                );
                 Reply::Opened { id }
             }
-            Request::Decode { id, keyframe, data } => {
-                let Some(decoder) = self.decoders.get_mut(&id) else {
+            Request::Decode {
+                id,
+                keyframe,
+                show,
+                data,
+            } => {
+                let Some(stream) = self.decoders.get_mut(&id) else {
                     return failed(FailKind::UnknownId, "no such decoder");
                 };
-                match decoder.decode(&data, keyframe) {
-                    Ok(Some(picture)) => match picture.check() {
-                        Ok(()) => Reply::Picture(picture),
-                        // Our own bug, but the app must not get it.
-                        Err(error) => failed(FailKind::Device, &error.to_string()),
-                    },
-                    Ok(None) => Reply::NoPicture,
+                stream.kept = false;
+                match stream.decoder.decode_frame(&data, keyframe) {
+                    Ok(true) if show => {
+                        self.answering = Some(id);
+                        stream.picture()
+                    }
+                    Ok(true) => {
+                        stream.kept = true;
+                        Reply::Kept
+                    }
+                    Ok(false) => Reply::NoPicture,
                     Err(failure) => failed(failure.kind, &failure.detail),
                 }
+            }
+            Request::Fetch { id } => {
+                let Some(stream) = self.decoders.get_mut(&id) else {
+                    return failed(FailKind::UnknownId, "no such decoder");
+                };
+                if !std::mem::take(&mut stream.kept) {
+                    return Reply::NoPicture;
+                }
+                self.answering = Some(id);
+                stream.picture()
             }
             Request::SetBitrate { id, bitrate } => match self.captures.get(&id) {
                 Some(capture) => {
@@ -169,10 +239,10 @@ impl Server<'_> {
                 None => failed(FailKind::UnknownId, "no such capture"),
             },
             Request::SetOutputSize { id, width, height } => {
-                let Some(decoder) = self.decoders.get_mut(&id) else {
+                let Some(stream) = self.decoders.get_mut(&id) else {
                     return failed(FailKind::UnknownId, "no such decoder");
                 };
-                decoder.set_output_size(width, height);
+                stream.decoder.set_output_size(width, height);
                 Reply::Done
             }
             Request::Close { id } => {
@@ -321,6 +391,7 @@ mod tests {
             Request::Decode {
                 id,
                 keyframe,
+                show: true,
                 data: vec![0, 0, 0, 1, if keyframe { 0x65 } else { 0x41 }],
             }
             .encode()
@@ -385,6 +456,92 @@ mod tests {
             Some(FailKind::UnknownId),
             "no capture to retune"
         );
+    }
+
+    /// Pictures the app will not show are kept back and fetched when it
+    /// can: only the newest, never a queue; a picture the same as the
+    /// last sent is answered `Unchanged`.
+    #[test]
+    fn pictures_not_shown_are_kept_and_fetched_and_the_same_is_not_sent_again() {
+        let open = Request::OpenDecoder {
+            codec: Codec::H264,
+            width: 64,
+            height: 48,
+            hardware: true,
+        };
+        // A frame that changes the fake's picture, or (`same`) one that
+        // does not.
+        let decode = |keyframe, show, same: bool| {
+            let mut data = vec![0, 0, 0, 1, if keyframe { 0x65 } else { 0x41 }];
+            if same {
+                data = vec![0, 0, 0, 1, 0x41, 0xff];
+            }
+            Request::Decode {
+                id: 1,
+                keyframe,
+                show,
+                data,
+            }
+            .encode()
+        };
+        let fetch = Request::Fetch { id: 1 }.encode();
+        let (replies, ok) = talk(
+            &mut Fake,
+            &[
+                hello(),
+                open.encode(),
+                // Nothing kept yet.
+                fetch.clone(),
+                decode(true, true, false),
+                // Two frames the app will not show: only the newest waits.
+                decode(false, false, false),
+                decode(false, false, false),
+                fetch.clone(),
+                // Fetched already.
+                fetch.clone(),
+                // The same picture again, shown or fetched: not sent.
+                decode(false, true, true),
+                decode(false, false, true),
+                fetch.clone(),
+                // Kept, then a frame shown: the kept one is gone.
+                decode(false, false, false),
+                decode(false, true, false),
+                fetch.clone(),
+                // Kept at one size and fetched at another: shrunk as it
+                // is fetched.
+                decode(false, false, false),
+                Request::SetOutputSize {
+                    id: 1,
+                    width: 32,
+                    height: 24,
+                }
+                .encode(),
+                fetch.clone(),
+                Request::Fetch { id: 9 }.encode(),
+            ],
+        );
+        assert!(ok);
+        let replies: Vec<Reply> = replies.into_iter().map(|(_, reply)| reply).collect();
+        let shade = |reply: &Reply| match reply {
+            Reply::Picture(p) => Some((p.planes.width, p.planes.y[0])),
+            _ => None,
+        };
+        assert_eq!(replies[2], Reply::NoPicture);
+        assert_eq!(shade(&replies[3]), Some((64, 1)));
+        assert_eq!(replies[4], Reply::Kept);
+        assert_eq!(replies[5], Reply::Kept);
+        assert_eq!(shade(&replies[6]), Some((64, 3)), "the newest only");
+        assert_eq!(replies[7], Reply::NoPicture);
+        assert_eq!(replies[8], Reply::Unchanged);
+        assert_eq!(replies[9], Reply::Kept);
+        assert_eq!(replies[10], Reply::Unchanged);
+        assert_eq!(replies[11], Reply::Kept);
+        assert_eq!(shade(&replies[12]), Some((64, 5)));
+        assert_eq!(replies[13], Reply::NoPicture);
+        assert_eq!(replies[14], Reply::Kept);
+        assert_eq!(replies[15], Reply::Done);
+        assert_eq!(shade(&replies[16]), Some((32, 6)));
+        assert_eq!(kind(&replies[17]), Some(FailKind::UnknownId));
     }
 
     /// The camera through the server: listed, started (the test camera
@@ -526,6 +683,7 @@ mod tests {
                 Request::Decode {
                     id: 1,
                     keyframe: *keyframe,
+                    show: true,
                     data: frame.to_vec(),
                 }
                 .encode(),
@@ -607,21 +765,23 @@ mod tests {
     }
 
     impl Decoder for ScriptedDecoder {
-        fn decode(
-            &mut self,
-            _: &[u8],
-            _: bool,
-        ) -> Result<Option<ipc::Decoded>, crate::backend::Failure> {
+        fn decode_frame(&mut self, _: &[u8], _: bool) -> Result<bool, crate::backend::Failure> {
             let n = self.frames;
             self.frames += 1;
             if let Some(failure) = (self.fail)(n) {
                 return Err(failure);
             }
+            Ok(true)
+        }
+
+        fn picture(&mut self) -> Result<Option<ipc::Decoded>, crate::backend::Failure> {
+            // Each frame's picture differs from the last.
+            let shade = u8::try_from(self.frames % 200).unwrap_or(0);
             Ok(Some(ipc::Decoded {
                 planes: Planes {
                     width: 2,
                     height: 2,
-                    y: vec![200; 4],
+                    y: vec![shade; 4],
                     u: vec![128],
                     v: vec![128],
                 },
