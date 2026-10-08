@@ -25,6 +25,9 @@ use super::decode::{self, H264, Outcome, Trouble};
 use super::helper::Lane;
 use super::screen::Picture;
 
+/// What a new picture calls to be drawn.
+type Wake = Arc<dyn Fn() + Send + Sync>;
+
 /// Frames of one camera waiting for the decoder at most: about a second.
 /// More means it cannot keep up; that camera's are dropped and a
 /// keyframe asked for.
@@ -62,7 +65,9 @@ struct Shared {
     /// people: added to the chroma planes.
     #[cfg(feature = "demo")]
     tints: Mutex<BTreeMap<String, [i16; 2]>>,
-    wake: Box<dyn Fn() + Send + Sync>,
+    /// Wakes whoever draws the pictures: the whole interface at first,
+    /// the call window alone once it is open ([`Gallery::set_wake`]).
+    wake: Mutex<Wake>,
 }
 
 impl std::fmt::Debug for Gallery {
@@ -106,9 +111,22 @@ impl Gallery {
                 pictures: AtomicUsize::new(0),
                 #[cfg(feature = "demo")]
                 tints: Mutex::new(BTreeMap::new()),
-                wake: Box::new(wake),
+                wake: Mutex::new(Arc::new(wake)),
             }),
         }
+    }
+
+    /// Has a new picture call `wake` from now on in place of what it
+    /// called: the call window has new pictures repaint only itself, not
+    /// the main window behind it.
+    pub fn set_wake(&self, wake: impl Fn() + Send + Sync + 'static) {
+        *lock(&self.shared.wake) = Arc::new(wake);
+    }
+
+    /// Calls the wake, not holding its lock while it runs.
+    fn wake(&self) {
+        let wake = Arc::clone(&lock(&self.shared.wake));
+        wake();
     }
 
     /// Puts `key`'s newest picture in place of any not taken, waking the
@@ -122,7 +140,7 @@ impl Gallery {
         };
         self.shared.pictures.fetch_add(1, Ordering::Relaxed);
         if was_empty {
-            (self.shared.wake)();
+            self.wake();
         }
     }
 

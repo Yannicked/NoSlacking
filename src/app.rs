@@ -33,6 +33,8 @@ mod popout;
 mod wire;
 mod workspace;
 
+#[cfg(feature = "huddle-video")]
+pub use call::CallWindow;
 pub use drafts::{Drafts, Taken};
 pub use popout::Popout;
 pub use wire::{edit_source, to_editable, to_mrkdwn, to_wire};

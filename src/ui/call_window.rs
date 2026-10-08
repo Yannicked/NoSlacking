@@ -92,6 +92,7 @@ pub struct TileView {
 }
 
 /// What the window shows, gathered by the app.
+#[derive(Clone, Debug, PartialEq)]
 pub struct CallView {
     /// "Ana's screen", or "Huddle video" without a share.
     pub title: String,

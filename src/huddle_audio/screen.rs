@@ -24,6 +24,9 @@ use egui::ColorImage;
 use super::decode::{self, H264, Outcome, Trouble};
 use super::helper::Lane;
 
+/// What a new picture calls to be drawn.
+type Wake = Arc<dyn Fn() + Send + Sync>;
+
 /// Frames waiting for the decoder at most: about three seconds of a
 /// share. More means it cannot keep up; they are dropped and a keyframe
 /// asked for.
@@ -66,7 +69,9 @@ struct Shared {
     /// Pictures put since the start, for the window to tell one from the
     /// next and for tests.
     pictures: AtomicUsize,
-    wake: Box<dyn Fn() + Send + Sync>,
+    /// Wakes whoever draws the pictures: the whole interface at first,
+    /// the call window alone once it is open ([`Screen::set_wake`]).
+    wake: Mutex<Wake>,
 }
 
 impl std::fmt::Debug for Screen {
@@ -99,7 +104,7 @@ impl Screen {
                 keyframe: AtomicBool::new(false),
                 no_video: AtomicBool::new(false),
                 pictures: AtomicUsize::new(0),
-                wake: Box::new(wake),
+                wake: Mutex::new(Arc::new(wake)),
             }),
         }
     }
@@ -111,13 +116,36 @@ impl Screen {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Has a new picture call `wake` from now on in place of what it
+    /// called: the call window has new pictures repaint only itself, not
+    /// the main window behind it.
+    pub fn set_wake(&self, wake: impl Fn() + Send + Sync + 'static) {
+        *self
+            .shared
+            .wake
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(wake);
+    }
+
+    /// Calls the wake, not holding its lock while it runs.
+    fn wake(&self) {
+        let wake = Arc::clone(
+            &self
+                .shared
+                .wake
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        wake();
+    }
+
     /// Puts the newest picture in place of any the interface has not
     /// taken, waking it only if it had taken the last one.
     pub fn put(&self, picture: Picture) {
         let was_empty = self.newest().replace(picture).is_none();
         self.shared.pictures.fetch_add(1, Ordering::Relaxed);
         if was_empty {
-            (self.shared.wake)();
+            self.wake();
         }
     }
 

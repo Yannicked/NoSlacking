@@ -208,19 +208,14 @@ pub use listen::{
     sharing_text, tell_wish, watch,
 };
 
-/// The call window's picture: the watched share's newest, uploaded.
+/// The call window's side of the app: what it draws from, shared with
+/// it, as it draws in a viewport of its own (see [`crate::app::CallWindow`]).
 #[cfg(feature = "huddle-video")]
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct CallPicture {
-    /// The texture it is drawn from, set again for each new picture.
-    pub texture: Option<egui::TextureHandle>,
-    /// The share's own size, for its shape.
-    pub source: [usize; 2],
-    /// Which share it is of.
-    pub of: Option<String>,
-    /// Each camera tile's newest picture, uploaded, and the camera's own
-    /// size, by camera.
-    pub tiles: std::collections::BTreeMap<String, (egui::TextureHandle, [usize; 2])>,
+    /// The view, the pictures uploaded and what the window did, between
+    /// the main window and the call window.
+    pub window: std::sync::Arc<std::sync::Mutex<crate::app::CallWindow>>,
     /// The demo draws the window inside the main one, to be in its
     /// screenshot.
     #[cfg(feature = "demo")]
@@ -228,20 +223,17 @@ pub struct CallPicture {
     /// The demo's call window size (`--demo-size`), to see it narrow.
     #[cfg(feature = "demo")]
     pub size: Option<[f32; 2]>,
-    /// Pixels handed to the textures in the last frame, for the demo's
-    /// frame times (`NOSLACKING_DEMO_FRAME_TIMES`).
-    #[cfg(feature = "demo")]
-    pub uploaded: usize,
 }
 
-#[cfg(feature = "huddle-video")]
-impl std::fmt::Debug for CallPicture {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CallPicture")
-            .field("source", &self.source)
-            .field("of", &self.of)
-            .field("tiles", &self.tiles.keys().collect::<Vec<_>>())
-            .finish_non_exhaustive()
+#[cfg(all(feature = "huddle-video", feature = "demo"))]
+impl CallPicture {
+    /// Pixels handed to the textures in the call window's last frame, for
+    /// the demo's frame times (`NOSLACKING_DEMO_FRAME_TIMES`).
+    pub fn uploaded(&self) -> usize {
+        self.window
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .uploaded
     }
 }
 

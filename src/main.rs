@@ -383,7 +383,7 @@ impl eframe::App for Window {
         self.app.frame_ui(ui);
         #[cfg(all(feature = "demo", feature = "huddle-video"))]
         if let Some(times) = &mut self.demo.frame_times {
-            times.note(_frame.info().cpu_usage, self.app.huddles.picture.uploaded);
+            times.note(_frame.info().cpu_usage, self.app.huddles.picture.uploaded());
         }
         #[cfg(feature = "demo")]
         self.demo.after_frame(ui.ctx(), &mut self.app);
