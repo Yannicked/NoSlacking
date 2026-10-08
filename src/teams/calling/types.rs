@@ -488,6 +488,17 @@ impl RosterParticipant {
         self.state == "active"
     }
 
+    /// Their sound's source id: the `sourceId` of the `main-audio` stream
+    /// of a device in the call, which the meeting names who speaks by.
+    pub fn audio_source(&self) -> Option<i64> {
+        self.endpoints
+            .values()
+            .filter_map(|e| e.call.as_ref()?.get("mediaStreams")?.as_array())
+            .flatten()
+            .find(|s| s.get("type").and_then(|t| t.as_str()) == Some("audio"))
+            .and_then(|s| s.get("sourceId")?.as_i64())
+    }
+
     /// Their camera's source id, while it is on: the `sourceId` of a
     /// `main-video` stream sending from a device in the call (recorded:
     /// it turns `sendrecv` when the camera goes on).
@@ -1160,6 +1171,9 @@ mod tests {
         // The organizer's camera is off: its video stream receives only.
         assert_eq!(who("8:live:organizer").camera_source(), None);
         assert_eq!(who("8:live:waiting").camera_source(), None);
+        assert_eq!(who("8:live:organizer").audio_source(), Some(201));
+        // One waiting has no sound in the call yet.
+        assert_eq!(who("8:live:waiting").audio_source(), None);
         assert!(who("8:live:waiting").is_waiting());
         assert_eq!(who("8:live:waiting").name(), Some("Wim Waiting"));
         assert_eq!(who("8:live:waiting").role, "guest");

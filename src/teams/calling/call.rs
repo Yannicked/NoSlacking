@@ -104,6 +104,8 @@ pub struct Attendee {
     pub muted: bool,
     /// Their camera's source id, while it is on.
     pub camera: Option<i64>,
+    /// Their sound's source id, which the meeting names who speaks by.
+    pub audio: Option<i64>,
 }
 
 /// Who is in a meeting, from its roster's deltas.
@@ -139,6 +141,7 @@ impl People {
                 waiting: them.is_waiting(),
                 muted: them.is_muted(),
                 camera: them.camera_source(),
+                audio: them.audio_source(),
             };
             let was = self
                 .by_mri
@@ -228,6 +231,7 @@ async fn run_meeting(
         channel: super::channel::Channel::default(),
         camera_lines: Vec::new(),
         watching: Vec::new(),
+        speaker: None,
     });
     call.relay = relay_for(client).await;
     let ended = call
@@ -478,6 +482,8 @@ struct InMeeting {
     /// Whose camera was last asked for on each camera line, by MRI and
     /// source id.
     watching: Vec<Option<(String, i64)>>,
+    /// Who spoke last, by MRI, as the meeting says.
+    speaker: Option<String>,
 }
 
 impl InMeeting {
@@ -1278,7 +1284,24 @@ impl Call {
                         log::warn!("Teams meeting: video request {sequence} refused");
                     }
                 }
-                super::channel::Heard::Speakers(_) => {}
+                super::channel::Heard::Speakers(history) => {
+                    let Some(meeting) = &mut self.meeting else {
+                        return;
+                    };
+                    // The newest first; ourselves (not in the list) aside.
+                    let speaker = history.iter().find_map(|&source| {
+                        meeting
+                            .people
+                            .list()
+                            .into_iter()
+                            .find(|a| a.audio == Some(source))
+                            .map(|a| a.mri)
+                    });
+                    if speaker.is_some() && speaker != meeting.speaker {
+                        meeting.speaker = speaker;
+                        self.ask_for_video(session, tell);
+                    }
+                }
             }
         }
     }
@@ -1305,7 +1328,11 @@ impl Call {
             .collect();
         let lines = meeting.camera_lines.len();
         meeting.watching.resize(lines, None);
-        let wanted = assign(lines, &meeting.watching, &on);
+        let wanted = with_speaker(
+            assign(lines, &meeting.watching, &on),
+            &on,
+            meeting.speaker.as_deref(),
+        );
         let mut changed = false;
         for (line, want) in wanted.iter().enumerate() {
             if meeting.watching[line] == *want {
@@ -1484,6 +1511,26 @@ fn assign(
         if let Some(free) = wanted.iter_mut().find(|w| w.is_none()) {
             *free = Some(camera.clone());
         }
+    }
+    wanted
+}
+
+/// `wanted` with the camera of who spoke last (`speaker`), if it is `on`,
+/// shown: on the last line, in place of whoever was there, when no line
+/// shows it yet. With one line, the line follows whoever speaks.
+fn with_speaker(
+    mut wanted: Vec<Option<(String, i64)>>,
+    on: &[(String, i64)],
+    speaker: Option<&str>,
+) -> Vec<Option<(String, i64)>> {
+    let Some(camera) = speaker.and_then(|s| on.iter().find(|(mri, _)| mri == s)) else {
+        return wanted;
+    };
+    if wanted.iter().flatten().any(|(mri, _)| *mri == camera.0) {
+        return wanted;
+    }
+    if let Some(last) = wanted.last_mut() {
+        *last = Some(camera.clone());
     }
     wanted
 }
@@ -1691,5 +1738,22 @@ mod tests {
         };
         assert_eq!(camera_lines(&sdp::offer(&local)), ["1", "4", "5"]);
         assert!(camera_lines("not sdp").is_empty());
+    }
+
+    #[test]
+    fn one_line_follows_whoever_speaks_with_a_camera_on() {
+        let cam = |mri: &str, source| (mri.to_owned(), source);
+        let on = [cam("a", 202), cam("b", 302)];
+        let shown = assign(1, &[], &on);
+        assert_eq!(shown, [Some(cam("a", 202))]);
+        // B speaks: the line shows b.
+        assert_eq!(
+            with_speaker(shown.clone(), &on, Some("b")),
+            [Some(cam("b", 302))]
+        );
+        // A speaker without a camera on changes nothing.
+        assert_eq!(with_speaker(shown.clone(), &on, Some("c")), shown);
+        // Nor does one already shown.
+        assert_eq!(with_speaker(shown.clone(), &on, Some("a")), shown);
     }
 }

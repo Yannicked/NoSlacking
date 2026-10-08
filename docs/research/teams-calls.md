@@ -1588,3 +1588,13 @@ the SPS and PPS with every keyframe. After one frame failed to decode,
 our decoder waited for a keyframe that could start it again, and none
 could: frozen, with a keyframe asked for every second. Every keyframe now
 carries the parameter sets last seen.
+
+**Extra camera lines, set aside.** With the extra receive-only lines
+offered as the web client writes them (placeholder stream, data line
+last), the meeting took them (`sendonly`) but then neither answered our
+`syn` on the data channel nor sent any audio, in three tries; it also
+sent its acceptance twice. Without them, both worked. Until a recording
+shows what else the web client does, we offer the one camera line. It
+follows whoever speaks with a camera on, by the data channel's `dsh`
+(the speakers' audio source ids, newest first), matched to the roster's
+`main-audio` `sourceId`.

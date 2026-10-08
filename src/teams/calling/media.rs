@@ -258,7 +258,11 @@ impl MediaConfig {
         };
         // After the data line's mid, 3.
         let cameras = if HAS_VIDEO {
-            ["4", "5", "6"].into_iter().map(line).collect()
+            ["4", "5", "6"]
+                .into_iter()
+                .take(MORE_CAMERAS)
+                .map(line)
+                .collect()
         } else {
             Vec::new()
         };
@@ -330,8 +334,12 @@ impl MediaConfig {
     }
 }
 
-/// How many more cameras than one a meeting shows.
-pub const MORE_CAMERAS: usize = 3;
+/// How many more camera lines than one a meeting is offered (or answered
+/// with). None for now: with them (each as the web client writes its
+/// own), the meeting took the lines but then neither answered on the data
+/// channel nor sent audio, in three tries. One line follows whoever speaks
+/// instead.
+pub const MORE_CAMERAS: usize = 0;
 
 /// Where the sound goes and comes from.
 #[derive(Debug, Default)]
@@ -2989,7 +2997,7 @@ mod tests {
         assert!(meeting.data);
         if HAS_VIDEO {
             let mids: Vec<&str> = meeting.cameras.iter().map(|c| c.mid.as_str()).collect();
-            assert_eq!(mids, ["5", "6", "7"]);
+            assert_eq!(mids, ["5", "6", "7"][..MORE_CAMERAS]);
         }
         let plan = plan(&remote, config.opus_pt).expect("a usable offer");
         // No `a=setup`: we are the DTLS client, as the web client was.
@@ -3006,7 +3014,7 @@ mod tests {
         assert!(config.data);
         if HAS_VIDEO {
             let mids: Vec<&str> = config.cameras.iter().map(|c| c.mid.as_str()).collect();
-            assert_eq!(mids, ["4", "5", "6"]);
+            assert_eq!(mids, ["4", "5", "6"][..MORE_CAMERAS]);
         }
         assert!(!MediaConfig::offer(None).data);
         assert_eq!(config.opus_pt, OPUS_PT);
