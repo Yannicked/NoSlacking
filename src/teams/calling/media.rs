@@ -57,6 +57,7 @@ use super::{Candidate, CandidateKind, Direction, LocalMedia, RemoteMedia, Setup}
 use crate::huddle_audio::dtls;
 use crate::huddle_audio::media::{RelayIo, SILENT_OPUS, Uplink, connect_relay};
 use crate::huddle_audio::microphone::ToneSource;
+use crate::huddle_audio::peer::{Flight, SKIP_AT_MOST, is_dtls, is_one_packet};
 use crate::huddle_audio::speaker::Feed;
 use crate::huddle_audio::turn::{self, Server, Transport};
 use crate::huddle_audio::uplink::{Outbound, Outgoing, Stamp};
@@ -830,70 +831,6 @@ fn public(ip: IpAddr) -> bool {
     }
 }
 
-/// The DTLS datagrams of the last flight we sent, kept to send again.
-///
-/// str0m's OpenSSL backend never retransmits a lost handshake flight
-/// (its timeout only notes the next deadline), and across two NATs the
-/// first ClientHello is often lost as the path opens: the call then
-/// never comes up. So while the handshake runs, a flight nothing has
-/// answered is sent again, as DTLS (RFC 6347 §4.2.4) would: after 1 s,
-/// then 2, then 4, a few times. A repeated handshake record is harmless
-/// to the far end.
-#[derive(Debug, Default)]
-struct Flight {
-    /// Each datagram with whether it went through the relay, and to where.
-    datagrams: Vec<(bool, SocketAddr, Vec<u8>)>,
-    /// Whether the far end has said anything since this flight began: the
-    /// next datagram we send starts a new flight.
-    answered: bool,
-    /// When to send it again.
-    resend_at: Option<Instant>,
-    /// The wait before that.
-    wait: Duration,
-    /// How often it was sent again.
-    tries: u32,
-}
-
-/// How many times a flight is sent again before the connection timeout
-/// is left to end the call.
-const FLIGHT_TRIES: u32 = 6;
-
-impl Flight {
-    /// We sent a DTLS datagram at `now`.
-    fn sent(&mut self, relayed: bool, to: SocketAddr, data: &[u8], now: Instant) {
-        if self.answered || self.datagrams.is_empty() {
-            self.datagrams.clear();
-            self.answered = false;
-            self.tries = 0;
-            self.wait = Duration::from_secs(1);
-            self.resend_at = Some(now + self.wait);
-        }
-        self.datagrams.push((relayed, to, data.to_vec()));
-    }
-
-    /// The far end sent a DTLS datagram: it heard us.
-    fn heard(&mut self) {
-        self.answered = true;
-        self.resend_at = None;
-    }
-
-    /// Whether to send the flight again at `now`; moves the next time on.
-    fn due(&mut self, now: Instant) -> bool {
-        if !self.resend_at.is_some_and(|at| at <= now) || self.datagrams.is_empty() {
-            return false;
-        }
-        self.tries += 1;
-        self.wait = (self.wait * 2).min(Duration::from_secs(4));
-        self.resend_at = (self.tries < FLIGHT_TRIES).then(|| now + self.wait);
-        true
-    }
-}
-
-/// Whether `data` is a DTLS record (RFC 7983's first byte 20 to 63).
-fn is_dtls(data: &[u8]) -> bool {
-    matches!(data.first(), Some(20..=63))
-}
-
 /// What went which way while connecting, by path and kind: which path
 /// ICE settled on, and whether the DTLS handshake crossed it, shows in
 /// the log when a call does not come up.
@@ -1047,19 +984,6 @@ fn apply(rtc: &mut Rtc, applied: &mut Applied, plan: &Plan) -> Result<Vec<String
         applied.dtls = true;
     }
     Ok(notes)
-}
-
-/// How many unreadable packets one round of driving the peer drops before
-/// the media counts as broken.
-const SKIP_AT_MOST: u32 = 100;
-
-/// Whether `error` is about one packet only (one that did not unpack or
-/// parse), not the connection.
-fn is_one_packet(error: &str0m::RtcError) -> bool {
-    matches!(
-        error,
-        str0m::RtcError::Packet(..) | str0m::RtcError::Rtp(_) | str0m::RtcError::Net(_)
-    )
 }
 
 /// The peer: Opus alone at `opus_pt`, OpenSSL's DTLS, full ICE.
@@ -2527,46 +2451,6 @@ mod tests {
             ],
             video_streams: Vec::new(),
         }
-    }
-
-    #[test]
-    fn an_unanswered_flight_is_sent_again_with_backoff() {
-        let start = Instant::now();
-        let to: SocketAddr = "198.51.100.7:5000".parse().expect("an address");
-        let mut flight = Flight::default();
-        flight.sent(false, to, &[22, 1], start);
-        flight.sent(false, to, &[22, 2], start);
-        assert!(!flight.due(start), "not before a second");
-        assert!(flight.due(start + Duration::from_secs(1)));
-        assert_eq!(flight.datagrams.len(), 2, "the whole flight");
-        assert!(
-            !flight.due(start + Duration::from_millis(2500)),
-            "then two seconds"
-        );
-        assert!(flight.due(start + Duration::from_secs(3)));
-        // An answer stops it; the next datagram starts a new flight.
-        flight.heard();
-        assert!(!flight.due(start + Duration::from_secs(60)));
-        flight.sent(false, to, &[22, 3], start + Duration::from_secs(60));
-        assert_eq!(flight.datagrams.len(), 1);
-        assert!(flight.due(start + Duration::from_secs(61)));
-    }
-
-    #[test]
-    fn a_flight_is_sent_again_a_few_times_only() {
-        let start = Instant::now();
-        let to: SocketAddr = "198.51.100.7:5000".parse().expect("an address");
-        let mut flight = Flight::default();
-        flight.sent(false, to, &[22], start);
-        let mut sent = 0;
-        let mut at = start;
-        for _ in 0..100 {
-            at += Duration::from_secs(5);
-            if flight.due(at) {
-                sent += 1;
-            }
-        }
-        assert_eq!(sent, FLIGHT_TRIES);
     }
 
     #[test]
