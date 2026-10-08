@@ -4,6 +4,7 @@
 use egui::{Align, Margin, RichText, Stroke};
 
 use super::composer::{self, Composer};
+use super::jump::Steer;
 use super::message::{self, Lead, Row};
 use super::rows;
 use crate::app::App;
@@ -36,10 +37,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ..
     } = app;
     // A reply being brought into view here.
-    let now = std::time::Instant::now();
-    let jump = jumps.iter().find(|j| j.list == key).cloned();
-    let steering = jump.as_ref().is_some_and(crate::jump::Jump::steering);
-    let light = jump.as_ref().map_or(0.0, |j| j.light(now));
+    let steer = Steer::of(jumps, &key);
+    let steering = steer.steering();
     let to_bottom = to_bottom && !steering;
     let mut target: Option<(f32, f32)> = None;
     let Some(workspace) = crate::app::active_in(workspaces, settings) else {
@@ -80,54 +79,43 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 rect.y_range(),
                 Stroke::new(1.0, palette.outline),
             );
-            let inset = theme::titlebar_inset(ui.ctx());
-            egui::Panel::top("thread-header")
-                .exact_size(52.0 + inset)
-                .show_separator_line(false)
-                .frame(egui::Frame::new().inner_margin(Margin {
-                    left: 16,
-                    right: 8,
-                    top: inset as i8,
-                    bottom: 0,
-                }))
-                .show(ui, |ui| {
-                    let rect = ui.max_rect();
-                    ui.painter().hline(
-                        rect.x_range(),
-                        rect.bottom() - 0.5,
-                        Stroke::new(1.0, palette.outline),
+            theme::pane_header(
+                ui,
+                &palette,
+                "thread-header",
+                egui::Color32::TRANSPARENT,
+                [16, 8],
+                |ui| {
+                    ui.label(
+                        RichText::new(t("Thread"))
+                            .font(theme::bold(16.0))
+                            .color(palette.text),
                     );
-                    ui.horizontal_centered(|ui| {
+                    if !channel_name.is_empty() {
                         ui.label(
-                            RichText::new(t("Thread"))
-                                .font(theme::bold(16.0))
-                                .color(palette.text),
+                            RichText::new(format!("#{channel_name}"))
+                                .font(theme::regular(13.0))
+                                .color(palette.secondary),
                         );
-                        if !channel_name.is_empty() {
-                            ui.label(
-                                RichText::new(format!("#{channel_name}"))
-                                    .font(theme::regular(13.0))
-                                    .color(palette.secondary),
-                            );
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        if theme::icon_button(ui, &palette, Icon::X, 17.0, &t("Close (Esc)"))
+                            .clicked()
+                        {
+                            actions.push(Action::CloseThread);
                         }
-                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                            if theme::icon_button(ui, &palette, Icon::X, 17.0, &t("Close (Esc)"))
-                                .clicked()
-                            {
-                                actions.push(Action::CloseThread);
-                            }
-                            if let Some(following) = following
-                                && follow_button(ui, &palette, following).clicked()
-                            {
-                                actions.push(Action::Views(crate::views::Action::Follow {
-                                    channel: channel.clone(),
-                                    thread: ts.clone(),
-                                    follow: !following,
-                                }));
-                            }
-                        });
+                        if let Some(following) = following
+                            && follow_button(ui, &palette, following).clicked()
+                        {
+                            actions.push(Action::Views(crate::views::Action::Follow {
+                                channel: channel.clone(),
+                                thread: ts.clone(),
+                                follow: !following,
+                            }));
+                        }
                     });
-                });
+                },
+            );
             egui::Panel::bottom("thread-composer")
                 .show_separator_line(false)
                 .frame(egui::Frame::new().inner_margin(Margin {
@@ -150,15 +138,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         channel_name: (!workspace.info.is_teams()).then(|| channel_name.clone()),
                         uploads: transfers,
                     };
-                    let before = taken.draft.text.clone();
-                    composer::show(ui, &composer, &mut taken.draft, actions);
-                    if crate::people::is_typing(&before, &taken.draft.text) {
-                        actions.push(Action::People(crate::people::Action::Typing {
-                            channel: channel.clone(),
-                            thread: Some(ts.clone()),
-                        }));
-                    }
-                    super::people::typing(ui, &palette, workspace, &channel, Some(&ts));
+                    composer::with_typing(ui, &composer, &channel, &mut taken.draft, actions);
                 });
             egui::CentralPanel::default()
                 .frame(egui::Frame::new())
@@ -186,13 +166,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             .as_ref()
                             .filter(|s| s.in_thread && s.channel == channel),
                     };
-                    // Only the rows in and near the view are laid out; the
-                    // rest are placed by the heights they were last drawn at.
                     let heights_id = egui::Id::new(("thread-heights", &channel, ts.as_str()));
-                    let mut heights: rows::Heights = ui
-                        .data_mut(|d| d.remove_temp(heights_id))
-                        .unwrap_or_default();
-                    heights.for_layout(look.key());
                     let output = egui::ScrollArea::vertical()
                         .id_salt(("thread", &channel, ts.as_str()))
                         .auto_shrink([false, false])
@@ -225,21 +199,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                 });
                                 previous = Some(*reply);
                             }
-                            let plan = rows::plan(
-                                entries.iter().map(|entry| heights.planned(entry)),
-                                viewport.min.y,
-                                viewport.max.y,
-                                400.0,
-                            );
-                            heights.sweep();
-                            if let Some(jump) = &jump {
-                                target = replies
-                                    .iter()
-                                    .position(|reply| reply.ts == jump.ts)
-                                    .map(|index| (plan.tops[index + 1], plan.tops[index + 2]));
-                            }
-                            let moved =
-                                rows::show(ui, &mut heights, &entries, &plan, |ui, index| {
+                            let drawn = rows::virtual_list(
+                                ui,
+                                heights_id,
+                                look.key(),
+                                viewport,
+                                &entries,
+                                |ui, index| {
                                     if index == 0 {
                                         ui.add_space(4.0);
                                         if let Some(parent) = parent {
@@ -278,11 +244,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                         if timeline.is_none_or(|t| t.loading && !t.loaded) {
                                             ui.add_space(16.0);
                                             ui.vertical_centered(|ui| {
-                                                ui.add(
-                                                    egui::Spinner::new()
-                                                        .size(18.0)
-                                                        .color(palette.dim),
-                                                );
+                                                ui.add(theme::spinner(&palette, 18.0));
                                             });
                                         }
                                     } else {
@@ -297,45 +259,42 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                             editing,
                                             actions,
                                         );
-                                        if light > 0.0
-                                            && jump.as_ref().is_some_and(|j| j.ts == reply.ts)
-                                        {
+                                        let light = steer.light(&reply.ts);
+                                        if light > 0.0 {
                                             super::conversation::paint_light(
                                                 ui, background, top, &palette, light,
                                             );
                                         }
                                     }
-                                });
+                                },
+                            );
+                            if let Some(ts) = steer.ts() {
+                                target = replies
+                                    .iter()
+                                    .position(|reply| reply.ts == *ts)
+                                    .map(|i| (drawn.tops[i + 1], drawn.tops[i + 2]));
+                            }
                             ui.add_space(12.0);
                             if to_bottom {
                                 // Your own reply: show it even when reading
                                 // further up.
                                 ui.scroll_to_cursor(Some(Align::BOTTOM));
                             }
-                            moved
+                            drawn.moved
                         });
-                    ui.data_mut(|d| d.insert_temp(heights_id, heights));
                     // Rows above the one being read came out taller or
                     // shorter than placed: move with them so the reading
                     // stays put. At the end, egui keeps the view stuck there.
                     let moved = output.inner;
                     let offset = output.state.offset.y;
                     let bottom = (output.content_size.y - output.inner_rect.height()).max(0.0);
-                    let view = output.inner_rect.height();
-                    if let Some(index) = jumps.iter().position(|j| j.list == key) {
-                        let loading = timeline.is_none_or(|t| t.loading || !t.loaded);
-                        let jump = &mut jumps[index];
-                        let wanted = jump.steer(target, offset, view, bottom, loading, now);
-                        if let Some(wanted) = wanted {
-                            let mut state = output.state;
-                            state.offset.y = wanted;
-                            state.store(ui.ctx(), output.id);
-                        }
-                        if jump.done(now) {
-                            jumps.remove(index);
-                        } else {
-                            ui.ctx().request_repaint();
-                        }
+                    let loading = timeline.is_none_or(|t| t.loading || !t.loaded);
+                    if let Some(wanted) =
+                        steer.drive(jumps, &key, target, loading, &output, ui.ctx())
+                    {
+                        let mut state = output.state;
+                        state.offset.y = wanted;
+                        state.store(ui.ctx(), output.id);
                     }
                     if steering {
                         // The jump moved the view; nothing else may this frame.

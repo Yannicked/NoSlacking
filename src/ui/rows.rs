@@ -166,6 +166,48 @@ pub fn show(
     moved
 }
 
+/// How far beyond the view rows are still drawn, so they are measured
+/// before they scroll in.
+pub const MARGIN: f32 = 400.0;
+
+/// What [`virtual_list`] drew.
+pub struct Drawn {
+    /// Where each row starts, and the list's bottom last, as planned.
+    pub tops: Vec<f32>,
+    /// How much taller the rows above the one being read turned out than
+    /// planned (see [`show`]).
+    pub moved: f32,
+}
+
+/// Draws the rows of `entries` in and near `viewport` (a scroll area's,
+/// inside it) with `draw`, the rest placed by the heights they were last
+/// drawn at. The heights are kept between frames under `id`, and
+/// forgotten when `layout` (what they were measured under) changes.
+pub fn virtual_list(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    layout: u64,
+    viewport: egui::Rect,
+    entries: &[Entry],
+    draw: impl FnMut(&mut egui::Ui, usize),
+) -> Drawn {
+    let mut heights: Heights = ui.data_mut(|d| d.remove_temp(id)).unwrap_or_default();
+    heights.for_layout(layout);
+    let plan = plan(
+        entries.iter().map(|entry| heights.planned(entry)),
+        viewport.min.y,
+        viewport.max.y,
+        MARGIN,
+    );
+    heights.sweep();
+    let moved = show(ui, &mut heights, entries, &plan, draw);
+    ui.data_mut(|d| d.insert_temp(id, heights));
+    Drawn {
+        tops: plan.tops,
+        moved,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

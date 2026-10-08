@@ -12,7 +12,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::app::App;
+use crate::app::{App, Tone};
 use crate::backend;
 use crate::failure::Failure;
 use crate::i18n::{t, tf};
@@ -33,6 +33,10 @@ pub use crate::huddle_audio::video::Share;
 pub const ALONE_FOR: Duration = Duration::from_secs(60);
 /// How long a failure shows in the call bar, unless closed sooner.
 pub const FAILED_FOR: Duration = Duration::from_secs(30);
+/// How long someone you pressed Admit for shows as being let in: Teams
+/// lets them in within a few seconds; past this it did not, and Admit
+/// can be pressed again.
+pub const ADMIT_WAIT: Duration = Duration::from_secs(20);
 
 /// How listening ended without failing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +122,10 @@ pub struct Listening {
     pub meeting: bool,
     /// The meeting's join link, once known.
     pub invite: Option<crate::meetings::MeetingLink>,
+    /// Those in the lobby you pressed Admit for, and when: the bar shows
+    /// them being let in until they leave the lobby, or for
+    /// [`ADMIT_WAIT`] at most.
+    pub admitting: Vec<(String, Instant)>,
     /// Who shares their screen, as last told.
     #[cfg(feature = "huddle-video")]
     pub shares: Vec<Share>,
@@ -168,6 +176,7 @@ impl Listening {
             answered: false,
             meeting: false,
             invite: None,
+            admitting: Vec::new(),
             #[cfg(feature = "huddle-video")]
             shares: Vec::new(),
             #[cfg(feature = "huddle-video")]
@@ -219,6 +228,14 @@ impl Listening {
     /// Who waits in the meeting's lobby, as last told.
     pub fn waiting(&self) -> impl Iterator<Item = &Person> {
         self.roster.people.iter().filter(|p| p.waiting)
+    }
+
+    /// Whether `user`, waiting in the lobby, is being let in at `now`:
+    /// Admit was pressed for them less than [`ADMIT_WAIT`] ago.
+    pub fn is_admitting(&self, user: &str, now: Instant) -> bool {
+        self.admitting
+            .iter()
+            .any(|(who, at)| who == user && now < *at + ADMIT_WAIT)
     }
 
     /// What the call window wants, given room for `tiles` tiles of
@@ -275,13 +292,7 @@ pub fn leave_alone(since: Option<Instant>, now: Instant) -> bool {
 
 /// A call's length as a clock: `0:05`, `12:34`, `1:02:03`.
 pub fn clock(length: Duration) -> String {
-    let seconds = length.as_secs();
-    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
+    crate::model::duration_text(length.as_secs().saturating_mul(1000))
 }
 
 /// Where the huddle is, for the bar's title.
@@ -443,9 +454,16 @@ fn own_name(app: &App, team: &str) -> String {
 /// Lets `user` (by the id the interface knows them by) in from the
 /// meeting's lobby.
 pub fn admit(app: &mut App, user: String) {
-    let Some(listening) = app.huddles.listening.as_ref().filter(|l| l.meeting) else {
+    let Some(listening) = app.huddles.listening.as_mut().filter(|l| l.meeting) else {
         return;
     };
+    let now = Instant::now();
+    if listening.is_admitting(&user, now) {
+        return;
+    }
+    // Those let in, or long since asked for, are forgotten.
+    listening.admitting.retain(|(_, at)| now < *at + ADMIT_WAIT);
+    listening.admitting.push((user.clone(), now));
     let team = listening.team.clone();
     app.backend.send(backend::Command::People {
         team,
@@ -635,7 +653,7 @@ pub fn heard(app: &mut App, team: &str, channel: &str, state: Listen) {
                     listening.watching = None;
                     tell_wish(app, None);
                 }
-                app.toast(t("The screen share ended"), false);
+                app.toast(t("The screen share ended"), Tone::Info);
             }
         }
         #[cfg(feature = "huddle-video")]
@@ -656,7 +674,7 @@ pub fn heard(app: &mut App, team: &str, channel: &str, state: Listen) {
                 t("The huddle ended")
             };
             app.huddles.listening = None;
-            app.toast(ended, false);
+            app.toast(ended, Tone::Info);
         }
         Listen::Ended(Err(error)) => {
             listening.phase = Phase::Failed { error, at: now };
@@ -717,7 +735,7 @@ pub fn frame(app: &mut App, now: Instant) {
     // huddle is left for being alone in.
     if !listening.is_call() && leave_alone(listening.alone_since, now) {
         leave(app);
-        app.toast(t("Everyone else left the huddle"), false);
+        app.toast(t("Everyone else left the huddle"), Tone::Info);
     } else if let Some(since) = listening.alone_since {
         app.waker
             .wake_after((since + ALONE_FOR).saturating_duration_since(now));
@@ -755,6 +773,18 @@ pub fn quit(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn someone_admitted_shows_as_let_in_for_a_while() {
+        let now = Instant::now();
+        let mut meeting = Listening::meeting("T1");
+        assert!(!meeting.is_admitting("U1", now));
+        meeting.admitting.push(("U1".into(), now));
+        assert!(meeting.is_admitting("U1", now + Duration::from_secs(5)));
+        assert!(!meeting.is_admitting("U2", now));
+        // Past the wait, Admit is offered again.
+        assert!(!meeting.is_admitting("U1", now + ADMIT_WAIT));
+    }
 
     fn person(user: &str, me: bool, muted: bool, speaking: bool) -> Person {
         Person {

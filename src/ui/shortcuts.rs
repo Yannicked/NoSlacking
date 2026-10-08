@@ -47,6 +47,63 @@ pub struct Group {
     pub shortcuts: &'static [Shortcut],
 }
 
+/// A chord the app takes in more than one place, kept with the way the
+/// sheet writes it, so the key handled and the key listed cannot part.
+#[derive(Clone, Copy, Debug)]
+pub struct Chord {
+    /// The modifiers held, `COMMAND` being Ctrl or ⌘.
+    pub modifiers: egui::Modifiers,
+    /// The key pressed with them.
+    pub key: egui::Key,
+    /// As the sheet writes it, such as `Cmd+Shift+H`.
+    pub text: &'static str,
+}
+
+impl Chord {
+    /// Takes the chord from `input` if it was pressed this frame.
+    pub fn take(self, input: &mut egui::InputState) -> bool {
+        input.consume_key(self.modifiers, self.key)
+    }
+
+    /// Takes the chord from `ui`'s window if it was pressed this frame.
+    pub fn pressed(self, ui: &egui::Ui) -> bool {
+        ui.input_mut(|input| self.take(input))
+    }
+
+    /// As this platform writes it, for a tooltip.
+    pub fn spelled(self) -> String {
+        spell(self.text, cfg!(target_os = "macos"))
+    }
+}
+
+/// Leaves the huddle or hangs up, from the main window or the call
+/// window.
+pub const HANG_UP: Chord = Chord {
+    modifiers: egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+    key: egui::Key::H,
+    text: "Cmd+Shift+H",
+};
+/// Mutes and unmutes the microphone (Slack's own chord).
+pub const MIC: Chord = Chord {
+    modifiers: egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+    key: egui::Key::Space,
+    text: "Cmd+Shift+Space",
+};
+/// Turns the camera on and off (Teams' chord: Slack's own is the
+/// composer's paste without formatting here).
+pub const CAMERA: Chord = Chord {
+    modifiers: egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+    key: egui::Key::O,
+    text: "Cmd+Shift+O",
+};
+/// Starts and stops sharing the screen (Teams' chord; Slack's desktop
+/// app has none of its own).
+pub const SHARE: Chord = Chord {
+    modifiers: egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+    key: egui::Key::E,
+    text: "Cmd+Shift+E",
+};
+
 const fn line(label: &'static str, keys: &'static [&'static str]) -> Shortcut {
     Shortcut {
         label,
@@ -149,15 +206,15 @@ pub const GROUPS: &[Group] = &[
         shortcuts: &[
             line("Keyboard shortcuts", &["Cmd+Slash"]),
             line("Settings", &["Cmd+Comma"]),
-            line("Leave the huddle or hang up", &["Cmd+Shift+H"]),
-            line("Mute / unmute the microphone", &["Cmd+Shift+Space"]),
+            line("Leave the huddle or hang up", &[HANG_UP.text]),
+            line("Mute / unmute the microphone", &[MIC.text]),
             Shortcut {
                 when: When::Camera,
-                ..line("Turn the camera on / off", &["Cmd+Shift+O"])
+                ..line("Turn the camera on / off", &[CAMERA.text])
             },
             Shortcut {
                 when: When::Share,
-                ..line("Share your screen / stop sharing", &["Cmd+Shift+E"])
+                ..line("Share your screen / stop sharing", &[SHARE.text])
             },
             Shortcut {
                 also: &["Cmd+Shift+Equals", "Cmd+Plus"],
@@ -254,11 +311,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .frame(super::overlays::modal_frame(app))
         .show(ctx, |ui| {
             ui.set_width(540.0);
-            ui.label(
-                RichText::new(t("Keyboard shortcuts"))
-                    .font(theme::bold(17.0))
-                    .color(palette.text),
-            );
+            theme::dialog_heading(ui, &palette, t("Keyboard shortcuts"));
             ui.label(
                 RichText::new(tf(
                     "Open this list any time with {shortcut}.",
@@ -718,6 +771,26 @@ mod tests {
         };
         assert_eq!(send(true), Some(&["Enter"][..]));
         assert_eq!(send(false), Some(&["Cmd+Enter"][..]));
+    }
+
+    #[test]
+    fn shared_chords_take_the_keys_they_list() {
+        for shared in [HANG_UP, MIC, CAMERA, SHARE] {
+            let mods: BTreeSet<&str> = [
+                (shared.modifiers.command, "Cmd"),
+                (shared.modifiers.alt, "Alt"),
+                (shared.modifiers.shift, "Shift"),
+            ]
+            .into_iter()
+            .filter_map(|(on, name)| on.then_some(name))
+            .collect();
+            assert_eq!(chord(&mods, shared.key.name()), shared.text);
+            assert!(
+                listed().contains(shared.text),
+                "not on the sheet: {}",
+                shared.text
+            );
+        }
     }
 
     #[test]

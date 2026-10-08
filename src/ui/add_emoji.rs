@@ -32,11 +32,7 @@ pub(super) fn dialog(app: &mut App, ctx: &egui::Context) {
         .frame(frame)
         .show(ctx, |ui| {
             ui.set_width(400.0);
-            ui.label(
-                RichText::new(t("Add emoji"))
-                    .font(theme::bold(17.0))
-                    .color(palette.text),
-            );
+            theme::dialog_heading(ui, &palette, t("Add emoji"));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 // The picture as it will look, or an empty square.

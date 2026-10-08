@@ -31,9 +31,12 @@
 use std::path::Path;
 #[cfg(any(target_os = "linux", test))]
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
+
+use crate::failure::Failure;
+use crate::sync::lock;
 
 /// What a claim replaced, to be put back.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,7 +66,7 @@ const BACKUP: &str = "slack-links.reg";
 const MIME: &str = "x-scheme-handler/slack";
 
 fn held() -> MutexGuard<'static, Option<Claim>> {
-    HELD.lock().unwrap_or_else(PoisonError::into_inner)
+    lock(&HELD)
 }
 
 /// Whether this run holds the `slack://` links now.
@@ -75,7 +78,7 @@ pub fn claimed() -> bool {
 /// after remembering what handled them (in memory and in `state`). A
 /// second claim while one is held keeps the first one's memory: the
 /// handler before that was NoSlacking itself.
-pub fn claim(state: &Path) -> Result<(), String> {
+pub fn claim(state: &Path) -> Result<(), Failure> {
     let mut held = held();
     if held.is_none() {
         let remembered = match read_record(state) {
@@ -97,17 +100,17 @@ pub fn claim(state: &Path) -> Result<(), String> {
 
 /// Gives the `slack://` links back if this run, or a run that crashed,
 /// claimed them. Whether anything was given back.
-pub fn release(state: &Path) -> Result<bool, String> {
+pub fn release(state: &Path) -> Result<bool, Failure> {
     release_with(state, false)
 }
 
 /// At start-up: gives back a claim a crashed run left, or one an older
 /// version made without a record, unless this run holds one already.
-pub fn release_at_start(state: &Path) -> Result<bool, String> {
+pub fn release_at_start(state: &Path) -> Result<bool, Failure> {
     release_with(state, true)
 }
 
-fn release_with(state: &Path, at_start: bool) -> Result<bool, String> {
+fn release_with(state: &Path, at_start: bool) -> Result<bool, Failure> {
     let mut held = held();
     let Some(claim) = to_give_back(
         at_start,
@@ -157,10 +160,10 @@ fn read_record(state: &Path) -> Option<Claim> {
     }
 }
 
-fn write_record(state: &Path, claim: &Claim) -> Result<(), String> {
-    std::fs::create_dir_all(state).map_err(|e| e.to_string())?;
-    let text = serde_json::to_string(claim).map_err(|e| e.to_string())?;
-    std::fs::write(state.join(RECORD), text).map_err(|e| e.to_string())
+fn write_record(state: &Path, claim: &Claim) -> Result<(), Failure> {
+    // A plain struct always serializes; a failure would be a bug's.
+    let text = serde_json::to_string(claim).map_err(|e| Failure::Io(e.to_string()))?;
+    crate::paths::write_atomic(&state.join(RECORD), text.as_bytes()).map_err(|e| Failure::io(&e))
 }
 
 /// The value `list`, a `mimeapps.list`, gives `mime` under `[Default
@@ -309,7 +312,7 @@ fn key_from_query(found: bool, output: &str) -> Key {
 mod platform {
     use std::path::{Path, PathBuf};
 
-    use super::{Claim, MIME, default_for, first_app, restore_default};
+    use super::{Claim, Failure, MIME, default_for, first_app, restore_default};
     use crate::auth::{SCHEME, SLACK_SCHEME};
     use crate::paths::APP_ID;
 
@@ -345,7 +348,7 @@ mod platform {
         super::pick_slack_desktop(&dirs, Path::exists).map(|name| format!("{name};"))
     }
 
-    pub(super) fn remember(_state: &Path) -> Result<Option<Claim>, String> {
+    pub(super) fn remember(_state: &Path) -> Result<Option<Claim>, Failure> {
         if in_flatpak() {
             return Ok(None);
         }
@@ -361,8 +364,8 @@ mod platform {
         }))
     }
 
-    pub(super) fn claim() -> Result<(), String> {
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    pub(super) fn claim() -> Result<(), Failure> {
+        let exe = std::env::current_exe().map_err(|e| Failure::io(&e))?;
         crate::auth::register_scheme_for(&exe, &[SCHEME, SLACK_SCHEME])
     }
 
@@ -377,26 +380,25 @@ mod platform {
         })
     }
 
-    pub(super) fn give_back(_state: &Path, claim: &Claim) -> Result<(), String> {
+    pub(super) fn give_back(_state: &Path, claim: &Claim) -> Result<(), Failure> {
         if in_flatpak() {
             return Ok(());
         }
-        let path = mimeapps().ok_or("no home directory")?;
+        let path = mimeapps().ok_or(Failure::NoHomeFolder)?;
         match std::fs::read_to_string(&path) {
             Ok(list) => {
                 let restored = restore_default(&list, MIME, &ours(), claim.previous.as_deref());
                 if restored != list {
                     // Whole or not at all: other apps' defaults live here.
-                    let temporary = path.with_extension("list.noslacking");
-                    std::fs::write(&temporary, restored).map_err(|e| e.to_string())?;
-                    std::fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
+                    crate::paths::write_atomic(&path, restored.as_bytes())
+                        .map_err(|e| Failure::io(&e))?;
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(Failure::io(&error)),
         }
         // The desktop file stops offering NoSlacking for slack:// links.
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe = std::env::current_exe().map_err(|e| Failure::io(&e))?;
         crate::auth::register_scheme_for(&exe, &[SCHEME])
     }
 }
@@ -405,7 +407,7 @@ mod platform {
 mod platform {
     use std::path::Path;
 
-    use super::{BACKUP, Claim, Key, key_from_query, registry_release_plan};
+    use super::{BACKUP, Claim, Failure, Key, key_from_query, registry_release_plan};
     use crate::auth::{SCHEME, SLACK_KEY, SLACK_SCHEME, run_reg};
 
     fn key() -> Key {
@@ -424,13 +426,13 @@ mod platform {
         }
     }
 
-    pub(super) fn remember(state: &Path) -> Result<Option<Claim>, String> {
+    pub(super) fn remember(state: &Path) -> Result<Option<Claim>, Failure> {
         let backup = match key() {
             Key::Absent => false,
             // Left by an older version: there is nothing better to put back.
             Key::Ours => false,
             Key::Theirs => {
-                std::fs::create_dir_all(state).map_err(|e| e.to_string())?;
+                std::fs::create_dir_all(state).map_err(|e| Failure::io(&e))?;
                 let file = state.join(BACKUP);
                 let file = file.display().to_string();
                 run_reg(&["export", SLACK_KEY, &file, "/y"])?;
@@ -443,8 +445,8 @@ mod platform {
         }))
     }
 
-    pub(super) fn claim() -> Result<(), String> {
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    pub(super) fn claim() -> Result<(), Failure> {
+        let exe = std::env::current_exe().map_err(|e| Failure::io(&e))?;
         crate::auth::register_scheme_for(&exe, &[SCHEME, SLACK_SCHEME])
     }
 
@@ -452,7 +454,7 @@ mod platform {
         (key() == Key::Ours).then(Claim::default)
     }
 
-    pub(super) fn give_back(state: &Path, claim: &Claim) -> Result<(), String> {
+    pub(super) fn give_back(state: &Path, claim: &Claim) -> Result<(), Failure> {
         let backup = state.join(BACKUP);
         let plan = registry_release_plan(
             key() == Key::Ours,
@@ -471,13 +473,13 @@ mod platform {
 mod platform {
     use std::path::Path;
 
-    use super::Claim;
+    use super::{Claim, Failure};
 
-    pub(super) fn remember(_state: &Path) -> Result<Option<Claim>, String> {
-        Err("NoSlacking cannot change the slack:// link handler on this platform".into())
+    pub(super) fn remember(_state: &Path) -> Result<Option<Claim>, Failure> {
+        Err(Failure::NoLinkHandler)
     }
 
-    pub(super) fn claim() -> Result<(), String> {
+    pub(super) fn claim() -> Result<(), Failure> {
         Ok(())
     }
 
@@ -485,7 +487,7 @@ mod platform {
         None
     }
 
-    pub(super) fn give_back(_state: &Path, _claim: &Claim) -> Result<(), String> {
+    pub(super) fn give_back(_state: &Path, _claim: &Claim) -> Result<(), Failure> {
         Ok(())
     }
 }

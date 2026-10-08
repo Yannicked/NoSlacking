@@ -19,6 +19,7 @@ mod huddle_camera;
 mod huddle_mic;
 #[cfg(feature = "huddle-share")]
 mod huddle_share;
+mod jump;
 mod keys;
 mod lightbox;
 mod login;
@@ -80,12 +81,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     let view_open = app.views.open.is_some();
     ui.data_mut(|d| d.insert_temp(views::open_id(), view_open));
-    let saved = std::sync::Arc::new(
-        app.active_team()
-            .and_then(|team| app.views.team(&team))
-            .map(|v| v.saved_keys.clone())
-            .unwrap_or_default(),
-    );
+    // Shared, not copied: the set is only made again when it changes.
+    let saved = app
+        .active_team()
+        .and_then(|team| app.views.team(&team))
+        .map(|v| v.saved_keys.clone())
+        .unwrap_or_default();
     ui.data_mut(|d| d.insert_temp(views::saved_id(), saved));
     // First, so Esc leaves a selected message before it closes the thread.
     selection::keys(app, ui.ctx());
@@ -408,7 +409,7 @@ pub fn file_size(bytes: u64) -> String {
 /// The URI an image of `team` loads by: public URLs as they are, files
 /// through the authenticated loader.
 pub fn image_uri(team: &str, url: &str) -> String {
-    if crate::slack::client::is_slack_file_url(url) || is_teams_media(url) {
+    if crate::model::is_slack_file_url(url) || is_teams_media(url) {
         crate::images::authed(team, url)
     } else {
         url.to_owned()

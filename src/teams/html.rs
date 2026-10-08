@@ -6,22 +6,7 @@
 //! tree for display and converts plain/formatted text into Teams HTML for sending.
 
 use crate::mrkdwn::{Block, Inline, Style};
-
-/// Escapes special HTML characters in text.
-pub fn escape_html(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
+use crate::text::xml_escape;
 
 /// Decodes common HTML entities back to characters.
 pub fn unescape_html(html: &str) -> String {
@@ -96,7 +81,7 @@ pub fn wire_to_teams(wire: &str) -> Outgoing {
             }
             Block::Preformatted(code) => {
                 html.push_str("<pre>");
-                html.push_str(&escape_html(&code));
+                html.push_str(&xml_escape(&code));
                 html.push_str("</pre>");
             }
         }
@@ -125,12 +110,12 @@ fn lines_html(inlines: &[Inline], mentions: &mut Vec<SentMention>) -> String {
 /// One inline as Teams HTML.
 fn inline_html(inline: &Inline, mentions: &mut Vec<SentMention>) -> String {
     match inline {
-        Inline::Text(text, style) => styled(&escape_html(text), *style),
-        Inline::Code(code) => format!("<code>{}</code>", escape_html(code)),
+        Inline::Text(text, style) => styled(&xml_escape(text), *style),
+        Inline::Code(code) => format!("<code>{}</code>", xml_escape(code)),
         Inline::Link { url, label, style } => {
             let text = label.as_deref().unwrap_or(url);
             styled(
-                &format!("<a href=\"{}\">{}</a>", escape_html(url), escape_html(text)),
+                &format!("<a href=\"{}\">{}</a>", xml_escape(url), xml_escape(text)),
                 *style,
             )
         }
@@ -140,7 +125,7 @@ fn inline_html(inline: &Inline, mentions: &mut Vec<SentMention>) -> String {
             let item = mentions.len();
             let span = format!(
                 "<span itemtype=\"http://schema.skype.com/Mention\" itemscope=\"\" itemid=\"{item}\">{}</span>",
-                escape_html(&name)
+                xml_escape(&name)
             );
             mentions.push(SentMention {
                 item,
@@ -150,10 +135,10 @@ fn inline_html(inline: &Inline, mentions: &mut Vec<SentMention>) -> String {
             span
         }
         Inline::Channel { id, label } => {
-            escape_html(&format!("#{}", label.as_deref().unwrap_or(id)))
+            xml_escape(&format!("#{}", label.as_deref().unwrap_or(id)))
         }
-        Inline::Broadcast(name) => escape_html(&format!("@{name}")),
-        Inline::Group { id, label } => escape_html(label.as_deref().unwrap_or(id)),
+        Inline::Broadcast(name) => xml_escape(&format!("@{name}")),
+        Inline::Group { id, label } => xml_escape(label.as_deref().unwrap_or(id)),
         Inline::Emoji(name) => {
             crate::emoji::unicode(name, None).unwrap_or_else(|| format!(":{name}:"))
         }

@@ -80,12 +80,7 @@ pub(super) fn file_view(
         .on_hover_text(&file.name);
         // In the thread panel the viewer steps through the thread's
         // pictures; a parent is its own thread.
-        let thread = row.in_thread.then(|| {
-            message
-                .thread_ts
-                .clone()
-                .unwrap_or_else(|| message.ts.clone())
-        });
+        let thread = row.in_thread.then(|| message.thread_root().clone());
         if response.hovered() {
             crate::ui::context::hover(
                 ui,

@@ -146,30 +146,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     confirm_remove_bookmark(app, ctx);
 }
 
-/// The frame every dialog here sits in, like the other overlays'.
-fn frame(app: &App) -> egui::Frame {
-    egui::Frame::new()
-        .fill(app.palette.overlay)
-        .stroke(egui::Stroke::new(1.0, app.palette.outline))
-        .corner_radius(CornerRadius::same(theme::RADIUS + 4))
-        .shadow(egui::epaint::Shadow {
-            offset: [0, 8],
-            blur: 32,
-            spread: 0,
-            color: app.palette.shadow,
-        })
-        .inner_margin(Margin::same(16))
-}
-
-/// A dialog's heading.
-fn heading(ui: &mut egui::Ui, app: &App, text: &str) -> egui::Response {
-    ui.label(
-        RichText::new(text)
-            .font(theme::bold(17.0))
-            .color(app.palette.text),
-    )
-}
-
 /// Picks people for a direct message (one) or a group message (several),
 /// with suggestions as you type.
 fn new_message(app: &mut App, ctx: &egui::Context) {
@@ -206,10 +182,10 @@ fn new_message(app: &mut App, ctx: &egui::Context) {
     let mut go = false;
     let mut close = escape;
     let response = egui::Modal::new(egui::Id::new("new-message"))
-        .frame(frame(app))
+        .frame(super::overlays::modal_frame(app))
         .show(ctx, |ui| {
             ui.set_width(440.0);
-            let title = heading(ui, app, &t("New message"));
+            let title = theme::dialog_heading(ui, &app.palette, t("New message"));
             ui.add_space(6.0);
             if !dialog.picked.is_empty() {
                 ui.horizontal_wrapped(|ui| {
@@ -360,7 +336,7 @@ fn new_message(app: &mut App, ctx: &egui::Context) {
                     go = true;
                 }
                 if dialog.busy {
-                    ui.add(egui::Spinner::new().size(16.0).color(palette.dim));
+                    ui.add(theme::spinner(&palette, 16.0));
                 }
             });
         });
@@ -424,11 +400,11 @@ fn browse(app: &mut App, ctx: &egui::Context) {
     let mut close = escape;
     let height = (ctx.content_rect().height() - 260.0).clamp(160.0, 460.0);
     let response = egui::Modal::new(egui::Id::new("browse-channels"))
-        .frame(frame(app))
+        .frame(super::overlays::modal_frame(app))
         .show(ctx, |ui| {
             ui.set_width(520.0);
             ui.horizontal(|ui| {
-                heading(ui, app, &t("Browse channels"));
+                theme::dialog_heading(ui, &app.palette, t("Browse channels"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if theme::icon_button(ui, &palette, Icon::X, 16.0, &t("Close")).clicked() {
                         close = true;
@@ -465,12 +441,12 @@ fn browse(app: &mut App, ctx: &egui::Context) {
                 crate::i18n::tn(
                     "{count} channel you can join",
                     "{count} channels you can join",
-                    u32::try_from(found.len()).unwrap_or(u32::MAX),
+                    crate::i18n::count(found.len()),
                 )
             };
             ui.horizontal(|ui| {
                 if !browse.done {
-                    ui.add(egui::Spinner::new().size(12.0).color(palette.dim));
+                    ui.add(theme::spinner(&palette, 12.0));
                 }
                 ui.label(
                     RichText::new(status)
@@ -542,7 +518,7 @@ fn listed_row(
     let mut clicked = false;
     child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         if joining {
-            ui.add(egui::Spinner::new().size(16.0).color(palette.dim));
+            ui.add(theme::spinner(palette, 16.0));
         } else {
             clicked = theme::primary_button(ui, palette, &t("Join")).clicked();
         }
@@ -620,10 +596,10 @@ fn new_channel(app: &mut App, ctx: &egui::Context) {
     let mut close = escape;
     let mut create = false;
     let response = egui::Modal::new(egui::Id::new("new-channel"))
-        .frame(frame(app))
+        .frame(super::overlays::modal_frame(app))
         .show(ctx, |ui| {
             ui.set_width(420.0);
-            let title = heading(ui, app, &t("Create a channel"));
+            let title = theme::dialog_heading(ui, &app.palette, t("Create a channel"));
             ui.add_space(6.0);
             let field = ui
                 .add_enabled(
@@ -689,7 +665,7 @@ fn new_channel(app: &mut App, ctx: &egui::Context) {
                     create = true;
                 }
                 if dialog.busy {
-                    ui.add(egui::Spinner::new().size(16.0).color(palette.dim));
+                    ui.add(theme::spinner(&palette, 16.0));
                 }
             });
         });
@@ -715,7 +691,6 @@ fn confirm_leave(app: &mut App, ctx: &egui::Context) {
     let Some(channel) = app.convos.leave.clone() else {
         return;
     };
-    let palette = app.palette;
     let Some(conversation) = app
         .active_workspace()
         .and_then(|w| w.conversation(&channel))
@@ -724,49 +699,19 @@ fn confirm_leave(app: &mut App, ctx: &egui::Context) {
         app.convos.leave = None;
         return;
     };
-    let mut answer = None;
-    let response = egui::Modal::new(egui::Id::new("confirm-leave"))
-        .frame(frame(app))
-        .show(ctx, |ui| {
-            ui.set_width(360.0);
-            heading(
-                ui,
-                app,
-                &tf("Leave #{name}?", &[("name", &conversation.name)]),
-            );
-            let note = if conversation.kind == ConversationKind::Private {
-                t("It is private: you need an invitation to come back.")
-            } else {
-                t("You can join it again from the channel browser.")
-            };
-            ui.label(
-                RichText::new(note)
-                    .font(theme::regular(14.0))
-                    .color(palette.secondary),
-            );
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if theme::secondary_button(ui, &palette, &t("Cancel")).clicked() {
-                    answer = Some(false);
-                }
-                let leave = egui::Button::new(
-                    RichText::new(t("Leave"))
-                        .font(theme::medium(14.0))
-                        .color(egui::Color32::WHITE),
-                )
-                .fill(palette.danger)
-                .min_size(Vec2::new(0.0, 32.0));
-                if ui.add(leave).clicked() {
-                    answer = Some(true);
-                }
-            });
-            if ui.input(|i| i.key_pressed(Key::Enter)) {
-                answer = Some(true);
-            }
-        });
-    if response.should_close() {
-        answer = Some(false);
-    }
+    let note = if conversation.kind == ConversationKind::Private {
+        t("It is private: you need an invitation to come back.")
+    } else {
+        t("You can join it again from the channel browser.")
+    };
+    let answer = super::overlays::confirm(
+        app,
+        ctx,
+        "confirm-leave",
+        &tf("Leave #{name}?", &[("name", &conversation.name)]),
+        &note,
+        &t("Leave"),
+    );
     match answer {
         Some(true) => app.actions.push(Action::Convos(Convos::Leave { channel })),
         Some(false) => app.convos.leave = None,
@@ -824,13 +769,13 @@ fn bookmark_dialog(app: &mut App, ctx: &egui::Context) {
     let mut close = false;
     let mut save = false;
     let response = egui::Modal::new(egui::Id::new("bookmark-dialog"))
-        .frame(frame(app))
+        .frame(super::overlays::modal_frame(app))
         .show(ctx, |ui| {
             ui.set_width(420.0);
-            heading(
+            theme::dialog_heading(
                 ui,
-                app,
-                &if dialog.editing.is_some() {
+                &app.palette,
+                if dialog.editing.is_some() {
                     t("Edit bookmark")
                 } else {
                     t("Add a bookmark")
@@ -942,45 +887,14 @@ fn confirm_remove_bookmark(app: &mut App, ctx: &egui::Context) {
     let Some((channel, bookmark)) = app.convos.remove_bookmark.clone() else {
         return;
     };
-    let palette = app.palette;
-    let mut answer = None;
-    let response = egui::Modal::new(egui::Id::new("confirm-remove-bookmark"))
-        .frame(frame(app))
-        .show(ctx, |ui| {
-            ui.set_width(360.0);
-            heading(
-                ui,
-                app,
-                &tf("Remove “{name}”?", &[("name", &bookmark.title)]),
-            );
-            ui.label(
-                RichText::new(t("It is removed for everyone in the channel."))
-                    .font(theme::regular(14.0))
-                    .color(palette.secondary),
-            );
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if theme::secondary_button(ui, &palette, &t("Cancel")).clicked() {
-                    answer = Some(false);
-                }
-                let remove = egui::Button::new(
-                    RichText::new(t("Remove"))
-                        .font(theme::medium(14.0))
-                        .color(egui::Color32::WHITE),
-                )
-                .fill(palette.danger)
-                .min_size(Vec2::new(0.0, 32.0));
-                if ui.add(remove).clicked() {
-                    answer = Some(true);
-                }
-            });
-            if ui.input(|i| i.key_pressed(Key::Enter)) {
-                answer = Some(true);
-            }
-        });
-    if response.should_close() {
-        answer = Some(false);
-    }
+    let answer = super::overlays::confirm(
+        app,
+        ctx,
+        "confirm-remove-bookmark",
+        &tf("Remove “{name}”?", &[("name", &bookmark.title)]),
+        &t("It is removed for everyone in the channel."),
+        &t("Remove"),
+    );
     match answer {
         Some(true) => app.actions.push(Action::Convos(Convos::RemoveBookmark {
             channel,

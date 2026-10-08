@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::app::App;
+use crate::app::{App, Tone};
 use crate::backend;
 use crate::i18n::{t, tf};
 use crate::people::{self, Huddle};
@@ -198,13 +198,13 @@ pub fn check_due(last: Option<&Check>, now: Instant) -> Instant {
 }
 
 mod listen;
+pub use listen::{
+    ADMIT_WAIT, Left, Listen, Listening, Person, Phase, Place, Roster, call_title_text, clock,
+    faces, meeting_title_text, quit, status_text, title_text,
+};
 #[cfg(feature = "huddle-video")]
 pub use listen::{
     Camera, Gallery, MAX_TILES, Screen, Share, Wish, cameras_text, sharing_text, tell_wish,
-};
-pub use listen::{
-    Left, Listen, Listening, Person, Phase, Place, Roster, call_title_text, clock, faces,
-    meeting_title_text, quit, status_text, title_text,
 };
 
 /// The call window's side of the app: what it draws from, shared with
@@ -229,10 +229,7 @@ impl CallPicture {
     /// Pixels handed to the textures in the call window's last frame, for
     /// the demo's frame times (`NOSLACKING_DEMO_FRAME_TIMES`).
     pub fn uploaded(&self) -> usize {
-        self.window
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .uploaded
+        crate::sync::lock(&self.window).uploaded
     }
 }
 
@@ -516,7 +513,10 @@ pub fn handle(app: &mut App, team: &str, event: people::Event) -> Option<people:
                         .find(|w| w.info.team_id == team)
                         .map(|w| w.user_label(&invite.from))
                         .unwrap_or_default();
-                    app.toast(tf("Missed call from {name}", &[("name", &name)]), false);
+                    app.toast(
+                        tf("Missed call from {name}", &[("name", &name)]),
+                        Tone::Info,
+                    );
                 }
             }
             None
@@ -597,7 +597,7 @@ pub fn handle(app: &mut App, team: &str, event: people::Event) -> Option<people:
                         "Could not decline the huddle: {error}",
                         &[("error", &error.message())],
                     ),
-                    true,
+                    Tone::Error,
                 );
             }
             None

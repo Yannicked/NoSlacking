@@ -6,6 +6,13 @@
 use std::cmp::Ordering;
 use std::path::PathBuf;
 
+/// The worker's connection and sign-in states, which views show as they
+/// are.
+pub use crate::backend::{SignIn, Socket};
+/// Whether a URL is a Slack file, which loads with the workspace's
+/// sign-in.
+pub use crate::slack::client::is_slack_file_url;
+
 /// A Slack message timestamp: `"1700000000.123456"`. Unique per conversation
 /// and ordered by time. Optimistic messages carry `local-<n>` until Slack
 /// answers, and sort after every real one.
@@ -16,6 +23,23 @@ pub struct Ts(pub String);
 impl Ts {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
+    }
+
+    /// `text` as a timestamp if it has a real one's shape, digits, a dot,
+    /// digits, as in a link or a query someone could have mangled.
+    pub fn parse(text: &str) -> Option<Ts> {
+        let (secs, micros) = text.split_once('.')?;
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        (digits(secs) && digits(micros)).then(|| Ts::new(text))
+    }
+
+    /// Seconds since the epoch and the microseconds past them, for a real
+    /// timestamp; `None` for a local or malformed one.
+    pub fn parts(&self) -> Option<(u64, u64)> {
+        match self.key() {
+            Key::Real(secs, micros) => Some((secs, micros)),
+            _ => None,
+        }
     }
 
     pub fn as_str(&self) -> &str {
@@ -1240,7 +1264,7 @@ pub fn new_client_msg_id() -> String {
     // The version and variant bits that make it a version 4 UUID.
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let hex = crate::text::hex(&bytes);
     format!(
         "{}-{}-{}-{}-{}",
         &hex[..8],
@@ -1264,6 +1288,12 @@ impl Message {
             KitBlock::RichText(blocks) => Some(blocks),
             _ => None,
         })
+    }
+
+    /// The thread this message starts or is in: its parent's timestamp,
+    /// or its own for a message with no thread yet.
+    pub fn thread_root(&self) -> &Ts {
+        self.thread_ts.as_ref().unwrap_or(&self.ts)
     }
 
     /// Whether this is a reply inside a thread (not the parent).
@@ -1558,15 +1588,13 @@ pub enum Action {
     PickEmoji {
         draft: String,
     },
+    /// Opens your message for editing in place.
     StartEdit {
         channel: String,
         ts: Ts,
-    },
-    /// Like `StartEdit`, in the thread panel: a thread's parent shows in
-    /// both panels, and only one of them gets the edit field.
-    StartEditInThread {
-        channel: String,
-        ts: Ts,
+        /// In the thread panel: a thread's parent shows in both panels,
+        /// and only one of them gets the edit field.
+        in_thread: bool,
     },
     CancelEdit,
     /// Edits your newest message in the open conversation.
@@ -2292,6 +2320,28 @@ mod tests {
             ..preview("a", None, None)
         };
         assert_eq!(cut.shown(8).1, More::Unknown);
+    }
+
+    #[test]
+    fn only_real_timestamps_parse() {
+        assert_eq!(
+            Ts::parse("1700000000.000100"),
+            Some(Ts::new("1700000000.000100"))
+        );
+        for bad in ["", "1700000000", "1700000000.", ".5", "17x.5", "local-3"] {
+            assert_eq!(Ts::parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn timestamps_split_into_seconds_and_micros() {
+        assert_eq!(
+            Ts::new("1700000000.000100").parts(),
+            Some((1_700_000_000, 100))
+        );
+        assert_eq!(Ts::new("12.5").parts(), Some((12, 500_000)));
+        assert_eq!(Ts::new("local-3").parts(), None);
+        assert_eq!(Ts::new("12.x").parts(), None);
     }
 
     #[test]

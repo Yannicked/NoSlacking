@@ -56,8 +56,24 @@ pub enum Page {
 
 pub struct Toast {
     pub text: String,
-    pub error: bool,
+    pub tone: Tone,
     pub until: Instant,
+}
+
+/// What a toast says: news, or a failure (shown in red, and logged).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    /// Done, or worth knowing.
+    Info,
+    /// Something failed.
+    Error,
+}
+
+impl Tone {
+    /// [`Tone::Error`] for a failure, [`Tone::Info`] otherwise.
+    pub fn error_if(error: bool) -> Self {
+        if error { Self::Error } else { Self::Info }
+    }
 }
 
 /// What the emoji picker adds to.
@@ -711,15 +727,16 @@ impl App {
         keys
     }
 
-    pub fn toast(&mut self, text: impl Into<String>, error: bool) {
+    /// Shows `text` for a few seconds at the foot of the window.
+    pub fn toast(&mut self, text: impl Into<String>, tone: Tone) {
         let text = text.into();
-        if error {
+        if tone == Tone::Error {
             log::warn!("{text}");
         }
         self.toasts.retain(|t| t.text != text);
         self.toasts.push(Toast {
             text,
-            error,
+            tone,
             until: Instant::now() + TOAST_FOR,
         });
         self.waker.wake_after(TOAST_FOR);
@@ -734,6 +751,22 @@ impl App {
 
     pub fn settings_changed(&mut self) {
         self.save_settings();
+    }
+
+    /// Sets the setting `field` picks to `value` and saves the settings,
+    /// if that changes it; whether it did.
+    pub fn update_setting<T: PartialEq>(
+        &mut self,
+        field: impl FnOnce(&mut crate::settings::Settings) -> &mut T,
+        value: T,
+    ) -> bool {
+        let slot = field(&mut self.settings);
+        if *slot == value {
+            return false;
+        }
+        *slot = value;
+        self.settings_changed();
+        true
     }
 
     /// Notices drafts that changed since the last frame and writes them
@@ -1106,10 +1139,10 @@ impl App {
     fn copy_image_frame(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.copied.inbox.try_recv() {
             match result {
-                Ok(()) => self.toast(t("Image copied").into_owned(), false),
+                Ok(()) => self.toast(t("Image copied").into_owned(), Tone::Info),
                 Err(error) => self.toast(
                     tf("Could not copy the image: {error}", &[("error", &error)]),
-                    true,
+                    Tone::Error,
                 ),
             }
         }
@@ -1150,7 +1183,7 @@ impl App {
                     let error = error.to_string();
                     self.toast(
                         tf("Could not copy the image: {error}", &[("error", &error)]),
-                        true,
+                        Tone::Error,
                     );
                 }
             }
@@ -1211,10 +1244,7 @@ impl App {
             Action::ShowShortcuts => self.shortcuts = true,
             Action::SetAppearance(appearance) => self.set_appearance(appearance),
             Action::HideInactive(after) => {
-                if after != self.settings.hide_inactive {
-                    self.settings.hide_inactive = after;
-                    self.settings_changed();
-                }
+                self.update_setting(|s| &mut s.hide_inactive, after);
             }
             Action::HideSettings => {
                 self.page = if self.workspaces.is_empty() {
@@ -1233,13 +1263,20 @@ impl App {
             Action::Edit { channel, ts, text } => self.edit(channel, ts, text),
             Action::Delete { channel, ts } => self.delete(channel, ts),
             Action::React { channel, ts, name } => self.react(&channel, &ts, &name),
-            Action::StartEdit { channel, ts } => self.start_edit(channel, ts, false),
-            Action::StartEditInThread { channel, ts } => self.start_edit(channel, ts, true),
+            Action::StartEdit {
+                channel,
+                ts,
+                in_thread,
+            } => self.start_edit(channel, ts, in_thread),
             Action::CancelEdit => self.editing = None,
             Action::EditLast => {
                 if let Some((channel, ts)) = self.active_workspace().and_then(|w| w.last_editable())
                 {
-                    self.actions.push(Action::StartEdit { channel, ts });
+                    self.actions.push(Action::StartEdit {
+                        channel,
+                        ts,
+                        in_thread: false,
+                    });
                 }
             }
             Action::Upload {
@@ -1266,7 +1303,7 @@ impl App {
             Action::OpenFile { url, name } => {
                 if let Some(team) = self.active_team() {
                     // Fetching a video can take a while; say it started.
-                    self.toast(tf("Opening {name}…", &[("name", &name)]), false);
+                    self.toast(tf("Opening {name}…", &[("name", &name)]), Tone::Info);
                     self.backend.send(Command::OpenFile { team, url, name });
                 }
             }
@@ -1381,7 +1418,7 @@ impl App {
                     let error = error.to_string();
                     self.toast(
                         tf("Could not open the folder: {error}", &[("error", &error)]),
-                        true,
+                        Tone::Error,
                     );
                 }
             }
@@ -1407,7 +1444,7 @@ impl App {
             } => self.share_to(&channel, &ts, thread.as_ref(), to, &comment),
             Action::Copy(text) => {
                 ctx.copy_text(text);
-                self.toast(t("Copied").into_owned(), false);
+                self.toast(t("Copied").into_owned(), Tone::Info);
             }
             // Accounts and sign-in.
             Action::AddWorkspace => {
@@ -1762,12 +1799,12 @@ impl App {
             // A link into a signed-in workspace opens here.
         } else if !mrkdwn::is_openable(url) {
             // Attachments and blocks carry URLs a bot chose.
-            self.toast(t("Only web and mail links can be opened"), true);
+            self.toast(t("Only web and mail links can be opened"), Tone::Error);
         } else if let Err(error) = open::that_detached(url) {
             let error = error.to_string();
             self.toast(
                 tf("Could not open the link: {error}", &[("error", &error)]),
-                true,
+                Tone::Error,
             );
         }
     }
@@ -1865,14 +1902,14 @@ impl App {
             .active_workspace()
             .and_then(|w| crate::links::permalink(&w.info.domain, channel, ts, thread));
         let Some(link) = link else {
-            self.toast(t("This message has no link yet"), true);
+            self.toast(t("This message has no link yet"), Tone::Error);
             return;
         };
         if let Err(error) = open::that_detached(&link) {
             let error = error.to_string();
             self.toast(
                 tf("Could not open the link: {error}", &[("error", &error)]),
-                true,
+                Tone::Error,
             );
         }
     }
@@ -1885,9 +1922,9 @@ impl App {
         match link {
             Some(link) => {
                 ctx.copy_text(link);
-                self.toast(t("Link copied"), false);
+                self.toast(t("Link copied"), Tone::Info);
             }
-            None => self.toast(t("This message has no link yet"), true),
+            None => self.toast(t("This message has no link yet"), Tone::Error),
         }
     }
 

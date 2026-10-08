@@ -48,10 +48,7 @@ pub fn settings_group(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             );
         });
     });
-    if hooks != app.settings.hooks {
-        app.settings.hooks = hooks;
-        app.settings_changed();
-    }
+    app.update_setting(|s| &mut s.hooks, hooks);
 }
 
 /// One hook: its command line, what it runs for, and a way to remove it.

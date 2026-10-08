@@ -629,14 +629,14 @@ msgid_plural "{count} days ago"
 msgstr[0] "{count} dag geleden"
 msgstr[1] "{count} dagen geleden"
 
-msgid "Could not change the reaction"
-msgstr "De reactie kon niet worden gewijzigd"
+msgid "Could not change the reaction: {error}"
+msgstr "De reactie kon niet worden gewijzigd: {error}"
 
-msgid "Could not delete the message"
-msgstr "Het bericht kon niet worden verwijderd"
+msgid "Could not delete the message: {error}"
+msgstr "Het bericht kon niet worden verwijderd: {error}"
 
-msgid "Could not edit the message"
-msgstr "Het bericht kon niet worden bewerkt"
+msgid "Could not edit the message: {error}"
+msgstr "Het bericht kon niet worden bewerkt: {error}"
 
 msgid "Sign in with the link"
 msgstr "Inloggen met de link"
@@ -3065,6 +3065,9 @@ msgstr "Een vergader-ID heeft een wachtwoordcode nodig."
 msgid "Admit"
 msgstr "Toelaten"
 
+msgid "Letting in…"
+msgstr "Bezig met toelaten…"
+
 msgid "Copy the link others join the meeting with"
 msgstr "De link kopiëren waarmee anderen aan de vergadering deelnemen"
 
@@ -3121,3 +3124,19 @@ msgstr "er is geen vergadering met die link, of met die ID en wachtwoordcode"
 
 msgid "{name} is waiting in the lobby"
 msgstr "{name} wacht in de lobby"
+
+# Starting at login and handling links.
+msgid "there is no home folder"
+msgstr "er is geen thuismap"
+
+msgid "inside Flatpak, add NoSlacking to your desktop's startup apps"
+msgstr "voeg NoSlacking binnen Flatpak toe aan de opstart-apps van je bureaublad"
+
+msgid "this system cannot start apps at login"
+msgstr "dit systeem kan geen apps starten bij het inloggen"
+
+msgid "this system cannot hand links to NoSlacking yet"
+msgstr "dit systeem kan nog geen links aan NoSlacking doorgeven"
+
+msgid "{tool} did not succeed"
+msgstr "{tool} is niet gelukt"

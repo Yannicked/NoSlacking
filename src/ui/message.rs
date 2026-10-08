@@ -16,10 +16,12 @@ mod files;
 mod menu;
 mod player;
 mod quote;
+mod verb;
 
 use cards::{attachment_media, attachment_view, blocks_view, kit_image_size};
 use files::{card_height, file_view, poster_size, thumb_size};
 use menu::{context_id, context_menu, toolbar};
+pub(crate) use verb::{Subject, Verb};
 
 pub struct Row<'a> {
     pub palette: &'a Palette,
@@ -43,6 +45,18 @@ pub struct Look {
     pub density: Density,
     /// Whether pictures and previews show at once, or wait for a click.
     pub inline_media: bool,
+}
+
+impl<'a> Row<'a> {
+    /// `message` in this row's list, for what can be done to it.
+    pub(crate) fn subject(&self, message: &'a Message) -> Subject<'a> {
+        Subject {
+            workspace: self.workspace,
+            channel: self.channel,
+            message,
+            in_thread: self.in_thread,
+        }
+    }
 }
 
 impl Look {
@@ -440,13 +454,10 @@ fn compact_lead(
             ))
             .layout(Layout::left_to_right(Align::Center)),
     );
-    let response = column
-        .add(
-            egui::Label::new(RichText::new(&name).font(theme::bold(13.5)).color(color))
-                .truncate()
-                .sense(Sense::click()),
-        )
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let response = theme::link_label(
+        &mut column,
+        egui::Label::new(RichText::new(&name).font(theme::bold(13.5)).color(color)).truncate(),
+    );
     if response.clicked()
         && let Some(user) = &message.user
     {
@@ -460,16 +471,14 @@ fn header(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let name = row.workspace.author(message);
-        let response = ui
-            .add(
-                egui::Label::new(
-                    RichText::new(&name)
-                        .font(theme::bold(14.5))
-                        .color(palette.text),
-                )
-                .sense(Sense::click()),
-            )
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let response = theme::link_label(
+            ui,
+            egui::Label::new(
+                RichText::new(&name)
+                    .font(theme::bold(14.5))
+                    .color(palette.text),
+            ),
+        );
         if response.clicked()
             && let Some(user) = &message.user
         {
@@ -544,10 +553,7 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
         let text = RichText::new(t("replied to a thread"))
             .font(theme::regular(12.0))
             .color(palette.secondary);
-        if ui
-            .add(egui::Label::new(text).sense(Sense::click()))
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked()
+        if theme::link_label(ui, egui::Label::new(text)).clicked()
             && let Some(parent) = &message.thread_ts
         {
             actions.push(Action::OpenThread {
@@ -567,17 +573,15 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
                     .font(theme::regular(12.5))
                     .color(palette.danger),
             );
-            if ui
-                .add(
-                    egui::Label::new(
-                        RichText::new(t("Retry"))
-                            .font(theme::semibold(12.5))
-                            .color(palette.link),
-                    )
-                    .sense(Sense::click()),
-                )
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked()
+            if theme::link_label(
+                ui,
+                egui::Label::new(
+                    RichText::new(t("Retry"))
+                        .font(theme::semibold(12.5))
+                        .color(palette.link),
+                ),
+            )
+            .clicked()
             {
                 actions.push(Action::Retry {
                     channel: row.channel.to_owned(),

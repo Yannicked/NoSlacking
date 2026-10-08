@@ -778,7 +778,7 @@ impl TeamsClient {
         format!(
             "{}/v1/users/ME/conversations/{}",
             self.chat_service_url(),
-            percent_encoding::utf8_percent_encode(chat_id, percent_encoding::NON_ALPHANUMERIC)
+            crate::percent::encode_strict(chat_id)
         )
     }
 
@@ -826,7 +826,7 @@ impl TeamsClient {
             None => format!(
                 "{}/v1/users/ME/conversations/{}/messages?pageSize={}",
                 base,
-                percent_encoding::utf8_percent_encode(chat_id, percent_encoding::NON_ALPHANUMERIC),
+                crate::percent::encode_strict(chat_id),
                 limit
             ),
         };
@@ -874,7 +874,7 @@ impl TeamsClient {
         let url = format!(
             "{}/v1/threads/{}?view=msnp24Equivalent",
             self.chat_service_url(),
-            percent_encoding::utf8_percent_encode(chat_id, percent_encoding::NON_ALPHANUMERIC)
+            crate::percent::encode_strict(chat_id)
         );
         let resp = self
             .authed_skype_request(|http, token| {
@@ -1066,10 +1066,7 @@ impl TeamsClient {
         let team = self
             .team_of_channel(channel)
             .ok_or_else(|| Failure::Unexpected("the channel's team is not known".into()))?;
-        let encode = |id: &str| {
-            percent_encoding::utf8_percent_encode(id, percent_encoding::NON_ALPHANUMERIC)
-                .to_string()
-        };
+        let encode = |id: &str| crate::percent::encode_strict(id).to_string();
         let url = format!(
             "{CSA_URL}/containers/{}/posts?modality=post&pageSize={limit}&teamId={}&filterSystemMessage=true",
             encode(channel),
@@ -1091,10 +1088,7 @@ impl TeamsClient {
         let team = self
             .team_of_channel(channel)
             .ok_or_else(|| Failure::Unexpected("the channel's team is not known".into()))?;
-        let encode = |id: &str| {
-            percent_encoding::utf8_percent_encode(id, percent_encoding::NON_ALPHANUMERIC)
-                .to_string()
-        };
+        let encode = |id: &str| crate::percent::encode_strict(id).to_string();
         let url = format!(
             "{CSA_URL}/teams/{}/channels/{}/posts/{post}/replies?pageSize={limit}",
             encode(&team),
@@ -1826,7 +1820,7 @@ impl TeamsClient {
         for id in ids {
             let url = format!(
                 "https://graph.microsoft.com/v1.0/users/{}?$select=id,displayName,userPrincipalName,mail",
-                percent_encoding::utf8_percent_encode(id, percent_encoding::NON_ALPHANUMERIC)
+                crate::percent::encode_strict(id)
             );
             let resp = self
                 .bearer(RESOURCE_GRAPH, |http, token| {

@@ -129,12 +129,9 @@ impl Command {
 /// The choice of "Hide inactive conversations" after `now`, round again
 /// to Off after the longest.
 pub fn next_hide(now: HideInactive) -> HideInactive {
-    match now {
-        HideInactive::Off => HideInactive::Week,
-        HideInactive::Week => HideInactive::Month,
-        HideInactive::Month => HideInactive::ThreeMonths,
-        HideInactive::ThreeMonths => HideInactive::Off,
-    }
+    let all = HideInactive::ALL;
+    let at = all.iter().position(|h| *h == now).unwrap_or(0);
+    all[(at + 1) % all.len()]
 }
 
 /// The command search in what was typed in the switcher, if it is one:

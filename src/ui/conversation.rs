@@ -4,11 +4,12 @@
 use egui::{Align, CornerRadius, Margin, RichText, Stroke, Vec2};
 
 use super::composer::{self, Composer};
+use super::jump::Steer;
 use super::message::{self, Lead, Row};
 use super::rows;
 use crate::app::App;
-use crate::backend::Socket;
 use crate::i18n::{t, tf};
+use crate::model::Socket;
 use crate::model::{Ability, Action, ConversationKind, Ts};
 use crate::theme::{self, Icon};
 
@@ -75,102 +76,108 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
     let popped_out = popouts
         .iter()
         .any(|p| p.team == workspace.info.team_id && p.channel == conversation.id);
-    let inset = theme::titlebar_inset(ui.ctx());
-    egui::Panel::top("conversation-header")
-        .exact_size(52.0 + inset)
-        .show_separator_line(false)
-        .frame(
-            egui::Frame::new()
-                .fill(palette.window)
-                .inner_margin(Margin {
-                    left: 20,
-                    right: 12,
-                    top: inset as i8,
-                    bottom: 0,
-                }),
-        )
-        .show(ui, |ui| {
-            let rect = ui.max_rect();
-            ui.painter().hline(
-                rect.x_range(),
-                rect.bottom() - 0.5,
-                Stroke::new(1.0, palette.outline),
+    theme::pane_header(
+        ui,
+        &palette,
+        "conversation-header",
+        palette.window,
+        [20, 12],
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let title = workspace.title(conversation);
+            match conversation.kind {
+                ConversationKind::Channel => {
+                    let (icon, _) = ui.allocate_exact_size(Vec2::splat(17.0), egui::Sense::hover());
+                    Icon::Hash.image(palette.secondary, 17.0).paint_at(ui, icon);
+                }
+                ConversationKind::Private => {
+                    let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
+                    Icon::Lock.image(palette.secondary, 16.0).paint_at(ui, icon);
+                }
+                ConversationKind::Direct => {
+                    let user = conversation
+                        .user
+                        .as_deref()
+                        .and_then(|id| workspace.user(id));
+                    let avatar = super::avatar(
+                        ui,
+                        user.and_then(|u| u.avatar.as_deref()),
+                        &title,
+                        conversation.user.as_deref().unwrap_or(&title),
+                        22.0,
+                    );
+                    let presence = conversation
+                        .user
+                        .as_deref()
+                        .and_then(|id| workspace.people.presence(id));
+                    super::people::dot(
+                        ui.painter(),
+                        &palette,
+                        avatar.rect,
+                        presence,
+                        palette.window,
+                    );
+                    if let Some(presence) = presence {
+                        avatar.on_hover_text(super::people::word(presence));
+                    }
+                }
+                ConversationKind::Group => {
+                    let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
+                    let kind = if workspace.is_meeting(conversation) {
+                        Icon::Video
+                    } else {
+                        Icon::Users
+                    };
+                    kind.image(palette.secondary, 16.0).paint_at(ui, icon);
+                }
+            }
+            // A Teams channel's team first, dimmed: every team has a
+            // General.
+            if let Some(team) = workspace.team_of(&conversation.id) {
+                ui.label(
+                    RichText::new(format!("{team} ›"))
+                        .font(theme::regular(15.0))
+                        .color(palette.dim),
+                );
+            }
+            let name = theme::link_label(
+                ui,
+                egui::Label::new(
+                    RichText::new(&title)
+                        .font(theme::bold(17.0))
+                        .color(palette.text),
+                ),
             );
-            ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let title = workspace.title(conversation);
-                match conversation.kind {
-                    ConversationKind::Channel => {
-                        let (icon, _) = ui.allocate_exact_size(Vec2::splat(17.0), egui::Sense::hover());
-                        Icon::Hash.image(palette.secondary, 17.0).paint_at(ui, icon);
-                    }
-                    ConversationKind::Private => {
-                        let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
-                        Icon::Lock.image(palette.secondary, 16.0).paint_at(ui, icon);
-                    }
-                    ConversationKind::Direct => {
-                        let user = conversation.user.as_deref().and_then(|id| workspace.user(id));
-                        let avatar = super::avatar(
-                            ui,
-                            user.and_then(|u| u.avatar.as_deref()),
-                            &title,
-                            conversation.user.as_deref().unwrap_or(&title),
-                            22.0,
-                        );
-                        let presence = conversation.user.as_deref().and_then(|id| workspace.people.presence(id));
-                        super::people::dot(ui.painter(), &palette, avatar.rect, presence, palette.window);
-                        if let Some(presence) = presence {
-                            avatar.on_hover_text(super::people::word(presence));
-                        }
-                    }
-                    ConversationKind::Group => {
-                        let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
-                        let kind = if workspace.is_meeting(conversation) { Icon::Video } else { Icon::Users };
-                        kind.image(palette.secondary, 16.0).paint_at(ui, icon);
-                    }
-                }
-                // A Teams channel's team first, dimmed: every team has a
-                // General.
-                if let Some(team) = workspace.team_of(&conversation.id) {
-                    ui.label(
-                        RichText::new(format!("{team} ›"))
-                            .font(theme::regular(15.0))
-                            .color(palette.dim),
-                    );
-                }
-                let name = ui
-                    .add(
-                        egui::Label::new(
-                            RichText::new(&title)
-                                .font(theme::bold(17.0))
-                                .color(palette.text),
-                        )
-                        .sense(egui::Sense::click()),
+            if crate::people::is_external_conversation(workspace, conversation) {
+                super::people::external_tag(
+                    ui,
+                    &palette,
+                    conversation.kind == ConversationKind::Direct,
+                );
+            }
+            if name.clicked()
+                && let Some(user) = &conversation.user
+            {
+                actions.push(Action::OpenProfile(user.clone()));
+            } else if name.clicked() && offers(Ability::Details) {
+                actions.push(super::browse::details(
+                    &conversation.id,
+                    crate::convos::Tab::About,
+                ));
+            }
+            if !conversation.topic.is_empty() {
+                ui.add_space(8.0);
+                let topic = crate::mrkdwn::plain(&conversation.topic, |_| None);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(topic)
+                            .font(theme::regular(13.0))
+                            .color(palette.secondary),
                     )
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                if crate::people::is_external_conversation(workspace, conversation) {
-                    super::people::external_tag(ui, &palette, conversation.kind == ConversationKind::Direct);
-                }
-                if name.clicked()
-                    && let Some(user) = &conversation.user
-                {
-                    actions.push(Action::OpenProfile(user.clone()));
-                } else if name.clicked() && offers(Ability::Details) {
-                    actions.push(super::browse::details(&conversation.id, crate::convos::Tab::About));
-                }
-                if !conversation.topic.is_empty() {
-                    ui.add_space(8.0);
-                    let topic = crate::mrkdwn::plain(&conversation.topic, |_| None);
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(topic)
-                                .font(theme::regular(13.0))
-                                .color(palette.secondary),
-                        )
-                        .truncate(),
-                    );
-                }
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    .truncate(),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     let tip = tf("Search ({shortcut})", &[("shortcut", &super::keys::command("F"))]);
                     if offers(Ability::Search) && theme::icon_button(ui, &palette, Icon::Search, 17.0, &tip).clicked() {
                         actions.push(Action::OpenSearch);
@@ -207,7 +214,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                             .on_hover_text(t("No live connection: new messages in this conversation are fetched every few seconds."));
                         }
                         Socket::Connecting => {
-                            ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
+                            ui.add(theme::spinner(&palette, 14.0));
                             ui.label(RichText::new(t("Connecting…")).font(theme::regular(12.0)).color(palette.dim));
                         }
                         Socket::Disconnected(reason) | Socket::Rejected(reason) => {
@@ -225,16 +232,11 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                     if let Some(members) = conversation.members
                         && !conversation.kind.is_dm()
                     {
-                        let count = ui
-                            .add(
-                                egui::Label::new(
+                        let count = theme::link_label(ui, egui::Label::new(
                                     RichText::new(crate::i18n::tn("{count} member", "{count} members", members))
                                         .font(theme::regular(12.5))
                                         .color(palette.dim),
-                                )
-                                .sense(egui::Sense::click()),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                ));
                         if count.clicked() && offers(Ability::Details) {
                             actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Members));
                         }
@@ -281,8 +283,8 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                         actions,
                     );
                 });
-            });
-        });
+        },
+    );
 }
 
 fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
@@ -349,15 +351,7 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
                 channel_name: None,
                 uploads: transfers,
             };
-            let before = taken.draft.text.clone();
-            composer::show(ui, &composer, &mut taken.draft, actions);
-            if crate::people::is_typing(&before, &taken.draft.text) {
-                actions.push(Action::People(crate::people::Action::Typing {
-                    channel: channel.to_owned(),
-                    thread: None,
-                }));
-            }
-            super::people::typing(ui, &palette, workspace, channel, None);
+            composer::with_typing(ui, &composer, channel, &mut taken.draft, actions);
         });
     app.drafts.put_back(key, taken);
 }
@@ -389,9 +383,8 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     let timeline = workspace.timelines.get(channel);
     // A message being brought into view here: it steers the list, so the
     // end of the list must not pull the view down meanwhile.
-    let now = std::time::Instant::now();
-    let jump = jumps.iter().find(|j| j.list == scroll_key).cloned();
-    let steering = jump.as_ref().is_some_and(crate::jump::Jump::steering);
+    let steer = Steer::of(jumps, &scroll_key);
+    let steering = steer.steering();
     let to_bottom = to_bottom && !steering;
     // A list of older history has no end to hold on to.
     let detached = timeline.is_some_and(|t| t.has_newer);
@@ -413,21 +406,17 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         .as_ref()
         .filter(|line| line.list == scroll_key)
         .and_then(|line| line.read.clone());
-    // Heights of the rows as last drawn: only the rows in and near the
-    // view are laid out, the rest are placed by these.
+    // Only the rows in and near the view are laid out; the rest are
+    // placed by the heights they were last drawn at.
     let heights_id = egui::Id::new(("row-heights", &scroll_key));
-    let mut heights: rows::Heights = ui
-        .data_mut(|d| d.remove_temp(heights_id))
-        .unwrap_or_default();
     let look = message::Look::of(settings);
-    heights.for_layout(look.key());
     let mut moved = 0.0;
     let output = area.show_viewport(ui, |ui, viewport| {
         ui.spacing_mut().item_spacing.y = 0.0;
         let Some(timeline) = timeline.filter(|t| t.loaded) else {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
-                ui.add(egui::Spinner::new().size(22.0).color(palette.dim));
+                ui.add(theme::spinner(&palette, 22.0));
             });
             return;
         };
@@ -482,31 +471,12 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
             .iter()
             .map(|item| item.entry(timeline.has_more, look))
             .collect();
-        let plan = rows::plan(
-            entries.iter().map(|entry| heights.planned(entry)),
-            viewport.min.y,
-            viewport.max.y,
-            MARGIN,
-        );
-        heights.sweep();
-        unread_top = items
-            .iter()
-            .position(|item| matches!(item, Item::Message { unread: true, .. }))
-            .map(|index| plan.tops[index]);
-        if let Some(jump) = &jump {
-            target = items
-                .iter()
-                .position(
-                    |item| matches!(item, Item::Message { message, .. } if message.ts == jump.ts),
-                )
-                .map(|index| (plan.tops[index], plan.tops[index + 1]));
-        }
-        let light = jump.as_ref().map_or(0.0, |j| j.light(now));
-        moved = rows::show(
+        let drawn = rows::virtual_list(
             ui,
-            &mut heights,
+            heights_id,
+            look.key(),
+            viewport,
             &entries,
-            &plan,
             |ui, index| match &items[index] {
                 Item::Top => top(ui, workspace, conversation, timeline, &palette, actions),
                 Item::Bottom => bottom_row(ui, timeline, &palette, actions),
@@ -525,12 +495,24 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
                     let background = ui.painter().add(egui::Shape::Noop);
                     let top = ui.cursor().top();
                     message::show(ui, &row, message, *lead, editing, actions);
-                    if light > 0.0 && jump.as_ref().is_some_and(|j| j.ts == message.ts) {
+                    let light = steer.light(&message.ts);
+                    if light > 0.0 {
                         paint_light(ui, background, top, &palette, light);
                     }
                 }
             },
         );
+        moved = drawn.moved;
+        unread_top = items
+            .iter()
+            .position(|item| matches!(item, Item::Message { unread: true, .. }))
+            .map(|index| drawn.tops[index]);
+        if let Some(ts) = steer.ts() {
+            target = items
+                .iter()
+                .position(|item| matches!(item, Item::Message { message, .. } if message.ts == *ts))
+                .map(|index| (drawn.tops[index], drawn.tops[index + 1]));
+        }
         ui.add_space(12.0);
         if to_bottom {
             // Jump, don't glide; the pin below keeps it there as the content
@@ -592,18 +574,9 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
             }
         }
     }
-    if let Some(index) = jumps.iter().position(|j| j.list == scroll_key) {
-        let loading = timeline.is_none_or(|t| t.loading || !t.loaded || t.around.is_some());
-        let view = output.inner_rect.height();
-        let jump = &mut jumps[index];
-        if let Some(wanted) = jump.steer(target, offset, view, bottom, loading, now) {
-            ui.data_mut(|d| d.insert_temp(offset_id, wanted));
-        }
-        if jump.done(now) {
-            jumps.remove(index);
-        } else {
-            ui.ctx().request_repaint();
-        }
+    let loading = timeline.is_none_or(|t| t.loading || !t.loaded || t.around.is_some());
+    if let Some(wanted) = steer.drive(jumps, &scroll_key, target, loading, &output, ui.ctx()) {
+        ui.data_mut(|d| d.insert_temp(offset_id, wanted));
     }
     if steering {
         // The jump moved the view; nothing else may this frame.
@@ -625,7 +598,6 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         ui.data_mut(|d| d.insert_temp(offset_id, kept));
         ui.ctx().request_repaint();
     }
-    ui.data_mut(|d| d.insert_temp(heights_id, heights));
     ui.data_mut(|d| {
         d.insert_temp(pin_id, (pinned, content));
         d.insert_temp(height_id, content);
@@ -655,10 +627,6 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         actions.push(Action::LoadNewer);
     }
 }
-
-/// How far beyond the view rows are still drawn, so they are measured
-/// before they scroll in.
-const MARGIN: f32 = 400.0;
 
 /// A row of the message list.
 enum Item<'a> {
@@ -758,7 +726,7 @@ fn top(
         ui.add_space(12.0);
         ui.vertical_centered(|ui| {
             if timeline.loading {
-                ui.add(egui::Spinner::new().size(18.0).color(palette.dim));
+                ui.add(theme::spinner(palette, 18.0));
             } else if ui
                 .add(
                     egui::Button::new(
@@ -863,7 +831,7 @@ fn bottom_row(
     ui.add_space(12.0);
     ui.vertical_centered(|ui| {
         if timeline.loading {
-            ui.add(egui::Spinner::new().size(18.0).color(palette.dim));
+            ui.add(theme::spinner(palette, 18.0));
         } else if ui
             .add(
                 egui::Button::new(
