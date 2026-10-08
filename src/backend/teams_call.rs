@@ -252,8 +252,9 @@ impl Caller {
     /// meeting's lobby.
     pub fn admit(&mut self, user: &str) {
         if let Some(running) = &self.running {
-            let mri = crate::teams::client::user_mri(user);
-            let _ = running.control.send(Control::Admit(mri));
+            // The call knows their MRI: a guest's is not one the id
+            // could be turned back into.
+            let _ = running.control.send(Control::Admit(user.to_owned()));
         }
     }
 
@@ -298,6 +299,8 @@ impl Caller {
     pub fn set_camera(&mut self, on: bool) {
         if let Some(running) = &self.running {
             let _ = running.camera.send(on);
+            // A meeting forwards it only once told.
+            let _ = running.control.send(Control::Camera(on));
         }
     }
 

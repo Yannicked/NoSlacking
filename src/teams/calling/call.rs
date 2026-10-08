@@ -42,8 +42,13 @@ pub enum Control {
     /// Start (or stop) sending our screen share: a renegotiation of
     /// ours turns the share line on or off (§C.6).
     Share(bool),
-    /// Let the one with this MRI in from the meeting's lobby.
+    /// Let someone in from the meeting's lobby: by their MRI, or the id
+    /// the interface knows them by (the MRI's last part, as for a guest's
+    /// `8:teamsvisitor:…`).
     Admit(String),
+    /// Our camera went on (or off). The media sends it by itself; a
+    /// meeting must be told it is on before it forwards it (§H.8).
+    Camera(bool),
     /// End the call.
     HangUp,
 }
@@ -135,6 +140,14 @@ impl People {
         changed
     }
 
+    /// The MRI of `user`: an MRI listed, or one whose last part is it.
+    fn mri_of(&self, user: &str) -> Option<String> {
+        self.by_mri
+            .keys()
+            .find(|mri| mri.as_str() == user || mri.ends_with(&format!(":{user}")))
+            .cloned()
+    }
+
     /// Everyone, by MRI.
     fn list(&self) -> Vec<Attendee> {
         self.by_mri.values().map(|(_, a)| a.clone()).collect()
@@ -198,6 +211,12 @@ async fn run_meeting(
         me: me.id,
         lobby: false,
         people: People::default(),
+        camera_on: false,
+        // The join's descriptions are the first.
+        request: 1,
+        changes: 0,
+        update_descriptions: None,
+        camera_capabilities: None,
     });
     call.relay = relay_for(client).await;
     let ended = call
@@ -431,6 +450,29 @@ struct InMeeting {
     /// Whether the meeting keeps us in its lobby.
     lobby: bool,
     people: People,
+    /// Whether our camera is on, as the meeting was last told.
+    camera_on: bool,
+    /// The last `mediaDescriptions` number sent.
+    request: u32,
+    /// How many times the video lines' use was changed, for the tag.
+    changes: u32,
+    /// The call leg's links for changing the video lines' use and saying
+    /// what our camera sends.
+    update_descriptions: Option<String>,
+    camera_capabilities: Option<String>,
+}
+
+impl InMeeting {
+    /// Takes in the video links of a call leg, as an acceptance or a
+    /// move to another media server hands them out.
+    fn take_links(&mut self, links: &super::types::AcceptanceLinks) {
+        if let Some(url) = &links.update_media_descriptions {
+            self.update_descriptions = Some(url.clone());
+        }
+        if let Some(url) = &links.apply_channel_parameters {
+            self.camera_capabilities = Some(url.clone());
+        }
+    }
 }
 
 /// Where our screen share's renegotiation stands.
@@ -638,6 +680,7 @@ impl Call {
                         self.offer_share(local).await;
                     }
                     Some(Control::Admit(mri)) => self.admit(&mri).await,
+                    Some(Control::Camera(on)) => self.camera(on).await,
                     // Asked to stop, or whoever steered the call is gone.
                     Some(Control::HangUp) | None => {
                         session.stop();
@@ -863,6 +906,7 @@ impl Call {
                 let lobby = acceptance.is_lobby();
                 if let Some(meeting) = &mut self.meeting {
                     meeting.lobby = lobby;
+                    meeting.take_links(&acceptance.links);
                 }
                 log::info!(
                     "Teams call: {}",
@@ -931,7 +975,12 @@ impl Call {
                 local.session_version += 1;
                 let answer = sdp::answer(local, &remote);
                 let leg = negotiation.media_content.media_leg_id.clone();
-                match self.api.answer_renegotiation(url, &answer, &leg).await {
+                let descriptions = self.next_descriptions(&answer);
+                match self
+                    .api
+                    .answer_renegotiation(url, &answer, &leg, descriptions)
+                    .await
+                {
                     Ok(()) => log::info!("Teams call: renegotiation answered"),
                     Err(error) => log::warn!("Teams call: renegotiation not answered: {error:?}"),
                 }
@@ -946,6 +995,9 @@ impl Call {
                     log::warn!("Teams call: an answer of ours was refused: {error:?}");
                 }
                 // Moved to another media server: its leg from now on.
+                if let Some(meeting) = &mut self.meeting {
+                    meeting.take_links(&links);
+                }
                 if let Some(url) = links.media_renegotiation {
                     log::info!("Teams call: on a new call leg");
                     self.renegotiation = Some(url);
@@ -1128,7 +1180,12 @@ impl Call {
             tell(CallEvent::Admitted);
         }
         let answer = sdp::answer(local, remote);
-        match self.api.answer_renegotiation(url, &answer, &self.leg).await {
+        let descriptions = self.next_descriptions(&answer);
+        match self
+            .api
+            .answer_renegotiation(url, &answer, &self.leg, descriptions)
+            .await
+        {
             Ok(()) => log::info!("Teams call: the new media server's offer answered"),
             Err(error) => {
                 log::warn!("Teams call: the new media server's offer not answered: {error:?}");
@@ -1137,8 +1194,79 @@ impl Call {
         Ok(())
     }
 
-    /// Lets `mri` in from the meeting's lobby.
-    async fn admit(&self, mri: &str) {
+    /// The next `mediaDescriptions` of a meeting, for our SDP `sdp`;
+    /// none outside a meeting.
+    fn next_descriptions(&mut self, sdp: &str) -> Option<serde_json::Value> {
+        let meeting = self.meeting.as_mut()?;
+        meeting.request += 1;
+        Some(super::api::descriptions_for(
+            sdp,
+            meeting.camera_on,
+            meeting.request,
+        ))
+    }
+
+    /// Tells a meeting our camera went on or off (recorded: what it can
+    /// send first, then the camera's line sending and receiving).
+    async fn camera(&mut self, on: bool) {
+        let camera = self
+            .last_remote
+            .as_ref()
+            .and_then(|r| r.camera())
+            .map(|l| l.mid.clone());
+        let share = self
+            .last_remote
+            .as_ref()
+            .and_then(|r| r.share())
+            .map(|l| l.mid.clone());
+        let Some(meeting) = self.meeting.as_mut().filter(|m| m.camera_on != on) else {
+            return;
+        };
+        let Some(mid) = camera else {
+            log::info!("Teams meeting: no camera line to turn on");
+            return;
+        };
+        meeting.camera_on = on;
+        meeting.request += 1;
+        meeting.changes += 1;
+        let descriptions =
+            super::api::media_descriptions(Some(&mid), on, share.as_deref(), meeting.request);
+        let number = meeting.changes;
+        let (update, capabilities) = (
+            meeting.update_descriptions.clone(),
+            meeting.camera_capabilities.clone(),
+        );
+        if on
+            && let Some(url) = capabilities
+            && let Err(error) = self.api.camera_capabilities(&url, &mid).await
+        {
+            log::info!("Teams meeting: the camera's capabilities not taken: {error:?}");
+        }
+        let Some(url) = update else {
+            log::info!("Teams meeting: no way to say the camera is on");
+            return;
+        };
+        match self
+            .api
+            .update_media_descriptions(&url, descriptions, number)
+            .await
+        {
+            Ok(()) => log::info!(
+                "Teams meeting: told our camera is {}",
+                if on { "on" } else { "off" }
+            ),
+            Err(error) => log::warn!("Teams meeting: the camera's change not taken: {error:?}"),
+        }
+    }
+
+    /// Lets `user` (see [`Control::Admit`]) in from the meeting's lobby.
+    async fn admit(&self, user: &str) {
+        let mri = self
+            .meeting
+            .as_ref()
+            .and_then(|m| m.people.mri_of(user))
+            .unwrap_or_else(|| crate::teams::client::user_mri(user));
+        let mri = mri.as_str();
         let Some(url) = self
             .conversation
             .as_ref()
@@ -1319,5 +1447,30 @@ mod tests {
         }
         assert!(people.take(&admitted, "8:live:organizer"));
         assert!(!people.list()[0].waiting);
+    }
+
+    #[test]
+    fn a_guest_is_admitted_by_the_mri_the_roster_gave() {
+        let mut update: RosterUpdate =
+            serde_json::from_str(include_str!("fixtures/roster_lobby.json")).expect("reads");
+        let waiting = update
+            .participants
+            .remove("8:live:waiting")
+            .expect("in the fixture");
+        update
+            .participants
+            .insert("8:teamsvisitor:a1b2c3".into(), waiting);
+        let mut people = People::default();
+        people.take(&update, "8:live:organizer");
+        // The interface knows them by the MRI's last part.
+        assert_eq!(
+            people.mri_of("a1b2c3").as_deref(),
+            Some("8:teamsvisitor:a1b2c3")
+        );
+        assert_eq!(
+            people.mri_of("8:teamsvisitor:a1b2c3").as_deref(),
+            Some("8:teamsvisitor:a1b2c3")
+        );
+        assert_eq!(people.mri_of("someone"), None);
     }
 }

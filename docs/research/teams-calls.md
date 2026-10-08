@@ -1477,3 +1477,32 @@ then a `call/end` push (`CallEndReasonLocalUserInitiated`). No
   not recorded.
 - Whether the second renegotiation always comes, and whether the new
   leg's keep-alive matters within a meeting's length.
+
+### H.8 Video in a meeting (recorded: `teams.live.com5.har`, camera on)
+
+A meeting's media server does not go by the SDP's directions for video.
+It goes by `mediaDescriptions`, which say what each video line is used
+for:
+
+- **On joining** they travel in the `callInvitation`'s `mediaContent`,
+  as `{descriptions: [{mid, direction: "recvonly"}, …], requestId: 1}`.
+  They list every camera line and the share line, as receiving.
+- **In every answer** they come again, `requestId` rising.
+- **When the camera goes on**, two requests follow:
+  1. `POST {applyChannelParameters}` (a call leg link) with
+     `{applyChannelParameters: {multiChannelParameter: {mids: [camera mid],
+     mediaParameter: "{\"maxVideoSendCapabilities\":{\"caps\":{…}}}"}}}`,
+     answered 202.
+  2. `POST {updateMediaDescriptions}` with
+     `{UpdateMediaDescriptions: {mediaDescriptions: {descriptions: [{mid,
+     direction: "sendrecv", label: "main-video"}, …], negotiationTag:
+     "{participantId};v_{n}", requestId}}}`, answered 200.
+
+Without them our camera was sent, but no one saw it, and no one's camera
+reached us. We now send them as the web client does: receive-only on
+joining, and the camera's line sending and receiving while it is on. How
+the server says whose camera comes on a line (`csrcInfo`) has not been
+recorded yet.
+
+A guest who is not signed in has a `8:teamsvisitor:…` MRI. Admitting
+someone sends the MRI the roster listed them by.

@@ -72,6 +72,12 @@ pub struct MediaContent {
     /// The web client's starting bandwidth hint; opaque, sent as recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub apply_channel_parameters: Option<serde_json::Value>,
+    /// In a meeting, which video lines we receive on and send on (see
+    /// [`crate::teams::calling::api::media_descriptions`]): its media
+    /// server sends and forwards video by these, not by the SDP's
+    /// directions (recorded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_descriptions: Option<serde_json::Value>,
     /// Only in what Microsoft sends.
     #[serde(skip_serializing)]
     pub new_offer: bool,
@@ -92,6 +98,7 @@ impl MediaContent {
                     "mediaParameter": "{\"sendSideBWSeed\":{\"seedValueBitsPerSec\":600000}}"
                 }
             })),
+            media_descriptions: None,
             new_offer: false,
         }
     }
@@ -309,6 +316,11 @@ pub struct AcceptanceLinks {
     /// For a renegotiation we start (adding video, later).
     pub media_renegotiation: Option<String>,
     pub acknowledgement: Option<String>,
+    /// In a meeting: where the video lines' use changes (our camera on
+    /// or off).
+    pub update_media_descriptions: Option<String>,
+    /// In a meeting: where what our camera can send is said.
+    pub apply_channel_parameters: Option<String>,
 }
 
 /// `PUT {updateEndpointMetadata}` (A.4).

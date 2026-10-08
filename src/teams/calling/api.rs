@@ -216,6 +216,42 @@ pub fn meeting_data(meeting: &crate::meetings::Meeting) -> serde_json::Value {
     })
 }
 
+/// A meeting's `mediaDescriptions` (§H.8): our camera's line (`camera`,
+/// its mid) sending and receiving while `camera_on`, else receiving only,
+/// and the share's line receiving, numbered `request_id`, which rises with
+/// each.
+pub fn media_descriptions(
+    camera: Option<&str>,
+    camera_on: bool,
+    share: Option<&str>,
+    request_id: u32,
+) -> serde_json::Value {
+    let mut descriptions = Vec::new();
+    if let Some(mid) = camera {
+        descriptions.push(if camera_on {
+            serde_json::json!({"mid": mid, "direction": "sendrecv", "label": "main-video"})
+        } else {
+            serde_json::json!({"mid": mid, "direction": "recvonly"})
+        });
+    }
+    if let Some(mid) = share {
+        descriptions.push(serde_json::json!({"mid": mid, "direction": "recvonly"}));
+    }
+    serde_json::json!({"descriptions": descriptions, "requestId": request_id})
+}
+
+/// The `mediaDescriptions` for an SDP of ours or the far end's: its
+/// camera and share lines, the camera as `camera_on` says.
+pub fn descriptions_for(sdp: &str, camera_on: bool, request_id: u32) -> serde_json::Value {
+    let media = crate::teams::calling::sdp::read(sdp).unwrap_or_default();
+    media_descriptions(
+        media.camera().map(|l| l.mid.as_str()),
+        camera_on,
+        media.share().map(|l| l.mid.as_str()),
+        request_id,
+    )
+}
+
 /// What a meeting's `cpconv` sends (§H.2): first without an offer, a
 /// "preheat" that asks the meeting service for the conversation, then,
 /// to `conversationController`, with our SDP `offer` to join the call.
@@ -273,6 +309,9 @@ pub fn meeting_request(
         body["participants"]["to"] = serde_json::json!([]);
         let mut media_content = MediaContent::ours(offer.to_owned(), ids.media_leg_id.clone());
         media_content.client_location = Some("NL".to_owned());
+        // Receiving on the video lines, the camera off: the meeting
+        // sends video by this (§H.8).
+        media_content.media_descriptions = Some(descriptions_for(offer, false, 1));
         body["callInvitation"] = serde_json::json!({
             "callModalities": crate::teams::calling::sdp::modalities(offer),
             "links": callbacks.links(Scope::Call, CALL_EVENTS),
@@ -688,6 +727,57 @@ impl CallApi {
             .map(drop)
     }
 
+    /// Says what our camera can send, at a meeting call leg's
+    /// `applyChannelParameters` link, before it goes on (recorded).
+    pub async fn camera_capabilities(&self, url: &str, mid: &str) -> Result<(), Failure> {
+        let caps = serde_json::json!({
+            "maxVideoSendCapabilities": {"caps": {
+                "max-width": 1280, "max-height": 1280, "max-fps": 30,
+                "max-streams": 1, "max-layers": 1, "sequence-number": 1,
+            }}
+        });
+        let body = serde_json::json!({
+            "applyChannelParameters": {"multiChannelParameter": {
+                "mids": [mid],
+                "mediaParameter": caps.to_string(),
+            }}
+        });
+        self.send(
+            reqwest::Method::POST,
+            url,
+            Some(body),
+            "say what the camera sends",
+        )
+        .await
+        .map(drop)
+    }
+
+    /// Changes the video lines' use in a meeting, at the call leg's
+    /// `updateMediaDescriptions` link: `descriptions` from
+    /// [`media_descriptions`], tagged with the `number` of the change.
+    pub async fn update_media_descriptions(
+        &self,
+        url: &str,
+        mut descriptions: serde_json::Value,
+        number: u32,
+    ) -> Result<(), Failure> {
+        descriptions["negotiationTag"] = format!(
+            "{};v_{number}",
+            self.me.participant_id.as_deref().unwrap_or_default()
+        )
+        .into();
+        let body =
+            serde_json::json!({"UpdateMediaDescriptions": {"mediaDescriptions": descriptions}});
+        self.send(
+            reqwest::Method::POST,
+            url,
+            Some(body),
+            "change the video lines",
+        )
+        .await
+        .map(drop)
+    }
+
     /// Lets `mri` in from the meeting's lobby, at the conversation's
     /// `admit` link.
     pub async fn admit(&self, url: &str, mri: &str) -> Result<(), Failure> {
@@ -704,8 +794,11 @@ impl CallApi {
         media_answer_url: &str,
         answer: &str,
         media_leg_id: &str,
+        descriptions: Option<serde_json::Value>,
     ) -> Result<(), Failure> {
-        let body = renegotiation_answer(&self.me, &self.ids, &self.callbacks, answer, media_leg_id);
+        let mut body =
+            renegotiation_answer(&self.me, &self.ids, &self.callbacks, answer, media_leg_id);
+        body.media_answer.media_content.media_descriptions = descriptions;
         let body = serde_json::to_value(&body).map_err(|e| Failure::Unexpected(e.to_string()))?;
         self.send(
             reqwest::Method::POST,
@@ -1343,6 +1436,10 @@ mod tests {
         );
         let invitation = &join["callInvitation"];
         assert_eq!(invitation["callModalities"][0], "Audio");
+        assert_eq!(
+            invitation["mediaContent"]["mediaDescriptions"]["requestId"],
+            1
+        );
         assert_eq!(invitation["mediaContent"]["blob"], offer);
         assert_eq!(
             invitation["mediaContent"]["mediaLegId"],
@@ -1379,5 +1476,30 @@ mod tests {
                 .expect("link")
                 .contains("/conversation/admitSuccess")
         );
+    }
+
+    #[test]
+    fn a_meeting_is_told_which_video_lines_receive_and_send() {
+        // As the web client said it on joining, its camera off.
+        let off = media_descriptions(Some("1"), false, Some("11"), 1);
+        assert_eq!(
+            off,
+            serde_json::json!({"descriptions": [
+                {"mid": "1", "direction": "recvonly"},
+                {"mid": "11", "direction": "recvonly"},
+            ], "requestId": 1})
+        );
+        // And once it was on.
+        let on = media_descriptions(Some("1"), true, Some("11"), 2);
+        assert_eq!(on["descriptions"][0]["direction"], "sendrecv");
+        assert_eq!(on["descriptions"][0]["label"], "main-video");
+        assert_eq!(on["requestId"], 2);
+        // An SDP's own lines: the meeting's media server's renumbered ones.
+        let read = descriptions_for(include_str!("fixtures/meeting_retarget.sdp"), false, 3);
+        assert_eq!(read["descriptions"][0]["mid"], "2");
+        assert_eq!(read["descriptions"][1]["mid"], "3");
+        // An audio-only SDP has none.
+        let none = descriptions_for("v=0\r\nm=audio 9 RTP/SAVP 111\r\na=mid:0\r\n", false, 1);
+        assert_eq!(none["descriptions"], serde_json::json!([]));
     }
 }
