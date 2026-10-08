@@ -801,6 +801,15 @@ impl DemoSetup {
                 app.huddles.listening = Some(noslacking::demo::meeting());
                 app.actions.push(Action::OpenConversation("C03".into()));
             }
+            // The same, Admit pressed for Lee: being let in.
+            Some("meeting-admitting") => {
+                let mut meeting = noslacking::demo::meeting();
+                meeting
+                    .admitting
+                    .push(("U06".into(), std::time::Instant::now()));
+                app.huddles.listening = Some(meeting);
+                app.actions.push(Action::OpenConversation("C03".into()));
+            }
             // Calling Bob: the call bar ringing.
             Some("calling") => {
                 app.huddles.listening = Some(noslacking::huddles::Listening {

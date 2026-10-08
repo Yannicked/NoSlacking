@@ -81,6 +81,9 @@ struct Waiting {
     /// The id the interface knows them by, which Admit sends.
     user: String,
     text: String,
+    /// Admit was pressed for them, and they are not in yet: until when
+    /// that shows.
+    admitting: Option<std::time::Instant>,
 }
 
 /// One person as the bar draws them.
@@ -209,9 +212,16 @@ fn gather(
             .filter_map(|person| {
                 let user = person.user.clone()?;
                 let name = label(person, &user);
+                let admitting = listening
+                    .admitting
+                    .iter()
+                    .find(|(who, _)| *who == user)
+                    .map(|(_, at)| *at + huddles::ADMIT_WAIT)
+                    .filter(|_| listening.is_admitting(&user, now));
                 Some(Waiting {
                     text: tf("{name} is waiting in the lobby", &[("name", &name)]),
                     user,
+                    admitting,
                 })
             })
             .collect(),
@@ -458,7 +468,20 @@ fn waiting_row(ui: &mut egui::Ui, palette: &Palette, waiting: &Waiting, actions:
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if small_button(ui, palette, &t("Admit"), Some(ACTIVE_BUTTON))
+            if let Some(until) = waiting.admitting {
+                // Asked: Teams lets them in within seconds, and the roster
+                // then takes them out of the lobby. Admit comes back if
+                // it does not.
+                ui.label(
+                    RichText::new(t("Letting in…"))
+                        .font(theme::medium(13.0))
+                        .color(palette.secondary),
+                );
+                ui.add(egui::Spinner::new().size(12.0).color(palette.secondary));
+                ui.ctx().request_repaint_after(
+                    until.saturating_duration_since(std::time::Instant::now()),
+                );
+            } else if small_button(ui, palette, &t("Admit"), Some(ACTIVE_BUTTON))
                 .on_hover_text(&waiting.text)
                 .clicked()
             {
