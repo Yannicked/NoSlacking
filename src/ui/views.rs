@@ -400,10 +400,6 @@ fn list<R>(
     spec: impl Fn(&R) -> (u64, f32),
     mut draw: impl FnMut(&mut egui::Ui, usize),
 ) {
-    let heights_id = egui::Id::new(("view-heights", salt));
-    let mut heights: rows::Heights = ui
-        .data_mut(|d| d.remove_temp(heights_id))
-        .unwrap_or_default();
     egui::ScrollArea::vertical()
         .id_salt(("view", salt))
         .auto_shrink([false, false])
@@ -416,16 +412,9 @@ fn list<R>(
                     rows::Entry { key, guess }
                 })
                 .collect();
-            let plan = rows::plan(
-                entries.iter().map(|entry| heights.planned(entry)),
-                viewport.min.y,
-                viewport.max.y,
-                400.0,
-            );
-            heights.sweep();
-            rows::show(ui, &mut heights, &entries, &plan, &mut draw);
+            let heights = egui::Id::new(("view-heights", salt));
+            rows::virtual_list(ui, heights, 0, viewport, &entries, &mut draw);
         });
-    ui.data_mut(|d| d.insert_temp(heights_id, heights));
 }
 
 /// A row key from anything hashable.

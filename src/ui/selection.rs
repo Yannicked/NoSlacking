@@ -15,8 +15,9 @@
 
 use egui::{Event, Key, Modifiers};
 
+use super::message::Verb;
 use crate::app::{App, Selected, WorkspaceState};
-use crate::model::{Ability, Action, Delivery, Message};
+use crate::model::{Action, Delivery, Message};
 
 pub fn keys(app: &mut App, ctx: &egui::Context) {
     if let Some(selected) = &mut app.selected {
@@ -82,11 +83,7 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
         return;
     };
     let message = list[index];
-    let mine = message.user.as_deref() == Some(workspace.info.user_id.as_str());
     let channel = selected.channel.clone();
-    let ts = message.ts.clone();
-    let offers = |ability| workspace.info.offers(ability);
-    let mut actions = Vec::new();
     let mut next = Some(selected.clone());
     if up || down {
         match step(&list, index, down) {
@@ -101,53 +98,26 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
             None => {}
         }
     }
-    if react && offers(Ability::Reactions) {
-        actions.push(Action::PickReaction {
-            channel: channel.clone(),
-            ts: ts.clone(),
-        });
-    }
-    if thread && !selected.in_thread && workspace.threads_in(&channel) {
-        actions.push(Action::OpenThread {
-            channel: channel.clone(),
-            ts: message.thread_ts.clone().unwrap_or_else(|| ts.clone()),
-        });
-    }
-    if edit && mine && offers(Ability::Edit) {
-        actions.push(if selected.in_thread {
-            Action::StartEditInThread {
-                channel: channel.clone(),
-                ts: ts.clone(),
-            }
-        } else {
-            Action::StartEdit {
-                channel: channel.clone(),
-                ts: ts.clone(),
-            }
-        });
-    }
-    if delete && mine {
-        actions.push(Action::AskDelete {
-            channel: channel.clone(),
-            ts: ts.clone(),
-        });
-    }
-    if unread && !selected.in_thread && offers(Ability::MarkUnread) {
-        actions.push(Action::MarkUnread {
-            channel: channel.clone(),
-            ts: ts.clone(),
-        });
-    }
-    if copy {
-        actions.push(Action::Copy(super::message::plain_text(workspace, message)));
-    }
-    if share && !ts.is_local() && offers(Ability::Share) {
-        actions.push(Action::Share {
-            channel: channel.clone(),
-            ts: ts.clone(),
-            thread: message.thread_ts.clone(),
-        });
-    }
+    let subject = super::message::Subject {
+        workspace,
+        channel: &channel,
+        message,
+        in_thread: selected.in_thread,
+    };
+    let asked = [
+        (react, Verb::React),
+        (thread, Verb::Reply),
+        (edit, Verb::Edit),
+        (delete, Verb::Delete),
+        (unread, Verb::MarkUnread),
+        (copy, Verb::Copy),
+        (share, Verb::Share),
+    ];
+    let actions: Vec<Action> = asked
+        .into_iter()
+        .filter(|(pressed, verb)| *pressed && verb.available(&subject))
+        .map(|(_, verb)| verb.action(&subject))
+        .collect();
     if escape {
         next = None;
     }

@@ -375,6 +375,27 @@ pub fn field_id(key: &str) -> egui::Id {
     egui::Id::new(("composer", key))
 }
 
+/// [`show`] for the messages of `channel`, with who is typing under it;
+/// Slack hears you are typing whenever the text grows.
+pub fn with_typing(
+    ui: &mut egui::Ui,
+    composer: &Composer<'_>,
+    channel: &str,
+    draft: &mut Draft,
+    actions: &mut Vec<Action>,
+) {
+    let before = draft.text.clone();
+    show(ui, composer, draft, actions);
+    let thread = composer.thread.clone();
+    if crate::people::is_typing(&before, &draft.text) {
+        let channel = channel.to_owned();
+        let typing = crate::people::Action::Typing { channel, thread };
+        actions.push(Action::People(typing));
+    }
+    let (palette, workspace) = (composer.palette, composer.workspace);
+    super::people::typing(ui, palette, workspace, channel, composer.thread.as_ref());
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     composer: &Composer<'_>,

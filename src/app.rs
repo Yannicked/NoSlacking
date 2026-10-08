@@ -753,6 +753,22 @@ impl App {
         self.save_settings();
     }
 
+    /// Sets the setting `field` picks to `value` and saves the settings,
+    /// if that changes it; whether it did.
+    pub fn update_setting<T: PartialEq>(
+        &mut self,
+        field: impl FnOnce(&mut crate::settings::Settings) -> &mut T,
+        value: T,
+    ) -> bool {
+        let slot = field(&mut self.settings);
+        if *slot == value {
+            return false;
+        }
+        *slot = value;
+        self.settings_changed();
+        true
+    }
+
     /// Notices drafts that changed since the last frame and writes them
     /// once typing pauses. Every change moves the drafts' revision, so an
     /// idle frame costs one comparison.
@@ -1228,10 +1244,7 @@ impl App {
             Action::ShowShortcuts => self.shortcuts = true,
             Action::SetAppearance(appearance) => self.set_appearance(appearance),
             Action::HideInactive(after) => {
-                if after != self.settings.hide_inactive {
-                    self.settings.hide_inactive = after;
-                    self.settings_changed();
-                }
+                self.update_setting(|s| &mut s.hide_inactive, after);
             }
             Action::HideSettings => {
                 self.page = if self.workspaces.is_empty() {
@@ -1250,13 +1263,20 @@ impl App {
             Action::Edit { channel, ts, text } => self.edit(channel, ts, text),
             Action::Delete { channel, ts } => self.delete(channel, ts),
             Action::React { channel, ts, name } => self.react(&channel, &ts, &name),
-            Action::StartEdit { channel, ts } => self.start_edit(channel, ts, false),
-            Action::StartEditInThread { channel, ts } => self.start_edit(channel, ts, true),
+            Action::StartEdit {
+                channel,
+                ts,
+                in_thread,
+            } => self.start_edit(channel, ts, in_thread),
             Action::CancelEdit => self.editing = None,
             Action::EditLast => {
                 if let Some((channel, ts)) = self.active_workspace().and_then(|w| w.last_editable())
                 {
-                    self.actions.push(Action::StartEdit { channel, ts });
+                    self.actions.push(Action::StartEdit {
+                        channel,
+                        ts,
+                        in_thread: false,
+                    });
                 }
             }
             Action::Upload {

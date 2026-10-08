@@ -16,10 +16,12 @@ mod files;
 mod menu;
 mod player;
 mod quote;
+mod verb;
 
 use cards::{attachment_media, attachment_view, blocks_view, kit_image_size};
 use files::{card_height, file_view, poster_size, thumb_size};
 use menu::{context_id, context_menu, toolbar};
+pub(crate) use verb::{Subject, Verb};
 
 pub struct Row<'a> {
     pub palette: &'a Palette,
@@ -43,6 +45,18 @@ pub struct Look {
     pub density: Density,
     /// Whether pictures and previews show at once, or wait for a click.
     pub inline_media: bool,
+}
+
+impl<'a> Row<'a> {
+    /// `message` in this row's list, for what can be done to it.
+    pub(crate) fn subject(&self, message: &'a Message) -> Subject<'a> {
+        Subject {
+            workspace: self.workspace,
+            channel: self.channel,
+            message,
+            in_thread: self.in_thread,
+        }
+    }
 }
 
 impl Look {

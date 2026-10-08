@@ -491,6 +491,7 @@ impl Setup {
             app.actions.push(Action::StartEdit {
                 channel: "C02".into(),
                 ts,
+                in_thread: false,
             });
         }
         if let Some(ts) = self.image.take_if(|ts| arrived(app, ts)) {

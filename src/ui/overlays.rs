@@ -749,10 +749,7 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                     }
                 });
         });
-    if tone != app.settings.skin_tone {
-        app.settings.skin_tone = tone;
-        app.settings_changed();
-    }
+    app.update_setting(|s| &mut s.skin_tone, tone);
     if close || response.should_close() {
         app.picker = None;
     }
