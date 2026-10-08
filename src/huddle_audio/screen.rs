@@ -374,9 +374,14 @@ fn next(jobs: &Jobs) -> Option<Job> {
     }
 }
 
+/// How many of the first frames' outcomes are logged.
+const FIRST_TOLD: u32 = 5;
+
 /// What the decoder did since its timings were last logged.
 #[derive(Default)]
 struct Timings {
+    /// How many outcomes were logged one by one.
+    told: u32,
     since: Option<Instant>,
     pictures: u32,
     decoding: Duration,
@@ -443,6 +448,19 @@ fn show(
     started: Instant,
     timings: &mut Timings,
 ) {
+    // What the first frames come to, which the timings leave out while
+    // nothing decodes.
+    if timings.told < FIRST_TOLD {
+        timings.told += 1;
+        let what = match &decoded {
+            Ok(decode::Outcome::Picture(_)) => "a picture".to_owned(),
+            Ok(decode::Outcome::Kept) => "kept back".to_owned(),
+            Ok(decode::Outcome::Unchanged) => "unchanged".to_owned(),
+            Ok(decode::Outcome::Nothing) => "nothing".to_owned(),
+            Err(trouble) => format!("{trouble}"),
+        };
+        log::info!("video: the share's decoder: {what}");
+    }
     let took = started.elapsed();
     match decoded {
         Ok(Outcome::Picture(picture)) => {

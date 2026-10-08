@@ -291,7 +291,7 @@ impl ParameterSets {
                     if self.sps.as_deref() != Some(*nal) {
                         if let Some(sps) = parse_sps(nal) {
                             log::info!(
-                                "video: the far end's stream is {}x{}, {} level {}",
+                                "video: the far end's stream on a line is {}x{}, {} level {}",
                                 sps.width,
                                 sps.height,
                                 sps.profile(),
@@ -543,7 +543,10 @@ impl CallVideo {
             && ours(ssrc)
             && self.seen.insert(ssrc)
         {
-            log::info!("video: the far end's camera comes on SSRC {ssrc}");
+            log::info!(
+                "video: {}: the far end's stream comes on SSRC {ssrc}",
+                self.name()
+            );
             rtc.direct_api()
                 .expect_stream_rx(ssrc.into(), None, self.mid, None);
             self.pair_rtx(rtc);
@@ -553,7 +556,10 @@ impl CallVideo {
             && ours(ssrc)
             && self.seen_rtx.insert(ssrc)
         {
-            log::info!("video: the far end resends lost packets on SSRC {ssrc}");
+            log::info!(
+                "video: {}: the far end resends lost packets on SSRC {ssrc}",
+                self.name()
+            );
             self.pair_rtx(rtc);
         }
     }
@@ -590,7 +596,8 @@ impl CallVideo {
         self.pictures_in += 1;
         if self.pictures_in == 1 {
             log::info!(
-                "video: the far end's first picture, {} bytes",
+                "video: {}: the far end's first picture, {} bytes",
+                self.name(),
                 data.data.len()
             );
         }
@@ -614,7 +621,8 @@ impl CallVideo {
             self.report.keyframes += 1;
             if self.unanswered > 0 {
                 log::info!(
-                    "video: the far end sent a keyframe after {} requests",
+                    "video: {}: the far end sent a keyframe after {} requests",
+                    self.name(),
                     self.unanswered
                 );
             }
@@ -678,7 +686,10 @@ impl CallVideo {
                 .last_picture
                 .is_some_and(|at| now.saturating_duration_since(at) >= self.stopped_after())
         {
-            log::info!("video: no picture from the far end for a while; its camera is off");
+            log::info!(
+                "video: {}: no picture from the far end for a while; it is off",
+                self.name()
+            );
             self.far_stopped();
         }
         if !self.backlog.is_empty() {
@@ -708,9 +719,10 @@ impl CallVideo {
         if self.showing && self.report.since.is_none_or(|at| now >= at + REPORT_EVERY) {
             if self.report.since.is_some() {
                 log::info!(
-                    "video: the far end's camera: {} pictures in {} s, {} keyframes, {} after \
+                    "video: {}: {} pictures in {} s, {} keyframes, {} after \
                      a loss, keyframes asked for {} times (PLI) and {} (FIR), at most {} \
                      frames waited; resends {}",
+                    self.name(),
                     self.report.pictures,
                     REPORT_EVERY.as_secs(),
                     self.report.keyframes,
@@ -782,6 +794,14 @@ impl CallVideo {
                 on,
             },
             Which::Share => MediaEvent::FarShare(on),
+        }
+    }
+
+    /// The line's name in the log: `camera 0`, `share`.
+    fn name(&self) -> String {
+        match self.which {
+            Which::Camera => format!("camera {}", self.line),
+            Which::Share => "share".to_owned(),
         }
     }
 
