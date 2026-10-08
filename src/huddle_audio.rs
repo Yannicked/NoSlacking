@@ -65,6 +65,7 @@ pub mod jitter;
 pub mod join;
 pub mod media;
 pub mod microphone;
+pub mod peer;
 pub mod probe;
 pub mod processing;
 pub mod region;
