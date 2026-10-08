@@ -14,8 +14,8 @@
 use std::net::{IpAddr, SocketAddr};
 
 use super::{
-    CAMERA_LABEL, Candidate, CandidateKind, Direction, Line, LineKind, LocalMedia, MoreCamera,
-    RemoteMedia, SHARE_LABEL, Setup, VideoCodec,
+    AUDIO_LABEL, CAMERA_LABEL, Candidate, CandidateKind, Direction, Line, LineKind, LocalMedia,
+    MoreCamera, RemoteMedia, SHARE_LABEL, Setup, VideoCodec,
 };
 
 /// Why an SDP could not be read.
@@ -378,13 +378,9 @@ fn opus_rtpmap(value: &str) -> Option<u8> {
 }
 
 fn direction_in(attrs: &[(&str, &str)]) -> Option<Direction> {
-    attrs.iter().find_map(|(n, _)| match *n {
-        "sendrecv" => Some(Direction::SendRecv),
-        "sendonly" => Some(Direction::SendOnly),
-        "recvonly" => Some(Direction::RecvOnly),
-        "inactive" => Some(Direction::Inactive),
-        _ => None,
-    })
+    attrs
+        .iter()
+        .find_map(|(n, _)| Direction::ALL.into_iter().find(|d| d.word() == *n))
 }
 
 fn kind_of(media: &str) -> LineKind {
@@ -482,9 +478,9 @@ pub fn offer(local: &LocalMedia) -> String {
     push(&mut out, "a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid");
     push(&mut out, &format!("a=setup:{}", setup_text(local.setup)));
     push(&mut out, "a=mid:0");
-    push(&mut out, direction_text(local.audio_direction));
+    push(&mut out, &format!("a={}", local.audio_direction.word()));
     transport_part(&mut out, local, true);
-    push(&mut out, "a=label:main-audio");
+    push(&mut out, &format!("a=label:{AUDIO_LABEL}"));
 
     // Video, for the lines' sake only. In a bundle a payload type must not
     // mean two codecs, so H.264 moves aside if Opus has its number.
@@ -737,9 +733,12 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
                 push(&mut out, &format!("a=rtcp-fb:{opus} transport-cc"));
                 push(&mut out, &format!("a=setup:{setup}"));
                 push(&mut out, &format!("a=mid:{}", line.mid));
-                push(&mut out, direction_text(direction(local.audio_direction)));
+                push(
+                    &mut out,
+                    &format!("a={}", direction(local.audio_direction).word()),
+                );
                 transport_part(&mut out, local, first);
-                let label = line.label.as_deref().unwrap_or("main-audio");
+                let label = line.label.as_deref().unwrap_or(AUDIO_LABEL);
                 push(&mut out, &format!("a=label:{label}"));
             }
             (LineKind::Data, _, Some(ssrc)) => {
@@ -946,7 +945,7 @@ fn video_line(
     }
     push(out, &format!("a=setup:{setup}"));
     push(out, &format!("a=mid:{}", line.mid));
-    push(out, direction_text(line.direction));
+    push(out, &format!("a={}", line.direction.word()));
     transport_part(out, local, candidates);
     push(out, "a=rtcp-rsize");
     push(out, &format!("a=label:{}", line.label));
@@ -1088,15 +1087,6 @@ fn setup_text(setup: Setup) -> &'static str {
         Setup::Passive => "passive",
         // An offer that does not choose leaves the choice to the answerer.
         Setup::ActPass | Setup::Unsaid => "actpass",
-    }
-}
-
-fn direction_text(direction: Direction) -> &'static str {
-    match direction {
-        Direction::SendRecv => "a=sendrecv",
-        Direction::SendOnly => "a=sendonly",
-        Direction::RecvOnly => "a=recvonly",
-        Direction::Inactive => "a=inactive",
     }
 }
 

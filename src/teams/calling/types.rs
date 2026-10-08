@@ -445,6 +445,36 @@ pub struct RosterUpdate {
     pub sequence_number: u64,
 }
 
+/// One of a participant's media streams in the call, as much as is read.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaStream {
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    direction: String,
+    source_id: Option<i64>,
+}
+
+impl MediaStream {
+    /// Whether it sends: its source is live.
+    fn sends(&self) -> bool {
+        use super::Direction::{SendOnly, SendRecv};
+        [SendRecv.word(), SendOnly.word()].contains(&self.direction.as_str())
+    }
+}
+
+/// The media streams an endpoint's `call` lists; one that does not read
+/// is left out.
+fn media_streams(call: Option<&serde_json::Value>) -> impl Iterator<Item = MediaStream> + '_ {
+    call.and_then(|c| c.get("mediaStreams")?.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|s| MediaStream::deserialize(s).ok())
+}
+
 /// One participant in a [`RosterUpdate`].
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -496,59 +526,37 @@ impl RosterParticipant {
     /// an `applicationsharing-video` stream sending from a device in the
     /// call (`recvonly` while they do not, recorded).
     pub fn share_source(&self) -> Option<i64> {
-        self.endpoints
-            .values()
-            .filter_map(|e| e.call.as_ref()?.get("mediaStreams")?.as_array())
-            .flatten()
-            .find(|s| {
-                s.get("label").and_then(|l| l.as_str()) == Some("applicationsharing-video")
-                    && matches!(
-                        s.get("direction").and_then(|d| d.as_str()),
-                        Some("sendrecv" | "sendonly")
-                    )
-            })
-            .and_then(|s| s.get("sourceId")?.as_i64())
+        self.streams()
+            .find(|s| s.label == super::SHARE_LABEL && s.sends())?
+            .source_id
     }
 
     /// The `sourceId` of the stream labelled `label` on their endpoint
     /// `endpoint`, in the call: ours, by our endpoint id, which the
     /// meeting names in what it wants of a stream of ours.
     pub fn stream_on(&self, endpoint: &str, label: &str) -> Option<i64> {
-        self.endpoints
+        let (_, on) = self
+            .endpoints
             .iter()
-            .find(|(id, _)| id.eq_ignore_ascii_case(endpoint))?
-            .1
-            .call
-            .as_ref()?
-            .get("mediaStreams")?
-            .as_array()?
-            .iter()
-            .find(|s| s.get("label").and_then(|l| l.as_str()) == Some(label))?
-            .get("sourceId")?
-            .as_i64()
+            .find(|(id, _)| id.eq_ignore_ascii_case(endpoint))?;
+        media_streams(on.call.as_ref())
+            .find(|s| s.label == label)?
+            .source_id
     }
 
     /// The directions of their `main-video` streams in the call, for the
     /// log.
     pub fn camera_directions(&self) -> Vec<String> {
-        self.endpoints
-            .values()
-            .filter_map(|e| e.call.as_ref()?.get("mediaStreams")?.as_array())
-            .flatten()
-            .filter(|s| s.get("label").and_then(|l| l.as_str()) == Some("main-video"))
-            .filter_map(|s| Some(s.get("direction")?.as_str()?.to_owned()))
+        self.streams()
+            .filter(|s| s.label == super::CAMERA_LABEL)
+            .map(|s| s.direction)
             .collect()
     }
 
     /// Their sound's source id: the `sourceId` of the `main-audio` stream
     /// of a device in the call, which the meeting names who speaks by.
     pub fn audio_source(&self) -> Option<i64> {
-        self.endpoints
-            .values()
-            .filter_map(|e| e.call.as_ref()?.get("mediaStreams")?.as_array())
-            .flatten()
-            .find(|s| s.get("type").and_then(|t| t.as_str()) == Some("audio"))
-            .and_then(|s| s.get("sourceId")?.as_i64())
+        self.streams().find(|s| s.kind == "audio")?.source_id
     }
 
     /// Their camera's source id, while it is on: the `sourceId` of a
@@ -556,19 +564,16 @@ impl RosterParticipant {
     /// it turns `sendrecv` when the camera goes on; one already on when we
     /// join may say `sendonly`).
     pub fn camera_source(&self) -> Option<i64> {
+        self.streams()
+            .find(|s| s.kind == "video" && s.label == super::CAMERA_LABEL && s.sends())?
+            .source_id
+    }
+
+    /// The media streams of every device of theirs in the call.
+    fn streams(&self) -> impl Iterator<Item = MediaStream> + '_ {
         self.endpoints
             .values()
-            .filter_map(|e| e.call.as_ref()?.get("mediaStreams")?.as_array())
-            .flatten()
-            .find(|s| {
-                s.get("type").and_then(|t| t.as_str()) == Some("video")
-                    && s.get("label").and_then(|l| l.as_str()) == Some("main-video")
-                    && matches!(
-                        s.get("direction").and_then(|d| d.as_str()),
-                        Some("sendrecv" | "sendonly")
-                    )
-            })
-            .and_then(|s| s.get("sourceId")?.as_i64())
+            .flat_map(|e| media_streams(e.call.as_ref()))
     }
 
     /// Whether they wait in a meeting's lobby: a device of theirs is
@@ -1005,6 +1010,9 @@ pub enum Push {
     ConversationEnd(ConversationEnd),
     ConversationUpdate(ConversationUpdate),
     ControlVideoStreaming(ControlVideoStreaming),
+    /// A renegotiation of ours was refused (`rejection`,
+    /// `mediaNegotiationFailure`), by its event name.
+    Refused(String),
     /// A callback a call does not act on (`progress`,
     /// `admitParticipantSuccess`, …), by its event name.
     Other(String),
@@ -1013,7 +1021,6 @@ pub enum Push {
 impl Push {
     /// Reads the body of a push to the callback `event`.
     pub fn read(event: &str, body: &serde_json::Value) -> Result<Self, serde_json::Error> {
-        let body = body.clone();
         Ok(match event {
             "mediaAnswer" => Self::MediaAnswer(MediaAnswerPush::deserialize(body)?.media_answer),
             "acceptance" => {
@@ -1035,6 +1042,7 @@ impl Push {
             "rosterUpdate" => Self::RosterUpdate(RosterUpdate::deserialize(body)?),
             "end" => Self::CallEnd(CallEndPush::deserialize(body)?.call_end),
             "conversationEnd" => Self::ConversationEnd(ConversationEnd::deserialize(body)?),
+            "rejection" | "mediaNegotiationFailure" => Self::Refused(event.to_owned()),
             other => Self::Other(other.to_owned()),
         })
     }

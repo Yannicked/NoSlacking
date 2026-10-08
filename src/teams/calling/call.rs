@@ -1288,7 +1288,7 @@ impl Call {
                     tell(CallEvent::FarEndMuted(muted));
                 }
             }
-            Push::Other(name) if name == "rejection" || name == "mediaNegotiationFailure" => {
+            Push::Refused(name) => {
                 log::info!("Teams call: our renegotiation was refused ({name})");
                 if self.share.offered.take().is_some() && !self.share.retried {
                     self.share.retried = true;

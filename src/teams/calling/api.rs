@@ -229,24 +229,25 @@ pub fn media_descriptions(
     share_on: bool,
     request_id: u32,
 ) -> serde_json::Value {
-    let mut descriptions = Vec::new();
-    if let Some(mid) = camera {
-        descriptions.push(if camera_on {
-            serde_json::json!({"mid": mid, "direction": "sendrecv", "label": "main-video"})
-        } else {
-            serde_json::json!({"mid": mid, "direction": "recvonly"})
-        });
-    }
-    for mid in more {
-        descriptions.push(serde_json::json!({"mid": mid, "direction": "recvonly"}));
-    }
-    if let Some(mid) = share {
-        descriptions.push(if share_on {
-            serde_json::json!({"mid": mid, "direction": "sendonly", "label": "applicationsharing-video"})
-        } else {
-            serde_json::json!({"mid": mid, "direction": "recvonly"})
-        });
-    }
+    use super::{CAMERA_LABEL, Direction, SHARE_LABEL};
+    // A line we send on is labelled; one we only receive on is not.
+    let line = |mid: &str, sending: Option<(Direction, &str)>| match sending {
+        Some((direction, label)) => {
+            serde_json::json!({"mid": mid, "direction": direction.word(), "label": label})
+        }
+        None => serde_json::json!({"mid": mid, "direction": Direction::RecvOnly.word()}),
+    };
+    let descriptions: Vec<_> = camera
+        .map(|mid| {
+            line(
+                mid,
+                camera_on.then_some((Direction::SendRecv, CAMERA_LABEL)),
+            )
+        })
+        .into_iter()
+        .chain(more.iter().map(|mid| line(mid, None)))
+        .chain(share.map(|mid| line(mid, share_on.then_some((Direction::SendOnly, SHARE_LABEL)))))
+        .collect();
     serde_json::json!({"descriptions": descriptions, "requestId": request_id})
 }
 
