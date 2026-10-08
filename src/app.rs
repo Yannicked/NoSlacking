@@ -63,7 +63,9 @@ pub struct Toast {
 /// What a toast says: news, or a failure (shown in red, and logged).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
+    /// Done, or worth knowing.
     Info,
+    /// Something failed.
     Error,
 }
 
