@@ -203,11 +203,7 @@ pub fn status_dialog(app: &mut App, ctx: &egui::Context) {
         .frame(super::overlays::modal_frame(app))
         .show(ctx, |ui| {
             ui.set_width(400.0);
-            let heading = ui.label(
-                RichText::new(t("Set a status"))
-                    .font(theme::bold(17.0))
-                    .color(palette.text),
-            );
+            let heading = theme::dialog_heading(ui, &palette, t("Set a status"));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let name = dialog.emoji.trim().trim_matches(':');

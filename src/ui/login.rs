@@ -366,7 +366,7 @@ fn link_fallback(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
 fn sign_in_status(app: &App, ui: &mut egui::Ui, palette: &Palette) {
     match &app.sign_in {
         Some(SignIn::Waiting(_) | SignIn::Exchanging) => {
-            ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
+            ui.add(theme::spinner(palette, 14.0));
             ui.label(
                 RichText::new(t("Signing in…"))
                     .font(theme::regular(13.0))
@@ -378,7 +378,7 @@ fn sign_in_status(app: &App, ui: &mut egui::Ui, palette: &Palette) {
             verification_uri,
             ..
         }) => {
-            ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
+            ui.add(theme::spinner(palette, 14.0));
             ui.label(
                 RichText::new(tf(
                     "Enter code {code} at {url}",

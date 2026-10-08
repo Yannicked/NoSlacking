@@ -65,11 +65,7 @@ pub fn dialog(app: &mut App, ctx: &egui::Context) {
         .frame(frame)
         .show(ctx, |ui| {
             ui.set_width(480.0);
-            let heading = ui.label(
-                RichText::new(t("Share message"))
-                    .font(theme::bold(17.0))
-                    .color(palette.text),
-            );
+            let heading = theme::dialog_heading(ui, &palette, t("Share message"));
             ui.add_space(8.0);
             let field = ui
                 .add(

@@ -254,11 +254,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .frame(super::overlays::modal_frame(app))
         .show(ctx, |ui| {
             ui.set_width(540.0);
-            ui.label(
-                RichText::new(t("Keyboard shortcuts"))
-                    .font(theme::bold(17.0))
-                    .color(palette.text),
-            );
+            theme::dialog_heading(ui, &palette, t("Keyboard shortcuts"));
             ui.label(
                 RichText::new(tf(
                     "Open this list any time with {shortcut}.",

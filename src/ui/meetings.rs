@@ -49,11 +49,7 @@ pub fn dialog(app: &mut App, ctx: &egui::Context) {
         .frame(frame)
         .show(ctx, |ui| {
             ui.set_width(380.0);
-            ui.label(
-                RichText::new(t("Meetings"))
-                    .font(theme::bold(17.0))
-                    .color(palette.text),
-            );
+            theme::dialog_heading(ui, &palette, t("Meetings"));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if theme::primary_button(ui, &palette, &t("Meet now")).clicked() {

@@ -197,7 +197,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let width = app.settings.sidebar_width;
     let now = app.now_seconds();
-    let inset = theme::titlebar_inset(ui.ctx());
     let App {
         workspaces,
         settings,
@@ -219,85 +218,62 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .show_separator_line(false)
         .frame(egui::Frame::new().fill(palette.panel))
         .show(ui, |ui| {
-            egui::Panel::top("sidebar-header")
-                .exact_size(52.0 + inset)
-                .show_separator_line(false)
-                .frame(egui::Frame::new().inner_margin(Margin {
-                    left: 16,
-                    right: HEADER_RIGHT,
-                    top: inset as i8,
-                    bottom: 0,
-                }))
-                .show(ui, |ui| {
-                    let rect = ui.max_rect();
-                    ui.painter().hline(
-                        rect.x_range(),
-                        rect.bottom() - 0.5,
-                        Stroke::new(1.0, palette.outline),
-                    );
-                    ui.horizontal_centered(|ui| {
-                        // The buttons are placed first, from the right edge
-                        // in, so a long workspace name is cut short instead
-                        // of pushing them past the edge.
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing.x = HEADER_GAP;
-                            if workspace.info.offers(Ability::Channels) {
-                                super::browse::header_buttons(ui, &palette, actions);
-                            }
-                            if workspace.info.offers(Ability::Meetings) {
-                                super::meetings::header_button(ui, &palette, actions);
-                            }
-                            if workspace.sections.is_some()
-                                && workspace.info.offers(Ability::Sections)
-                                && theme::icon_button(
-                                    ui,
-                                    &palette,
-                                    Icon::Plus,
-                                    16.0,
-                                    &t("New section"),
-                                )
+            theme::pane_header(
+                ui,
+                &palette,
+                "sidebar-header",
+                egui::Color32::TRANSPARENT,
+                [16, HEADER_RIGHT],
+                |ui| {
+                    // The buttons are placed first, from the right edge
+                    // in, so a long workspace name is cut short instead
+                    // of pushing them past the edge.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = HEADER_GAP;
+                        if workspace.info.offers(Ability::Channels) {
+                            super::browse::header_buttons(ui, &palette, actions);
+                        }
+                        if workspace.info.offers(Ability::Meetings) {
+                            super::meetings::header_button(ui, &palette, actions);
+                        }
+                        if workspace.sections.is_some()
+                            && workspace.info.offers(Ability::Sections)
+                            && theme::icon_button(ui, &palette, Icon::Plus, 16.0, &t("New section"))
                                 .clicked()
-                            {
-                                actions.push(Action::NameSection {
-                                    rename: None,
-                                    channel: None,
-                                });
-                            }
-                            ui.add_space(4.0);
-                            ui.with_layout(
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(&workspace.info.name)
-                                                .font(theme::bold(16.0))
-                                                .color(palette.text),
-                                        )
-                                        .truncate(),
-                                    );
-                                    let (color, tip) = match socket {
-                                        crate::model::Socket::Connected => {
-                                            (palette.accent, t("Live"))
-                                        }
-                                        crate::model::Socket::Off => {
-                                            (palette.dim, t("Live updates off"))
-                                        }
-                                        crate::model::Socket::Connecting => {
-                                            (palette.warning, t("Connecting…"))
-                                        }
-                                        _ => (palette.danger, t("Offline")),
-                                    };
-                                    let (dot, response) =
-                                        ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                                    ui.painter().circle_filled(dot.center(), 4.0, color);
-                                    response.on_hover_text(tip);
-                                    super::desktop::dnd_button(ui, &palette, workspace, actions);
-                                },
+                        {
+                            actions.push(Action::NameSection {
+                                rename: None,
+                                channel: None,
+                            });
+                        }
+                        ui.add_space(4.0);
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&workspace.info.name)
+                                        .font(theme::bold(16.0))
+                                        .color(palette.text),
+                                )
+                                .truncate(),
                             );
+                            let (color, tip) = match socket {
+                                crate::model::Socket::Connected => (palette.accent, t("Live")),
+                                crate::model::Socket::Off => (palette.dim, t("Live updates off")),
+                                crate::model::Socket::Connecting => {
+                                    (palette.warning, t("Connecting…"))
+                                }
+                                _ => (palette.danger, t("Offline")),
+                            };
+                            let (dot, response) =
+                                ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                            ui.painter().circle_filled(dot.center(), 4.0, color);
+                            response.on_hover_text(tip);
+                            super::desktop::dnd_button(ui, &palette, workspace, actions);
                         });
                     });
-                });
+                },
+            );
             if let Some(reason) = &workspace.signed_out {
                 egui::Frame::new()
                     .fill(palette.warning.gamma_multiply(0.15))
@@ -456,7 +432,7 @@ fn list(
     if workspace.conversations.is_empty() {
         ui.add_space(24.0);
         ui.vertical_centered(|ui| {
-            ui.add(egui::Spinner::new().size(18.0).color(palette.dim));
+            ui.add(theme::spinner(palette, 18.0));
         });
     }
 }
