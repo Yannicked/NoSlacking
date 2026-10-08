@@ -6,8 +6,9 @@
 //!
 //! Every message is a 16-byte header and a JSON array:
 //!
-//! - the bytes `10 0f 92 00`;
-//! - a sequence number, little-endian, counted each way from 0;
+//! - the bytes `10 0f 92`;
+//! - a sequence number, big-endian, counted each way (the server's runs
+//!   on from call to call: `08 6d` seen), and a `00`;
 //! - who sends it and to whom, each a big-endian 32-bit id followed by
 //!   `01`. The server is -4. We are -2 until its `ack` names our id (its
 //!   header's addressee).
@@ -23,7 +24,7 @@
 pub const LABEL: &str = "main-channel";
 
 /// The header's first bytes.
-const MAGIC: [u8; 4] = [0x10, 0x0f, 0x92, 0x00];
+const MAGIC: [u8; 3] = [0x10, 0x0f, 0x92];
 /// The header's length.
 const HEADER: usize = 16;
 /// The meeting's media server's id.
@@ -48,7 +49,8 @@ pub struct Frame {
 pub fn encode(seq: u16, from: i32, to: i32, messages: &[serde_json::Value]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER + 64);
     out.extend_from_slice(&MAGIC);
-    out.extend_from_slice(&seq.to_le_bytes());
+    out.extend_from_slice(&seq.to_be_bytes());
+    out.push(0);
     out.extend_from_slice(&from.to_be_bytes());
     out.push(1);
     out.extend_from_slice(&to.to_be_bytes());
@@ -60,13 +62,13 @@ pub fn encode(seq: u16, from: i32, to: i32, messages: &[serde_json::Value]) -> V
 
 /// Reads one message; `None` for one not in this shape.
 pub fn decode(bytes: &[u8]) -> Option<Frame> {
-    if bytes.len() < HEADER || bytes[..4] != MAGIC {
+    if bytes.len() < HEADER || bytes[..3] != MAGIC {
         return None;
     }
     let id = |at: usize| -> Option<i32> {
         Some(i32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
     };
-    let seq = u16::from_le_bytes([bytes[4], bytes[5]]);
+    let seq = u16::from_be_bytes([bytes[3], bytes[4]]);
     let (from, to) = (id(6)?, id(11)?);
     let messages = match serde_json::from_slice(&bytes[HEADER..]).ok()? {
         serde_json::Value::Array(messages) => messages,
@@ -273,5 +275,20 @@ mod tests {
         );
         assert!(channel.heard(&estimate).is_empty());
         assert!(channel.heard(b"not a frame").is_empty());
+    }
+
+    #[test]
+    fn the_servers_sequence_numbers_past_255_read() {
+        // As recorded on a server whose count had run on: 0x086e.
+        let ack = hex("100f92086e00fffffffc0100000826015b7b2274797065223a2261636b227d5d");
+        let frame = decode(&ack).expect("reads");
+        assert_eq!(frame.seq, 0x086e);
+        assert_eq!((frame.from, frame.to), (SERVER, 0x0826));
+        let mut channel = Channel::default();
+        assert_eq!(channel.heard(&ack), vec![Heard::Ready]);
+        // And ours, numbered past 255, write the same way.
+        let ours = encode(0x0102, 0x0826, SERVER, &[serde_json::json!({})]);
+        assert_eq!(ours[..6], [0x10, 0x0f, 0x92, 0x01, 0x02, 0x00]);
+        assert_eq!(decode(&ours).expect("reads").seq, 0x0102);
     }
 }

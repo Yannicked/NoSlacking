@@ -1534,9 +1534,15 @@ reliable, negotiated in-band), on the data line. Each message is a
 16-byte header and a JSON array:
 
 ```
-10 0f 92 00 | seq (u16, little-endian, each way from 0) |
+10 0f 92 | seq (u16, big-endian) 00 |
 from (i32, big-endian) 01 | to (i32, big-endian) 01 | [ {...} ]
 ```
+
+The server's sequence number runs on from call to call (`08 6d` seen). We
+first read `10 0f 92 00` as a fixed marker and the sequence number as
+little-endian. That agrees until the server's count passes 255; after
+that no message of the server's read. This, not our extra camera lines,
+was why some calls heard no `ack`.
 
 The server is -4. The client is -2 until the server's `ack` arrives; the
 `ack` is addressed to the id the client then sends from (415 in the log).
@@ -1589,7 +1595,8 @@ our decoder waited for a keyframe that could start it again, and none
 could: frozen, with a keyframe asked for every second. Every keyframe now
 carries the parameter sets last seen.
 
-**Extra camera lines, set aside.** With the extra receive-only lines
+**Extra camera lines, set aside (wrongly).** The cause was the header
+misread above, not the lines; they are back. With the extra receive-only lines
 offered as the web client writes them (placeholder stream, data line
 last), the meeting took them (`sendonly`) but then neither answered our
 `syn` on the data channel nor sent any audio, in three tries; it also
