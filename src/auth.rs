@@ -411,11 +411,9 @@ pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Re
     let applications = data.join("applications");
     std::fs::create_dir_all(&applications).map_err(|e| e.to_string())?;
     let file = applications.join(format!("{APP_ID}.desktop"));
-    let exec = crate::autostart::exec_quote(&exe.display().to_string());
     let entry = format!(
-        "[Desktop Entry]\nType=Application\nName=NoSlacking\nComment=A native Slack client\n\
-         Exec={exec} %u\nIcon={APP_ID}\nTerminal=false\nCategories=Network;InstantMessaging;Chat;\n\
-         MimeType={mime}\nStartupWMClass={APP_ID}\n",
+        "{head}Categories=Network;InstantMessaging;Chat;\nMimeType={mime}\nStartupWMClass={APP_ID}\n",
+        head = crate::autostart::desktop_entry_head(exe, "%u"),
         mime = schemes
             .iter()
             .map(|scheme| format!("x-scheme-handler/{scheme};"))
@@ -424,7 +422,7 @@ pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Re
     let current = std::fs::read_to_string(&file).unwrap_or_default();
     let unchanged = current == entry;
     if !unchanged {
-        std::fs::write(&file, entry).map_err(|e| e.to_string())?;
+        crate::paths::write_atomic(&file, entry.as_bytes()).map_err(|e| e.to_string())?;
         let _ = quietly(std::process::Command::new("update-desktop-database").arg(&applications));
     }
     // Every start would otherwise run xdg-mime, which on KDE Plasma 6 prints
@@ -507,10 +505,7 @@ fn install_icons(data: &std::path::Path) -> Result<(), String> {
         if std::fs::read(&path).is_ok_and(|current| current == bytes) {
             continue;
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        crate::paths::write_atomic(&path, bytes).map_err(|e| e.to_string())?;
         wrote = true;
     }
     if wrote {

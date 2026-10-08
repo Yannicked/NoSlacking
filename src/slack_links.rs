@@ -160,9 +160,8 @@ fn read_record(state: &Path) -> Option<Claim> {
 }
 
 fn write_record(state: &Path, claim: &Claim) -> Result<(), String> {
-    std::fs::create_dir_all(state).map_err(|e| e.to_string())?;
     let text = serde_json::to_string(claim).map_err(|e| e.to_string())?;
-    std::fs::write(state.join(RECORD), text).map_err(|e| e.to_string())
+    crate::paths::write_atomic(&state.join(RECORD), text.as_bytes()).map_err(|e| e.to_string())
 }
 
 /// The value `list`, a `mimeapps.list`, gives `mime` under `[Default
@@ -389,9 +388,8 @@ mod platform {
                 let restored = restore_default(&list, MIME, &ours(), claim.previous.as_deref());
                 if restored != list {
                     // Whole or not at all: other apps' defaults live here.
-                    let temporary = path.with_extension("list.noslacking");
-                    std::fs::write(&temporary, restored).map_err(|e| e.to_string())?;
-                    std::fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
+                    crate::paths::write_atomic(&path, restored.as_bytes())
+                        .map_err(|e| e.to_string())?;
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

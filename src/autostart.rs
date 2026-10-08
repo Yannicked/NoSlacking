@@ -54,13 +54,22 @@ pub fn exec_quote(path: &str) -> String {
     out
 }
 
-/// The XDG autostart entry that starts `exe` hidden.
-pub fn desktop_entry(exe: &Path) -> String {
+/// The lines every desktop file NoSlacking writes starts with, running
+/// `exe` with `args` (already quoted as the `Exec` key wants them).
+pub fn desktop_entry_head(exe: &Path, args: &str) -> String {
     use crate::paths::APP_ID;
     let exec = exec_quote(&exe.display().to_string());
     format!(
         "[Desktop Entry]\nType=Application\nName=NoSlacking\nComment=A native Slack client\n\
-         Exec={exec} {HIDDEN}\nIcon={APP_ID}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
+         Exec={exec} {args}\nIcon={APP_ID}\nTerminal=false\n"
+    )
+}
+
+/// The XDG autostart entry that starts `exe` hidden.
+pub fn desktop_entry(exe: &Path) -> String {
+    format!(
+        "{}X-GNOME-Autostart-enabled=true\n",
+        desktop_entry_head(exe, HIDDEN)
     )
 }
 
