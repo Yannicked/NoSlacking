@@ -1037,6 +1037,19 @@ fn apply(rtc: &mut Rtc, applied: &mut Applied, plan: &Plan) -> Result<Vec<String
     Ok(notes)
 }
 
+/// How many unreadable packets one round of driving the peer drops before
+/// the media counts as broken.
+const SKIP_AT_MOST: u32 = 100;
+
+/// Whether `error` is about one packet only (one that did not unpack or
+/// parse), not the connection.
+fn is_one_packet(error: &str0m::RtcError) -> bool {
+    matches!(
+        error,
+        str0m::RtcError::Packet(..) | str0m::RtcError::Rtp(_) | str0m::RtcError::Net(_)
+    )
+}
+
 /// The peer: Opus alone at `opus_pt`, OpenSSL's DTLS, full ICE.
 fn new_rtc(opus_pt: u8, video: &[(u8, Option<u8>)], controlling: bool, now: Instant) -> Rtc {
     let mut config = RtcConfig::new()
@@ -1796,6 +1809,8 @@ impl Session {
         }
         let mut direct = Vec::new();
         let mut events = Vec::new();
+        // Packets dropped this round, so a stream of them cannot spin here.
+        let mut skipped = 0;
         loop {
             match self.rtc.poll_output() {
                 Ok(Output::Timeout(at)) => {
@@ -1840,6 +1855,13 @@ impl Session {
                     }
                 }
                 Ok(Output::Event(event)) => events.push(event),
+                // One packet that does not read (a meeting's media server
+                // sent an H.264 packet too short to unpack, seen ending a
+                // call): dropped, the call goes on.
+                Err(error) if is_one_packet(&error) && skipped < SKIP_AT_MOST => {
+                    skipped += 1;
+                    log::info!("media: a packet dropped: {error}");
+                }
                 Err(error) => {
                     self.over
                         .get_or_insert(Err(failure(Stage::Media, format!("WebRTC: {error}"))));
