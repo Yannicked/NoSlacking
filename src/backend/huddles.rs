@@ -187,7 +187,7 @@ pub fn call(client: Client, team: String, command: Command, sink: Sink) -> Optio
     match command {
         Command::DeclineHuddle { channel, room } => {
             tokio::spawn(async move {
-                let result = if client.token().is_session() {
+                let result = if client.is_session() {
                     client
                         .act::<Value>("rooms.inviteResponse", &decline_params(&channel, &room))
                         .await
@@ -204,7 +204,7 @@ pub fn call(client: Client, team: String, command: Command, sink: Sink) -> Optio
             None
         }
         Command::CheckHuddle { channel, room } => {
-            if !client.token().is_session() {
+            if !client.is_session() {
                 return None;
             }
             tokio::spawn(async move {

@@ -1,5 +1,6 @@
 //! What a real-time event from Slack means for the interface.
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::Event;
@@ -61,9 +62,7 @@ pub(super) fn str_of<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 fn message_of(value: &Value) -> Option<Message> {
-    serde_json::from_value::<types::Message>(value.clone())
-        .ok()?
-        .into_model()
+    types::Message::deserialize(value).ok()?.into_model()
 }
 
 /// Turns an Events API event into interface events.

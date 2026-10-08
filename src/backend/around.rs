@@ -6,7 +6,7 @@
 //! is given, and the ones nearest `oldest` when only that is given, so one
 //! call of each reads either side of a message.
 
-use super::api::failure;
+use super::api::{HistoryQuery, failure};
 use super::{Event, Sink};
 use crate::model::{Message, Ts};
 use crate::slack::{Client, SlackError, types};
@@ -32,20 +32,14 @@ async fn side(
     oldest: Option<&Ts>,
     limit: u32,
 ) -> Result<Side, SlackError> {
-    let mut params = vec![
-        ("channel", channel.to_owned()),
-        ("limit", limit.to_string()),
-        ("include_all_metadata", "false".to_owned()),
-    ];
+    let mut query = HistoryQuery::new(channel, limit).without_metadata();
     if let Some(latest) = latest {
-        params.push(("latest", latest.0.clone()));
-        params.push(("inclusive", "true".to_owned()));
+        query = query.up_to(latest);
     }
     if let Some(oldest) = oldest {
-        params.push(("oldest", oldest.0.clone()));
-        params.push(("inclusive", "false".to_owned()));
+        query = query.after(oldest, Some(false));
     }
-    let page: types::HistoryPage = client.call("conversations.history", &params).await?;
+    let page: types::HistoryPage = query.page(client).await?;
     Ok(Side {
         messages: page
             .messages
