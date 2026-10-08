@@ -136,6 +136,37 @@ impl RemoteMedia {
             .or_else(|| video().find(|l| l.label.is_none()))
     }
 
+    /// What its lines are, for the log: each line's mid, kind, label and
+    /// direction, a video line's SSRC range, and the H.264 found. Nothing
+    /// in it is a secret (no credentials, keys or addresses).
+    pub fn summary(&self) -> String {
+        let lines: Vec<String> = self
+            .lines
+            .iter()
+            .map(|l| {
+                let mut text = format!("{}:{:?}", l.mid, l.kind);
+                if let Some(label) = &l.label {
+                    text.push_str(&format!(" {label}"));
+                }
+                if l.port == 0 {
+                    text.push_str(" rejected");
+                } else {
+                    text.push_str(&format!(" {:?}", l.direction));
+                }
+                if let Some((first, last)) = l.ssrc_range {
+                    text.push_str(&format!(" ssrc {first}-{last}"));
+                }
+                text
+            })
+            .collect();
+        format!(
+            "{}; H.264 camera {:?}, share {:?}",
+            lines.join(", "),
+            self.video.map(|v| v.pt),
+            self.share_video.map(|v| v.pt)
+        )
+    }
+
     /// The screen share's m-line (`applicationsharing-video`), in use or
     /// not.
     pub fn share(&self) -> Option<&Line> {

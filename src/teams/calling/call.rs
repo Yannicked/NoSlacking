@@ -1150,7 +1150,10 @@ impl Call {
         local: &mut LocalMedia,
         tell: &(impl Fn(CallEvent) + Send),
     ) -> Result<(), Failure> {
-        log::info!("Teams call: moving to another media server");
+        log::info!(
+            "Teams call: moving to another media server: {}",
+            remote.summary()
+        );
         let Some(url) = negotiation.links.media_answer.as_deref() else {
             log::warn!("Teams call: a new media server's offer without an answer link");
             return Ok(());
@@ -1323,6 +1326,7 @@ fn apply(session: &MediaSession, blob: &str) -> Option<RemoteMedia> {
             return None;
         }
     };
+    log::info!("Teams call: the far end's media: {}", remote.summary());
     if let Err(error) = session.apply_remote(&remote) {
         log::warn!("Teams call: the far end's media refused: {error}");
         return None;

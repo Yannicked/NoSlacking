@@ -398,7 +398,8 @@ impl CallVideo {
         self.ssrcs = ssrcs;
         if send != self.send || receive != self.receive {
             log::info!(
-                "video: {}sending, {}receiving",
+                "video: {:?} line {}sending, {}receiving",
+                self.which,
                 if send { "" } else { "not " },
                 if receive { "" } else { "not " }
             );
