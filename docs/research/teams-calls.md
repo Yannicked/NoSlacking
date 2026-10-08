@@ -1512,3 +1512,17 @@ type 107 (resends 99) whatever was offered: we offered 108 and it
 answered 107, so its video came at a number our line did not know, and
 ours went at one it did not take. We now offer 107 and 99 when joining a
 meeting; 1:1 calls keep 108.
+
+**Receiving someone's camera (`teams.live.com9.har`).** The web client
+joined; another web client joined, was let in, and turned its camera on
+a few seconds later; the web client then showed it. Between the camera
+going on (the roster's `main-video` stream turning `sendrecv`) and its
+picture there was **no request and no push about video at all**: only
+roster updates. So the web client asks for someone's video in-band. Its
+web clients' roster endpoints list a `data` stream (`sendrecv`) and an
+`applicationsharing` one; ours lists neither. The data line is an SCTP
+data channel in the bundle (`m=x-data … RTP/SAVP 127 126`,
+`a=x-data-protocol:sctp`, `a=sctp-port:5000`,
+`a=max-message-size:262144`, label `data`), offered `actpass` and
+answered `active`. What it carries is not in a HAR; the next step is a
+log of its messages.
