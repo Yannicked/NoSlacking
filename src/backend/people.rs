@@ -259,8 +259,7 @@ async fn poll(client: Client, team: String, users: Vec<String>, sink: Sink) {
                 log::debug!("users.getPresence for {user}: {error}");
                 // A refusal of the sign-in or of the method will not change
                 // for the next person; an unknown person is only this one.
-                let refused = matches!(&error, SlackError::Api(code)
-                    if code == "missing_scope" || code == "not_allowed_token_type");
+                let refused = error.is_code(&["missing_scope", "not_allowed_token_type"]);
                 if error.is_auth() || refused {
                     return;
                 }

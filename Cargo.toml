@@ -8,6 +8,10 @@ license = "MIT"
 # also reads this to accept them.
 publish = false
 description = "A native Slack client"
+# The workspace builds the video helper too (default-members), so `cargo
+# run` needs telling which binary is the app. It builds the app alone:
+# `cargo build` builds the helper beside it.
+default-run = "noslacking"
 repository = "https://github.com/Yannicked/NoSlacking"
 keywords = ["slack", "chat", "egui", "client"]
 categories = ["gui"]
@@ -229,13 +233,13 @@ section = "net"
 priority = "optional"
 extended-description = "One window for your Slack workspaces: channels, direct messages, threads, reactions, files and notifications, without Electron."
 # ALSA is linked, so $auto finds it (as libasound2t64 on newer releases);
-# the others are loaded at run time and must be named.
-depends = "$auto, libxkbcommon0, libegl1, libgl1"
+# the others are loaded at run time and must be named. PipeWire's
+# library is the helper's: releases build it with its `pipewire` feature,
+# to share the screen under Wayland, and $auto reads only the app.
+depends = "$auto, libxkbcommon0, libegl1, libgl1, libpipewire-0.3-0t64 | libpipewire-0.3-0"
 # libva and a VA-API driver: noslacking-video loads them at run time to
 # decode huddle video on the GPU; without them it decodes in software.
-# The ScreenCast portal and PipeWire: how the helper sees the screen
-# under Wayland in a build with `huddle-share` (the helper built with its
-# `pipewire` feature then links libpipewire; $auto reads only the app).
+# The ScreenCast portal asks which screen to share.
 recommends = "libwayland-client0, libxkbcommon-x11-0, libva2, libva-drm2, mesa-va-drivers | intel-media-va-driver, xdg-desktop-portal, pipewire"
 assets = [
     ["target/release/noslacking", "usr/bin/", "755"],
@@ -257,7 +261,9 @@ assets = [
 [package.metadata.generate-rpm]
 auto-req = "auto"
 # By library, so the same package fits Fedora and openSUSE.
-requires = { "libxkbcommon.so.0()(64bit)" = "*", "libEGL.so.1()(64bit)" = "*", "libGL.so.1()(64bit)" = "*" }
+# libpipewire for the helper, which releases link to share the screen
+# under Wayland (auto-req reads it too, but naming it says why).
+requires = { "libxkbcommon.so.0()(64bit)" = "*", "libEGL.so.1()(64bit)" = "*", "libGL.so.1()(64bit)" = "*", "libpipewire-0.3.so.0()(64bit)" = "*" }
 recommends = { "libwayland-client.so.0()(64bit)" = "*", "libxkbcommon-x11.so.0()(64bit)" = "*" }
 # libva for the video helper (loaded at run time, so auto-req
 # cannot see it); the driver comes with Mesa or intel-media-driver.
@@ -279,7 +285,17 @@ assets = [
 ]
 
 [features]
-default = ["highlight", "bundled-emoji"]
+# Huddle video, your camera, screen sharing and Teams are on: each is
+# used daily, and each turns off on its own (`--no-default-features
+# --features ...`) for a build without it.
+default = [
+    "highlight",
+    "bundled-emoji",
+    "huddle-video",
+    "huddle-camera",
+    "huddle-share",
+    "teams",
+]
 # Compiles all of Noto Color Emoji (about 10 MB) into Linux and other Unix
 # builds, for desktops whose emoji font is one fastframe-emoji cannot draw
 # (COLRv1 only, as on Fedora). Without it the app reads
@@ -290,16 +306,14 @@ bundled-emoji = []
 demo = []
 # Watching screen shares and cameras in huddles: a call window with the
 # share and the camera tiles, decoded by the noslacking-video helper
-# (which must ship beside the app). Off until it has been tried against
-# Slack.
+# (which ships beside the app; without it the window says "No video").
 huddle-video = ["dep:yuv", "dep:bytemuck", "dep:noslacking-video-ipc"]
 # Sending your camera in huddles: opened only while it is on, captured
 # and encoded to H.264 by the noslacking-video helper (V4L2 on Linux,
 # nokhwa on macOS and Windows; on the GPU when it can), with a
 # self-preview in the call bar from the helper's small copy of each
 # picture: the app adds no capture or encoding dependency. No helper, no
-# camera. Independent of `huddle-video` (sending needs no decoder). Off
-# until it has been tried against Slack.
+# camera. Independent of `huddle-video` (sending needs no decoder).
 huddle-camera = ["dep:yuv", "dep:bytemuck", "dep:noslacking-video-ipc"]
 # Sharing your screen in huddles: a second Chime attendee (`#content`)
 # that sends only the screen, captured only while sharing and encoded
@@ -307,13 +321,13 @@ huddle-camera = ["dep:yuv", "dep:bytemuck", "dep:noslacking-video-ipc"]
 # Wayland and in the Flatpak when the helper is built with its
 # `pipewire` feature, the X server on X11, xcap on macOS and Windows; on
 # the GPU when it can): the app adds no capture dependency and only
-# sends the H.264 the helper hands it. Off until it has been tried
-# against Slack.
+# sends the H.264 the helper hands it. Releases build the helper with
+# `pipewire`, so sharing works under Wayland and in the Flatpak.
 huddle-share = ["huddle-camera"]
-# Microsoft Teams workspaces (src/teams/, src/backend/teams.rs): off
-# until it has been tried more widely. Signs in as Microsoft's own Teams
-# client, which an organisation's app policies do not see; see
-# docs/research/microsoft-teams.md before turning it on.
+# Microsoft Teams workspaces (src/teams/, src/backend/teams.rs). Signs
+# in as Microsoft's own Teams client, which an organisation's app
+# policies do not see; docs/research/microsoft-teams.md has the risks.
+# Leave it out (`--no-default-features`) for a Slack-only build.
 teams = ["dep:flate2"]
 # Colours code blocks that name their language (```` ```rust ````). Our own
 # small lexer, a few kilobytes; turn it off for plain code blocks.

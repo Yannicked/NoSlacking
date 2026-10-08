@@ -57,6 +57,7 @@ use super::{Candidate, CandidateKind, Direction, LocalMedia, RemoteMedia, Setup}
 use crate::huddle_audio::dtls;
 use crate::huddle_audio::media::{RelayIo, SILENT_OPUS, Uplink, connect_relay};
 use crate::huddle_audio::microphone::ToneSource;
+use crate::huddle_audio::peer::{Flight, SKIP_AT_MOST, is_dtls, is_one_packet};
 use crate::huddle_audio::speaker::Feed;
 use crate::huddle_audio::turn::{self, Server, Transport};
 use crate::huddle_audio::uplink::{Outbound, Outgoing, Stamp};
@@ -72,6 +73,21 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// media counts as lost: a peer on Wi-Fi drops checks for a moment.
 const RECONNECT_GRACE: Duration = Duration::from_secs(10);
 const STATS_EVERY: Duration = Duration::from_secs(5);
+/// What str0m's bandwidth estimate starts from, in kbit/s, before the
+/// far end's feedback says more.
+const BWE_START_KBPS: u64 = 700;
+/// Of the estimate, what the audio is left (Opus, with headroom).
+#[cfg(feature = "huddle-camera")]
+const AUDIO_BPS: u64 = 80_000;
+/// Video sent this long with no estimate means the far end sends no
+/// feedback we read: the share then goes at [`UNESTIMATED_SHARE_BPS`].
+#[cfg(feature = "huddle-camera")]
+const NO_ESTIMATE_AFTER: Duration = Duration::from_secs(10);
+/// A share's bitrate when nothing estimates the link: enough for a
+/// screen's text at 1080p and 15 a second, which the camera's 600 kbit/s
+/// start is not.
+#[cfg(feature = "huddle-camera")]
+const UNESTIMATED_SHARE_BPS: u32 = 1_500_000;
 const AUDIO_TICK: Duration = Duration::from_millis(20);
 /// The audio m-line's mid in our offer (§D.1).
 pub const AUDIO_MID: &str = "0";
@@ -597,10 +613,10 @@ enum Command {
     /// Send this on the meeting's data channel.
     Data(Vec<u8>),
     /// Keep what the camera's (or, `share`, the share's) line sends
-    /// within this many bit/s.
+    /// within what a meeting allows.
     Limit {
         share: bool,
-        bitrate: u32,
+        limit: super::types::VideoLimit,
     },
 }
 
@@ -686,9 +702,9 @@ impl MediaSession {
     }
 
     /// Keeps what our camera (or, `share`, our screen share) sends within
-    /// `bitrate` bit/s, as a meeting asks.
-    pub fn limit(&self, share: bool, bitrate: u32) {
-        let _ = self.commands.send(Command::Limit { share, bitrate });
+    /// `limit`, as a meeting asks.
+    pub fn limit(&self, share: bool, limit: super::types::VideoLimit) {
+        let _ = self.commands.send(Command::Limit { share, limit });
     }
 
     /// Sends `message` on the meeting's data channel, once it is open.
@@ -828,70 +844,6 @@ fn public(ip: IpAddr) -> bool {
         IpAddr::V4(ip) => !(ip.is_private() || ip.is_loopback() || ip.is_link_local()),
         IpAddr::V6(ip) => !(ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00),
     }
-}
-
-/// The DTLS datagrams of the last flight we sent, kept to send again.
-///
-/// str0m's OpenSSL backend never retransmits a lost handshake flight
-/// (its timeout only notes the next deadline), and across two NATs the
-/// first ClientHello is often lost as the path opens: the call then
-/// never comes up. So while the handshake runs, a flight nothing has
-/// answered is sent again, as DTLS (RFC 6347 §4.2.4) would: after 1 s,
-/// then 2, then 4, a few times. A repeated handshake record is harmless
-/// to the far end.
-#[derive(Debug, Default)]
-struct Flight {
-    /// Each datagram with whether it went through the relay, and to where.
-    datagrams: Vec<(bool, SocketAddr, Vec<u8>)>,
-    /// Whether the far end has said anything since this flight began: the
-    /// next datagram we send starts a new flight.
-    answered: bool,
-    /// When to send it again.
-    resend_at: Option<Instant>,
-    /// The wait before that.
-    wait: Duration,
-    /// How often it was sent again.
-    tries: u32,
-}
-
-/// How many times a flight is sent again before the connection timeout
-/// is left to end the call.
-const FLIGHT_TRIES: u32 = 6;
-
-impl Flight {
-    /// We sent a DTLS datagram at `now`.
-    fn sent(&mut self, relayed: bool, to: SocketAddr, data: &[u8], now: Instant) {
-        if self.answered || self.datagrams.is_empty() {
-            self.datagrams.clear();
-            self.answered = false;
-            self.tries = 0;
-            self.wait = Duration::from_secs(1);
-            self.resend_at = Some(now + self.wait);
-        }
-        self.datagrams.push((relayed, to, data.to_vec()));
-    }
-
-    /// The far end sent a DTLS datagram: it heard us.
-    fn heard(&mut self) {
-        self.answered = true;
-        self.resend_at = None;
-    }
-
-    /// Whether to send the flight again at `now`; moves the next time on.
-    fn due(&mut self, now: Instant) -> bool {
-        if !self.resend_at.is_some_and(|at| at <= now) || self.datagrams.is_empty() {
-            return false;
-        }
-        self.tries += 1;
-        self.wait = (self.wait * 2).min(Duration::from_secs(4));
-        self.resend_at = (self.tries < FLIGHT_TRIES).then(|| now + self.wait);
-        true
-    }
-}
-
-/// Whether `data` is a DTLS record (RFC 7983's first byte 20 to 63).
-fn is_dtls(data: &[u8]) -> bool {
-    matches!(data.first(), Some(20..=63))
 }
 
 /// What went which way while connecting, by path and kind: which path
@@ -1049,19 +1001,6 @@ fn apply(rtc: &mut Rtc, applied: &mut Applied, plan: &Plan) -> Result<Vec<String
     Ok(notes)
 }
 
-/// How many unreadable packets one round of driving the peer drops before
-/// the media counts as broken.
-const SKIP_AT_MOST: u32 = 100;
-
-/// Whether `error` is about one packet only (one that did not unpack or
-/// parse), not the connection.
-fn is_one_packet(error: &str0m::RtcError) -> bool {
-    matches!(
-        error,
-        str0m::RtcError::Packet(..) | str0m::RtcError::Rtp(_) | str0m::RtcError::Net(_)
-    )
-}
-
 /// The peer: Opus alone at `opus_pt`, OpenSSL's DTLS, full ICE.
 fn new_rtc(opus_pt: u8, video: &[(u8, Option<u8>)], controlling: bool, now: Instant) -> Rtc {
     let mut config = RtcConfig::new()
@@ -1070,6 +1009,12 @@ fn new_rtc(opus_pt: u8, video: &[(u8, Option<u8>)], controlling: bool, now: Inst
         .set_crypto_provider(Arc::new(dtls::provider()))
         // Brings the far end's RTCP receiver reports on what we send.
         .set_stats_interval(Some(STATS_EVERY));
+    // With video, str0m's send-side estimate from the far end's
+    // transport-cc feedback (or REMB) sets what our camera and share
+    // send: the extension is the offer's number 3, str0m's own.
+    if !video.is_empty() {
+        config = config.enable_bwe(Some(str0m::bwe::Bitrate::kbps(BWE_START_KBPS)));
+    }
     config.codec_config().add_config(
         Pt::from(opus_pt),
         None,
@@ -1109,6 +1054,25 @@ fn new_rtc(opus_pt: u8, video: &[(u8, Option<u8>)], controlling: bool, now: Inst
     let mut rtc = config.build(now);
     rtc.direct_api().set_ice_controlling(controlling);
     rtc
+}
+
+/// What each of `shares` screen shares and `cameras` cameras of ours may
+/// send, in bit/s, of a send bandwidth estimate of `bps`: what is left
+/// after the audio, two thirds of it to the shares when cameras go too
+/// (a screen's text wants it more than a face), shared evenly among each
+/// kind.
+#[cfg(feature = "huddle-camera")]
+fn split_estimate(bps: u64, shares: usize, cameras: usize) -> (u32, u32) {
+    let left = bps.saturating_sub(AUDIO_BPS);
+    let for_shares = match (shares, cameras) {
+        (0, _) => 0,
+        (_, 0) => left,
+        _ => left * 2 / 3,
+    };
+    let each = |part: u64, count: usize| {
+        u32::try_from(part / u64::try_from(count.max(1)).unwrap_or(1)).unwrap_or(u32::MAX)
+    };
+    (each(for_shares, shares), each(left - for_shares, cameras))
 }
 
 /// Declares the audio m-line, sending on `ssrc`.
@@ -1355,6 +1319,14 @@ struct Session {
     channel: Option<str0m::channel::ChannelId>,
     /// More camera lines, in a meeting.
     more: Vec<super::video::CallVideo>,
+    /// The last send bandwidth estimate, in bit/s, once there is one.
+    estimate: Option<u64>,
+    /// Since when we have sent video, and whether its rates were fixed
+    /// for want of an estimate.
+    #[cfg(feature = "huddle-camera")]
+    video_since: Option<Instant>,
+    #[cfg(feature = "huddle-camera")]
+    unestimated: bool,
 }
 
 impl Session {
@@ -1525,6 +1497,11 @@ impl Session {
             data_ssrc,
             channel: None,
             more,
+            estimate: None,
+            #[cfg(feature = "huddle-camera")]
+            video_since: None,
+            #[cfg(feature = "huddle-camera")]
+            unestimated: false,
         })
     }
 
@@ -1968,6 +1945,7 @@ impl Session {
                     }
                 }
             }
+            RtcEvent::EgressBitrateEstimate(estimate) => self.bitrate_estimate(&estimate),
             RtcEvent::KeyframeRequest(request) => {
                 for line in self
                     .video
@@ -2130,14 +2108,14 @@ impl Session {
                 log::info!("media: stopping");
                 self.over.get_or_insert(Ok(()));
             }
-            Some(Command::Limit { share, bitrate }) => {
+            Some(Command::Limit { share, limit }) => {
                 let line = if share {
                     &mut self.share
                 } else {
                     &mut self.video
                 };
                 if let Some(line) = line {
-                    line.limit(bitrate);
+                    line.limit(limit, self.estimate.is_some());
                 }
             }
             Some(Command::Data(message)) => {
@@ -2259,10 +2237,81 @@ impl Session {
         if self.next_stats <= now {
             if self.connected {
                 self.stats();
+                self.pace_video(now);
             }
             self.next_stats = now + STATS_EVERY;
         }
     }
+
+    /// Our senders now, each with whether it is the share.
+    #[cfg(feature = "huddle-camera")]
+    fn senders(&self) -> Vec<(bool, crate::huddle_audio::camera_send::SendControl)> {
+        self.video
+            .iter()
+            .chain(self.share.iter())
+            .chain(self.more.iter())
+            .filter_map(|line| Some((line.is_share(), line.sending()?.clone())))
+            .collect()
+    }
+
+    /// The bandwidth estimate, less the audio's, to what we send: the
+    /// share two thirds when the camera goes too, each sender within its
+    /// own limits and a meeting's ceiling.
+    fn bitrate_estimate(&mut self, estimate: &str0m::bwe::BweKind) {
+        let bps = match estimate {
+            str0m::bwe::BweKind::Twcc { estimate, .. } => estimate.as_u64(),
+            str0m::bwe::BweKind::Remb { estimate, .. } => estimate.as_u64(),
+            _ => return,
+        };
+        if self.estimate.is_none_or(|was| was.abs_diff(bps) > was / 5) {
+            log::info!("media: send bandwidth estimate {} kbit/s", bps / 1000);
+        }
+        self.estimate = Some(bps);
+        #[cfg(feature = "huddle-camera")]
+        {
+            let senders = self.senders();
+            let shares = senders.iter().filter(|(share, _)| *share).count();
+            let (share, camera) = split_estimate(bps, shares, senders.len() - shares);
+            for (is_share, control) in &senders {
+                control.set_bitrate(if *is_share { share } else { camera });
+            }
+        }
+    }
+
+    /// Every few seconds while we send video: tells the estimate what we
+    /// would send at most, so it probes that far, and with no estimate
+    /// after [`NO_ESTIMATE_AFTER`] sends the share at a fixed rate.
+    #[cfg(feature = "huddle-camera")]
+    fn pace_video(&mut self, now: Instant) {
+        let senders = self.senders();
+        if senders.is_empty() {
+            self.video_since = None;
+            return;
+        }
+        let desired: u64 = senders
+            .iter()
+            .map(|(_, control)| u64::from(control.limits().max_bitrate))
+            .sum::<u64>()
+            + AUDIO_BPS;
+        self.rtc
+            .bwe()
+            .set_desired_bitrate(str0m::bwe::Bitrate::bps(desired));
+        let since = *self.video_since.get_or_insert(now);
+        if self.estimate.is_none() && !self.unestimated && now >= since + NO_ESTIMATE_AFTER {
+            self.unestimated = true;
+            log::info!(
+                "media: no send bandwidth estimate (the far end's feedback did not come); \
+                 a share goes at {} kbit/s",
+                UNESTIMATED_SHARE_BPS / 1000
+            );
+            for (_, control) in senders.iter().filter(|(share, _)| *share) {
+                control.set_bitrate(UNESTIMATED_SHARE_BPS);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "huddle-camera"))]
+    fn pace_video(&mut self, _now: Instant) {}
 
     /// Sends our unanswered DTLS flight again, each datagram the way it
     /// went first.
@@ -2461,6 +2510,19 @@ mod tests {
     use super::super::{Line, LineKind};
     use super::*;
 
+    #[cfg(feature = "huddle-camera")]
+    #[test]
+    fn the_estimate_goes_mostly_to_the_share() {
+        // 2 Mbit/s: 1.92 after the audio, two thirds of it to the share.
+        assert_eq!(split_estimate(2_000_000, 1, 1), (1_280_000, 640_000));
+        // One sender takes it all; two cameras share theirs evenly.
+        assert_eq!(split_estimate(2_000_000, 1, 0), (1_920_000, 0));
+        assert_eq!(split_estimate(2_000_000, 0, 2), (0, 960_000));
+        // Less than the audio's leaves nothing (each sender's own least
+        // still holds).
+        assert_eq!(split_estimate(50_000, 1, 1), (0, 0));
+    }
+
     fn addr(text: &str) -> SocketAddr {
         text.parse().expect("an address")
     }
@@ -2527,46 +2589,6 @@ mod tests {
             ],
             video_streams: Vec::new(),
         }
-    }
-
-    #[test]
-    fn an_unanswered_flight_is_sent_again_with_backoff() {
-        let start = Instant::now();
-        let to: SocketAddr = "198.51.100.7:5000".parse().expect("an address");
-        let mut flight = Flight::default();
-        flight.sent(false, to, &[22, 1], start);
-        flight.sent(false, to, &[22, 2], start);
-        assert!(!flight.due(start), "not before a second");
-        assert!(flight.due(start + Duration::from_secs(1)));
-        assert_eq!(flight.datagrams.len(), 2, "the whole flight");
-        assert!(
-            !flight.due(start + Duration::from_millis(2500)),
-            "then two seconds"
-        );
-        assert!(flight.due(start + Duration::from_secs(3)));
-        // An answer stops it; the next datagram starts a new flight.
-        flight.heard();
-        assert!(!flight.due(start + Duration::from_secs(60)));
-        flight.sent(false, to, &[22, 3], start + Duration::from_secs(60));
-        assert_eq!(flight.datagrams.len(), 1);
-        assert!(flight.due(start + Duration::from_secs(61)));
-    }
-
-    #[test]
-    fn a_flight_is_sent_again_a_few_times_only() {
-        let start = Instant::now();
-        let to: SocketAddr = "198.51.100.7:5000".parse().expect("an address");
-        let mut flight = Flight::default();
-        flight.sent(false, to, &[22], start);
-        let mut sent = 0;
-        let mut at = start;
-        for _ in 0..100 {
-            at += Duration::from_secs(5);
-            if flight.due(at) {
-                sent += 1;
-            }
-        }
-        assert_eq!(sent, FLIGHT_TRIES);
     }
 
     #[test]

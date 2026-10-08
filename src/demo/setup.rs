@@ -85,6 +85,8 @@ views! {
     /// meeting title, its join link to copy, and Lee waiting in the lobby
     /// with Admit.
     Meeting = "meeting",
+    /// The same, Admit pressed for Lee: being let in.
+    MeetingAdmitting = "meeting-admitting",
     /// Calling Bob: the call bar ringing.
     Calling = "calling",
     /// The meeting's call window, drawn inside the main one.
@@ -621,6 +623,14 @@ impl Setup {
             }
             View::Meeting => {
                 app.huddles.listening = Some(super::meeting());
+                open(app, "C03");
+            }
+            View::MeetingAdmitting => {
+                let mut meeting = super::meeting();
+                meeting
+                    .admitting
+                    .push(("U06".into(), std::time::Instant::now()));
+                app.huddles.listening = Some(meeting);
                 open(app, "C03");
             }
             View::Calling => {

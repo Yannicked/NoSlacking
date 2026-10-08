@@ -6,39 +6,50 @@ NoSlacking needs a Rust toolchain (pinned in `rust-toolchain.toml`) and the
 usual egui build dependencies. On Debian/Ubuntu:
 
 ```
-sudo apt-get install libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake
+sudo apt-get install libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libssl-dev cmake libpipewire-0.3-dev libclang-dev
 ```
 
 ```
-cargo run                 # the real app
+cargo build               # the app and its video helper
+cargo run                 # the real app (builds the app alone)
 cargo run --features demo # a pretend Slack, offline
 ```
 
-Huddle video (the `huddle-video` feature) is decoded only by the video
-helper, `noslacking-video` (crates/noslacking-video), which the app
-looks for beside its own binary. `cargo build` builds both; `cargo run`
-builds the app alone, so run `cargo build` (with the same features)
-first, or the call window says there is no video.
+The default build has everything: huddle video, your camera, screen
+sharing and Microsoft Teams workspaces (the `huddle-video`,
+`huddle-camera`, `huddle-share` and `teams` features). Leave any of them
+out with `--no-default-features` and the features you want, for example
+`--no-default-features --features highlight,bundled-emoji` for a
+Slack-only build without video.
 
-Your camera (the `huddle-camera` feature) and screen sharing (the
-`huddle-share` feature) are captured and encoded by the same helper; the
+Huddle video is decoded only by the video helper, `noslacking-video`
+(crates/noslacking-video), which the app looks for beside its own
+binary. `cargo build` builds both; `cargo run` builds the app alone, so
+run `cargo build` first, or the call window says there is no video. The
+helper uses the GPU through VA-API on Linux; on macOS and Windows it has
+no hardware back end yet (VideoToolbox and Media Foundation are planned)
+and decodes and encodes in software.
+
+Your camera and screen sharing are captured and encoded by the same
+helper; the
 app itself has no capture or encoding dependency, and without the helper
 there is no camera and no sharing (Settings → Huddles then says so under
 the camera's picker; the microphone and speaker pickers work without it).
 The helper reaches cameras through
 V4L2 on Linux (its own few calls, nothing to install) and nokhwa on macOS
 and Windows. On X11 (and
-on macOS and Windows) the helper needs nothing more. To share under
-Wayland or in the Flatpak, build the helper with its `pipewire` feature,
-which needs PipeWire's headers and libclang (`libpipewire-0.3-dev
-libclang-dev`, or `pipewire-devel clang-devel`):
+on macOS and Windows) the helper needs nothing more. Under Wayland and
+in the Flatpak it shares through the ScreenCast portal and PipeWire: its
+`pipewire` feature, on by default, which needs PipeWire's headers and
+libclang to build on Linux (`libpipewire-0.3-dev libclang-dev`, or
+`pipewire-devel clang-devel`). Without them, build the helper without
+it; it then shares only X11 screens:
 
 ```
-cargo build --features huddle-share,noslacking-video/pipewire
+cargo build -p noslacking && cargo build -p noslacking-video --no-default-features
 ```
 
-`--all-features` (the checks below) turns on the helper's `pipewire`
-feature too. Nothing else in the build needs libclang.
+Nothing else in the build needs libclang.
 
 Sound plays through ALSA on Linux (`libasound2-dev`, or
 `alsa-lib-devel`). Huddles' DTLS is OpenSSL's: Linux links the system's

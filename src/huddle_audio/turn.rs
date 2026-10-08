@@ -132,8 +132,6 @@ pub enum Method {
     Data = 0x007,
     /// Lets a peer's address through.
     CreatePermission = 0x008,
-    /// Binds a channel to a peer; not used.
-    ChannelBind = 0x009,
 }
 
 impl Method {
@@ -145,7 +143,6 @@ impl Method {
             0x006 => Self::Send,
             0x007 => Self::Data,
             0x008 => Self::CreatePermission,
-            0x009 => Self::ChannelBind,
             _ => return None,
         })
     }
@@ -195,8 +192,6 @@ pub mod attr {
     pub const MESSAGE_INTEGRITY: u16 = 0x0008;
     /// Why a request was refused.
     pub const ERROR_CODE: u16 = 0x0009;
-    /// A channel's number; not used.
-    pub const CHANNEL_NUMBER: u16 = 0x000C;
     /// An allocation's lifetime, in seconds.
     pub const LIFETIME: u16 = 0x000D;
     /// A peer's address.
@@ -213,13 +208,9 @@ pub mod attr {
     pub const REQUESTED_TRANSPORT: u16 = 0x0019;
     /// Our address as the server sees it.
     pub const XOR_MAPPED_ADDRESS: u16 = 0x0020;
-    /// The sender's software; not sent.
-    pub const SOFTWARE: u16 = 0x8022;
     /// Where to allocate instead (with a 300 Try Alternate), written as a
     /// plain address, not XORed.
     pub const ALTERNATE_SERVER: u16 = 0x8023;
-    /// A CRC of the message; not sent.
-    pub const FINGERPRINT: u16 = 0x8028;
 }
 
 /// A STUN transaction id.
@@ -642,11 +633,6 @@ impl Client {
             events: VecDeque::new(),
             next_transaction: next,
         }
-    }
-
-    /// The relayed address, once allocated.
-    pub fn relayed(&self) -> Option<SocketAddr> {
-        self.relayed
     }
 
     /// Whether `ip` may send to us.
@@ -1352,7 +1338,6 @@ mod tests {
         }
         assert_eq!(sends, SENDS);
         assert!(now - start > Duration::from_secs(10));
-        assert_eq!(client.relayed(), None);
     }
 
     #[test]

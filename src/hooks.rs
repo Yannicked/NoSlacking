@@ -56,7 +56,7 @@ pub struct Hook {
 
 impl Hook {
     /// The keywords, one by one.
-    pub fn keyword_list(&self) -> Vec<String> {
+    fn keyword_list(&self) -> Vec<String> {
         self.keywords
             .split(',')
             .map(str::trim)

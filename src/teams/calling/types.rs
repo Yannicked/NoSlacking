@@ -689,15 +689,77 @@ pub struct StreamControl {
     pub fmt_params: String,
 }
 
+/// What a meeting lets one of our video streams send, from its
+/// `controlVideoStreaming`: each part none when it sets no limit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VideoLimit {
+    /// The most bitrate, in bit/s (`max-br`).
+    pub bitrate: Option<u32>,
+    /// The most pictures a second (`max-fps`, lowered to keep within
+    /// `max-mbps` at the largest size).
+    pub fps: Option<u32>,
+    /// The box pictures fit within (`max-fs`).
+    pub size: Option<(u32, u32)>,
+}
+
+impl VideoLimit {
+    /// Whether it limits nothing.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 impl StreamControl {
-    /// The most it may take, in bit/s (`max-br` is in kbit/s).
-    pub fn max_bitrate(&self) -> Option<u32> {
+    /// The number `name=` holds in `fmtParams`.
+    fn param(&self, name: &str) -> Option<u32> {
         self.fmt_params
             .split(';')
-            .find_map(|p| p.trim().strip_prefix("max-br="))
-            .and_then(|kbps| kbps.trim().parse::<u32>().ok())
-            .map(|kbps| kbps.saturating_mul(1000))
+            .find_map(|p| p.trim().strip_prefix(name)?.strip_prefix('='))
+            .and_then(|value| value.trim().parse::<u32>().ok())
     }
+
+    /// The most it may take, in bit/s (`max-br` is in kbit/s).
+    pub fn max_bitrate(&self) -> Option<u32> {
+        self.param("max-br").map(|kbps| kbps.saturating_mul(1000))
+    }
+
+    /// All it asks: the bitrate, the pictures a second (`max-fps` is in
+    /// hundredths) and a box from `max-fs`. A rate that at the box's size
+    /// would pass `max-mbps` (macroblocks a second) is lowered to fit.
+    pub fn limit(&self) -> VideoLimit {
+        let frame_size = self.param("max-fs").filter(|&fs| fs > 0);
+        let fps = self.param("max-fps").map(|hundredths| hundredths / 100);
+        let within_mbps = self
+            .param("max-mbps")
+            .zip(frame_size)
+            .map(|(mbps, fs)| mbps / fs);
+        let fps = match (fps, within_mbps) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+        .map(|fps| fps.max(1));
+        VideoLimit {
+            bitrate: self.max_bitrate(),
+            fps,
+            size: frame_size.map(frame_box),
+        }
+    }
+}
+
+/// The 16:9 box a picture of `fs` macroblocks (16×16) fills: 8160 is
+/// 1920×1080, 3600 1280×720, 920 640×360, 240 320×180. Its width a
+/// whole number of macroblocks, its height even; a picture of another
+/// shape fits within it with no more macroblocks than it has.
+pub fn frame_box(fs: u32) -> (u32, u32) {
+    let pixels = f64::from(fs) * 256.0;
+    let width = (pixels * 16.0 / 9.0).sqrt().floor();
+    // Whole macroblocks, at least one.
+    let width = ((width as u32) / 16 * 16).max(16);
+    // 16:9, but no more rows of macroblocks than `fs` leaves (1080 is 68
+    // rows, as 1088 is).
+    let rows = (fs / (width / 16)).max(1);
+    let height = (width * 9 / 16).min(rows * 16) & !1;
+    (width, height.max(16))
 }
 
 // ---------------------------------------------------------------- C.3
@@ -1366,5 +1428,50 @@ mod tests {
         assert_eq!(control.control_info[0].source_id, 2293);
         assert_eq!(control.control_info[0].max_bitrate(), Some(825_000));
         assert_eq!(StreamControl::default().max_bitrate(), None);
+        // 15 a second is within 135000 macroblocks a second at 8160 each.
+        assert_eq!(
+            control.control_info[0].limit(),
+            VideoLimit {
+                bitrate: Some(825_000),
+                fps: Some(15),
+                size: Some((1920, 1080)),
+            }
+        );
+        assert!(StreamControl::default().limit().is_empty());
+    }
+
+    #[test]
+    fn a_frame_size_is_a_16_by_9_box_of_whole_macroblocks() {
+        assert_eq!(frame_box(8160), (1920, 1080));
+        assert_eq!(frame_box(3600), (1280, 720));
+        assert_eq!(frame_box(920), (640, 360));
+        assert_eq!(frame_box(240), (320, 180));
+        assert_eq!(frame_box(1), (16, 16));
+        // An odd size never gives a box of more macroblocks than asked.
+        for fs in [500, 1234, 4000, 8191] {
+            let (w, h) = frame_box(fs);
+            assert!((w / 16) * h.div_ceil(16) <= fs, "{fs}: {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn too_many_macroblocks_a_second_lower_the_rate() {
+        let control = |params: &str| StreamControl {
+            fmt_params: params.into(),
+            ..StreamControl::default()
+        };
+        // 30 a second at 1080p would be 244800 macroblocks a second.
+        assert_eq!(
+            control("max-fps=3000;max-fs=8160;max-mbps=122400")
+                .limit()
+                .fps,
+            Some(15)
+        );
+        // Without max-fps the macroblock budget alone sets the rate.
+        assert_eq!(control("max-fs=3600;max-mbps=108000").limit().fps, Some(30));
+        // Never below one a second; a parameter named like another is
+        // not taken for it.
+        assert_eq!(control("max-fs=8160;max-mbps=10").limit().fps, Some(1));
+        assert_eq!(control("max-brx=9;max-br=7").limit().bitrate, Some(7000));
     }
 }

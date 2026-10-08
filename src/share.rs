@@ -37,12 +37,6 @@ impl Share {
             ..Self::default()
         }
     }
-
-    /// The link to the shared message in the workspace at `domain`, which
-    /// for a reply opens its thread.
-    pub fn link(&self, domain: &str) -> Option<String> {
-        crate::links::permalink(domain, &self.channel, &self.ts, self.thread.as_ref())
-    }
 }
 
 /// The text to post: the `comment` (already in Slack's markup), then the
@@ -115,7 +109,9 @@ mod tests {
             Ts::new("1700000500.000200"),
             Some(Ts::new("1700000000.000100")),
         );
-        let link = share.link("acme").expect("a link");
+        let link =
+            crate::links::permalink("acme", &share.channel, &share.ts, share.thread.as_ref())
+                .expect("a link");
         assert_eq!(
             link,
             "https://acme.slack.com/archives/C1/p1700000500000200?thread_ts=1700000000.000100&cid=C1"
@@ -134,12 +130,6 @@ mod tests {
                 thread: Some(Ts::new("1700000000.000100")),
             })
         );
-    }
-
-    #[test]
-    fn a_message_not_sent_yet_has_nothing_to_share() {
-        let share = Share::new("C1".into(), Ts::new("local-1"), None);
-        assert_eq!(share.link("acme"), None);
     }
 
     #[test]

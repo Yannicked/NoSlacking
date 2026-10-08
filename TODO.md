@@ -1055,6 +1055,22 @@ engineering, as for the rest of the session sign-in.
 - **Huddle video:** [docs/research/huddle-video.md](docs/research/huddle-video.md)
   (2026-10-07). Watching is realistic on the audio path; sending is much
   more.
+  - [x] **On by default (2026-10-08):** `huddle-video`, `huddle-camera`
+        and `huddle-share` (and `teams`) are default features, and so is
+        the helper's `pipewire`. The stages below say "off by default" as
+        they were written. The Flatpak gets libclang from the LLVM 22 SDK
+        extension, and the .deb and .rpm depend on libpipewire. The trials against Slack below are
+        still open. The Flatpak still has no camera (V4L2 would need
+        `--device=all`; the Camera portal item below).
+  - [x] **The call window repaints on its own (2026-10-08):** a deferred
+        viewport; new pictures wake it alone, and the main window
+        repaints only when what it shows changes. A profile of a call
+        with cameras had the main window rebuilt 65–95 times a second
+        for them (most of the UI thread's 4.6 s of CPU in 68 s); in the
+        demo the UI thread went from 23 % to 9 % of a core.
+  - [x] **The live call bar fits the sidebar (2026-10-08):** icon-only
+        controls are square, as their size says; the theme's padding
+        had made the row wider than the bar.
   - [x] Stage 0 built, unproven against Slack: every `--huddle-probe`
         run logs INDEX (sources, `#content` shares, the codec
         intersection), PAUSE/RESUME, BITRATES and DATA_MESSAGE topics;
@@ -1195,9 +1211,11 @@ engineering, as for the rest of the session sign-in.
                  compositor give linear dma-bufs (the log's "PipeWire
                  format … dma-bufs (modifier 0x0)")? Then X11, the
                  Flatpak, macOS and Windows (xcap only built in CI).
-           - [ ] Ship it: releases and the Flatpak build the helper with
-                 `--features noslacking-video/pipewire` (libpipewire and
-                 libclang) once `huddle-share` is on.
+           - [x] Ship it: the helper's `pipewire` feature is on by
+                 default (2026-10-08), so releases, the Flatpak and a
+                 plain `cargo build` share under Wayland; Linux builds
+                 need libpipewire's headers and libclang. Not yet built
+                 in the release workflow.
            - [ ] Tiled modifiers as well as linear (ask VA-API which it
                  imports), to spare the compositor its copy.
            - Learned for 3: the capture thread must be the pipeline's

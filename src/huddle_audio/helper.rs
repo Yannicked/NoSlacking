@@ -659,6 +659,27 @@ impl RemoteCapture {
             ))),
         }
     }
+
+    /// Fits the pictures within `max` from the next picture on, a
+    /// keyframe first; none lifts the box.
+    pub fn set_max_size(&mut self, max: Option<(u32, u32)>) -> Result<(), CaptureTrouble> {
+        let (width, height) = max.unwrap_or((0, 0));
+        let request = Request::SetMaxSize {
+            id: self.id,
+            width,
+            height,
+        };
+        match self
+            .helper
+            .call(self.generation, request)
+            .map_err(CaptureTrouble::lost)?
+        {
+            Reply::Done => Ok(()),
+            other => Err(CaptureTrouble::Lost(format!(
+                "an answer to the picture size: {other:?}"
+            ))),
+        }
+    }
 }
 
 #[cfg(feature = "huddle-camera")]

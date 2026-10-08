@@ -8,7 +8,13 @@ published learn.microsoft.com pages built from it.
 
 ## Status and decision
 
-**Not being built for now.** The two routes compare like this:
+**Update (2026-10-08):** built after all on the second route (section 6),
+and on by default since 2026-10-08 (the `teams` cargo feature; a
+Slack-only build leaves it out with `--no-default-features`). The
+risks in section 2 stand, and the README points users to them.
+
+**Not being built for now** (as decided on 2026-10-06). The two routes
+compare like this:
 
 - **The official route (Microsoft Graph with an app registration)** works
   for loading chats and sending on demand. It has no live updates for a

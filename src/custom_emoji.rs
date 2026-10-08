@@ -131,7 +131,7 @@ impl ImageProblem {
 
 /// Checks a picture's size and kind by its bytes (not its file name), and
 /// reads its dimensions.
-pub fn check_image(bytes: &[u8]) -> Result<ImageInfo, ImageProblem> {
+fn check_image(bytes: &[u8]) -> Result<ImageInfo, ImageProblem> {
     if bytes.len() > MAX_BYTES {
         return Err(ImageProblem::TooLarge);
     }

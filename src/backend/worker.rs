@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
-use super::api::{failure, worth_retrying};
+use super::api::{Call, act_with_blocks, failure, with_text, worth_retrying};
 use super::fetch::{
     Boot, boot, conversation_info, conversations, edit_sidebar, history, sections, thread,
     workspace_details,
@@ -296,6 +296,29 @@ struct Live {
     stop: watch::Sender<bool>,
     generation: u64,
     status: Socket,
+}
+
+/// What a Slack-only command does in a workspace where it cannot run: a
+/// Teams one, or one not signed in (see [`Worker::missing`]).
+enum Otherwise {
+    /// Says so, as a problem with what it was doing: for what the user
+    /// asked for.
+    Refuse(Doing),
+    /// Logs it, as "not `what`": for what the interface asks on its own.
+    Skip(&'static str),
+    /// Answers with the event made from the workspace and why, for a
+    /// command whose view waits for its answer.
+    Answer(Box<dyn FnOnce(String, Failure) -> Event>),
+}
+
+/// Ends a history load of `channel`, so it does not show as loading for
+/// ever.
+fn history_failed(channel: String) -> Otherwise {
+    Otherwise::Answer(Box::new(move |team, error| Event::HistoryFailed {
+        team,
+        channel,
+        error,
+    }))
 }
 
 pub struct Worker {
@@ -629,7 +652,7 @@ impl Worker {
         let (sink, gate) = self.sink.gated();
         let client = self.make_client(&workspace.team_id, token, sink.clone());
         self.images.set_client(&workspace.team_id, client.clone());
-        let session = client.token().is_session();
+        let session = client.is_session();
         // The token decides it, whatever the saved details said.
         workspace.sign_in = crate::model::SignInKind::of(session);
         // What Slack granted, until its answers say otherwise; a session
@@ -866,8 +889,7 @@ impl Worker {
     }
 
     fn is_session(&self, team: &str) -> bool {
-        self.slack_team(team)
-            .is_some_and(|t| t.client.token().is_session())
+        self.slack_team(team).is_some_and(|t| t.client.is_session())
     }
 
     /// The real-time status of one workspace: its own RTM socket for a
@@ -949,54 +971,53 @@ impl Worker {
                 cursor,
             } => self.load_history(team, channel, Some(cursor)),
             Command::LoadThread { team, channel, ts } => self.load_thread(team, channel, ts),
-            Command::LoadAround { team, channel, ts } => match self.slack(&team) {
-                Some((client, sink)) => {
-                    tokio::spawn(super::around::around(client, team, channel, ts, sink));
-                }
-                None => self.history_unavailable(team, channel),
-            },
+            Command::LoadAround { team, channel, ts } => self.spawn_slack(
+                team,
+                history_failed(channel.clone()),
+                |client, team, sink| super::around::around(client, team, channel, ts, sink),
+            ),
             Command::Search {
                 query,
                 page,
                 request,
-            } => match self.slack(&query.team) {
-                Some((client, sink)) => {
-                    tokio::spawn(super::search::search(client, query, page, request, sink));
-                }
-                None => self.sink.send(Event::Search {
-                    result: Err(self.missing(&query.team)),
-                    team: query.team,
+            } => self.spawn_slack(
+                query.team.clone(),
+                Otherwise::Answer(Box::new(move |team, error| Event::Search {
+                    team,
                     request,
-                }),
-            },
+                    result: Err(error),
+                })),
+                move |client, _, sink| super::search::search(client, query, page, request, sink),
+            ),
             Command::LoadNewer {
                 team,
                 channel,
                 after,
-            } => match self.slack(&team) {
-                Some((client, sink)) => {
-                    tokio::spawn(super::around::newer(client, team, channel, after, sink));
-                }
-                None => self.history_unavailable(team, channel),
-            },
+            } => self.spawn_slack(
+                team,
+                history_failed(channel.clone()),
+                |client, team, sink| super::around::newer(client, team, channel, after, sink),
+            ),
             Command::FetchQuote {
                 team,
                 channel,
                 ts,
                 thread,
-            } => match self.slack(&team) {
-                Some((client, sink)) => {
-                    tokio::spawn(super::around::quote(
-                        client, team, channel, ts, thread, sink,
-                    ));
-                }
-                None => self.sink.send(Event::Quoted {
-                    result: Err(self.missing(&team)),
+            } => {
+                let (to, at) = (channel.clone(), ts.clone());
+                self.spawn_slack(
                     team,
-                    channel,
-                    ts,
-                }),
-            },
+                    Otherwise::Answer(Box::new(move |team, error| Event::Quoted {
+                        team,
+                        channel: to,
+                        ts: at,
+                        result: Err(error),
+                    })),
+                    |client, team, sink| {
+                        super::around::quote(client, team, channel, ts, thread, sink)
+                    },
+                );
+            }
             Command::Send {
                 team,
                 channel,
@@ -1060,38 +1081,39 @@ impl Worker {
             } => self.slash(id, team, channel, command, text),
             Command::PressButton { team, press } => self.press_button(team, press),
             Command::CancelUpload { id } => self.cancel_upload(id),
-            Command::Download { team, url, name } => self.download(&team, url, name),
-            Command::OpenFile { team, url, name } => self.open_file(&team, url, name),
+            Command::Download { team, url, name } => self.download(team, url, name),
+            Command::OpenFile { team, url, name } => self.open_file(team, url, name),
             Command::FetchAudio {
                 team,
                 id,
                 url,
                 name,
-            } => self.fetch_audio(&team, id, url, name),
+            } => self.fetch_audio(team, id, url, name),
             Command::ViewFile {
                 id,
                 team,
                 url,
                 kind,
                 size,
-            } => self.view_file(id, &team, url, kind, size),
-            Command::Mark { team, channel, ts } => self.mark(&team, channel, ts),
+            } => self.view_file(id, team, url, kind, size),
+            Command::Mark { team, channel, ts } => self.mark(team, channel, ts),
             Command::FetchUsers { team, ids } => self.fetch_users(team, ids),
             Command::FetchBots { team, ids } => self.fetch_bots(team, ids),
             Command::Sidebar { team, calls } => self.edit_sidebar(team, calls),
             Command::CloseConversation { team, channel } => self.act(
-                &team,
-                "conversations.close",
-                vec![("channel", channel)],
-                &["channel_not_found", "already_closed"],
+                team,
+                Doing::CloseConversation,
+                Call::new(
+                    "conversations.close",
+                    vec![("channel", channel)],
+                    &["channel_not_found", "already_closed"],
+                ),
             ),
-            Command::FetchConversation { team, channel } => {
-                if let Some((client, sink)) = self.slack(&team) {
-                    tokio::spawn(conversation_info(client, team, channel, sink));
-                } else {
-                    log::debug!("not fetching {channel} in {team}: signed out");
-                }
-            }
+            Command::FetchConversation { team, channel } => self.spawn_slack(
+                team,
+                Otherwise::Skip("fetching a conversation"),
+                |client, team, sink| conversation_info(client, team, channel, sink),
+            ),
             Command::Reconnect => self.reconnect(),
             Command::SetProxy(proxy) => match crate::slack::net::configure(&proxy) {
                 // New clients only help once the sockets reconnect on them.
@@ -1104,23 +1126,23 @@ impl Worker {
                     )));
                 }
             },
-            Command::Snooze { team, minutes } => {
-                if let Some((client, sink)) = self.slack(&team) {
-                    tokio::spawn(super::desktop::snooze(client, team, minutes, sink));
-                }
-            }
+            Command::Snooze { team, minutes } => self.spawn_slack(
+                team,
+                Otherwise::Refuse(Doing::Snooze),
+                move |client, team, sink| super::desktop::snooze(client, team, minutes, sink),
+            ),
             Command::Mute {
                 team,
                 channel,
                 muted,
                 all,
-            } => {
-                if let Some((client, sink)) = self.slack(&team) {
-                    tokio::spawn(super::desktop::mute(
-                        client, team, channel, muted, all, sink,
-                    ));
-                }
-            }
+            } => self.spawn_slack(
+                team,
+                Otherwise::Refuse(Doing::ChangeMute),
+                move |client, team, sink| {
+                    super::desktop::mute(client, team, channel, muted, all, sink)
+                },
+            ),
             Command::AddEmoji {
                 team,
                 name,
@@ -1128,42 +1150,43 @@ impl Worker {
                 file_name,
                 mime,
             } => self.add_emoji(team, name, image, file_name, mime),
-            Command::FetchEmoji { team } => {
-                if let Some((client, sink)) = self.slack(&team) {
-                    tokio::spawn(async move { super::fetch::emoji(&client, &team, &sink).await });
-                }
-            }
-            Command::FetchDnd { team } => {
-                if let Some((client, sink)) = self.slack(&team) {
-                    tokio::spawn(super::desktop::dnd_info(client, team, sink));
-                }
-            }
+            Command::FetchEmoji { team } => self.spawn_slack(
+                team,
+                Otherwise::Skip("fetching emoji"),
+                |client, team, sink| async move { super::fetch::emoji(&client, &team, &sink).await },
+            ),
+            Command::FetchDnd { team } => self.spawn_slack(
+                team,
+                Otherwise::Skip("fetching Do Not Disturb"),
+                super::desktop::dnd_info,
+            ),
             Command::People { team, command } => self.people_command(team, command),
             #[cfg(feature = "teams")]
             Command::Convos { team, command } if self.teams_session(&team).is_some() => {
                 self.teams_convos(team, command);
             }
-            Command::Convos { team, command } => match self.slack(&team) {
-                Some((client, sink)) => {
-                    tokio::spawn(super::convos::run(client, team, command, sink));
-                }
-                None => self.sink.send(Event::Convos {
-                    event: crate::convos::Event::Failed {
-                        what: command.failure(),
-                        error: self.missing(&team),
-                    },
+            Command::Convos { team, command } => {
+                let what = command.doing();
+                self.spawn_slack(
                     team,
-                }),
-            },
-            Command::Views { team, command } => match self.slack(&team) {
-                Some((client, sink)) => {
-                    tokio::spawn(super::views::run(client, team, command, sink));
-                }
-                None => self.sink.send(Event::Views {
-                    event: command.failed(self.missing(&team)),
+                    Otherwise::Answer(Box::new(move |team, error| Event::Convos {
+                        team,
+                        event: crate::convos::Event::Failed { what, error },
+                    })),
+                    |client, team, sink| super::convos::run(client, team, command, sink),
+                );
+            }
+            Command::Views { team, command } => {
+                let failed = command.clone();
+                self.spawn_slack(
                     team,
-                }),
-            },
+                    Otherwise::Answer(Box::new(move |team, error| Event::Views {
+                        team,
+                        event: failed.failed(error),
+                    })),
+                    |client, team, sink| super::views::run(client, team, command, sink),
+                );
+            }
         }
     }
 
@@ -1207,11 +1230,11 @@ impl Worker {
             ));
             return;
         }
-        if let Some((client, sink)) = self.slack(&team) {
-            tokio::spawn(thread(client, team, channel, ts, sink));
-        } else {
-            self.refuse(self.missing(&team), Doing::LoadThread);
-        }
+        self.spawn_slack(
+            team,
+            Otherwise::Refuse(Doing::LoadThread),
+            |client, team, sink| thread(client, team, channel, ts, sink),
+        );
     }
 
     /// Posts a message; the answer settles the interface's optimistic copy.
@@ -1256,13 +1279,11 @@ impl Worker {
             Some(Backend::Slack(slack)) => {
                 let (client, sink) = (slack.client.clone(), slack.sink.clone());
                 tokio::spawn(async move {
-                    let (method, params, ignore) = request(&channel, &change);
-                    let result = match act_with_blocks::<Value>(&client, method, &params).await {
-                        Ok(_) => Ok(()),
-                        // Already as asked: nothing to undo.
-                        Err(SlackError::Api(code)) if ignore.contains(&code.as_str()) => Ok(()),
-                        Err(error) => Err(failure(&error)),
-                    };
+                    // Already as asked is no failure: nothing to undo.
+                    let result = request(&channel, &change)
+                        .run(&client)
+                        .await
+                        .map_err(|e| failure(&e));
                     sink.send(Event::Settled {
                         team,
                         channel,
@@ -1298,31 +1319,18 @@ impl Worker {
     /// `files.delete`, answered with [`Event::FileDeleteSettled`] either
     /// way, so a file hidden on screen never stays hidden after a refusal.
     fn delete_file(&self, team: String, file: String, name: String) {
-        let Some((client, sink)) = self.slack(&team) else {
-            let missing = self.missing(&team);
-            self.sink.send(Event::FileDeleteSettled {
-                team,
-                file,
-                name,
-                result: Err(missing),
-            });
-            return;
-        };
-        tokio::spawn(async move {
-            let (method, params, ignore) = delete_file_request(&file);
-            let result = match client.act::<Value>(method, &params).await {
-                Ok(_) => Ok(()),
-                // Gone already, which is what was asked.
-                Err(SlackError::Api(code)) if ignore.contains(&code.as_str()) => Ok(()),
-                Err(error) => Err(failure(&error)),
-            };
-            sink.send(Event::FileDeleteSettled {
+        // Gone already is what was asked.
+        let call = delete_file_request(&file);
+        self.answer_slack(
+            team,
+            |client| async move { call.run(&client).await.map_err(|e| failure(&e)) },
+            |team, result| Event::FileDeleteSettled {
                 team,
                 file,
                 name,
                 result,
-            });
-        });
+            },
+        );
     }
 
     /// `emoji.add` as the web client sends it; only a browser session
@@ -1335,25 +1343,17 @@ impl Worker {
         file_name: String,
         mime: String,
     ) {
-        let answer = |sink: &Sink, team, name, result| {
-            sink.send(Event::EmojiAdded { team, name, result });
-        };
-        let Some((client, sink)) = self.slack(&team) else {
-            let missing = self.missing(&team);
-            answer(&self.sink, team, name, Err(missing));
-            return;
-        };
-        if !client.token().is_session() {
-            answer(&sink, team, name, Err(Failure::NeedsSession));
-            return;
-        }
-        tokio::spawn(async move {
-            let result = client
-                .add_emoji(&name, image, &file_name, &mime)
-                .await
-                .map_err(|e| failure(&e));
-            answer(&sink, team, name, result);
-        });
+        let named = name.clone();
+        self.answer_slack(
+            team,
+            |client| async move {
+                client
+                    .add_emoji(&named, image, &file_name, &mime)
+                    .await
+                    .map_err(|e| failure(&e))
+            },
+            |team, result| Event::EmojiAdded { team, name, result },
+        );
     }
 
     fn upload(
@@ -1427,37 +1427,21 @@ impl Worker {
     /// one, so it works with any sign-in, and otherwise through
     /// `chat.command`, Slack's own runner, which only sessions may call.
     fn slash(&self, id: u64, team: String, channel: String, command: String, text: String) {
-        let Some((client, sink)) = self.slack(&team) else {
-            let missing = self.missing(&team);
-            self.sink.send(Event::Slash {
-                id,
-                command,
-                result: Err(missing),
-            });
-            return;
-        };
-        tokio::spawn(async move {
-            let result = run_slash(&client, &channel, &command, &text).await;
-            sink.send(Event::Slash {
+        let named = command.clone();
+        self.answer_slack(
+            team,
+            |client| async move { run_slash(&client, &channel, &named, &text).await },
+            move |_, result| Event::Slash {
                 id,
                 command,
                 result,
-            });
-        });
+            },
+        );
     }
 
     /// Presses an app's button through `blocks.actions` (see
     /// [`super::blocks`]), which only a browser session may call.
     fn press_button(&self, team: String, press: crate::model::Press) {
-        let Some((client, sink)) = self.slack(&team) else {
-            let missing = self.missing(&team);
-            self.sink.send(Event::Pressed {
-                team,
-                press,
-                result: Err(missing),
-            });
-            return;
-        };
         // The press is dated like Slack's own; a clock before 1970 only
         // makes the date wrong, which Slack does not check.
         let now_ms = std::time::SystemTime::now()
@@ -1465,102 +1449,99 @@ impl Worker {
             .map_or(0, |since| {
                 u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
             });
-        tokio::spawn(async move {
-            let result = super::blocks::press(&client, &press, now_ms).await;
-            if let Err(error) = &result {
-                log::warn!("blocks.actions: {error:?}");
-            }
-            sink.send(Event::Pressed {
+        let pressed = press.clone();
+        self.answer_slack(
+            team,
+            |client| async move {
+                let result = super::blocks::press(&client, &pressed, now_ms).await;
+                if let Err(error) = &result {
+                    log::warn!("blocks.actions: {error:?}");
+                }
+                result
+            },
+            |team, result| Event::Pressed {
                 team,
                 press,
                 result,
-            });
-        });
+            },
+        );
     }
 
-    fn download(&self, team: &str, url: String, name: String) {
-        let Some((client, sink)) = self.slack(team) else {
-            let missing = self.missing(team);
-            self.refuse(missing, Doing::Download { name });
-            return;
-        };
-        tokio::spawn(async move {
-            match download(&client, &url, &name).await {
-                Ok(path) => sink.send(Event::Notice(Notice::Saved {
-                    path: path.display().to_string(),
-                })),
-                Err(error) => sink.send(Event::Error(error)),
-            }
-        });
+    fn download(&self, team: String, url: String, name: String) {
+        self.spawn_slack(
+            team,
+            Otherwise::Refuse(Doing::Download { name: name.clone() }),
+            |client, _, sink| async move {
+                match download(&client, &url, &name).await {
+                    Ok(path) => sink.send(Event::Notice(Notice::Saved {
+                        path: path.display().to_string(),
+                    })),
+                    Err(error) => sink.send(Event::Error(error)),
+                }
+            },
+        );
     }
 
-    fn open_file(&self, team: &str, url: String, name: String) {
-        let Some((client, sink)) = self.slack(team) else {
-            let missing = self.missing(team);
-            self.refuse(missing, Doing::Open { name });
-            return;
-        };
-        let dir = self.images.open_dir(team, &url);
-        tokio::spawn(async move {
-            if let Err(error) = open_file(&client, dir, &url, &name).await {
-                sink.send(Event::Error(error));
-            }
-        });
+    fn open_file(&self, team: String, url: String, name: String) {
+        let dir = self.images.open_dir(&team, &url);
+        self.spawn_slack(
+            team,
+            Otherwise::Refuse(Doing::Open { name: name.clone() }),
+            |client, _, sink| async move {
+                if let Err(error) = open_file(&client, dir, &url, &name).await {
+                    sink.send(Event::Error(error));
+                }
+            },
+        );
     }
 
     /// Fetches a sound whole, for playing in the app. Its answer always
     /// comes, so the card never waits for ever.
-    fn fetch_audio(&self, team: &str, id: u64, url: String, name: String) {
-        let Some((client, sink)) = self.slack(team) else {
-            let missing = self.missing(team);
-            let doing = Doing::Download { name };
-            self.sink.send(Event::AudioFetched {
+    fn fetch_audio(&self, team: String, id: u64, url: String, name: String) {
+        let doing = Doing::Download { name: name.clone() };
+        self.answer_slack(
+            team,
+            |client| async move {
+                Ok(fetch_bytes(&client, &url, &name, crate::audio::MAX_BYTES)
+                    .await
+                    .map(crate::audio::Bytes::from))
+            },
+            move |_, result| Event::AudioFetched {
                 id,
-                result: Err(Problem::new(doing, missing)),
-            });
-            return;
-        };
-        tokio::spawn(async move {
-            let result = fetch_bytes(&client, &url, &name, crate::audio::MAX_BYTES)
-                .await
-                .map(crate::audio::Bytes::from);
-            sink.send(Event::AudioFetched { id, result });
-        });
+                result: result.unwrap_or_else(|missing| Err(Problem::new(doing, missing))),
+            },
+        );
     }
 
     /// Fetches a file for the viewer and reads it off the runtime's
     /// threads.
-    fn view_file(&self, id: u64, team: &str, url: String, kind: crate::viewer::Kind, size: u64) {
-        let Some((client, sink)) = self.slack(team) else {
-            let missing = self.missing(team);
-            self.sink.send(Event::FileView {
-                id,
-                result: Err(missing),
-            });
-            return;
-        };
-        tokio::spawn(async move {
-            let result = view(&client, &url, kind, size).await;
-            sink.send(Event::FileView { id, result });
-        });
+    fn view_file(&self, id: u64, team: String, url: String, kind: crate::viewer::Kind, size: u64) {
+        self.answer_slack(
+            team,
+            |client| async move { view(&client, &url, kind, size).await },
+            move |_, result| Event::FileView { id, result },
+        );
     }
 
     /// Moves your read marker. The interface sends this on its own as you
     /// read; a workspace that is signed out has nothing to mark, and
     /// saying so on every click would only be noise.
-    fn mark(&self, team: &str, channel: String, ts: Ts) {
-        match self.workspaces.get(team) {
+    fn mark(&self, team: String, channel: String, ts: Ts) {
+        match self.workspaces.get(&team) {
             Some(Backend::Slack(_)) => self.act(
                 team,
-                "conversations.mark",
-                vec![("channel", channel), ("ts", ts.0)],
-                &["not_in_channel", "channel_not_found"],
+                Doing::MarkRead,
+                Call::new(
+                    "conversations.mark",
+                    vec![("channel", channel), ("ts", ts.0)],
+                    &["not_in_channel", "channel_not_found"],
+                ),
             ),
             #[cfg(feature = "teams")]
             Some(Backend::Teams(session)) => {
                 tokio::spawn(super::teams::mark(
                     session.client.clone(),
-                    team.to_owned(),
+                    team,
                     channel,
                     ts,
                 ));
@@ -1570,11 +1551,11 @@ impl Worker {
     }
 
     fn edit_sidebar(&self, team: String, calls: Vec<crate::sidebar::SidebarCall>) {
-        if let Some((client, sink)) = self.slack(&team) {
-            tokio::spawn(edit_sidebar(client, team, calls, sink));
-        } else {
-            self.refuse(self.missing(&team), Doing::ChangeSidebar);
-        }
+        self.spawn_slack(
+            team,
+            Otherwise::Refuse(Doing::ChangeSidebar),
+            |client, team, sink| edit_sidebar(client, team, calls, sink),
+        );
     }
 
     /// Opens every socket afresh and lists every workspace's conversations
@@ -1585,7 +1566,7 @@ impl Worker {
         let restarted = self.retry_boots(std::time::Instant::now(), true);
         let session_teams: Vec<(String, Client)> = self
             .slack_teams()
-            .filter(|(_, team)| team.client.token().is_session())
+            .filter(|(_, team)| team.client.is_session())
             .map(|(id, team)| (id.clone(), team.client.clone()))
             .collect();
         for (id, client) in session_teams {
@@ -1611,6 +1592,14 @@ impl Worker {
     #[cfg(feature = "teams")]
     fn teams_convos(&self, team: String, command: crate::convos::Command) {
         let Some(session) = self.teams_session(&team) else {
+            // Only called for a Teams workspace; answered all the same.
+            self.sink.send(Event::Convos {
+                event: crate::convos::Event::Failed {
+                    what: command.doing(),
+                    error: self.missing(&team),
+                },
+                team,
+            });
             return;
         };
         let (client, sink) = (session.client.clone(), session.sink.clone());
@@ -1625,7 +1614,7 @@ impl Worker {
             other => sink.send(Event::Convos {
                 team,
                 event: crate::convos::Event::Failed {
-                    what: other.failure(),
+                    what: other.doing(),
                     error: Failure::Unsupported,
                 },
             }),
@@ -1652,37 +1641,70 @@ impl Worker {
         self.report_socket();
     }
 
-    /// Calls a method for its effect, reporting failures (except `ignore`d
-    /// codes) as errors.
-    fn act(
+    /// Makes a call for its effect, reporting failures (but those that
+    /// mean it is done already) as a problem with `doing`.
+    fn act(&self, team: String, doing: Doing, call: Call) {
+        self.spawn_slack(
+            team,
+            Otherwise::Refuse(doing.clone()),
+            |client, _, sink| async move {
+                if let Err(error) = call.run(&client).await {
+                    sink.send(Event::Error(Problem::new(doing, failure(&error))));
+                }
+            },
+        );
+    }
+
+    /// Starts `work` with `team`'s Slack client, or, for a Teams
+    /// workspace or one not signed in, does what `otherwise` says.
+    fn spawn_slack<Fut>(
         &self,
-        team: &str,
-        method: &'static str,
-        params: Vec<(&'static str, String)>,
-        ignore: &'static [&'static str],
-    ) {
-        let Some((client, sink)) = self.slack(team) else {
-            let missing = self.missing(team);
-            self.refuse(
-                missing,
-                Doing::Call {
-                    method: method.to_owned(),
-                },
-            );
-            return;
-        };
-        tokio::spawn(async move {
-            match client.act::<Value>(method, &params).await {
-                Ok(_) => {}
-                Err(SlackError::Api(code)) if ignore.contains(&code.as_str()) => {}
-                Err(error) => sink.send(Event::Error(Problem::new(
-                    Doing::Call {
-                        method: method.to_owned(),
-                    },
-                    failure(&error),
-                ))),
+        team: String,
+        otherwise: Otherwise,
+        work: impl FnOnce(Client, String, Sink) -> Fut,
+    ) where
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        match self.slack(&team) {
+            Some((client, sink)) => {
+                tokio::spawn(work(client, team, sink));
             }
-        });
+            None => {
+                let why = self.missing(&team);
+                match otherwise {
+                    Otherwise::Refuse(doing) => self.refuse(why, doing),
+                    Otherwise::Skip(what) => self.skipped(what, &team),
+                    Otherwise::Answer(answer) => self.sink.send(answer(team, why)),
+                }
+            }
+        }
+    }
+
+    /// Runs `work` with `team`'s Slack client and sends `answer` with its
+    /// result; for a Teams workspace or one not signed in, `answer` says
+    /// why it could not run, so the interface is never left waiting.
+    fn answer_slack<T, Fut>(
+        &self,
+        team: String,
+        work: impl FnOnce(Client) -> Fut,
+        answer: impl FnOnce(String, Result<T, Failure>) -> Event + Send + 'static,
+    ) where
+        Fut: std::future::Future<Output = Result<T, Failure>> + Send + 'static,
+        T: Send + 'static,
+    {
+        match self.slack(&team) {
+            Some((client, sink)) => {
+                let work = work(client);
+                tokio::spawn(async move {
+                    let result = work.await;
+                    sink.send(answer(team, result));
+                });
+            }
+            None => {
+                let why = self.missing(&team);
+                self.sink.send(answer(team, Err(why)));
+            }
+        }
     }
 
     /// Says that `doing` cannot be done, and why (see [`Self::missing`]),
@@ -1714,87 +1736,59 @@ impl Worker {
         #[cfg(feature = "teams")]
         if let Some(session) = self.teams_session(&team) {
             let (client, sink) = (session.client.clone(), session.sink.clone());
-            let ids: Vec<String> = ids
-                .into_iter()
-                .filter(|id| self.users_requested.insert((team.clone(), id.clone())))
-                .collect();
+            let ids = unasked(&mut self.users_requested, &team, ids);
             if !ids.is_empty() {
                 tokio::spawn(super::teams::fetch_users(client, team, ids, sink));
             }
             return;
         }
-        let Some((client, sink)) = self.slack(&team) else {
-            self.skipped("fetching people", &team);
-            return;
-        };
-        let ids: Vec<String> = ids
-            .into_iter()
-            .filter(|id| self.users_requested.insert((team.clone(), id.clone())))
-            .collect();
-        if ids.is_empty() {
-            return;
-        }
-        let internal = self.internal.clone();
-        tokio::spawn(async move {
-            let mut users = Vec::new();
-            let mut retry = Vec::new();
-            for id in ids {
-                match client
-                    .call::<types::UserInfo>("users.info", &[("user", id.clone())])
-                    .await
-                {
-                    Ok(info) => users.push(info.user.into_model()),
-                    Err(error) => {
-                        log::debug!("users.info {id}: {error}");
-                        if worth_retrying(&error) {
-                            retry.push(id);
-                        }
-                    }
-                }
-            }
-            if !retry.is_empty() {
-                let _ = internal.send(Internal::FetchFailed {
-                    team: team.clone(),
-                    users: retry,
-                    bots: Vec::new(),
-                });
-            }
-            if !users.is_empty() {
-                sink.send(Event::Users { team, users });
-            }
+        self.fetch_each(team, ids, Info::Users, user_info, |team, users| {
+            Event::Users { team, users }
         });
     }
 
     fn fetch_bots(&mut self, team: String, ids: Vec<String>) {
+        self.fetch_each(team, ids, Info::Bots, bot_info, |team, bots| Event::Bots {
+            team,
+            bots,
+        });
+    }
+
+    /// Fetches the people or apps of `ids` not asked for already, one by
+    /// one through `info`, and sends those that came with `found`. Those
+    /// that failed for a passing reason may be asked for again.
+    fn fetch_each<T, Fut>(
+        &mut self,
+        team: String,
+        ids: Vec<String>,
+        kind: Info,
+        info: impl Fn(Client, String) -> Fut + Send + 'static,
+        found: impl FnOnce(String, Vec<T>) -> Event + Send + 'static,
+    ) where
+        Fut: std::future::Future<Output = Result<T, SlackError>> + Send,
+        T: Send + 'static,
+    {
         let Some((client, sink)) = self.slack(&team) else {
-            self.skipped("fetching apps", &team);
+            self.skipped(kind.fetching(), &team);
             return;
         };
-        let ids: Vec<String> = ids
-            .into_iter()
-            .filter(|id| self.bots_requested.insert((team.clone(), id.clone())))
-            .collect();
+        let requested = match kind {
+            Info::Users => &mut self.users_requested,
+            Info::Bots => &mut self.bots_requested,
+        };
+        let ids = unasked(requested, &team, ids);
         if ids.is_empty() {
             return;
         }
         let internal = self.internal.clone();
         tokio::spawn(async move {
-            let mut bots = Vec::new();
+            let mut got = Vec::new();
             let mut retry = Vec::new();
             for id in ids {
-                match client
-                    .call::<types::BotInfo>("bots.info", &[("bot", id.clone())])
-                    .await
-                {
-                    Ok(info) => {
-                        let mut bot = info.bot.into_model();
-                        if bot.id.is_empty() {
-                            bot.id = id;
-                        }
-                        bots.push(bot);
-                    }
+                match info(client.clone(), id.clone()).await {
+                    Ok(item) => got.push(item),
                     Err(error) => {
-                        log::debug!("bots.info {id}: {error}");
+                        log::debug!("{} {id}: {error}", kind.method());
                         if worth_retrying(&error) {
                             retry.push(id);
                         }
@@ -1802,14 +1796,18 @@ impl Worker {
                 }
             }
             if !retry.is_empty() {
+                let (users, bots) = match kind {
+                    Info::Users => (retry, Vec::new()),
+                    Info::Bots => (Vec::new(), retry),
+                };
                 let _ = internal.send(Internal::FetchFailed {
                     team: team.clone(),
-                    users: Vec::new(),
-                    bots: retry,
+                    users,
+                    bots,
                 });
             }
-            if !bots.is_empty() {
-                sink.send(Event::Bots { team, bots });
+            if !got.is_empty() {
+                sink.send(found(team, got));
             }
         });
     }
@@ -2024,7 +2022,7 @@ impl Worker {
                 }
                 Translated::RefreshPrefs => {
                     if let Some((client, sink)) = self.slack(team)
-                        && client.token().is_session()
+                        && client.is_session()
                     {
                         tokio::spawn(super::desktop::prefs(client, team.to_owned(), sink));
                     }
@@ -2088,12 +2086,20 @@ impl Worker {
                 #[cfg(feature = "huddle-share")]
                 crate::people::Command::ShareHuddle { request } => self.teams_call.share(request),
                 crate::people::Command::MuteHuddle { muted } => self.teams_call.set_muted(muted),
-                _ => {}
+                // Slack's alone (status, away, typing, huddles): said so
+                // where a view waits on it.
+                other => match other.refused(Failure::Unsupported) {
+                    Some(event) => session.sink.send(Event::People { team, event }),
+                    None => log::debug!("{other:?} is not for a Teams workspace"),
+                },
             }
             return;
         }
         let Some((client, sink)) = self.slack(&team) else {
-            self.skipped("acting on people", &team);
+            match command.refused(self.missing(&team)) {
+                Some(event) => self.sink.send(Event::People { team, event }),
+                None => self.skipped("acting on people", &team),
+            }
             return;
         };
         let command = match command {
@@ -2239,52 +2245,52 @@ impl Worker {
     }
 }
 
-/// Adds a message's text as Slack's own composer sends it: the mrkdwn
-/// `text`, which notifications and older clients show, and the same
-/// message as a `rich_text` block, which Slack draws. When no block can be
-/// made (see [`crate::slack::rich_out`]), the text goes alone.
-pub(crate) fn with_text(params: &mut Vec<(&'static str, String)>, text: String) {
-    let blocks = crate::slack::rich_out::blocks_param(&text);
-    params.push(("text", text));
-    if let Some(blocks) = blocks {
-        params.push(("blocks", blocks));
-    }
+/// What [`Worker::fetch_each`] fetches.
+#[derive(Clone, Copy)]
+enum Info {
+    Users,
+    Bots,
 }
 
-/// Slack's answers when it will not take a message's `blocks`.
-const BLOCKS_REFUSED: [&str; 3] = [
-    "invalid_blocks",
-    "invalid_blocks_format",
-    "msg_blocks_too_long",
-];
-
-/// Makes a call that may carry `blocks`; should Slack refuse them, the
-/// same call goes again with the text alone, so a message is never lost
-/// to its layout.
-pub(crate) async fn act_with_blocks<T: serde::de::DeserializeOwned>(
-    client: &Client,
-    method: &str,
-    params: &[(&'static str, String)],
-) -> Result<T, SlackError> {
-    match client.act::<T>(method, params).await {
-        Err(SlackError::Api(code))
-            if BLOCKS_REFUSED.contains(&code.as_str())
-                && params.iter().any(|(name, _)| *name == "blocks") =>
-        {
-            log::warn!("Slack refused a message's blocks ({code}); sending its text alone");
-            client.act(method, &without_blocks(params)).await
+impl Info {
+    /// The method that answers one.
+    fn method(self) -> &'static str {
+        match self {
+            Self::Users => "users.info",
+            Self::Bots => "bots.info",
         }
-        other => other,
+    }
+
+    /// What is skipped, for the log.
+    fn fetching(self) -> &'static str {
+        match self {
+            Self::Users => "fetching people",
+            Self::Bots => "fetching apps",
+        }
     }
 }
 
-/// The same parameters without `blocks`.
-fn without_blocks(params: &[(&'static str, String)]) -> Vec<(&'static str, String)> {
-    params
-        .iter()
-        .filter(|(name, _)| *name != "blocks")
-        .cloned()
+/// The ids of `ids` not asked for in `team` yet, now marked as asked.
+fn unasked(requested: &mut HashSet<(String, String)>, team: &str, ids: Vec<String>) -> Vec<String> {
+    ids.into_iter()
+        .filter(|id| requested.insert((team.to_owned(), id.clone())))
         .collect()
+}
+
+/// One person, by id.
+async fn user_info(client: Client, id: String) -> Result<crate::model::User, SlackError> {
+    let info: types::UserInfo = client.call("users.info", &[("user", id)]).await?;
+    Ok(info.user.into_model())
+}
+
+/// One app, by id; Slack can leave the id out of its answer.
+async fn bot_info(client: Client, id: String) -> Result<crate::model::Bot, SlackError> {
+    let info: types::BotInfo = client.call("bots.info", &[("bot", id.clone())]).await?;
+    let mut bot = info.bot.into_model();
+    if bot.id.is_empty() {
+        bot.id = id;
+    }
+    Ok(bot)
 }
 
 /// Posts `outgoing` to Slack and settles the optimistic copy with the
@@ -2352,29 +2358,22 @@ fn post_params(
     params
 }
 
-/// The Web API call that makes a [`Change`], and the error codes that
+/// The Web API call that makes a [`Change`], with the error codes that
 /// mean it is already made.
-fn request(
-    channel: &str,
-    change: &Change,
-) -> (
-    &'static str,
-    Vec<(&'static str, String)>,
-    &'static [&'static str],
-) {
+fn request(channel: &str, change: &Change) -> Call {
     let channel = ("channel", channel.to_owned());
     match change {
         Change::Edit { ts, text, .. } => {
             let mut params = vec![channel, ("ts", ts.0.clone())];
             with_text(&mut params, text.clone());
-            ("chat.update", params, &[])
+            Call::new("chat.update", params, &[])
         }
-        Change::Delete { ts, .. } => (
+        Change::Delete { ts, .. } => Call::new(
             "chat.delete",
             vec![channel, ("ts", ts.0.clone())],
             &["message_not_found"],
         ),
-        Change::React { ts, name, added } => (
+        Change::React { ts, name, added } => Call::new(
             if *added {
                 "reactions.add"
             } else {
@@ -2386,16 +2385,10 @@ fn request(
     }
 }
 
-/// The call that deletes file `file`, and the refusals that mean it is
+/// The call that deletes file `file`, with the refusals that mean it is
 /// gone already.
-fn delete_file_request(
-    file: &str,
-) -> (
-    &'static str,
-    Vec<(&'static str, String)>,
-    &'static [&'static str],
-) {
-    (
+fn delete_file_request(file: &str) -> Call {
+    Call::new(
         "files.delete",
         vec![("file", file.to_owned())],
         &["file_not_found", "file_deleted"],
@@ -2456,7 +2449,7 @@ async fn run_slash(
             .await
         }
         "leave" => act("conversations.leave", vec![("channel", channel)]).await,
-        _ if client.token().is_session() => {
+        _ if client.is_session() => {
             let params = [
                 ("channel", channel),
                 ("command", format!("/{command}")),
@@ -2482,12 +2475,15 @@ mod tests {
 
     #[test]
     fn deleting_a_file_names_only_the_file_and_takes_gone_as_done() {
-        let (method, params, ignore) = delete_file_request("F1");
-        assert_eq!(method, "files.delete");
-        assert_eq!(params, vec![("file", "F1".to_owned())]);
-        assert!(ignore.contains(&"file_not_found"));
-        assert!(ignore.contains(&"file_deleted"));
-        assert!(!ignore.contains(&"cant_delete_file"), "a refusal is undone");
+        let call = delete_file_request("F1");
+        assert_eq!(call.method, "files.delete");
+        assert_eq!(call.params, vec![("file", "F1".to_owned())]);
+        assert!(call.done.contains(&"file_not_found"));
+        assert!(call.done.contains(&"file_deleted"));
+        assert!(
+            !call.done.contains(&"cant_delete_file"),
+            "a refusal is undone"
+        );
     }
 
     /// A worker with no network behind it: an in-memory keyring, a
@@ -2569,6 +2565,41 @@ mod tests {
                 ("teams_me".to_owned(), Err(Failure::Unsupported)),
                 ("T404".to_owned(), Err(Failure::NotSignedIn)),
             ]
+        );
+    }
+
+    #[cfg(feature = "teams")]
+    #[tokio::test]
+    async fn slack_only_people_commands_are_answered_in_teams() {
+        let (mut worker, events) = worker();
+        teams(&mut worker, "teams_me");
+        worker.command(Command::People {
+            team: "teams_me".into(),
+            command: crate::people::Command::SetStatus {
+                emoji: ":palm_tree:".into(),
+                text: "Away".into(),
+                expiration: 0,
+            },
+        });
+        worker.command(Command::People {
+            team: "teams_me".into(),
+            command: crate::people::Command::Typing {
+                channel: "19:a@thread.v2".into(),
+                thread: None,
+            },
+        });
+        let events: Vec<Event> = events.try_iter().collect();
+        assert!(
+            matches!(
+                &events[..],
+                [Event::People {
+                    event: crate::people::Event::StatusSet {
+                        result: Err(Failure::Unsupported)
+                    },
+                    ..
+                }]
+            ),
+            "{events:?}"
         );
     }
 
@@ -2828,6 +2859,18 @@ mod tests {
         assert_eq!(signed_out, ["TA", "TB", "TC"]);
     }
 
+    #[test]
+    fn each_id_is_asked_for_once_per_workspace() {
+        let mut requested = HashSet::new();
+        let ids = |list: &[&str]| list.iter().map(|id| (*id).to_owned()).collect();
+        assert_eq!(
+            unasked(&mut requested, "TA", ids(&["U1", "U2"])),
+            ["U1", "U2"]
+        );
+        assert_eq!(unasked(&mut requested, "TA", ids(&["U2", "U3"])), ["U3"]);
+        assert_eq!(unasked(&mut requested, "TB", ids(&["U1"])), ["U1"]);
+    }
+
     #[tokio::test]
     async fn failed_fetches_can_be_asked_for_again() {
         let (mut worker, _events) = worker();
@@ -2976,7 +3019,7 @@ mod tests {
             text: wire.into(),
             before: None,
         };
-        let (method, params, _) = request("C1", &edit);
+        let Call { method, params, .. } = request("C1", &edit);
         assert_eq!(method, "chat.update");
         assert_eq!(
             params[..3],
@@ -3000,12 +3043,54 @@ mod tests {
                 [("channel", "C1".to_owned()), ("text", wire.to_owned())]
             );
         }
-        let params = vec![
-            ("channel", "C1".to_owned()),
-            ("text", "hi".to_owned()),
-            ("blocks", "[]".to_owned()),
-        ];
-        assert_eq!(without_blocks(&params), params[..2]);
+    }
+
+    #[tokio::test]
+    async fn user_actions_in_an_unknown_workspace_say_so() {
+        let (mut worker, events) = worker();
+        worker.waiting = None;
+        worker.command(Command::Snooze {
+            team: "TX".into(),
+            minutes: Some(30),
+        });
+        worker.command(Command::People {
+            team: "TX".into(),
+            command: crate::people::Command::SetAway(true),
+        });
+        // Asked for by the interface on its own: only logged.
+        worker.command(Command::FetchEmoji { team: "TX".into() });
+        worker.command(Command::People {
+            team: "TX".into(),
+            command: crate::people::Command::Active,
+        });
+        worker.command(Command::CloseConversation {
+            team: "TX".into(),
+            channel: "D1".into(),
+        });
+        let events: Vec<Event> = events.try_iter().collect();
+        assert!(
+            matches!(
+                &events[..],
+                [
+                    Event::Error(Problem {
+                        doing: Doing::Snooze,
+                        failure: Failure::NotSignedIn
+                    }),
+                    Event::People {
+                        event: crate::people::Event::AwaySet {
+                            away: true,
+                            result: Err(Failure::NotSignedIn)
+                        },
+                        ..
+                    },
+                    Event::Error(Problem {
+                        doing: Doing::CloseConversation,
+                        ..
+                    }),
+                ]
+            ),
+            "{events:?}"
+        );
     }
 
     #[tokio::test]

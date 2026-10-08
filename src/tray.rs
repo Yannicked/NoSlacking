@@ -55,7 +55,7 @@ fn icon(size: usize) -> Vec<u8> {
 }
 
 /// What the unread entry says.
-pub fn unread_label(unread: Unread) -> String {
+fn unread_label(unread: Unread) -> String {
     if unread.mentions > 0 {
         tn(
             "{count} mention or direct message",
