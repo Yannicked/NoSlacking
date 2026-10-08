@@ -4,7 +4,7 @@
 
 # NoSlacking
 
-**A fast, native Slack client for Linux, macOS and Windows.**<br>
+**A fast, native Slack and Microsoft Teams client for Linux, macOS and Windows.**<br>
 One small window for all your workspaces. No Electron, no browser engine.
 
 [![CI](https://github.com/Yannicked/NoSlacking/actions/workflows/ci.yml/badge.svg)](https://github.com/Yannicked/NoSlacking/actions/workflows/ci.yml)
@@ -26,6 +26,8 @@ One small window for all your workspaces. No Electron, no browser engine.
 - **Everything you do in Slack every day.** Channels, DMs, threads,
   reactions, files, search, notifications and your sidebar sections, across
   all your workspaces.
+- **Teams in the same window.** Your Microsoft Teams chats, channels, calls
+  and meetings sit in the workspace rail beside your Slack workspaces.
 - **Built for the keyboard.** Ctrl+K to jump anywhere, single keys for the
   selected message, and a sheet of every shortcut on Ctrl+/.
 - **Calm by default.** Unread conversations rise to the top of their section;
@@ -85,11 +87,14 @@ One small window for all your workspaces. No Electron, no browser engine.
   formatting.
 - Calls, and meetings joined by link or ID or started with Meet now, with
   cameras, screen sharing and admitting people from the lobby.
-- Add a Teams account (work, school or personal) from the sign-in screen.
-  NoSlacking signs in as Microsoft's own Teams app, so your organisation's
-  app approval does not apply to it and an administrator may block it; see
-  [the research note](docs/research/microsoft-teams.md#2-the-route-third-party-clients-take-not-pursued) before
-  using it at work.
+- Reactions, editing and new messages, notifications, read state and
+  presence, as for Slack.
+- Not yet for Teams: search, files and uploads, pins, bookmarks, Later,
+  scheduled messages, your status and Do Not Disturb, custom emoji, and
+  browsing or creating channels. Closing a chat hides it here only.
+- Add a Teams account (work, school or personal) from the sign-in screen;
+  see [Signing in](#microsoft-teams) and
+  [Use at your own risk](#use-at-your-own-risk) before using it at work.
 
 **Writing**
 - `@mention`, `@group`, `#channel` and `:emoji:` autocomplete, slash
@@ -131,6 +136,8 @@ Then start NoSlacking and sign in.
 
 ## Signing in
 
+### Slack
+
 - **Sign in with your browser.** NoSlacking opens Slack's sign-in page in
   your browser. Sign in as usual (password, emailed code or SSO); when Slack
   hands the sign-in back, the browser passes it to NoSlacking, which
@@ -160,6 +167,28 @@ Browser sign-ins get live messages over Slack's session socket. Tokens and
 cookies are stored only in your operating system's keyring (Secret Service on
 Linux, the Keychain on macOS, the Credential Manager on Windows), never in a
 file, and never written to the log.
+
+### Microsoft Teams
+
+On the sign-in screen (or **+** in the workspace rail), under **Sign in to
+Microsoft Teams**:
+
+1. For a work or school account, leave **Organization / Tenant** empty, or
+   fill in the company's domain (`company.onmicrosoft.com`) or tenant ID.
+   A guest account needs the domain of the company that invited you. For a
+   personal Teams (free) account, tick **Personal account**.
+2. Press **Sign in with Microsoft Teams**. NoSlacking shows a code: copy it,
+   press **Open Microsoft Login**, enter the code on Microsoft's page and
+   sign in there as usual. NoSlacking finishes by itself.
+
+NoSlacking signs in as Microsoft's own Teams app, the way other unofficial
+Teams clients do. No app needs registering, and your organisation's app
+approval does not apply to it, which is also why an administrator may see
+the sign-in as unusual or block it (see
+[the research note](docs/research/microsoft-teams.md#2-the-route-third-party-clients-take-not-pursued)).
+A personal account has chats but no teams or channels. Live messages come
+over Teams' own push connection, and the tokens are kept in the keyring,
+as Slack's are.
 
 ## Building from source
 
@@ -249,9 +278,10 @@ Open them from **Settings → Files**.
 ## Use at your own risk
 
 NoSlacking is an independent, unofficial client. It is not made, endorsed,
-supported or reviewed by Slack Technologies or Salesforce. "Slack" is a
-trademark of Salesforce, Inc., used here only to say which service this
-client works with.
+supported or reviewed by Slack Technologies, Salesforce or Microsoft.
+"Slack" is a trademark of Salesforce, Inc., and "Microsoft Teams" a
+trademark of Microsoft Corporation, used here only to say which services
+this client works with.
 
 Before you use it, know that:
 
@@ -268,10 +298,16 @@ Before you use it, know that:
   the OS keyring and sends them only to Slack's own hosts, but treat them
   like a password and sign out (or revoke the session in Slack) on a
   computer you stop using.
+- **Teams sign-in goes around your organisation's app controls.** It signs
+  in as Microsoft's own Teams app, on endpoints Microsoft does not document
+  for others. Administrators may see it as an unusual sign-in, Conditional
+  Access may block it, and Microsoft's API terms forbid getting around
+  technical limits. Do not use it at work without your administrators'
+  agreement.
 - **There is no warranty.** The software is provided as is; see the
   [license](LICENSE).
 
-Use NoSlacking only with your own account, and use your own Slack app (the
+Use NoSlacking only with your own accounts, and use your own Slack app (the
 documented route) where your workspace requires it.
 
 ## Thanks
