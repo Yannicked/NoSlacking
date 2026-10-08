@@ -516,6 +516,12 @@ pub fn handle(app: &mut App, team: &str, event: people::Event) -> Option<people:
             }
             None
         }
+        people::Event::CallTakenElsewhere { call } => {
+            for invite in app.huddles.invites.cancelled(team, None, Some(&call)) {
+                app.withdraw_invite_note(team, &invite.channel);
+            }
+            None
+        }
         people::Event::HuddleRoom { room, change } => {
             app.huddles.invites.room_changed(team, &room, &change, &me);
             if let Some(workspace) = app.workspaces.iter_mut().find(|w| w.info.team_id == team) {

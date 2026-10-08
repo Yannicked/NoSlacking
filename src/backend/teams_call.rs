@@ -75,6 +75,9 @@ impl Speech {
 #[derive(Debug)]
 struct Running {
     team: String,
+    /// The call's id, for one answered here: a second delivery of it
+    /// must not ring.
+    call_id: Option<String>,
     control: mpsc::UnboundedSender<Control>,
     /// Whether the interface wants the microphone muted.
     muted: watch::Sender<bool>,
@@ -130,6 +133,7 @@ fn controls() -> (Running, mpsc::UnboundedReceiver<Control>, Wanted) {
     let (camera_sender, camera) = watch::channel(false);
     let running = Running {
         team: String::new(),
+        call_id: None,
         control,
         muted,
         #[cfg(feature = "huddle-camera")]
@@ -175,6 +179,15 @@ impl Caller {
     /// an invitation. A call already ringing is declined: one rings at a
     /// time.
     pub fn ring(&mut self, client: TeamsClient, team: String, call: Incoming, sink: Sink) {
+        // The connection is registered for chat and for calls, and a call
+        // may come once for each: the second delivery is the same call.
+        let known = |id: Option<&str>| id == Some(call.call_id.as_str());
+        if known(self.ringing.as_ref().map(|r| r.call_id.as_str()))
+            || known(self.running.as_ref().and_then(|r| r.call_id.as_deref()))
+        {
+            log::info!("Teams call: a second delivery of a call already here; not rung again");
+            return;
+        }
         if let Some(old) = self.ringing.take() {
             let _ = old.decide.send(Decision::Decline);
         }
@@ -200,7 +213,9 @@ impl Caller {
         if ringing.decide.send(Decision::Accept { channel }).is_err() {
             return false;
         }
-        self.running = Some(ringing.running);
+        let mut running = ringing.running;
+        running.call_id = Some(ringing.call_id);
+        self.running = Some(running);
         true
     }
 
@@ -565,6 +580,8 @@ impl<T: Fn(Listen)> Shown<'_, T> {
             CallEvent::AudioFlowing => {}
             CallEvent::FarEndMuted(muted) => self.change(|far| far.muted = muted),
             CallEvent::FarEndVideo(on) => self.far_video(on),
+            // Only an incoming call's ringing says this, and that is over.
+            CallEvent::AnsweredElsewhere => {}
             CallEvent::Ended { result, .. } => self.ended = Some(result),
         }
     }
@@ -687,9 +704,20 @@ async fn ring(
     let mut decisions = decisions;
     let channel = loop {
         tokio::select! {
-            // Ended while ringing: the caller gave up, or it failed.
+            // Ended while ringing: the caller gave up, it was picked up
+            // elsewhere, or it failed.
             () = &mut driving => {
-                stopped_ringing();
+                let mut elsewhere = false;
+                while let Ok(event) = events.try_recv() {
+                    elsewhere |= event == CallEvent::AnsweredElsewhere;
+                }
+                if elsewhere {
+                    invite(people::Event::CallTakenElsewhere {
+                        call: call_id.clone(),
+                    });
+                } else {
+                    stopped_ringing();
+                }
                 return;
             }
             decided = &mut decisions => match decided {

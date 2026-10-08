@@ -53,6 +53,10 @@ pub enum CallEvent {
     FarEndMuted(bool),
     /// The far end's camera started (`true`) or stopped showing.
     FarEndVideo(bool),
+    /// An incoming call stopped ringing because another device of yours
+    /// (or another delivery of the same call here) picked it up: not a
+    /// missed call.
+    AnsweredElsewhere,
     /// The call is over: normally (`Ok`) or because something failed.
     Ended {
         result: Result<(), Failure>,
@@ -442,7 +446,12 @@ impl Call {
                 },
                 push = inbox.recv() => match push {
                     Some(Push::CallEnd(end)) => {
-                        log::info!("Teams call: the caller gave up ({}, {})", end.code, end.phrase);
+                        if answered_elsewhere(&end) {
+                            log::info!("Teams call: picked up elsewhere ({}, {})", end.code, end.phrase);
+                            tell(CallEvent::AnsweredElsewhere);
+                        } else {
+                            log::info!("Teams call: the caller gave up ({}, {})", end.code, end.phrase);
+                        }
                         return Ok(());
                     }
                     Some(Push::ConversationEnd(_)) => return Ok(()),
@@ -731,6 +740,14 @@ fn apply(session: &MediaSession, blob: &str) -> Option<RemoteMedia> {
     Some(remote)
 }
 
+/// Whether a ringing call ended because it was picked up elsewhere:
+/// another device says so in `acceptedElsewhereBy`; a second delivery of
+/// the call to this same connection (it is registered for chat and for
+/// calls) only says so in words.
+fn answered_elsewhere(end: &super::types::Outcome) -> bool {
+    end.accepted_elsewhere_by.is_some() || end.phrase.contains("accepted by another")
+}
+
 /// The interface's failure for the media's: its stage, never its detail
 /// (which may name addresses).
 fn media_failure(failure: media::Failure) -> Failure {
@@ -771,6 +788,31 @@ mod tests {
         assert!(call.offer.blob.starts_with("v=0"));
         // Its links stay out of the log.
         assert!(!format!("{call:?}").contains("http"));
+    }
+
+    #[test]
+    fn a_call_picked_up_elsewhere_is_not_missed() {
+        use super::super::types::Outcome;
+        // A second delivery of the call to this connection, as logged.
+        let fork = Outcome {
+            code: 487,
+            phrase: "Call cancelled as it was accepted by another fork.".into(),
+            ..Outcome::default()
+        };
+        assert!(answered_elsewhere(&fork));
+        // Another device of yours.
+        let device = Outcome {
+            accepted_elsewhere_by: Some(Participant::default()),
+            ..Outcome::default()
+        };
+        assert!(answered_elsewhere(&device));
+        // The caller gave up.
+        let gave_up = Outcome {
+            code: 487,
+            phrase: "CallEndReasonLocalUserInitiated".into(),
+            ..Outcome::default()
+        };
+        assert!(!answered_elsewhere(&gave_up));
     }
 
     #[test]

@@ -344,6 +344,10 @@ pub enum Event {
         channel: Option<String>,
         room: Option<String>,
     },
+    /// An incoming call (Microsoft Teams; its invitation's room is
+    /// `call`) stopped ringing because it was picked up elsewhere: its
+    /// invitation goes, and it was not missed.
+    CallTakenElsewhere { call: String },
     /// A huddle changed, known only by its room.
     HuddleRoom {
         room: String,
@@ -817,6 +821,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
         // Taken by `huddles::handle` above.
         Event::HuddleInvite { .. }
         | Event::HuddleInviteCancelled { .. }
+        | Event::CallTakenElsewhere { .. }
         | Event::HuddleRoom { .. }
         | Event::HuddleChecked { .. }
         | Event::InviteDeclined { .. }
