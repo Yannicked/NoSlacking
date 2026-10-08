@@ -10,6 +10,7 @@ mod around;
 mod blocks;
 pub mod convos;
 pub mod desktop;
+mod devices;
 mod fetch;
 mod files;
 pub mod huddles;
@@ -38,6 +39,9 @@ use crate::sidebar::SidebarCall;
 
 /// What the interface asks the worker to do.
 pub enum Command {
+    /// Lists the cameras, microphones and speakers there are, or says
+    /// which to use in huddles (see [`crate::devices`]).
+    Devices(crate::devices::Command),
     /// Saves the Slack app's credentials and restarts Socket Mode with them.
     SaveApp(AppCredentials),
     /// Starts OAuth in the browser, asking for `request`'s scopes.
@@ -300,6 +304,7 @@ impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use crate::redact::REDACTED;
         match self {
+            Self::Devices(command) => f.debug_tuple("Devices").field(command).finish(),
             Self::SaveApp(app) => f.debug_tuple("SaveApp").field(app).finish(),
             Self::StartSignIn {
                 redirect,
@@ -647,6 +652,9 @@ pub enum Socket {
 
 #[derive(Debug)]
 pub enum Event {
+    /// Devices listed, or a chosen one that would not open (see
+    /// [`crate::devices`]).
+    Devices(crate::devices::Event),
     /// The keyring answered: the stored app, if any.
     AppLoaded(Option<AppCredentials>),
     /// The keyring failed to read or save a secret.

@@ -304,6 +304,7 @@ impl Failure {
                     "no microphone could be opened; check that Windows' privacy settings let apps use it",
                 ),
                 HuddleTrouble::Microphone => t("no microphone could be opened"),
+                HuddleTrouble::NoDeviceList => t("the sound devices could not be listed"),
                 HuddleTrouble::NoCamera => t("no camera was found"),
                 // Each system keeps apps from the camera its own way;
                 // say where to let NoSlacking use it.
@@ -376,6 +377,8 @@ pub enum HuddleTrouble {
     SoundStopped,
     /// No microphone would open on unmuting.
     Microphone,
+    /// The system would not say which sound devices there are.
+    NoDeviceList,
     /// There is no camera to turn on.
     NoCamera,
     /// The system did not let the app use the camera.
@@ -661,6 +664,7 @@ mod tests {
             Failure::Huddle(HuddleTrouble::Lost),
             Failure::Huddle(HuddleTrouble::SoundStopped),
             Failure::Huddle(HuddleTrouble::Microphone),
+            Failure::Huddle(HuddleTrouble::NoDeviceList),
             Failure::Huddle(HuddleTrouble::NoCamera),
             Failure::Huddle(HuddleTrouble::CameraDenied),
             Failure::Huddle(HuddleTrouble::Camera),

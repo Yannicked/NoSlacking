@@ -373,6 +373,8 @@ pub struct App {
     pub people: crate::people::State,
     /// Huddle invitations, and when huddles were last checked.
     pub huddles: crate::huddles::State,
+    /// The cameras, microphones and speakers there are, as last listed.
+    pub devices: crate::devices::State,
     /// The views at the top of the sidebar and what they list.
     pub views: crate::views::State,
     /// Where the "New" line goes: the read marker when the open
@@ -564,6 +566,7 @@ impl App {
             convos: crate::convos::State::default(),
             people: crate::people::State::default(),
             huddles: crate::huddles::State::default(),
+            devices: crate::devices::State::default(),
             views: crate::views::State::default(),
             read_line: None,
             sidebar_filter: String::new(),
@@ -602,6 +605,8 @@ impl App {
         app.start_theme_scan();
         app.start_tray();
         app.refresh_autostart();
+        // Before any huddle: the devices it is to use.
+        crate::devices::tell(&app);
         app
     }
 
@@ -1186,7 +1191,11 @@ impl App {
                     });
                 }
             }
-            Action::ShowSettings => self.page = Page::Settings,
+            Action::ShowSettings => {
+                self.page = Page::Settings;
+                // The pickers show what is plugged in now.
+                crate::devices::refresh_all(self);
+            }
             Action::ShowShortcuts => self.shortcuts = true,
             Action::SetAppearance(appearance) => self.set_appearance(appearance),
             Action::HideInactive(after) => {
@@ -1439,6 +1448,7 @@ impl App {
             Action::Convos(action) => crate::convos::apply(self, action),
             Action::People(action) => crate::people::apply(self, action),
             Action::Huddle(action) => crate::huddles::apply(self, action),
+            Action::Devices(action) => crate::devices::apply(self, action),
             Action::Views(action) => crate::views::apply(self, action),
         }
     }
