@@ -125,8 +125,18 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                     }
                     ConversationKind::Group => {
                         let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
-                        Icon::Users.image(palette.secondary, 16.0).paint_at(ui, icon);
+                        let kind = if workspace.is_meeting(conversation) { Icon::Video } else { Icon::Users };
+                        kind.image(palette.secondary, 16.0).paint_at(ui, icon);
                     }
+                }
+                // A Teams channel's team first, dimmed: every team has a
+                // General.
+                if let Some(team) = workspace.team_of(&conversation.id) {
+                    ui.label(
+                        RichText::new(format!("{team} ›"))
+                            .font(theme::regular(15.0))
+                            .color(palette.dim),
+                    );
                 }
                 let name = ui
                     .add(

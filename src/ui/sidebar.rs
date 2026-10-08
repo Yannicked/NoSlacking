@@ -923,6 +923,9 @@ fn row(
     match conversation.kind {
         ConversationKind::Channel => Icon::Hash.image(text_color, 15.0).paint_at(ui, icon_rect),
         ConversationKind::Private => Icon::Lock.image(text_color, 14.0).paint_at(ui, icon_rect),
+        ConversationKind::Group if workspace.is_meeting(conversation) => {
+            Icon::Video.image(text_color, 15.0).paint_at(ui, icon_rect);
+        }
         ConversationKind::Group => Icon::Users.image(text_color, 15.0).paint_at(ui, icon_rect),
         ConversationKind::Direct => {
             let user = conversation

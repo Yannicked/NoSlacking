@@ -316,11 +316,39 @@ impl WorkspaceState {
     /// it, plainly ("General"), a direct message by who is in it.
     pub fn named_place(&self, conversation: &Conversation) -> String {
         let title = self.title(conversation);
-        if conversation.kind.is_dm() || self.info.is_teams() {
+        if conversation.kind.is_dm() {
             title
+        } else if self.info.is_teams() {
+            // Every team has a General: the team tells them apart.
+            match self.team_of(&conversation.id) {
+                Some(team) => format!("{team} › {title}"),
+                None => title,
+            }
         } else {
             format!("#{title}")
         }
+    }
+
+    /// Whether `conversation` is a Microsoft Teams meeting's chat (its id
+    /// names the meeting), drawn with a camera rather than people.
+    pub fn is_meeting(&self, conversation: &Conversation) -> bool {
+        self.info.is_teams() && conversation.id.contains("meeting_")
+    }
+
+    /// The Microsoft Teams team a channel belongs to, by name: the
+    /// sidebar section its team is.
+    pub fn team_of(&self, channel: &str) -> Option<&str> {
+        if !self.info.is_teams() {
+            return None;
+        }
+        self.sections
+            .as_ref()?
+            .iter()
+            .find(|s| {
+                s.kind == crate::model::SectionKind::Custom
+                    && s.channel_ids.iter().any(|c| c == channel)
+            })
+            .map(|s| s.name.as_str())
     }
 
     /// The label for a message's author: the name a bot posted under, the
