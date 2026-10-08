@@ -408,7 +408,7 @@ pub fn file_size(bytes: u64) -> String {
 /// The URI an image of `team` loads by: public URLs as they are, files
 /// through the authenticated loader.
 pub fn image_uri(team: &str, url: &str) -> String {
-    if crate::slack::client::is_slack_file_url(url) || is_teams_media(url) {
+    if crate::model::is_slack_file_url(url) || is_teams_media(url) {
         crate::images::authed(team, url)
     } else {
         url.to_owned()

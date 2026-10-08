@@ -7,8 +7,8 @@ use super::composer::{self, Composer};
 use super::message::{self, Lead, Row};
 use super::rows;
 use crate::app::App;
-use crate::backend::Socket;
 use crate::i18n::{t, tf};
+use crate::model::Socket;
 use crate::model::{Ability, Action, ConversationKind, Ts};
 use crate::theme::{self, Icon};
 
@@ -75,102 +75,108 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
     let popped_out = popouts
         .iter()
         .any(|p| p.team == workspace.info.team_id && p.channel == conversation.id);
-    let inset = theme::titlebar_inset(ui.ctx());
-    egui::Panel::top("conversation-header")
-        .exact_size(52.0 + inset)
-        .show_separator_line(false)
-        .frame(
-            egui::Frame::new()
-                .fill(palette.window)
-                .inner_margin(Margin {
-                    left: 20,
-                    right: 12,
-                    top: inset as i8,
-                    bottom: 0,
-                }),
-        )
-        .show(ui, |ui| {
-            let rect = ui.max_rect();
-            ui.painter().hline(
-                rect.x_range(),
-                rect.bottom() - 0.5,
-                Stroke::new(1.0, palette.outline),
+    theme::pane_header(
+        ui,
+        &palette,
+        "conversation-header",
+        palette.window,
+        [20, 12],
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let title = workspace.title(conversation);
+            match conversation.kind {
+                ConversationKind::Channel => {
+                    let (icon, _) = ui.allocate_exact_size(Vec2::splat(17.0), egui::Sense::hover());
+                    Icon::Hash.image(palette.secondary, 17.0).paint_at(ui, icon);
+                }
+                ConversationKind::Private => {
+                    let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
+                    Icon::Lock.image(palette.secondary, 16.0).paint_at(ui, icon);
+                }
+                ConversationKind::Direct => {
+                    let user = conversation
+                        .user
+                        .as_deref()
+                        .and_then(|id| workspace.user(id));
+                    let avatar = super::avatar(
+                        ui,
+                        user.and_then(|u| u.avatar.as_deref()),
+                        &title,
+                        conversation.user.as_deref().unwrap_or(&title),
+                        22.0,
+                    );
+                    let presence = conversation
+                        .user
+                        .as_deref()
+                        .and_then(|id| workspace.people.presence(id));
+                    super::people::dot(
+                        ui.painter(),
+                        &palette,
+                        avatar.rect,
+                        presence,
+                        palette.window,
+                    );
+                    if let Some(presence) = presence {
+                        avatar.on_hover_text(super::people::word(presence));
+                    }
+                }
+                ConversationKind::Group => {
+                    let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
+                    let kind = if workspace.is_meeting(conversation) {
+                        Icon::Video
+                    } else {
+                        Icon::Users
+                    };
+                    kind.image(palette.secondary, 16.0).paint_at(ui, icon);
+                }
+            }
+            // A Teams channel's team first, dimmed: every team has a
+            // General.
+            if let Some(team) = workspace.team_of(&conversation.id) {
+                ui.label(
+                    RichText::new(format!("{team} ›"))
+                        .font(theme::regular(15.0))
+                        .color(palette.dim),
+                );
+            }
+            let name = theme::link_label(
+                ui,
+                egui::Label::new(
+                    RichText::new(&title)
+                        .font(theme::bold(17.0))
+                        .color(palette.text),
+                ),
             );
-            ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let title = workspace.title(conversation);
-                match conversation.kind {
-                    ConversationKind::Channel => {
-                        let (icon, _) = ui.allocate_exact_size(Vec2::splat(17.0), egui::Sense::hover());
-                        Icon::Hash.image(palette.secondary, 17.0).paint_at(ui, icon);
-                    }
-                    ConversationKind::Private => {
-                        let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
-                        Icon::Lock.image(palette.secondary, 16.0).paint_at(ui, icon);
-                    }
-                    ConversationKind::Direct => {
-                        let user = conversation.user.as_deref().and_then(|id| workspace.user(id));
-                        let avatar = super::avatar(
-                            ui,
-                            user.and_then(|u| u.avatar.as_deref()),
-                            &title,
-                            conversation.user.as_deref().unwrap_or(&title),
-                            22.0,
-                        );
-                        let presence = conversation.user.as_deref().and_then(|id| workspace.people.presence(id));
-                        super::people::dot(ui.painter(), &palette, avatar.rect, presence, palette.window);
-                        if let Some(presence) = presence {
-                            avatar.on_hover_text(super::people::word(presence));
-                        }
-                    }
-                    ConversationKind::Group => {
-                        let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
-                        let kind = if workspace.is_meeting(conversation) { Icon::Video } else { Icon::Users };
-                        kind.image(palette.secondary, 16.0).paint_at(ui, icon);
-                    }
-                }
-                // A Teams channel's team first, dimmed: every team has a
-                // General.
-                if let Some(team) = workspace.team_of(&conversation.id) {
-                    ui.label(
-                        RichText::new(format!("{team} ›"))
-                            .font(theme::regular(15.0))
-                            .color(palette.dim),
-                    );
-                }
-                let name = ui
-                    .add(
-                        egui::Label::new(
-                            RichText::new(&title)
-                                .font(theme::bold(17.0))
-                                .color(palette.text),
-                        )
-                        .sense(egui::Sense::click()),
+            if crate::people::is_external_conversation(workspace, conversation) {
+                super::people::external_tag(
+                    ui,
+                    &palette,
+                    conversation.kind == ConversationKind::Direct,
+                );
+            }
+            if name.clicked()
+                && let Some(user) = &conversation.user
+            {
+                actions.push(Action::OpenProfile(user.clone()));
+            } else if name.clicked() && offers(Ability::Details) {
+                actions.push(super::browse::details(
+                    &conversation.id,
+                    crate::convos::Tab::About,
+                ));
+            }
+            if !conversation.topic.is_empty() {
+                ui.add_space(8.0);
+                let topic = crate::mrkdwn::plain(&conversation.topic, |_| None);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(topic)
+                            .font(theme::regular(13.0))
+                            .color(palette.secondary),
                     )
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                if crate::people::is_external_conversation(workspace, conversation) {
-                    super::people::external_tag(ui, &palette, conversation.kind == ConversationKind::Direct);
-                }
-                if name.clicked()
-                    && let Some(user) = &conversation.user
-                {
-                    actions.push(Action::OpenProfile(user.clone()));
-                } else if name.clicked() && offers(Ability::Details) {
-                    actions.push(super::browse::details(&conversation.id, crate::convos::Tab::About));
-                }
-                if !conversation.topic.is_empty() {
-                    ui.add_space(8.0);
-                    let topic = crate::mrkdwn::plain(&conversation.topic, |_| None);
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(topic)
-                                .font(theme::regular(13.0))
-                                .color(palette.secondary),
-                        )
-                        .truncate(),
-                    );
-                }
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    .truncate(),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     let tip = tf("Search ({shortcut})", &[("shortcut", &super::keys::command("F"))]);
                     if offers(Ability::Search) && theme::icon_button(ui, &palette, Icon::Search, 17.0, &tip).clicked() {
                         actions.push(Action::OpenSearch);
@@ -207,7 +213,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                             .on_hover_text(t("No live connection: new messages in this conversation are fetched every few seconds."));
                         }
                         Socket::Connecting => {
-                            ui.add(egui::Spinner::new().size(14.0).color(palette.dim));
+                            ui.add(theme::spinner(&palette, 14.0));
                             ui.label(RichText::new(t("Connecting…")).font(theme::regular(12.0)).color(palette.dim));
                         }
                         Socket::Disconnected(reason) | Socket::Rejected(reason) => {
@@ -225,16 +231,11 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                     if let Some(members) = conversation.members
                         && !conversation.kind.is_dm()
                     {
-                        let count = ui
-                            .add(
-                                egui::Label::new(
+                        let count = theme::link_label(ui, egui::Label::new(
                                     RichText::new(crate::i18n::tn("{count} member", "{count} members", members))
                                         .font(theme::regular(12.5))
                                         .color(palette.dim),
-                                )
-                                .sense(egui::Sense::click()),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                ));
                         if count.clicked() && offers(Ability::Details) {
                             actions.push(super::browse::details(&conversation.id, crate::convos::Tab::Members));
                         }
@@ -281,8 +282,8 @@ fn header(app: &mut App, ui: &mut egui::Ui, channel: &str) {
                         actions,
                     );
                 });
-            });
-        });
+        },
+    );
 }
 
 fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
@@ -427,7 +428,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
         let Some(timeline) = timeline.filter(|t| t.loaded) else {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
-                ui.add(egui::Spinner::new().size(22.0).color(palette.dim));
+                ui.add(theme::spinner(&palette, 22.0));
             });
             return;
         };
@@ -758,7 +759,7 @@ fn top(
         ui.add_space(12.0);
         ui.vertical_centered(|ui| {
             if timeline.loading {
-                ui.add(egui::Spinner::new().size(18.0).color(palette.dim));
+                ui.add(theme::spinner(palette, 18.0));
             } else if ui
                 .add(
                     egui::Button::new(
@@ -863,7 +864,7 @@ fn bottom_row(
     ui.add_space(12.0);
     ui.vertical_centered(|ui| {
         if timeline.loading {
-            ui.add(egui::Spinner::new().size(18.0).color(palette.dim));
+            ui.add(theme::spinner(palette, 18.0));
         } else if ui
             .add(
                 egui::Button::new(

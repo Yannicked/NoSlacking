@@ -168,7 +168,7 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
 /// Takes Ctrl+Shift+H (⌘⇧H), which leaves the huddle, from `input`:
 /// the main window's, or the call window's while it has the focus.
 pub fn leave_chord(input: &mut egui::InputState) -> bool {
-    input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::H)
+    super::shortcuts::HANG_UP.take(input)
 }
 
 /// How a hint spells the command key with `key`: "⌘K" on macOS, where

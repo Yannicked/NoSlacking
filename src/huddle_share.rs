@@ -15,7 +15,7 @@
 //! keep the rule itself (see [`crate::huddle_audio::share`]); this is
 //! only its picture.
 
-use crate::app::App;
+use crate::app::{App, Tone};
 use crate::backend;
 use crate::failure::{Failure, HuddleTrouble};
 use crate::i18n::{t, tf};
@@ -135,7 +135,10 @@ pub fn apply(app: &mut App, action: ShareAction) {
         && listening.sharing == Sharing::Off
         && !crate::huddle_audio::share::may_share(listening.shares.len())
     {
-        app.toast(Failure::Huddle(HuddleTrouble::ShareLimit).message(), false);
+        app.toast(
+            Failure::Huddle(HuddleTrouble::ShareLimit).message(),
+            Tone::Info,
+        );
         return;
     }
     let Some(listening) = app.huddles.listening.as_mut().filter(|l| l.in_huddle()) else {
@@ -177,22 +180,22 @@ pub fn news(app: &mut App, team: &str, channel: &str, news: ShareNews) {
         ShareNews::Ended => {
             listening.share_sources.clear();
             if was == Sharing::On {
-                app.toast(t("Your screen share ended"), false);
+                app.toast(t("Your screen share ended"), Tone::Info);
             }
         }
         ShareNews::Failed(error) => {
             listening.share_sources.clear();
             if quiet(&error) {
-                app.toast(t("Screen sharing was cancelled"), false);
+                app.toast(t("Screen sharing was cancelled"), Tone::Info);
             } else if error == Failure::Huddle(HuddleTrouble::ShareLimit) {
-                app.toast(error.message(), true);
+                app.toast(error.message(), Tone::Error);
             } else if was == Sharing::On {
                 app.toast(
                     tf(
                         "Your screen share stopped: {error}",
                         &[("error", &error.message())],
                     ),
-                    true,
+                    Tone::Error,
                 );
             } else {
                 app.toast(
@@ -200,7 +203,7 @@ pub fn news(app: &mut App, team: &str, channel: &str, news: ShareNews) {
                         "Could not share your screen: {error}",
                         &[("error", &error.message())],
                     ),
-                    true,
+                    Tone::Error,
                 );
             }
         }

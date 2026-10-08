@@ -80,54 +80,43 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 rect.y_range(),
                 Stroke::new(1.0, palette.outline),
             );
-            let inset = theme::titlebar_inset(ui.ctx());
-            egui::Panel::top("thread-header")
-                .exact_size(52.0 + inset)
-                .show_separator_line(false)
-                .frame(egui::Frame::new().inner_margin(Margin {
-                    left: 16,
-                    right: 8,
-                    top: inset as i8,
-                    bottom: 0,
-                }))
-                .show(ui, |ui| {
-                    let rect = ui.max_rect();
-                    ui.painter().hline(
-                        rect.x_range(),
-                        rect.bottom() - 0.5,
-                        Stroke::new(1.0, palette.outline),
+            theme::pane_header(
+                ui,
+                &palette,
+                "thread-header",
+                egui::Color32::TRANSPARENT,
+                [16, 8],
+                |ui| {
+                    ui.label(
+                        RichText::new(t("Thread"))
+                            .font(theme::bold(16.0))
+                            .color(palette.text),
                     );
-                    ui.horizontal_centered(|ui| {
+                    if !channel_name.is_empty() {
                         ui.label(
-                            RichText::new(t("Thread"))
-                                .font(theme::bold(16.0))
-                                .color(palette.text),
+                            RichText::new(format!("#{channel_name}"))
+                                .font(theme::regular(13.0))
+                                .color(palette.secondary),
                         );
-                        if !channel_name.is_empty() {
-                            ui.label(
-                                RichText::new(format!("#{channel_name}"))
-                                    .font(theme::regular(13.0))
-                                    .color(palette.secondary),
-                            );
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        if theme::icon_button(ui, &palette, Icon::X, 17.0, &t("Close (Esc)"))
+                            .clicked()
+                        {
+                            actions.push(Action::CloseThread);
                         }
-                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                            if theme::icon_button(ui, &palette, Icon::X, 17.0, &t("Close (Esc)"))
-                                .clicked()
-                            {
-                                actions.push(Action::CloseThread);
-                            }
-                            if let Some(following) = following
-                                && follow_button(ui, &palette, following).clicked()
-                            {
-                                actions.push(Action::Views(crate::views::Action::Follow {
-                                    channel: channel.clone(),
-                                    thread: ts.clone(),
-                                    follow: !following,
-                                }));
-                            }
-                        });
+                        if let Some(following) = following
+                            && follow_button(ui, &palette, following).clicked()
+                        {
+                            actions.push(Action::Views(crate::views::Action::Follow {
+                                channel: channel.clone(),
+                                thread: ts.clone(),
+                                follow: !following,
+                            }));
+                        }
                     });
-                });
+                },
+            );
             egui::Panel::bottom("thread-composer")
                 .show_separator_line(false)
                 .frame(egui::Frame::new().inner_margin(Margin {
@@ -278,11 +267,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                         if timeline.is_none_or(|t| t.loading && !t.loaded) {
                                             ui.add_space(16.0);
                                             ui.vertical_centered(|ui| {
-                                                ui.add(
-                                                    egui::Spinner::new()
-                                                        .size(18.0)
-                                                        .color(palette.dim),
-                                                );
+                                                ui.add(theme::spinner(&palette, 18.0));
                                             });
                                         }
                                     } else {
