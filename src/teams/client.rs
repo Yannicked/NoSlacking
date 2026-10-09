@@ -1393,32 +1393,26 @@ impl TeamsClient {
                     })
                     .await?;
                 if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-                    // Refused even with a fresh groups token, as for a chat
-                    // with a work account, where the web client's request
-                    // (the same address, body and tokens) is taken: the
-                    // service's own reason says what differs.
-                    log::warn!(
-                        "the groups service refused to start a chat: {}",
+                    // The groups service cannot read our tokens: we sign in
+                    // as the desktop app, whose personal tokens are opaque
+                    // tickets, and only the web client's app (which cannot
+                    // sign in by device code, AADSTS70002) gets the kind it
+                    // reads ("S2S12008 … exception when validating the
+                    // token"). The chat service takes our skype token, so
+                    // the chat is made there, the Skype way (not recorded
+                    // for personal accounts).
+                    log::info!(
+                        "the groups service refused to start a chat ({}); asking the chat service",
                         why_unauthorized(&resp)
                     );
+                    self.create_chat_on_chat_service(&members).await?
+                } else {
+                    resp
                 }
-                resp
             }
             // The chat service's own way, which work clients have used:
             // not yet seen in a recording of the work web client.
-            Account::Work => {
-                let url = format!("{}/v1/threads", self.chat_service_url());
-                let body = serde_json::json!({
-                    "members": members,
-                    "properties": { "threadType": "chat", "fixedRoster": "true", "uniquerosterthread": "true" },
-                });
-                self.authed_skype_request(|http, token| {
-                    http.post(&url)
-                        .header("Authentication", format!("skypetoken={}", token))
-                        .json(&body)
-                })
-                .await?
-            }
+            Account::Work => self.create_chat_on_chat_service(&members).await?,
         };
         if !resp.status().is_success() {
             return Err(refused(resp, "start a chat").await);
@@ -1431,6 +1425,26 @@ impl TeamsClient {
         let text = resp.text().await.unwrap_or_default();
         created_thread(&text, location.as_deref())
             .ok_or_else(|| Failure::Unexpected("no chat id in the answer".into()))
+    }
+
+    /// Asks the chat service itself to make a chat of `members`, with the
+    /// skype token: one with the same people already there is answered
+    /// instead (`uniquerosterthread`).
+    async fn create_chat_on_chat_service(
+        &self,
+        members: &[serde_json::Value],
+    ) -> Result<reqwest::Response, Failure> {
+        let url = format!("{}/v1/threads", self.chat_service_url());
+        let body = serde_json::json!({
+            "members": members,
+            "properties": { "threadType": "chat", "fixedRoster": "true", "uniquerosterthread": "true" },
+        });
+        self.authed_skype_request(|http, token| {
+            http.post(&url)
+                .header("Authentication", format!("skypetoken={}", token))
+                .json(&body)
+        })
+        .await
     }
 
     /// A picture from Teams: a person's avatar or a picture in a message,
