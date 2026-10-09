@@ -818,6 +818,14 @@ only received on names no SSRC of ours; and the phone's share arrives at a
 new mid with ICE of its own (answered bundled), at the camera's payload
 type (told apart by `x-ssrc-range`), and its stop is never signalled.
 
+Seen since (a call from NoSlacking to a phone, 2026-10-09): the phone's
+share came as a renegotiation adding `applicationsharing-video` `sendonly`
+at a new mid, and its stop as another renegotiation with the line
+`rejected`, so a phone does announce the end of its share, at least there.
+While it shared, a still screen sent nothing for over 8 seconds at a
+time (8 pictures in the first 10 s, then 1 in the next 10), so the
+quiet that ends a share's view has to be long.
+
 What the code says, all of which held:
 
 A share in a 1:1 call is a renegotiation by the sharer, nothing else: no

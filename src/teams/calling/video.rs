@@ -51,9 +51,13 @@ pub fn camera_key(line: usize) -> String {
 /// No picture from the far end for this long: its camera is off (the
 /// native client stops sending without a renegotiation).
 const FAR_STOPPED: Duration = Duration::from_secs(3);
-/// The same for its screen share, which it also stops without a word
-/// (recorded) but which may send a still screen rarely.
-const SHARE_STOPPED: Duration = Duration::from_secs(8);
+/// The same for its screen share, only as a last resort: the far end
+/// says when its share ends (the line goes from its next description, see
+/// [`CallVideo::set_flows`]), and a share sends a picture only when the
+/// screen changes, so a still one is quiet for long stretches. One
+/// recording had a phone's share end without a word; such a share stays
+/// on its last picture until this runs out.
+const SHARE_STOPPED: Duration = Duration::from_secs(120);
 /// The fewest seconds between two keyframe requests of ours.
 const PLI_EVERY: Duration = Duration::from_secs(1);
 /// How many of the far end's frames may wait in the decoder's queue;
