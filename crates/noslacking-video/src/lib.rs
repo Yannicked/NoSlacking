@@ -26,6 +26,7 @@
 //! descriptors, nokhwa's Objective-C shim) stay out of the app's build.
 
 pub mod backend;
+pub mod blur;
 pub mod capture;
 pub mod fake;
 #[cfg(target_os = "linux")]

@@ -134,10 +134,29 @@ pub fn run(name: &str, settings: Settings, open: Opener) -> Result<Capture, Trou
 /// `feed` until `stop`, or until the camera goes away (then says so).
 fn read(device: &mut dyn Device, feed: &mpsc::Sender<Ask>, stop: &AtomicBool) {
     let mut failures = 0;
+    // The background blurred here, on the reader's thread, beside the
+    // pipeline's encoding.
+    let mut blur = if crate::blur::wanted() {
+        match crate::blur::Blur::new() {
+            Ok(blur) => {
+                eprintln!("noslacking-video: camera: blurring the background");
+                Some(blur)
+            }
+            Err(error) => {
+                eprintln!("noslacking-video: camera: no blur: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     while !stop.load(Ordering::Relaxed) {
         match device.next() {
-            Ok(Some((picture, at))) => {
+            Ok(Some((mut picture, at))) => {
                 failures = 0;
+                if let Some(blur) = &mut blur {
+                    blur.apply(&mut picture);
+                }
                 if feed.send(Ask::Picture { picture, at }).is_err() {
                     break;
                 }

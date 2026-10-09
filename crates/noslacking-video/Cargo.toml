@@ -18,6 +18,10 @@ path = "src/main.rs"
 
 [dependencies]
 noslacking-video-ipc = { path = "../video-ipc" }
+# The camera's background blur (src/blur.rs): tract runs the person
+# segmentation model on the processor, pure Rust (MIT/Apache-2.0); its
+# unsafe is its own SIMD kernels. A first try, on with NOSLACKING_BLUR=1.
+tract-onnx = "0.23.8"
 # H.264 decoded in software where the GPU cannot (or is not wanted): pure
 # Rust (rusty_h264, BSD-2-Clause; the decoder itself forbids unsafe, its
 # SIMD kernels in rusty_h264-accel, the `asm` feature, are intrinsics
