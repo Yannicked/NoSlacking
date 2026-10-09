@@ -63,8 +63,8 @@ Windows decode and encode in software.
   Pictures are scaled on the GPU to the size shown before they are
   copied back: for a share shown at half size that is 6 times less CPU
   than software; at full size software still wins. Off by default for
-  now. Vulkan Video, V4L2,
-  VideoToolbox and Media Foundation are planned behind the same trait.
+  now. VideoToolbox (macOS) is built behind the same trait, not yet run
+  on a Mac (§6.7); Vulkan Video, V4L2 and Media Foundation are planned.
   Our camera is encoded on the GPU too (§6.8): 1 ms and 0.4 ms of CPU a
   640×480 picture through the helper against 4.3 ms in software.
 - **Sharing your screen (Stage 4, 2026-10-07):** built behind
@@ -1270,8 +1270,30 @@ Two kinds, both behind the same `Backend` trait:
 | ARM Linux (Snapdragon, Raspberry Pi) | V4L2 stateful | `v4l2r` | planned |
 | ARM Linux (Rockchip, MediaTek, Allwinner) | V4L2 stateless | `v4l2r` + `src/h264.rs` | planned |
 | Windows (x86 and Snapdragon) | Vulkan Video, else Media Foundation / D3D11 video | `gpu-video`; `windows` | planned; the helper builds and reports no hardware |
-| macOS | VideoToolbox | `objc2-video-toolbox`, `objc2-core-media` | planned; the helper builds and reports no hardware |
+| macOS | VideoToolbox | `objc2-video-toolbox`, `objc2-core-media`, `objc2-core-video` | **decoding and encoding built** (`feat/videotoolbox`), checked by cross-compiling from Linux, not yet run on a Mac |
 | everywhere | software | rusty_h264 (decode), rusty_h264-encoder | the default and the fallback |
+
+**VideoToolbox (`src/videotoolbox/`, 2026-10-09).** VideoToolbox parses
+the stream itself, so the back end only reshapes it: Annex B to AVCC
+(the SPS and PPS become a format description, a new session at the IDR
+that changes them) and back, with the parameter sets put in front of
+each IDR the encoder makes; NV12 pixel buffers to I420 and back. Both
+sessions run synchronously (one frame in, its output waited for) and
+require hardware, so the helper's own software stays the fallback. A
+decoded picture is cropped to the SPS's size and shrunk on the
+processor by a whole step (no GPU scaling yet: a `VTPixelTransferSession`
+could do it, as it does for the share). A share's RGB is copied into
+an IOSurface buffer and converted and scaled into the encoder's NV12 by
+a pixel transfer session (BT.601 studio range, as the software path),
+the processor converting if that fails; the camera's I420 is written in.
+The encoder is constrained baseline (`H264_ConstrainedBaseline_AutoLevel`
+spelled out, since the symbol is macOS 12's; plain baseline before), no
+frame reordering, real time, an average rate with a 1.5× byte limit a
+second, an IDR at least every 4 s. The SPS reader moved from the app's
+`bitstream.rs` to `noslacking-video-ipc::h264` so the decoder can crop
+to it. Ignored tests (`--ignored videotoolbox`) decode the fixtures
+against ffmpeg's hashes and encode the test screen three ways on a Mac's
+GPU.
 
 ### 6.8 Encoding on the GPU (VA-API, `feat/hw-encode`, 2026-10-07)
 
