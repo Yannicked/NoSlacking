@@ -148,7 +148,8 @@ impl Command {
     /// What failed, should this command fail.
     pub fn doing(&self) -> Doing {
         match self {
-            Self::Open { .. } | Self::FindPeople { .. } => Doing::Open,
+            Self::Open { .. } => Doing::Open,
+            Self::FindPeople { .. } => Doing::FindPeople,
             Self::Browse => Doing::Browse,
             Self::Join { .. } => Doing::Join,
             Self::Leave { .. } => Doing::Leave,
@@ -231,6 +232,8 @@ pub enum Event {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Doing {
     Open,
+    /// Searching the server for people to message.
+    FindPeople,
     Browse,
     Join,
     Leave,
@@ -569,6 +572,10 @@ pub struct NewMessage {
     /// The last query sent to the server for people, so each is asked
     /// once.
     pub asked: String,
+    /// A query not asked yet, and when it was last changed: asked only
+    /// once typing pauses, as asking on every key had Teams refuse the
+    /// searches (HTTP 429).
+    typed: Option<(String, std::time::Instant)>,
     /// The last query's matches: a workspace can have tens of thousands
     /// of people, too many to search on every frame.
     found: Option<FoundPeople>,
@@ -586,7 +593,40 @@ struct FoundPeople {
     ids: Vec<String>,
 }
 
+/// How long typing must pause before what is typed is searched for.
+pub const SEARCH_AFTER: std::time::Duration = std::time::Duration::from_millis(400);
+
 impl NewMessage {
+    /// The query to ask the server for people with at `now`, if it is
+    /// due: two characters or more, not asked yet, and unchanged for
+    /// [`SEARCH_AFTER`]. While one waits, `Err` says how long until it is
+    /// due, to look again then.
+    pub fn due_search(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Result<Option<String>, std::time::Duration> {
+        let query = self.query.trim();
+        if query.chars().count() < 2 || query == self.asked {
+            self.typed = None;
+            return Ok(None);
+        }
+        match &self.typed {
+            Some((typed, at)) if typed == query => {
+                let waited = now.saturating_duration_since(*at);
+                if waited < SEARCH_AFTER {
+                    return Err(SEARCH_AFTER - waited);
+                }
+                self.asked = query.to_owned();
+                self.typed = None;
+                Ok(Some(self.asked.clone()))
+            }
+            _ => {
+                self.typed = Some((query.to_owned(), now));
+                Err(SEARCH_AFTER)
+            }
+        }
+    }
+
     /// The suggestions for the current query, worked out again only when
     /// the query, the picks or the people change.
     pub fn suggestions(&mut self, workspace: &WorkspaceState) -> Vec<String> {
@@ -1405,6 +1445,10 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                         &[("error", &error.message())],
                     )
                 }
+                Doing::FindPeople => tf(
+                    "Could not search for people: {error}",
+                    &[("error", &error.message())],
+                ),
                 Doing::Browse => {
                     if let Some(browse) = &mut app.convos.browse {
                         browse.error = Some(error.clone());
@@ -1568,6 +1612,31 @@ mod tests {
         dialog.pick("U1".into());
         assert_eq!(dialog.picked.len(), MAX_PEOPLE);
         assert!(dialog.query.is_empty());
+    }
+
+    #[test]
+    fn people_are_searched_for_once_typing_pauses() {
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        let mut dialog = NewMessage {
+            query: "a".into(),
+            ..NewMessage::default()
+        };
+        assert_eq!(dialog.due_search(at(0)), Ok(None), "too short");
+        // Each key starts the wait again.
+        dialog.query = "an".into();
+        assert_eq!(dialog.due_search(at(0)), Err(SEARCH_AFTER));
+        dialog.query = "ana".into();
+        assert_eq!(dialog.due_search(at(100)), Err(SEARCH_AFTER));
+        assert_eq!(
+            dialog.due_search(at(300)),
+            Err(std::time::Duration::from_millis(200))
+        );
+        assert_eq!(dialog.due_search(at(500)), Ok(Some("ana".into())));
+        // Asked once.
+        assert_eq!(dialog.due_search(at(2000)), Ok(None));
+        dialog.query = " ana ".into();
+        assert_eq!(dialog.due_search(at(2100)), Ok(None), "the same, trimmed");
     }
 
     #[test]
