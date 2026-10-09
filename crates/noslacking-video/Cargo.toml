@@ -83,6 +83,24 @@ futures-lite = { version = "2.6", default-features = false, features = ["std"], 
 xcap = { version = "0.9.8", default-features = false }
 nokhwa = { version = "0.10.11", default-features = false, features = ["input-native"] }
 
+# Media Foundation, Windows' video API: H.264 decoded through its own
+# decoder on the GPU (DXVA, over a Direct3D 11 device) and encoded by the
+# GPU vendor's encoder (src/mediafoundation/). The `windows` crate
+# (MIT/Apache-2.0) is bindings only, nothing compiled, at the version
+# nokhwa's Media Foundation camera already brings.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS's Screen Recording permission, checked and asked for before the
 # first capture (already in the tree through xcap).
@@ -106,8 +124,8 @@ sha2 = "0.11"
 
 [lints.rust]
 # This crate is where the unsafe code lives that the app forbids: the
-# calls into libva, the PipeWire stream, V4L2 (the camera on Linux) and
-# one fcntl. Everything else in it is denied
+# calls into libva, the PipeWire stream, V4L2 (the camera on Linux),
+# Media Foundation and Direct3D 11 (Windows) and one fcntl. Everything else in it is denied
 # unsafe code, and the modules that need it say so
 # (`#[allow(unsafe_code)]`).
 unsafe_code = "deny"
