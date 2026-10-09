@@ -3143,3 +3143,6 @@ msgstr "{tool} is niet gelukt"
 
 msgid "Sign in to Microsoft Teams to join a meeting"
 msgstr "Meld je aan bij Microsoft Teams om deel te nemen aan een vergadering"
+
+msgid "Account"
+msgstr "Account"
