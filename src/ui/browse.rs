@@ -354,14 +354,17 @@ fn new_message(app: &mut App, ctx: &egui::Context) {
             pick = pick.or_else(|| found.get(dialog.selected).cloned());
         }
     }
-    // Where the server has to be asked for people, it is asked as the
-    // query changes; the answers land among the workspace's people and
+    // Where the server has to be asked for people, it is asked once
+    // typing pauses; the answers land among the workspace's people and
     // so in the suggestions.
-    let query = dialog.query.trim().to_owned();
-    if searches && query.chars().count() >= 2 && query != dialog.asked {
-        dialog.asked.clone_from(&query);
-        app.actions
-            .push(Action::Convos(Convos::FindPeople { query }));
+    if searches {
+        match dialog.due_search(std::time::Instant::now()) {
+            Ok(Some(query)) => app
+                .actions
+                .push(Action::Convos(Convos::FindPeople { query })),
+            Ok(None) => {}
+            Err(wait) => ctx.request_repaint_after(wait),
+        }
     }
     if let Some(id) = pick {
         dialog.pick(id);

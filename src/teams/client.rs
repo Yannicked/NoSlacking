@@ -94,6 +94,10 @@ pub(crate) async fn refused(resp: reqwest::Response, what: &str) -> Failure {
         crate::teams::auth::error_code(&body),
         message.chars().take(200).collect::<String>()
     );
+    // Said as the rate limit it is, which passes.
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Failure::RateLimited;
+    }
     Failure::Http(status.as_u16())
 }
 

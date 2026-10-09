@@ -524,7 +524,7 @@ pub async fn find_people(client: TeamsClient, team: String, query: String, sink:
         Err(error) => sink.send(Event::Convos {
             team,
             event: crate::convos::Event::Failed {
-                what: crate::convos::Doing::Open,
+                what: crate::convos::Doing::FindPeople,
                 error,
             },
         }),
