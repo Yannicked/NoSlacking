@@ -1269,7 +1269,7 @@ Two kinds, both behind the same `Backend` trait:
 | desktop Linux without VA H.264, NVIDIA | Vulkan Video | `gpu-video` | planned |
 | ARM Linux (Snapdragon, Raspberry Pi) | V4L2 stateful | `v4l2r` | planned |
 | ARM Linux (Rockchip, MediaTek, Allwinner) | V4L2 stateless | `v4l2r` + `src/h264.rs` | planned |
-| Windows (x86 and Snapdragon) | Vulkan Video, else Media Foundation / D3D11 video | `gpu-video`; `windows` | planned; the helper builds and reports no hardware |
+| Windows (x86 and Snapdragon) | Media Foundation (DXVA decoding, the vendor's encoder) | `windows` | built, untested on hardware (§6.13) |
 | macOS | VideoToolbox | `objc2-video-toolbox`, `objc2-core-media` | planned; the helper builds and reports no hardware |
 | everywhere | software | rusty_h264 (decode), rusty_h264-encoder | the default and the fallback |
 
@@ -1946,6 +1946,45 @@ Not worth a second transport, a platform split and the fd handling;
 - Upload and draw costs on a real GPU (radeonsi, Intel) were not
   measured here: Xvfb gives llvmpipe. The image pool and `set_partial`
   might behave differently there.
+
+### 6.13 Media Foundation on Windows (2026-10-09, `feat/media-foundation`)
+
+Chosen over Vulkan Video (§6.5) for Windows: it reaches every vendor
+(including Snapdragon, which has no Vulkan Video), encodes as well as
+decodes through each vendor's own encoder, and needs only the `windows`
+crate nokhwa already brings (0.62, bindings only, nothing compiled).
+`src/mediafoundation/` in the helper:
+
+- **Decoding**: Microsoft's H.264 decoder transform
+  (`CLSID_MSH264DecoderMFT`) given a Direct3D 11 device through an
+  `IMFDXGIDeviceManager` (DXVA), `CODECAPI_AVLowLatencyMode` on, Annex B
+  frames in, NV12 out. It is offered only where DXVA lists the H.264
+  profile with NV12 and the transform takes the device; the size limit
+  is the largest of 4096×2304, 2560×1600, 1920×1088 DXVA has a
+  configuration for. Its software path is not used: a first picture
+  not in GPU memory hands the stream to rusty_h264. Pictures the app
+  takes are read back by locking the buffer (Media Foundation copies
+  the surface out) and shrunk on the processor; no GPU scaling yet
+  (D3D11 video processing would be the way, as VA-API's).
+- **Encoding**: the first hardware encoder `MFTEnumEx` lists
+  (`MFT_ENUM_FLAG_HARDWARE | SORTANDFILTER`) that takes NV12 and our
+  settings: CBR, no B-frames, low latency, constrained baseline (plain
+  baseline where refused), a GOP of 4 s and a forced IDR at least that
+  often, IDRs on request (`CODECAPI_AVEncVideoForceKeyFrame`), the bit
+  rate changed in place (`CODECAPI_AVEncCommonMeanBitRate`).
+  Asynchronous encoders are unlocked and driven by polling their events
+  (`METransformNeedInput`, `METransformHaveOutput`), one picture in and
+  its frame out per call; one that holds pictures back fails after 2 s
+  and the pipeline goes on in software. Pictures go in from memory
+  (converted on the processor); no D3D manager is set on the encoder.
+  Output is checked and tidied as VA-API's is: a slice required, access
+  unit delimiters dropped, the SPS and PPS put in front of an IDR that
+  lacks them.
+- **State**: built and checked by cross-compiling (`x86_64-pc-windows-msvc`,
+  clippy clean); the arithmetic (planes, sizes, NAL units, error codes)
+  is unit-tested on every system. Not yet run on Windows: the GPU tests
+  (`cargo test -p noslacking-video -- --ignored mediafoundation`) are
+  for a Windows machine.
 
 ## Sources
 - amazon-chime-sdk-js @ dea69d268c623ab2006169d3899981fea766fa8a (Apache-2.0), files as cited.
