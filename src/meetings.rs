@@ -9,6 +9,11 @@
 //! with the link it would have had, the typed passcode in place of the
 //! link's token (recorded), and the meeting service answers the
 //! meeting's own code, passcode and link, which the join then sends back.
+//!
+//! A meeting link opened in a browser lands on Teams' launcher page, which
+//! offers to open it in the app as an `msteams:` link: the scheme, then the
+//! path the page was given (recorded: `/_#/meet/{code}?p={token}&anon=true`).
+//! [`web_form`] reads that back into the link it came from.
 
 use crate::redact::REDACTED;
 
@@ -56,6 +61,8 @@ impl Meeting {
     /// `passcode`.
     pub fn parse(link_or_id: &str, passcode: &str) -> Result<Self, NotAMeeting> {
         let text = link_or_id.trim();
+        let web = web_form(text);
+        let text = web.as_deref().unwrap_or(text);
         if let Some(link) = Self::from_link(text) {
             return Ok(link);
         }
@@ -184,6 +191,38 @@ impl Dialog {
     }
 }
 
+/// The scheme Teams' launcher page opens the app with.
+pub const MSTEAMS_SCHEME: &str = "msteams";
+
+/// The web link an `msteams:` link to a meeting stands for: the launcher
+/// page's `msteams:/_#/meet/…` (recorded), and `msteams:/meet/…` or
+/// `msteams://teams.microsoft.com/meet/…` with the host's part kept, old
+/// `/l/meetup-join/…` links too. `None` for anything else.
+pub fn web_form(link: &str) -> Option<String> {
+    let (scheme, rest) = link.trim().split_once(':')?;
+    if !scheme.eq_ignore_ascii_case(MSTEAMS_SCHEME) {
+        return None;
+    }
+    let (host, path) = match rest.strip_prefix("//") {
+        Some(after) => after.split_once('/')?,
+        None => ("teams.microsoft.com", rest.trim_start_matches('/')),
+    };
+    let path = path.strip_prefix("_#/").unwrap_or(path);
+    let host = host.to_ascii_lowercase();
+    let known = host == PERSONAL_HOST || host.ends_with(".microsoft.com");
+    (known && (path.starts_with("meet/") || path.starts_with("l/meetup-join/")))
+        .then(|| format!("https://{host}/{path}"))
+}
+
+/// Whether `link` is one to a Teams meeting, to join here (or, for an
+/// old work link, to say why not): a web link or an `msteams:` one.
+pub fn is_meeting_link(link: &str) -> bool {
+    !matches!(
+        Meeting::parse(link, ""),
+        Err(NotAMeeting::Unreadable | NotAMeeting::NoPasscode)
+    )
+}
+
 /// Whether `code` is a meeting ID: digits only, as long as Teams makes
 /// them (13 in a recording; some services print 10 to 15).
 fn looks_like_code(code: &str) -> bool {
@@ -253,6 +292,61 @@ mod tests {
             ),
             Err(NotAMeeting::OldWorkLink)
         );
+    }
+
+    #[test]
+    fn the_launchers_msteams_links_read_as_the_meeting_link() {
+        // As the launcher page passes it on (recorded).
+        let launched = "msteams:/_#/meet/9312345678901?p=AbCdEf123&anon=true";
+        assert_eq!(
+            web_form(launched).as_deref(),
+            Some("https://teams.microsoft.com/meet/9312345678901?p=AbCdEf123&anon=true")
+        );
+        let meeting = Meeting::parse(launched, "").expect("a meeting");
+        assert_eq!(meeting.code, "9312345678901");
+        assert_eq!(meeting.passcode, "AbCdEf123");
+        assert_eq!(
+            meeting.url(),
+            "https://teams.microsoft.com/meet/9312345678901?p=AbCdEf123"
+        );
+        for link in [
+            "msteams:/meet/9312345678901?p=x",
+            "MSTEAMS:/meet/9312345678901?p=x",
+            "msteams://teams.live.com/meet/9312345678901?p=x",
+        ] {
+            assert!(Meeting::parse(link, "").is_ok(), "{link}");
+        }
+        assert_eq!(
+            Meeting::parse("msteams:/l/meetup-join/19%3ameeting_x%40thread.v2/0", ""),
+            Err(NotAMeeting::OldWorkLink)
+        );
+        for link in [
+            "msteams:/l/chat/0/0?users=x",
+            "msteams://example.com/meet/9312345678901?p=x",
+            "slack://open",
+        ] {
+            assert_eq!(web_form(link), None, "{link}");
+        }
+    }
+
+    #[test]
+    fn links_from_outside_are_meetings_only_when_they_name_one() {
+        assert!(is_meeting_link(
+            "https://teams.microsoft.com/meet/9312345678901?p=x"
+        ));
+        assert!(is_meeting_link("msteams:/_#/meet/9312345678901?p=x"));
+        // Said why not, in the dialog.
+        assert!(is_meeting_link(
+            "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0"
+        ));
+        for link in [
+            "noslacking://oauth/callback?code=1",
+            "slack://open",
+            "9312345678901",
+            "https://teams.microsoft.com/meet/9312345678901",
+        ] {
+            assert!(!is_meeting_link(link), "{link}");
+        }
     }
 
     #[test]

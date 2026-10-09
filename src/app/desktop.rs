@@ -437,7 +437,11 @@ impl App {
             .unwrap_or_default();
         for request in requests {
             if let crate::single_instance::Request::Open(link) = request {
-                self.backend.send(crate::backend::Command::Callback(link));
+                if crate::meetings::is_meeting_link(&link) {
+                    self.open_meeting_link(&link);
+                } else {
+                    self.backend.send(crate::backend::Command::Callback(link));
+                }
             }
             self.desktop.raise = true;
         }

@@ -14,7 +14,8 @@ use std::path::PathBuf;
 /// What the command line asked for.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Cli {
-    /// A noslacking:// link the desktop passed (`LINK`).
+    /// A link the desktop passed (`LINK`): a noslacking:// sign-in
+    /// redirect, or a Teams meeting to join.
     pub link: Option<String>,
     /// `--hidden`: start in the tray without a window.
     pub hidden: bool,
@@ -489,7 +490,7 @@ pub fn help() -> String {
     rows.push(("-V, --version".to_owned(), "Print version"));
     let width = rows.iter().map(|(left, _)| left.len()).max().unwrap_or(0);
     let mut help = format!(
-        "{}\n\n{USAGE}\n\nArguments:\n  [LINK]  A noslacking:// link; the desktop passes sign-in redirects this way\n\nOptions:\n",
+        "{}\n\n{USAGE}\n\nArguments:\n  [LINK]  A noslacking:// link (the desktop passes sign-in redirects this way), or a Teams meeting link to join\n\nOptions:\n",
         env!("CARGO_PKG_DESCRIPTION")
     );
     for (left, text) in rows {
