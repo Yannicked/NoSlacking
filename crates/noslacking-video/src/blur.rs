@@ -2,10 +2,10 @@
 //! `NOSLACKING_BLUR=N`: the model runs on every Nth picture, 1 for all).
 //!
 //! Google's MediaPipe selfie segmenter (Apache-2.0, see `models/README.md`)
-//! says where the person is, run by tract on the processor: on every
-//! third picture, its mask smoothed over time and kept for the
-//! pictures between, since people move slowly against 30 pictures a
-//! second. The background is each plane shrunk to a quarter and blurred
+//! says where the person is, run by tract on the processor on every
+//! picture (or every Nth, cheaper but less smooth: the mask is then kept
+//! for the pictures between), its mask smoothed over time so edges do
+//! not flicker. The background is each plane shrunk to a quarter and blurred
 //! there, from the background's own pixels only (the mask weighs them), so
 //! the person's colours do not bleed into a halo around them; the full
 //! picture then keeps the person and takes the blurred plane elsewhere.
@@ -23,8 +23,9 @@ const MODEL: &[u8] = include_bytes!("../models/selfie_segmenter_landscape.onnx")
 const MODEL_W: usize = 256;
 const MODEL_H: usize = 144;
 /// The model runs on every this many pictures when the setting names no
-/// number.
-const MODEL_EVERY: u64 = 3;
+/// number: every one, which follows movement smoothly (tried: every third
+/// looked behind) at about twice the processor time.
+const MODEL_EVERY: u64 = 1;
 /// How much of a new mask goes into the one kept, so its edges do not
 /// flicker.
 const MASK_NEW: f32 = 0.7;
@@ -40,7 +41,7 @@ const REPORT_EVERY: Duration = Duration::from_secs(10);
 
 /// Whether the background is wanted blurred, and on every how many
 /// pictures the model runs: `NOSLACKING_BLUR` set to a number (1 for every
-/// picture), or to anything else but empty or `0` for every third.
+/// picture), or to anything else but empty or `0` for every picture.
 pub fn wanted() -> Option<u64> {
     every(&std::env::var("NOSLACKING_BLUR").ok()?)
 }
@@ -449,6 +450,7 @@ mod tests {
         assert_eq!(every(""), None);
         assert_eq!(every("0"), None);
         assert_eq!(every("1"), Some(1));
+        assert_eq!(every("3"), Some(3));
         assert_eq!(every(" 2 "), Some(2));
         assert_eq!(every("yes"), Some(MODEL_EVERY));
     }
