@@ -18,6 +18,10 @@ path = "src/main.rs"
 
 [dependencies]
 noslacking-video-ipc = { path = "../video-ipc" }
+# SIMD for the camera's background blur, whose person segmentation model
+# runs on our own kernels (src/segment.rs): safe eight-lane vectors
+# (Zlib/MIT/Apache-2.0), already in the tree.
+wide = "0.7.33"
 # H.264 decoded in software where the GPU cannot (or is not wanted): pure
 # Rust (rusty_h264, BSD-2-Clause; the decoder itself forbids unsafe, its
 # SIMD kernels in rusty_h264-accel, the `asm` feature, are intrinsics
