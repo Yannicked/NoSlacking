@@ -3783,12 +3783,17 @@ dependencies = [
  "libloading",
  "nokhwa",
  "noslacking-video-ipc",
+ "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-core-media",
+ "objc2-core-video",
+ "objc2-video-toolbox",
  "pipewire",
  "rusty_h264-common",
  "rusty_h264-decoder",
  "rusty_h264-encoder",
  "sha2",
+ "windows",
  "x11rb",
  "xcap",
  "yuv",
@@ -4448,6 +4453,18 @@ dependencies = [
  "objc2 0.5.3",
  "objc2-core-location",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "objc2-video-toolbox"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05bf9a3c14831a7d9641b0d81d87dd913ee238a012b2fde27db5a84b56f5df3e"
+dependencies = [
+ "bitflags 2.13.2",
+ "objc2-core-foundation",
+ "objc2-core-media",
+ "objc2-core-video",
 ]
 
 [[package]]

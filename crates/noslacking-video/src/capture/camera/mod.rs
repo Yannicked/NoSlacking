@@ -7,7 +7,7 @@
 //! off, leaves, or the huddle takes no video. Where the frames come
 //! from, chosen at build time ([`System`]):
 //!
-//! - Linux: V4L2, spoken directly ([`v4l2`]): no libclang, no PipeWire.
+//! - Linux: V4L2, spoken directly (`v4l2`): no libclang, no PipeWire.
 //! - macOS and Windows: `nokhwa` (AVFoundation, Media Foundation).
 //! - [`CameraChoice::Test`]: a generated 640×480 picture with a moving
 //!   clock ([`TestCamera`]), for the probe, the demo and the benchmarks.

@@ -5,10 +5,13 @@
 //! talks to it over its standard input and output in the messages of
 //! `noslacking-video-ipc`. The helper decodes every stream the app shows
 //! on the GPU through the platform's video API, a [`backend::Backend`]
-//! (VA-API on Linux, `vaapi`), when the app asks for it and the GPU can;
-//! and otherwise, or once the GPU fails, in software ([`software`]). On
-//! other systems, and where VA-API has no H.264 decoder, it reports no
-//! hardware and decodes everything in software. It also captures and
+//! (VA-API on Linux, `vaapi`; VideoToolbox on macOS, [`videotoolbox`];
+//! Media Foundation on Windows, [`mediafoundation`]; the last two built but
+//! not yet tried on a Mac or a Windows GPU), when the app asks for it and
+//! the GPU can; and otherwise, or once the GPU fails, in software
+//! ([`software`]). On other systems, and where the platform's API has no
+//! H.264 decoder, it reports no hardware and decodes everything in
+//! software. It also captures and
 //! encodes what the user sends ([`capture`], [`pipeline`]): the screen
 //! they share and their camera ([`capture::camera`]), on the GPU when it
 //! can and in software otherwise. The app gets only the H.264 to send
@@ -27,6 +30,7 @@ pub mod capture;
 pub mod fake;
 #[cfg(target_os = "linux")]
 pub mod h264;
+pub mod mediafoundation;
 pub mod nal;
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
@@ -38,10 +42,12 @@ pub mod software;
 pub mod software_encoder;
 #[cfg(target_os = "linux")]
 pub mod vaapi;
+pub mod videotoolbox;
 
 /// The back end this system has, or one that can do nothing: the
 /// `NOSLACKING_VIDEO_BACKEND` environment variable may name one
-/// (`vaapi`, `fake`, `none`), else the platform's is tried.
+/// (`fake`, `none`), else the platform's (`vaapi`, `videotoolbox`,
+/// `mediafoundation`) is tried.
 pub fn choose_backend() -> Box<dyn backend::Backend> {
     let wanted = std::env::var("NOSLACKING_VIDEO_BACKEND").unwrap_or_default();
     match wanted.as_str() {
@@ -60,10 +66,25 @@ fn platform_backend() -> Box<dyn backend::Backend> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn platform_backend() -> Box<dyn backend::Backend> {
-    // VideoToolbox (macOS) and Media Foundation (Windows) are planned;
-    // until then the helper decodes in software there.
+    match videotoolbox::VideoToolbox::open() {
+        Ok(backend) => Box::new(backend),
+        Err(why) => Box::new(backend::Nothing::new(&format!("none: {why}"))),
+    }
+}
+
+#[cfg(windows)]
+fn platform_backend() -> Box<dyn backend::Backend> {
+    match mediafoundation::MediaFoundation::open() {
+        Ok(backend) => Box::new(backend),
+        Err(why) => Box::new(backend::Nothing::new(&format!("none: {why}"))),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn platform_backend() -> Box<dyn backend::Backend> {
+    // No video API is spoken elsewhere: the helper decodes in software.
     Box::new(backend::Nothing::new(
         "none: no back end for this system yet",
     ))
