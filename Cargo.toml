@@ -60,16 +60,16 @@ egui_extras = { version = "0.36", features = ["image", "svg", "gif", "webp"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "ico"] }
 # The shared foundation of ZapFast and Spotifast (crmne/fastframe). Every
 # crate comes from the same tag; move them together.
-fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
-fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
-fastframe-icons = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
-fastframe-theme = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
-fastframe-emoji = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
-fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
-fastframe-log = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
-fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
-fastframe-macos = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
-fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
+fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-icons = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-theme = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-emoji = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-log = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-macos = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
 # The Web API and file transfers. rustls everywhere so the client links one
 # TLS stack and builds without OpenSSL on every platform.
 # socks and system-proxy: Settings → Network (the system's proxy settings
@@ -218,7 +218,7 @@ rusty_h264-decoder = { version = "0.16", default-features = false, features = ["
 noslacking-video = { path = "crates/noslacking-video" }
 
 [build-dependencies]
-fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2", features = ["build"] }
+fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1", features = ["build"] }
 # The .exe's icon and version info (build.rs; it does nothing for other
 # targets). Without the toml feature it pulls in no parser.
 winresource = { version = "0.1", default-features = false }
@@ -378,16 +378,16 @@ opus-decoder = { path = "vendor/opus-decoder" }
 # bidi shaping, egui's busy-loop fix and Wayland frame pacing. Every egui
 # crate comes from the same revision so they share one emath and epaint.
 # Move together with the other fastframe apps.
-ecolor = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-eframe = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-egui = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-egui-wgpu = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-egui-winit = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-egui_extras = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-egui_glow = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-emath = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-epaint = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+ecolor = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+eframe = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui-wgpu = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui-winit = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui_extras = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui_glow = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+emath = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+epaint = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
 # crmne/winit apps-0.30, shared with the same apps (Wayland occlusion and
 # clipboard fixes). eframe from the fork above calls its API.
-winit = { git = "https://github.com/crmne/winit", rev = "544a73716c7a54c916d97d6c86c0b1bdaa81234e" }
+winit = { git = "https://github.com/crmne/winit", rev = "ed7caa9023f10b397f5b6ec8284a840cbd8a6f65" }

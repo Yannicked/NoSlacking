@@ -413,10 +413,13 @@ impl App {
         self.save_settings();
     }
 
-    /// Whether the desktop showed a tray item, so the window can close
+    /// Whether the desktop shows a tray item now, so the window can close
     /// into it.
     pub fn has_tray(&self) -> bool {
-        self.desktop.tray.is_some()
+        self.desktop
+            .tray
+            .as_ref()
+            .is_some_and(crate::tray::Tray::is_shown)
     }
 
     /// Hands over the requests later launches send (see
@@ -485,7 +488,7 @@ impl App {
     /// hiding the window from the tray).
     pub(super) fn closed_action(&self) -> fastframe_shell::Closed {
         if !self.quit
-            && self.desktop.tray.is_some()
+            && self.has_tray()
             && (self.settings.desktop.close_to_tray || self.desktop.hide)
         {
             fastframe_shell::Closed::Hide
@@ -503,9 +506,7 @@ impl App {
     /// the tray to come back through. macOS makes its menu-bar item with
     /// the first window, so it always opens one.
     pub(super) fn can_start_hidden(&self) -> bool {
-        cfg!(not(target_os = "macos"))
-            && self.desktop.tray.is_some()
-            && self.settings.desktop.close_to_tray
+        cfg!(not(target_os = "macos")) && self.has_tray() && self.settings.desktop.close_to_tray
     }
 
     /// Slack's Do Not Disturb state for a workspace.
