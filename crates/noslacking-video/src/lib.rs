@@ -37,6 +37,7 @@ pub mod nal;
 #[allow(unsafe_code)]
 pub mod pipe;
 pub mod pipeline;
+pub mod segment;
 pub mod server;
 pub mod shrink;
 pub mod software;

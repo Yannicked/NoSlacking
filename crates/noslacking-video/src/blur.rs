@@ -2,7 +2,7 @@
 //! `NOSLACKING_BLUR=N`: the model runs on every Nth picture, 1 for all).
 //!
 //! Google's MediaPipe selfie segmenter (Apache-2.0, see `models/README.md`)
-//! says where the person is, run by tract on the processor on every
+//! says where the person is, run by our own code (`crate::segment`) on every
 //! picture (or every Nth, cheaper but less smooth: the mask is then kept
 //! for the pictures between), its mask smoothed over time so edges do
 //! not flicker. The background is each plane shrunk to a quarter and blurred
@@ -15,10 +15,11 @@
 use std::time::{Duration, Instant};
 
 use noslacking_video_ipc::Planes;
-use tract_onnx::prelude::*;
 
-/// The model, as `tools/selfie-onnx/convert.py` made it.
-const MODEL: &[u8] = include_bytes!("../models/selfie_segmenter_landscape.onnx");
+use crate::segment::Segmenter;
+
+/// The model, as `tools/selfie-onnx/export.py` made it.
+const MODEL: &[u8] = include_bytes!("../models/selfie_segmenter_landscape.nsseg");
 /// Its input, in pixels.
 const MODEL_W: usize = 256;
 const MODEL_H: usize = 144;
@@ -57,7 +58,7 @@ fn every(setting: &str) -> Option<u64> {
 /// The blur for one camera: the model, the mask kept between pictures,
 /// and what it cost.
 pub struct Blur {
-    model: std::sync::Arc<TypedRunnableModel>,
+    model: Segmenter,
     input: Vec<f32>,
     mask: Vec<f32>,
     pictures: u64,
@@ -76,13 +77,13 @@ struct Cost {
 }
 
 impl Blur {
-    /// Loads the model (about 50 ms), to run on every `every`th picture.
+    /// Loads the model, to run on every `every`th picture.
     pub fn new(every: u64) -> Result<Self, String> {
-        let model = tract_onnx::onnx()
-            .model_for_read(&mut &MODEL[..])
-            .and_then(|m| m.into_optimized())
-            .and_then(|m| m.into_runnable())
+        let model = Segmenter::from_bytes(MODEL)
             .map_err(|e| format!("the segmentation model did not load: {e}"))?;
+        if model.input_size() != (MODEL_W, MODEL_H) {
+            return Err("the segmentation model takes another size".into());
+        }
         Ok(Self {
             model,
             input: vec![0.0; MODEL_W * MODEL_H * 3],
@@ -166,15 +167,13 @@ impl Blur {
     }
 
     /// The person's mask for `picture`, `MODEL_W` × `MODEL_H`, 1 on them.
-    fn segment(&mut self, picture: &Planes) -> TractResult<Vec<f32>> {
+    fn segment(&mut self, picture: &Planes) -> Result<Vec<f32>, String> {
         model_input(picture, &mut self.input);
-        let x: Tensor =
-            tract_ndarray::Array4::from_shape_vec((1, MODEL_H, MODEL_W, 3), self.input.clone())?
-                .into();
-        let out = self.model.run(tvec!(x.into_tvalue()))?;
-        let mask = out[0].clone().into_tensor();
-        let view = mask.try_as_plain_ram()?;
-        Ok(view.as_slice::<f32>()?.to_vec())
+        let mask = self.model.run(&self.input);
+        if mask.len() != MODEL_W * MODEL_H {
+            return Err("the segmentation model's mask is another size".into());
+        }
+        Ok(mask.to_vec())
     }
 
     fn report(&mut self) {
