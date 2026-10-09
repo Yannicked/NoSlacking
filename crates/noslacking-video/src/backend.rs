@@ -1,7 +1,7 @@
 //! What a platform's video API must provide to serve the app: one
-//! [`Backend`] per API (VA-API, and VideoToolbox, built but not yet
-//! tried on a Mac; Media Foundation, Vulkan Video and V4L2 are planned,
-//! see docs/research/huddle-video.md),
+//! [`Backend`] per API (VA-API; VideoToolbox and Media Foundation, built
+//! but not yet tried on a Mac or a Windows GPU; Vulkan Video and V4L2
+//! are planned, see docs/research/huddle-video.md),
 //! opening [`Decoder`]s, and the GPU's [`crate::pipeline::Gpu`] a capture
 //! encodes on. An [`Encoder`] is what a GPU's encoder offers whatever
 //! feeds it.
