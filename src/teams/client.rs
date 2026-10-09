@@ -94,7 +94,21 @@ pub(crate) async fn refused(resp: reqwest::Response, what: &str) -> Failure {
         crate::teams::auth::error_code(&body),
         message.chars().take(200).collect::<String>()
     );
+    // Said as the rate limit it is, which passes.
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Failure::RateLimited;
+    }
     Failure::Http(status.as_u16())
+}
+
+/// Why a service answered 401, as its `WWW-Authenticate` header says
+/// (the scheme and error, never a token): "unknown" without one.
+fn why_unauthorized(resp: &reqwest::Response) -> String {
+    resp.headers()
+        .get(reqwest::header::WWW_AUTHENTICATE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.chars().take(200).collect())
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 /// What `fetchShortProfile` answers.
@@ -1412,30 +1426,44 @@ impl TeamsClient {
                     "members": members,
                     "properties": { "threadType": "chat", "isStickyThread": "true" },
                 });
-                self.bearer(RESOURCE_GROUPS_PERSONAL, |http, token| {
-                    crate::teams::auth::consumer_headers(
-                        http.post(PERSONAL_THREADS_URL)
-                            .bearer_auth(token)
-                            .header("x-skypetoken", &skype)
-                            .json(&body),
-                    )
-                })
-                .await?
+                let resp = self
+                    .bearer(RESOURCE_GROUPS_PERSONAL, |http, token| {
+                        crate::teams::auth::consumer_headers(
+                            http.post(PERSONAL_THREADS_URL)
+                                .bearer_auth(token)
+                                .header("x-skypetoken", &skype)
+                                .json(&body),
+                        )
+                    })
+                    .await?;
+                if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                    // The groups service cannot read our tokens: we sign in
+                    // as the desktop app, whose personal tokens are opaque
+                    // tickets, and only the web client's app (which cannot
+                    // sign in by device code, AADSTS70002) gets the kind it
+                    // reads ("S2S12008 … exception when validating the
+                    // token"). The chat service takes our skype token, so
+                    // the chat is made there, the Skype way (not recorded
+                    // for personal accounts).
+                    log::info!(
+                        "the groups service refused to start a chat ({}); asking the chat service",
+                        why_unauthorized(&resp)
+                    );
+                    // Its own properties, not the work ones: "Consumer users
+                    // disallowed on uniquerosterthread" (HTTP 400).
+                    self.create_chat_on_chat_service(&body).await?
+                } else {
+                    resp
+                }
             }
             // The chat service's own way, which work clients have used:
             // not yet seen in a recording of the work web client.
             Account::Work => {
-                let url = format!("{}/v1/threads", self.chat_service_url());
                 let body = serde_json::json!({
                     "members": members,
                     "properties": { "threadType": "chat", "fixedRoster": "true", "uniquerosterthread": "true" },
                 });
-                self.authed_skype_request(|http, token| {
-                    http.post(&url)
-                        .header("Authentication", format!("skypetoken={}", token))
-                        .json(&body)
-                })
-                .await?
+                self.create_chat_on_chat_service(&body).await?
             }
         };
         if !resp.status().is_success() {
@@ -1449,6 +1477,21 @@ impl TeamsClient {
         let text = resp.text().await.unwrap_or_default();
         created_thread(&text, location.as_deref())
             .ok_or_else(|| Failure::Unexpected("no chat id in the answer".into()))
+    }
+
+    /// Asks the chat service itself to make the chat `body` describes
+    /// (its members and properties), with the skype token.
+    async fn create_chat_on_chat_service(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response, Failure> {
+        let url = format!("{}/v1/threads", self.chat_service_url());
+        self.authed_skype_request(|http, token| {
+            http.post(&url)
+                .header("Authentication", format!("skypetoken={}", token))
+                .json(body)
+        })
+        .await
     }
 
     /// A picture from Teams: a person's avatar or a picture in a message,

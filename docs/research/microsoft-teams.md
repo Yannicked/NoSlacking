@@ -357,6 +357,18 @@ people in personal chats with `fetchFederated`, and yourself with
 the groups service's scope too (2026-10-07): the middle tier answers
 `fetchShortProfile` with that token, where it refused every other.
 
+Starting a chat is where the two client ids part (2026-10-09). The groups
+service (`teams.live.com/api/groups/v1/threads`) answers our groups-scoped
+token with 401 and `WWW-Authenticate: Bearer "S2S12008: … caught an
+exception when validating the token"`, even freshly minted: the desktop
+app's personal tokens are opaque tickets (`EwA…`), the web client's are
+encrypted JWTs (`eyJhbGciOiJkaXIi…`, `A256CBC-HS512`), and the groups
+service reads only the latter. The web client's id cannot sign in by
+device code (`AADSTS70002`: the client must be marked as mobile). So a
+personal account's chat is made on the chat service instead,
+`POST {chatService}/v1/threads` with the skype token, as work accounts'
+are; that route is not seen in a recording of the personal web client.
+
 ### 6.2 Audio and video calls
 
 ost (MIT) implements 1:1 and channel calls. Its flow: an IC3 token
