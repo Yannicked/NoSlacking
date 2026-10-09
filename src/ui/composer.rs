@@ -370,9 +370,12 @@ fn groups(groups: &[crate::model::UserGroup], query: &str) -> Vec<Suggestion> {
         .collect()
 }
 
-/// The text field of the composer for the draft `key`.
-pub fn field_id(key: &str) -> egui::Id {
-    egui::Id::new(("composer", key))
+/// The text field of the composer for the draft `key` in the window `ctx`
+/// is drawing. A popped-out chat's composer is also open in the main
+/// window, and egui collapses the selection of a field without focus each
+/// frame: sharing one field, each window undid the other's selection.
+pub fn field_id(ctx: &egui::Context, key: &str) -> egui::Id {
+    egui::Id::new(("composer", key, ctx.viewport_id()))
 }
 
 /// [`show`] for the messages of `channel`, with who is typing under it;
@@ -403,7 +406,7 @@ pub fn show(
     actions: &mut Vec<Action>,
 ) {
     let palette = composer.palette;
-    let id = field_id(&composer.key);
+    let id = field_id(ui.ctx(), &composer.key);
     let focused = ui.memory(|m| m.has_focus(id));
     let state = egui::TextEdit::load_state(ui.ctx(), id);
     let cursor = state
@@ -625,7 +628,7 @@ pub fn show(
             // only ever shows on drafts tall enough to scroll.
             ui.spacing_mut().scroll.fade.strength = 0.0;
             egui::ScrollArea::vertical()
-                .id_salt(("composer-scroll", &composer.key))
+                .id_salt(("composer-scroll", &composer.key, ui.ctx().viewport_id()))
                 .max_height(220.0)
                 .stick_to_bottom(true)
                 .show(ui, |ui| {

@@ -27,7 +27,7 @@ pub fn global(app: &mut App, ctx: &egui::Context) {
     let editing = app
         .editing
         .as_ref()
-        .is_some_and(|e| ctx.memory(|m| m.has_focus(super::message::edit_id(e))));
+        .is_some_and(|e| ctx.memory(|m| m.has_focus(super::message::edit_id(ctx, e))));
     // Esc closes open suggestions first.
     let suggesting = app
         .visible_drafts()
@@ -187,7 +187,7 @@ fn in_empty_composer(app: &App, ctx: &egui::Context) -> bool {
         return false;
     };
     app.visible_drafts().iter().any(|key| {
-        super::composer::field_id(key) == focused
+        super::composer::field_id(ctx, key) == focused
             && app.drafts.get(key).is_none_or(|d| d.text.is_empty())
     })
 }
