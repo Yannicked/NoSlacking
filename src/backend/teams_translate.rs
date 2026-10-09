@@ -684,13 +684,20 @@ pub fn translate_user(user: &types::UserDetails) -> User {
         // Bots are `28:` MRIs; people `8:`.
         is_bot: user.id.starts_with("28:"),
         deleted: false,
-        title: String::new(),
+        title: user.job_title.clone().unwrap_or_default(),
         status_text: String::new(),
         status_emoji: String::new(),
         tz: None,
         team: String::new(),
         enterprise: String::new(),
         stranger: false,
+        contact: crate::model::Contact {
+            email: user.email.clone().unwrap_or_default(),
+            phone: user.phone.clone().unwrap_or_default(),
+            department: user.department.clone().unwrap_or_default(),
+            office: user.office.clone().unwrap_or_default(),
+            organization: user.organization.clone().unwrap_or_default(),
+        },
     }
 }
 

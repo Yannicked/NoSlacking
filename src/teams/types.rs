@@ -52,6 +52,21 @@ pub struct UserDetails {
     /// the middle tier's picture service needs it to find the photo.
     #[serde(default, rename = "imageUri")]
     pub image_uri: Option<String>,
+    /// What the directory says of their work, where it says it (a work
+    /// account's profiles; recorded).
+    #[serde(default, rename = "jobTitle")]
+    pub job_title: Option<String>,
+    #[serde(default)]
+    pub department: Option<String>,
+    /// Their organization: its company name, or else the tenant's.
+    #[serde(default)]
+    pub organization: Option<String>,
+    /// A phone number: the office's, or else the mobile.
+    #[serde(default)]
+    pub phone: Option<String>,
+    /// Where they work: the office, or else the location.
+    #[serde(default)]
+    pub office: Option<String>,
 }
 
 /// A team in Microsoft Teams (CSA endpoint).

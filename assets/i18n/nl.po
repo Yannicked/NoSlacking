@@ -3140,3 +3140,18 @@ msgstr "dit systeem kan nog geen links aan NoSlacking doorgeven"
 
 msgid "{tool} did not succeed"
 msgstr "{tool} is niet gelukt"
+
+msgid "Organization"
+msgstr "Organisatie"
+
+msgid "Department"
+msgstr "Afdeling"
+
+msgid "Office"
+msgstr "Kantoor"
+
+msgid "Email"
+msgstr "E-mail"
+
+msgid "Phone"
+msgstr "Telefoon"
