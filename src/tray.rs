@@ -70,7 +70,8 @@ fn unread_label(unread: Unread) -> String {
 }
 
 impl Tray {
-    /// Registers the item; `None` when the desktop has no tray. `wake` is
+    /// Registers the item; `None` when it cannot be made. On Linux it is
+    /// made even while no panel shows it: ask [`Self::is_shown`]. `wake` is
     /// called, from the tray's thread, whenever something was clicked.
     pub fn spawn(wake: impl Fn() + Send + Sync + 'static) -> Option<Self> {
         use fastframe_tray::MenuItem;
@@ -79,6 +80,11 @@ impl Tray {
             title: "NoSlacking".to_owned(),
             icon,
             template_icon: None,
+            // The tray icon is the app's icon, so panels that look icons up
+            // by name may draw the installed one. A left click on macOS
+            // still toggles the window, as it did before.
+            themed_icon: true,
+            menu_on_click: false,
             menu: vec![
                 MenuItem::action("show", t("Show NoSlacking")),
                 MenuItem::action(UNREAD, unread_label(Unread::default())),
@@ -88,6 +94,12 @@ impl Tray {
         };
         let tray = fastframe_tray::Tray::spawn(config, wake)?;
         Some(Self { tray, shown: None })
+    }
+
+    /// Whether a panel shows the item now. On Linux one may start after
+    /// the app, or the desktop may have none.
+    pub fn is_shown(&self) -> bool {
+        self.tray.is_shown()
     }
 
     /// What was asked for since the last call, oldest first.
