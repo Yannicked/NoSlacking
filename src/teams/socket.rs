@@ -179,6 +179,36 @@ pub fn extract_socketio_ack_id(frame: &str) -> Option<String> {
     }
 }
 
+/// How often [`user_activity`] is said while the app runs: Teams counts
+/// you active only while the connection keeps saying so (the web client
+/// says it on connecting and again as you use it), and otherwise shows
+/// you away after a while, whatever presence was published.
+pub const ACTIVITY_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The Socket.IO event that tells Teams you are active on this
+/// connection: the `id`th event it sends, which the server acknowledges
+/// with `6:::{id}+[]`, tagged with the correlation vector `cv` (recorded,
+/// as the web client sends it).
+pub fn user_activity(id: u64, cv: &str) -> String {
+    // Written out in the web client's order (`serde_json` would sort the
+    // keys); `cv` is base64, nothing in it to escape.
+    format!(r#"5:{id}+::{{"name":"user.activity","args":[{{"state":"active","cv":"{cv}"}}]}}"#)
+}
+
+/// A fresh correlation vector, as Microsoft's clients tag what they send:
+/// 16 random bytes in base64, then `.0` (recorded: 22 characters and a
+/// counter).
+pub fn correlation_vector() -> String {
+    use base64::Engine as _;
+    use rand::Rng as _;
+    let mut bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    format!(
+        "{}.0",
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
+    )
+}
+
 /// Generates the appropriate response frame if `frame` requires an acknowledgment or pong.
 pub fn handle_frame_control(frame: &str) -> Option<String> {
     if frame == "2" || frame == "2::" {
@@ -567,6 +597,20 @@ pub async fn register_endpoint(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn activity_is_said_as_the_web_client_says_it() {
+        let frame = super::user_activity(1, "AAAAAAAAAAAAAAAAAAAAAA.0");
+        assert_eq!(
+            frame,
+            r#"5:1+::{"name":"user.activity","args":[{"state":"active","cv":"AAAAAAAAAAAAAAAAAAAAAA.0"}]}"#
+        );
+        let cv = super::correlation_vector();
+        assert_eq!(cv.len(), 24);
+        assert!(cv.ends_with(".0"));
+        // The server's acknowledgement needs no answer.
+        assert_eq!(super::handle_frame_control("6:::1+[]"), None);
+    }
+
     use super::*;
 
     #[test]
