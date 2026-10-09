@@ -1715,3 +1715,39 @@ endpoint id in the roster. Their `max-br` (kbit/s) becomes the bitrate of
 that line's encoder, within its own limits (camera 1.8 Mbit/s, share
 2.5 Mbit/s). The size and frame rate limits are not applied: our encoder
 keeps its own.
+
+### H.12 Another organization's meeting (recorded: `teams.live.com13.har`, and `teams.microsoft.com.har` as a guest)
+
+Joined signed in with a personal account, a work organization's meeting
+goes as H.2 and H.3: the same `cpconv` at `api.flightproxy.skype.com`,
+`applicationType: "TFL"`, the same "preheat" and join; NoSlacking joined
+it so, with a personal and with a work account. The differences:
+
+- The preheat's answer names the meeting's organizer and organization
+  (`meetingInfo: {organizerId, tenantId}`) and its chat
+  (`activeModalities.groupChat: {threadId, messageId}`); the join sends
+  both back as they came, where a meeting of one's own sends `null`.
+- The meeting's chat is not ours until we are in its call: reading it
+  answers 404 for about ten seconds after the join. Then the client
+  takes it up: `PUT {chat service}/v1/threads/{thread}/members/{our
+  MRI}` with `{"relationshipState": "Accepted"}`, then `PUT
+  …/users/ME/conversations/{thread}/properties?name=alerts` with
+  `{"alerts": "true"}`.
+
+A guest, not signed in, gets its token from `POST
+teams.microsoft.com/api/authsvc/v1.0/authz/visitor` (no body, no
+credentials; answers a Skype token, the region and `regionGtms`), and
+then uses the region's addresses from it, not the personal ones:
+`calling_conversationServiceUrl` (`…flightproxy.teams.microsoft.com/api/v2/epconv`)
+for the preheat, `teams.microsoft.com/trap-exp/tokens` for the relays,
+with `ms-teams-region` and `ms-teams-ring` headers. Its preheat's
+`meetingData` adds `type: "meetingId"`, and its join a
+`participantScreening` value (`source: "JoinShield"`); `regionGtms`
+also names a CAPTCHA address for the conversation service, which was
+not used here. NoSlacking does not join as a guest.
+
+A meeting link opens `teams.microsoft.com/dl/launcher/launcher.html`
+with `url=/_#/meet/{code}?p={token}&anon=true`, which opens an
+installed app at `msteams:` and that path. Slides shown with PowerPoint
+Live come over a socket of their own
+(`pptservicescast.officeapps.live.com`), not as a video stream.

@@ -1245,6 +1245,12 @@ async fn trouter_once(
     let (mut write, mut read) = stream.split();
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
     heartbeat.tick().await;
+    // Said at once, as the web client does, then again and again: without
+    // it Teams shows you away a while after the presence above. Each
+    // event this connection sends is numbered.
+    let mut activity = tokio::time::interval(socket::ACTIVITY_EVERY);
+    let mut events: u64 = 0;
+    let cv = socket::correlation_vector();
     // A personal account's registrations lapse; renewed well before.
     let mut renew = tokio::time::interval(socket::PERSONAL_REGISTRATION_TTL * 5 / 6);
     renew.tick().await;
@@ -1257,6 +1263,13 @@ async fn trouter_once(
             _ = heartbeat.tick() => {
                 write
                     .send(WsMessage::Text("2::".into()))
+                    .await
+                    .map_err(|error| Failure::Network(error.to_string()))?;
+            }
+            _ = activity.tick() => {
+                events += 1;
+                write
+                    .send(WsMessage::Text(socket::user_activity(events, &cv).into()))
                     .await
                     .map_err(|error| Failure::Network(error.to_string()))?;
             }

@@ -282,13 +282,17 @@ pub fn descriptions_for(
 /// "preheat" that asks the meeting service for the conversation, then,
 /// to `conversationController`, with our SDP `offer` to join the call.
 /// `meeting_data` is the meeting's code, passcode and link: as typed for
-/// the first, as the first answered for the second (recorded).
+/// the first, as the first answered for the second (recorded). The join
+/// also sends back what the preheat answered of the meeting's organizer
+/// and chat, `preheated` (recorded, for a meeting of another
+/// organization).
 pub fn meeting_request(
     me: &Participant,
     ids: &CallIds,
     callbacks: &Callbacks,
     meeting_data: &serde_json::Value,
     offer: Option<&str>,
+    preheated: Option<&CpconvAnswer>,
 ) -> serde_json::Value {
     // The join hands over the callbacks of one in the call; the preheat
     // those of one joining a conversation.
@@ -353,6 +357,17 @@ pub fn meeting_request(
         body["participantPropertyBag"] = serde_json::json!({
             "aiVoiceConsent": {"value": {"aiVoiceConsentValue": "0"}, "sequenceNumber": 0}
         });
+    }
+    if let Some(preheated) = preheated {
+        if let Some(info) = &preheated.meeting_info {
+            body["meetingInfo"] = info.clone();
+        }
+        if let Some(chat) = &preheated.active_modalities.group_chat {
+            body["groupChat"] = serde_json::json!({
+                "threadId": chat.thread_id,
+                "messageId": chat.message_id,
+            });
+        }
     }
     body["conversationRequest"] = conversation;
     body["endpointState"] = serde_json::json!({
@@ -615,6 +630,11 @@ impl CallApi {
         self.incoming()
     }
 
+    /// The account the call is made with.
+    pub fn client(&self) -> &TeamsClient {
+        &self.client
+    }
+
     /// The call's ids.
     pub fn ids(&self) -> &CallIds {
         &self.ids
@@ -693,6 +713,7 @@ impl CallApi {
             &self.callbacks,
             &meeting_data(meeting),
             None,
+            None,
         );
         let resp = self
             .send(
@@ -722,6 +743,7 @@ impl CallApi {
             &self.callbacks,
             &meeting_data,
             Some(offer),
+            Some(preheated),
         );
         let resp = self
             .send(
@@ -1430,10 +1452,12 @@ mod tests {
         let callbacks = Callbacks::new(SURL, &ids.call_agent_id);
         let typed =
             serde_json::json!({"meetingCode": "123", "passcode": "token", "meetingUrl": "u"});
-        let preheat = meeting_request(&me, &ids, &callbacks, &typed, None);
+        let preheat = meeting_request(&me, &ids, &callbacks, &typed, None, None);
         assert_eq!(preheat["meetingData"], typed);
         assert!(preheat.get("callInvitation").is_none());
         assert!(preheat["participants"].get("to").is_none());
+        assert!(preheat["meetingInfo"].is_null());
+        assert!(preheat["groupChat"].is_null());
         assert!(
             preheat["conversationRequest"]
                 .get("suppressDialout")
@@ -1455,8 +1479,34 @@ mod tests {
         let answered =
             serde_json::json!({"meetingCode": "123", "passcode": "123456", "meetingUrl": "u2"});
         let offer = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=label:main-audio\r\n";
-        let join = meeting_request(&me, &ids, &callbacks, &answered, Some(offer));
+        // What the preheat answered of the meeting's organizer and chat,
+        // as in the recording of another organization's meeting.
+        let preheated: CpconvAnswer = serde_json::from_value(serde_json::json!({
+            "conversationController": "https://conv.example/conv/C1",
+            "meetingInfo": {"organizerId": "organizer", "tenantId": "tenant"},
+            "activeModalities": {
+                "groupChat": {"threadId": "19:meeting_M1@thread.v2", "messageId": "0"},
+                "realTimeActivityFeed": {"links": {}}
+            },
+        }))
+        .expect("reads");
+        let join = meeting_request(
+            &me,
+            &ids,
+            &callbacks,
+            &answered,
+            Some(offer),
+            Some(&preheated),
+        );
         assert_eq!(join["meetingData"], answered);
+        assert_eq!(
+            join["meetingInfo"],
+            serde_json::json!({"organizerId": "organizer", "tenantId": "tenant"})
+        );
+        assert_eq!(
+            join["groupChat"],
+            serde_json::json!({"threadId": "19:meeting_M1@thread.v2", "messageId": "0"})
+        );
         assert_eq!(join["participants"]["to"], serde_json::json!([]));
         assert_eq!(join["conversationRequest"]["suppressDialout"], true);
         assert_eq!(
