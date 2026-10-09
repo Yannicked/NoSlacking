@@ -1405,14 +1405,22 @@ impl TeamsClient {
                         "the groups service refused to start a chat ({}); asking the chat service",
                         why_unauthorized(&resp)
                     );
-                    self.create_chat_on_chat_service(&members).await?
+                    // Its own properties, not the work ones: "Consumer users
+                    // disallowed on uniquerosterthread" (HTTP 400).
+                    self.create_chat_on_chat_service(&body).await?
                 } else {
                     resp
                 }
             }
             // The chat service's own way, which work clients have used:
             // not yet seen in a recording of the work web client.
-            Account::Work => self.create_chat_on_chat_service(&members).await?,
+            Account::Work => {
+                let body = serde_json::json!({
+                    "members": members,
+                    "properties": { "threadType": "chat", "fixedRoster": "true", "uniquerosterthread": "true" },
+                });
+                self.create_chat_on_chat_service(&body).await?
+            }
         };
         if !resp.status().is_success() {
             return Err(refused(resp, "start a chat").await);
@@ -1427,22 +1435,17 @@ impl TeamsClient {
             .ok_or_else(|| Failure::Unexpected("no chat id in the answer".into()))
     }
 
-    /// Asks the chat service itself to make a chat of `members`, with the
-    /// skype token: one with the same people already there is answered
-    /// instead (`uniquerosterthread`).
+    /// Asks the chat service itself to make the chat `body` describes
+    /// (its members and properties), with the skype token.
     async fn create_chat_on_chat_service(
         &self,
-        members: &[serde_json::Value],
+        body: &serde_json::Value,
     ) -> Result<reqwest::Response, Failure> {
         let url = format!("{}/v1/threads", self.chat_service_url());
-        let body = serde_json::json!({
-            "members": members,
-            "properties": { "threadType": "chat", "fixedRoster": "true", "uniquerosterthread": "true" },
-        });
         self.authed_skype_request(|http, token| {
             http.post(&url)
                 .header("Authentication", format!("skypetoken={}", token))
-                .json(&body)
+                .json(body)
         })
         .await
     }
