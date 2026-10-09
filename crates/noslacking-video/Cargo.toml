@@ -87,6 +87,17 @@ nokhwa = { version = "0.10.11", default-features = false, features = ["input-nat
 # macOS's Screen Recording permission, checked and asked for before the
 # first capture (already in the tree through xcap).
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGWindow"] }
+# VideoToolbox, macOS's video acceleration API, for decoding and
+# encoding H.264 on the GPU (src/videotoolbox/): objc2's bindings to the
+# system frameworks (MIT/Apache-2.0/Zlib, nothing compiled), the
+# CoreMedia and CoreVideo types VideoToolbox takes and gives, and
+# CoreFoundation's dictionaries, numbers and strings for its options.
+# Only the headers used are on; objc2-core-foundation and the CoreMedia
+# and CoreVideo crates are already in the tree through xcap and nokhwa.
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFArray", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime", "objc2-core-video"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTBase", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTPixelTransferProperties", "VTPixelTransferSession", "VTSession", "objc2-core-media", "objc2-core-video"] }
 
 [features]
 # The ScreenCast portal and PipeWire on by default, so a plain `cargo
