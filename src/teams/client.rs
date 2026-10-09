@@ -94,7 +94,21 @@ pub(crate) async fn refused(resp: reqwest::Response, what: &str) -> Failure {
         crate::teams::auth::error_code(&body),
         message.chars().take(200).collect::<String>()
     );
+    // Said as the rate limit it is, which passes.
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Failure::RateLimited;
+    }
     Failure::Http(status.as_u16())
+}
+
+/// Why a service answered 401, as its `WWW-Authenticate` header says
+/// (the scheme and error, never a token): "unknown" without one.
+fn why_unauthorized(resp: &reqwest::Response) -> String {
+    resp.headers()
+        .get(reqwest::header::WWW_AUTHENTICATE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.chars().take(200).collect())
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 /// What `fetchShortProfile` answers.
@@ -284,6 +298,37 @@ struct ShortProfile {
     user_principal_name: Option<String>,
     #[serde(default, rename = "imageUri")]
     image_uri: Option<String>,
+    /// A personal account's addresses, where `email` is not given.
+    #[serde(default, rename = "emailsInfo")]
+    emails_info: Vec<EmailInfo>,
+    #[serde(default, rename = "jobTitle")]
+    job_title: Option<String>,
+    #[serde(default)]
+    department: Option<String>,
+    #[serde(default, rename = "companyName")]
+    company_name: Option<String>,
+    #[serde(default, rename = "tenantName")]
+    tenant_name: Option<String>,
+    #[serde(default, rename = "telephoneNumber")]
+    telephone_number: Option<String>,
+    #[serde(default)]
+    mobile: Option<String>,
+    #[serde(default, rename = "physicalDeliveryOfficeName")]
+    office_name: Option<String>,
+    #[serde(default, rename = "userLocation")]
+    user_location: Option<String>,
+}
+
+/// One of a personal account's addresses.
+#[derive(serde::Deserialize)]
+struct EmailInfo {
+    #[serde(default)]
+    address: Option<String>,
+}
+
+/// `value` if it says something.
+fn said(value: Option<String>) -> Option<String> {
+    value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
 }
 
 impl ShortProfile {
@@ -298,12 +343,22 @@ impl ShortProfile {
             .map(id_of_mri)
             .filter(|id| !id.is_empty())
             .or_else(|| self.object_id.filter(|id| !id.is_empty()))?;
+        let email = said(self.email).or_else(|| {
+            self.emails_info
+                .into_iter()
+                .find_map(|info| said(info.address))
+        });
         Some(UserDetails {
             id,
             display_name: self.display_name.filter(|n| !n.trim().is_empty()),
-            email: self.email,
+            email,
             user_principal_name: self.user_principal_name,
             image_uri: self.image_uri.filter(|u| !u.is_empty()),
+            job_title: said(self.job_title),
+            department: said(self.department),
+            organization: said(self.company_name).or_else(|| said(self.tenant_name)),
+            phone: said(self.telephone_number).or_else(|| said(self.mobile)),
+            office: said(self.office_name).or_else(|| said(self.user_location)),
         })
     }
 }
@@ -1052,6 +1107,50 @@ impl TeamsClient {
         }
     }
 
+    /// Takes up the chat `thread` of a meeting we are in, as the web
+    /// client does once let in: accepts being a member, then turns its
+    /// alerts on (recorded, a personal account in another organization's
+    /// meeting). The chat service knows us in the thread only a few
+    /// seconds after the join; until then this is `Failure::Http(404)`,
+    /// which is not logged, so it can be tried again.
+    pub async fn take_up_meeting_chat(&self, thread: &str) -> Result<(), Failure> {
+        let me = self
+            .user_from_token()
+            .ok_or_else(|| Failure::Unexpected("who you are is not known".into()))?;
+        let url = format!(
+            "{}/v1/threads/{}/members/{}",
+            self.chat_service_url(),
+            crate::percent::encode_strict(thread),
+            crate::percent::encode_strict(&user_mri(&me.id))
+        );
+        let resp = self
+            .authed_skype_request(|http, token| {
+                http.put(&url)
+                    .header("Authentication", format!("skypetoken={token}"))
+                    .json(&serde_json::json!({"relationshipState": "Accepted"}))
+            })
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(Failure::Http(404));
+        }
+        if !resp.status().is_success() {
+            return Err(refused(resp, "join the meeting's chat").await);
+        }
+        let url = format!("{}/properties?name=alerts", self.conversation_url(thread));
+        let resp = self
+            .authed_skype_request(|http, token| {
+                http.put(&url)
+                    .header("Authentication", format!("skypetoken={token}"))
+                    .json(&serde_json::json!({"alerts": "true"}))
+            })
+            .await?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(refused(resp, "turn the meeting chat's alerts on").await)
+        }
+    }
+
     /// Fetches joined teams and channels from the chat service aggregator,
     /// which wants a bearer token of its own audience.
     /// The newest posts of the channel `channel`, with their replies, as
@@ -1368,30 +1467,44 @@ impl TeamsClient {
                     "members": members,
                     "properties": { "threadType": "chat", "isStickyThread": "true" },
                 });
-                self.bearer(RESOURCE_GROUPS_PERSONAL, |http, token| {
-                    crate::teams::auth::consumer_headers(
-                        http.post(PERSONAL_THREADS_URL)
-                            .bearer_auth(token)
-                            .header("x-skypetoken", &skype)
-                            .json(&body),
-                    )
-                })
-                .await?
+                let resp = self
+                    .bearer(RESOURCE_GROUPS_PERSONAL, |http, token| {
+                        crate::teams::auth::consumer_headers(
+                            http.post(PERSONAL_THREADS_URL)
+                                .bearer_auth(token)
+                                .header("x-skypetoken", &skype)
+                                .json(&body),
+                        )
+                    })
+                    .await?;
+                if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                    // The groups service cannot read our tokens: we sign in
+                    // as the desktop app, whose personal tokens are opaque
+                    // tickets, and only the web client's app (which cannot
+                    // sign in by device code, AADSTS70002) gets the kind it
+                    // reads ("S2S12008 … exception when validating the
+                    // token"). The chat service takes our skype token, so
+                    // the chat is made there, the Skype way (not recorded
+                    // for personal accounts).
+                    log::info!(
+                        "the groups service refused to start a chat ({}); asking the chat service",
+                        why_unauthorized(&resp)
+                    );
+                    // Its own properties, not the work ones: "Consumer users
+                    // disallowed on uniquerosterthread" (HTTP 400).
+                    self.create_chat_on_chat_service(&body).await?
+                } else {
+                    resp
+                }
             }
             // The chat service's own way, which work clients have used:
             // not yet seen in a recording of the work web client.
             Account::Work => {
-                let url = format!("{}/v1/threads", self.chat_service_url());
                 let body = serde_json::json!({
                     "members": members,
                     "properties": { "threadType": "chat", "fixedRoster": "true", "uniquerosterthread": "true" },
                 });
-                self.authed_skype_request(|http, token| {
-                    http.post(&url)
-                        .header("Authentication", format!("skypetoken={}", token))
-                        .json(&body)
-                })
-                .await?
+                self.create_chat_on_chat_service(&body).await?
             }
         };
         if !resp.status().is_success() {
@@ -1405,6 +1518,21 @@ impl TeamsClient {
         let text = resp.text().await.unwrap_or_default();
         created_thread(&text, location.as_deref())
             .ok_or_else(|| Failure::Unexpected("no chat id in the answer".into()))
+    }
+
+    /// Asks the chat service itself to make the chat `body` describes
+    /// (its members and properties), with the skype token.
+    async fn create_chat_on_chat_service(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response, Failure> {
+        let url = format!("{}/v1/threads", self.chat_service_url());
+        self.authed_skype_request(|http, token| {
+            http.post(&url)
+                .header("Authentication", format!("skypetoken={}", token))
+                .json(body)
+        })
+        .await
     }
 
     /// A picture from Teams: a person's avatar or a picture in a message,
@@ -1884,6 +2012,7 @@ impl TeamsClient {
             email,
             user_principal_name,
             image_uri: None,
+            ..UserDetails::default()
         })
     }
 
@@ -2150,6 +2279,48 @@ mod tests {
         ] {
             assert!(!is_media_url(url), "{url}");
         }
+    }
+
+    #[test]
+    fn profiles_say_where_people_work_and_how_to_reach_them() {
+        // A work account's, in the middle tier's fields (recorded shape).
+        let work: ShortProfile = serde_json::from_value(serde_json::json!({
+            "mri": "8:orgid:aaaa-bbbb",
+            "displayName": "Pim Example",
+            "email": "pim@example.com",
+            "jobTitle": "Engineer",
+            "department": "Platform",
+            "companyName": "",
+            "tenantName": "Example Inc.",
+            "telephoneNumber": null,
+            "mobile": "+31 6 0000 0000",
+            "physicalDeliveryOfficeName": "Utrecht",
+        }))
+        .expect("reads");
+        let details = work.into_details().expect("an id");
+        assert_eq!(details.job_title.as_deref(), Some("Engineer"));
+        assert_eq!(details.department.as_deref(), Some("Platform"));
+        assert_eq!(
+            details.organization.as_deref(),
+            Some("Example Inc."),
+            "the tenant's, the company's empty"
+        );
+        assert_eq!(
+            details.phone.as_deref(),
+            Some("+31 6 0000 0000"),
+            "the mobile, with no office phone"
+        );
+        assert_eq!(details.office.as_deref(), Some("Utrecht"));
+        // A personal account's address comes in `emailsInfo`.
+        let personal: ShortProfile = serde_json::from_value(serde_json::json!({
+            "mri": "8:live:someone",
+            "displayName": "Someone",
+            "emailsInfo": [{"address": "someone@example.com"}],
+        }))
+        .expect("reads");
+        let details = personal.into_details().expect("an id");
+        assert_eq!(details.email.as_deref(), Some("someone@example.com"));
+        assert_eq!(details.job_title, None);
     }
 
     #[test]

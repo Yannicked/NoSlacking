@@ -28,6 +28,10 @@ use crate::teams::client::TeamsClient;
 
 /// How long an unanswered call rings before we give up.
 const RING_FOR: Duration = Duration::from_secs(60);
+/// How often, and how far apart, a meeting's chat is tried while the chat
+/// service does not know us in it yet: a minute in all.
+const CHAT_TRIES: u32 = 20;
+const CHAT_AGAIN: Duration = Duration::from_secs(3);
 /// How long an incoming call rings here before it counts as missed; the
 /// caller usually gives up first.
 const RINGS_HERE_FOR: Duration = Duration::from_secs(60);
@@ -283,6 +287,7 @@ async fn run_meeting(
         own_camera: None,
         own_share: None,
         limits: (None, None),
+        chat: None,
     });
     call.relay = relay_for(client).await;
     let ended = call
@@ -557,6 +562,9 @@ struct InMeeting {
     own_share: Option<i64>,
     /// What our camera and our share were last let send.
     limits: (Option<VideoLimit>, Option<VideoLimit>),
+    /// The meeting's chat thread, until it is taken up once we are in
+    /// the call.
+    chat: Option<String>,
 }
 
 impl InMeeting {
@@ -723,6 +731,13 @@ impl Call {
                 return Err(error);
             }
         };
+        if let Some(meeting) = &mut self.meeting {
+            meeting.chat = [&joined, &preheated]
+                .into_iter()
+                .find_map(|answer| answer.active_modalities.group_chat.as_ref())
+                .map(|chat| chat.thread_id.clone())
+                .filter(|thread| !thread.is_empty());
+        }
         let links = preheated.links.clone().merged(joined.links);
         if let Some(url) = &links.update_endpoint_state
             && let Err(error) = self.api.preheat_done(url).await
@@ -747,6 +762,7 @@ impl Call {
             links,
             meeting_data: None,
             roster: None,
+            ..CpconvAnswer::default()
         });
         log::info!("Teams meeting: joined, waiting for its answer");
         let ended = self
@@ -755,6 +771,33 @@ impl Call {
         session.stop();
         *counts = session.counts();
         ended
+    }
+
+    /// Takes up the meeting's chat once we are in its call, as the web
+    /// client does (recorded), on a task of its own: the chat service
+    /// knows us in the thread only some seconds after (recorded: about
+    /// ten), so it is tried again a while.
+    fn take_up_chat(&mut self) {
+        let Some(thread) = self.meeting.as_mut().and_then(|m| m.chat.take()) else {
+            return;
+        };
+        let client = self.api.client().clone();
+        tokio::spawn(async move {
+            for _ in 0..CHAT_TRIES {
+                match client.take_up_meeting_chat(&thread).await {
+                    Ok(()) => {
+                        log::info!("Teams meeting: its chat taken up");
+                        return;
+                    }
+                    Err(Failure::Http(404)) => tokio::time::sleep(CHAT_AGAIN).await,
+                    Err(error) => {
+                        log::info!("Teams meeting: its chat not taken up: {error:?}");
+                        return;
+                    }
+                }
+            }
+            log::info!("Teams meeting: its chat never came");
+        });
     }
 
     /// Whether we wait in a meeting's lobby.
@@ -902,6 +945,7 @@ impl Call {
             links: attached.conversation().cloned().unwrap_or_default(),
             meeting_data: None,
             roster: None,
+            ..CpconvAnswer::default()
         });
         if let Some(url) = &invitation.links.progress
             && let Err(error) = self.api.ringing(url).await
@@ -1097,6 +1141,9 @@ impl Call {
                         "picked up"
                     }
                 );
+                if !lobby {
+                    self.take_up_chat();
+                }
                 self.accepted = true;
                 if let Some(url) = &acceptance.links.acknowledgement
                     && let Err(error) = self.api.acknowledge_acceptance(url).await
@@ -1429,6 +1476,7 @@ impl Call {
         {
             log::info!("Teams meeting: in the call");
             tell(CallEvent::Admitted);
+            self.take_up_chat();
         }
         local.share_open = self.meeting.is_some();
         let answer = sdp::answer(local, remote);

@@ -3140,3 +3140,27 @@ msgstr "dit systeem kan nog geen links aan NoSlacking doorgeven"
 
 msgid "{tool} did not succeed"
 msgstr "{tool} is niet gelukt"
+
+msgid "Sign in to Microsoft Teams to join a meeting"
+msgstr "Meld je aan bij Microsoft Teams om deel te nemen aan een vergadering"
+
+msgid "Account"
+msgstr "Account"
+
+msgid "Could not search for people: {error}"
+msgstr "Er kon niet naar mensen worden gezocht: {error}"
+
+msgid "Organization"
+msgstr "Organisatie"
+
+msgid "Department"
+msgstr "Afdeling"
+
+msgid "Office"
+msgstr "Kantoor"
+
+msgid "Email"
+msgstr "E-mail"
+
+msgid "Phone"
+msgstr "Telefoon"

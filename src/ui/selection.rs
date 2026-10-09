@@ -121,7 +121,7 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
     if escape {
         next = None;
     }
-    let back_to = (next.is_none()).then(|| composer(app, selected.in_thread));
+    let back_to = (next.is_none()).then(|| composer(app, ctx, selected.in_thread));
     app.actions.extend(actions);
     app.selected = next;
     if let Some(Some(field)) = back_to {
@@ -239,7 +239,7 @@ fn step<T>(list: &[T], index: usize, down: bool) -> Option<&T> {
 }
 
 /// The composer field of the conversation or the thread.
-fn composer(app: &App, in_thread: bool) -> Option<egui::Id> {
+fn composer(app: &App, ctx: &egui::Context, in_thread: bool) -> Option<egui::Id> {
     let team = app.active_team()?;
     let key = if in_thread {
         let (channel, ts) = app.thread.as_ref()?;
@@ -248,7 +248,7 @@ fn composer(app: &App, in_thread: bool) -> Option<egui::Id> {
         let channel = app.active_workspace()?.active.clone()?;
         App::draft_key(&team, &channel, None)
     };
-    Some(super::composer::field_id(&key))
+    Some(super::composer::field_id(ctx, &key))
 }
 
 /// Whether the focused field is an empty composer on screen, and if so
@@ -256,7 +256,7 @@ fn composer(app: &App, in_thread: bool) -> Option<egui::Id> {
 fn empty_composer(app: &App, ctx: &egui::Context) -> Option<bool> {
     let focused = ctx.memory(|m| m.focused())?;
     [false, true].into_iter().find(|&in_thread| {
-        composer(app, in_thread) == Some(focused) && {
+        composer(app, ctx, in_thread) == Some(focused) && {
             let team = app.active_team().unwrap_or_default();
             let key = match (&app.thread, in_thread) {
                 (Some((channel, ts)), true) => App::draft_key(&team, channel, Some(ts)),

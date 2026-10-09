@@ -379,9 +379,14 @@ async fn accept_either(
 ///
 /// Safe to run at every start: the scheme is NoSlacking's own. `slack://`
 /// links are only borrowed for a browser sign-in, and kept while one is
-/// (see [`crate::slack_links`]).
+/// (see [`crate::slack_links`]). `msteams:` links, Teams meetings a browser
+/// opens in the app, are taken only while no other app has them.
 pub fn register_scheme() -> Result<(), Failure> {
     let exe = std::env::current_exe().map_err(|e| Failure::io(&e))?;
+    #[cfg(windows)]
+    if let Err(error) = offer_teams_links(&exe) {
+        log::warn!("could not offer to open Teams meeting links: {error:?}");
+    }
     if crate::slack_links::claimed() {
         register_scheme_for(&exe, &[SCHEME, SLACK_SCHEME])
     } else {
@@ -392,6 +397,9 @@ pub fn register_scheme() -> Result<(), Failure> {
 /// Writes the desktop file, listing `schemes` alone, and makes it the
 /// default for them. Listing `slack` only while it is claimed keeps
 /// desktops from offering NoSlacking for those links the rest of the time.
+/// `msteams` (Teams meeting links a browser opens in the app) is always
+/// listed, but made the default only while no other app is: an installed
+/// Teams client keeps its links.
 #[cfg(target_os = "linux")]
 pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Result<(), Failure> {
     use crate::paths::APP_ID;
@@ -416,6 +424,7 @@ pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Re
         head = crate::autostart::desktop_entry_head(exe, "%u"),
         mime = schemes
             .iter()
+            .chain(&[crate::meetings::MSTEAMS_SCHEME])
             .map(|scheme| format!("x-scheme-handler/{scheme};"))
             .collect::<String>(),
     );
@@ -433,7 +442,18 @@ pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Re
         .and_then(|path| std::fs::read_to_string(path).ok())
         .unwrap_or_default();
     let desktop = format!("{APP_ID}.desktop");
+    let teams = format!("x-scheme-handler/{}", crate::meetings::MSTEAMS_SCHEME);
+    let take_teams = match crate::slack_links::default_for(&list, &teams) {
+        // Ours already, or another app's: nothing to do either way.
+        Some(_) => false,
+        // None set here: only if the desktop names no other app either.
+        None => {
+            quietly_read(std::process::Command::new("xdg-mime").args(["query", "default", &teams]))
+                .is_some_and(|app| app.is_empty() || app == desktop)
+        }
+    };
     if unchanged
+        && !take_teams
         && schemes
             .iter()
             .all(|scheme| defaults_to(&list, &format!("x-scheme-handler/{scheme}"), &desktop))
@@ -446,6 +466,9 @@ pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Re
             .iter()
             .map(|scheme| format!("x-scheme-handler/{scheme}")),
     );
+    if take_teams {
+        args.push(teams);
+    }
     let status =
         quietly(std::process::Command::new("xdg-mime").args(&args)).map_err(|e| Failure::io(&e))?;
     if status.success() {
@@ -465,6 +488,21 @@ fn quietly(command: &mut std::process::Command) -> std::io::Result<std::process:
         log::debug!("{:?} said: {}", command.get_program(), said.trim());
     }
     Ok(output.status)
+}
+
+/// What a desktop tool prints, trimmed, if it ran and succeeded; what it
+/// complains about goes to the log, as with [`quietly`].
+#[cfg(target_os = "linux")]
+fn quietly_read(command: &mut std::process::Command) -> Option<String> {
+    let output = command.stdin(std::process::Stdio::null()).output().ok()?;
+    let said = String::from_utf8_lossy(&output.stderr);
+    if !said.trim().is_empty() {
+        log::debug!("{:?} said: {}", command.get_program(), said.trim());
+    }
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 /// Whether `list`, a `mimeapps.list`, makes `desktop` the default for
@@ -534,6 +572,25 @@ pub(crate) fn register_scheme_for(exe: &std::path::Path, schemes: &[&str]) -> Re
         run_reg(&["add", &command_key, "/ve", "/d", &command, "/f"])?;
     }
     Ok(())
+}
+
+/// Registers for `msteams:` links unless another app has: an installed
+/// Teams keeps them. Ours already (an earlier start's), it is written
+/// again, in case the app moved.
+#[cfg(windows)]
+fn offer_teams_links(exe: &std::path::Path) -> Result<(), Failure> {
+    // The scheme's own key names the app that wrote it: ours, the name
+    // `register_scheme_for` gives it.
+    let key = format!(r"HKCR\{}", crate::meetings::MSTEAMS_SCHEME);
+    let handler = std::process::Command::new("reg")
+        .args(["query", key.as_str(), "/ve"])
+        .output()
+        .map_err(|e| Failure::io(&e))?;
+    let ours = String::from_utf8_lossy(&handler.stdout).contains(REGISTRY_NAME);
+    if handler.status.success() && !ours {
+        return Ok(());
+    }
+    register_scheme_for(exe, &[crate::meetings::MSTEAMS_SCHEME])
 }
 
 /// Runs `reg.exe` with `args`, failing when it does.

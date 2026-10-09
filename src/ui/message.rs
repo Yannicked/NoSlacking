@@ -608,11 +608,13 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
     }
 }
 
-/// The edit field's id: one per message and panel, since a thread's parent
-/// shows in both the conversation and the thread.
-pub fn edit_id(editing: &Editing) -> egui::Id {
+/// The edit field's id: one per message, panel and window, since a
+/// thread's parent shows in both the conversation and the thread, and a
+/// popped-out chat in both windows (see [`super::composer::field_id`]).
+pub fn edit_id(ctx: &egui::Context, editing: &Editing) -> egui::Id {
     egui::Id::new((
         "edit",
+        ctx.viewport_id(),
         editing.channel.as_str(),
         editing.ts.as_str(),
         editing.in_thread,
@@ -629,7 +631,7 @@ fn edit(
     let Some(current) = editing.as_mut() else {
         return;
     };
-    let id = edit_id(current);
+    let id = edit_id(ui.ctx(), current);
     // Read focus before taking the input lock: egui guards input and memory
     // with one context lock, so asking for memory inside `input_mut`
     // deadlocks the interface.

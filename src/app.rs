@@ -1788,6 +1788,38 @@ impl App {
         self.meeting_dialog = Some(crate::meetings::Dialog::new(&team, link));
     }
 
+    /// Opens the meetings dialog for a meeting link the desktop handed
+    /// over (a browser's "open in the app"), in the workspace shown if it
+    /// has meetings, else the first that does; joined once asked, as a
+    /// link opened here is.
+    pub(crate) fn open_meeting_link(&mut self, link: &str) {
+        let shown = self
+            .active_workspace()
+            .filter(|w| w.info.offers(crate::model::Ability::Meetings));
+        let Some(team) = shown
+            .or_else(|| {
+                self.workspaces
+                    .iter()
+                    .find(|w| w.info.offers(crate::model::Ability::Meetings))
+            })
+            .map(|w| w.info.team_id.clone())
+        else {
+            self.toast(
+                t("Sign in to Microsoft Teams to join a meeting"),
+                Tone::Error,
+            );
+            return;
+        };
+        // The web form, which the dialog shows: an `msteams:` link reads
+        // as one.
+        let link = crate::meetings::Meeting::parse(link, "")
+            .map(|meeting| meeting.url())
+            .or_else(|_| crate::meetings::web_form(link).ok_or(()))
+            .unwrap_or_else(|()| link.to_owned());
+        self.focus_overlay = true;
+        self.meeting_dialog = Some(crate::meetings::Dialog::new(&team, &link));
+    }
+
     pub(crate) fn open_url(&mut self, url: &str) {
         let meetings = self
             .active_workspace()

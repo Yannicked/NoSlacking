@@ -1260,6 +1260,12 @@ pub struct Profile {
     pub status_emoji: String,
     pub image_72: Option<String>,
     pub image_192: Option<String>,
+    /// Given only to a sign-in that may read addresses
+    /// (`users:read.email`), and as the person chose to show it.
+    #[serde(deserialize_with = "null_default")]
+    pub email: String,
+    #[serde(deserialize_with = "null_default")]
+    pub phone: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1311,6 +1317,11 @@ impl User {
                 .map(|e| e.enterprise_id)
                 .unwrap_or_default(),
             stranger: self.is_stranger,
+            contact: model::Contact {
+                email: self.profile.email,
+                phone: self.profile.phone,
+                ..model::Contact::default()
+            },
         }
     }
 }

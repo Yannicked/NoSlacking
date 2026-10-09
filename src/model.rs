@@ -442,6 +442,28 @@ pub struct User {
     /// profile here beyond the basics.
     #[serde(default)]
     pub stranger: bool,
+    /// How to reach them and where they work, as far as their profile
+    /// says.
+    #[serde(default)]
+    pub contact: Contact,
+}
+
+/// How to reach someone and where they work, as Teams' directory lists
+/// it; each empty where it says nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Contact {
+    pub email: String,
+    pub phone: String,
+    pub department: String,
+    pub office: String,
+    pub organization: String,
+}
+
+impl Contact {
+    /// Whether there is anything to show.
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 impl User {
