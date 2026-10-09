@@ -105,6 +105,12 @@ fn users() -> Vec<User> {
             tz: Some("America/Sao_Paulo".into()),
             status_text: "Reviewing mockups".into(),
             status_emoji: ":art:".into(),
+            contact: crate::model::Contact {
+                email: "ana@example.com".into(),
+                phone: "+55 11 5555 0100".into(),
+                department: "Design".into(),
+                ..crate::model::Contact::default()
+            },
             ..user("U01", "ana", "Ana Lima", "Design lead")
         },
         user("U02", "bob", "Bob Martens", "Backend"),

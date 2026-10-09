@@ -3149,3 +3149,18 @@ msgstr "Account"
 
 msgid "Could not search for people: {error}"
 msgstr "Er kon niet naar mensen worden gezocht: {error}"
+
+msgid "Organization"
+msgstr "Organisatie"
+
+msgid "Department"
+msgstr "Afdeling"
+
+msgid "Office"
+msgstr "Kantoor"
+
+msgid "Email"
+msgstr "E-mail"
+
+msgid "Phone"
+msgstr "Telefoon"

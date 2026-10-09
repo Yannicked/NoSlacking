@@ -298,6 +298,37 @@ struct ShortProfile {
     user_principal_name: Option<String>,
     #[serde(default, rename = "imageUri")]
     image_uri: Option<String>,
+    /// A personal account's addresses, where `email` is not given.
+    #[serde(default, rename = "emailsInfo")]
+    emails_info: Vec<EmailInfo>,
+    #[serde(default, rename = "jobTitle")]
+    job_title: Option<String>,
+    #[serde(default)]
+    department: Option<String>,
+    #[serde(default, rename = "companyName")]
+    company_name: Option<String>,
+    #[serde(default, rename = "tenantName")]
+    tenant_name: Option<String>,
+    #[serde(default, rename = "telephoneNumber")]
+    telephone_number: Option<String>,
+    #[serde(default)]
+    mobile: Option<String>,
+    #[serde(default, rename = "physicalDeliveryOfficeName")]
+    office_name: Option<String>,
+    #[serde(default, rename = "userLocation")]
+    user_location: Option<String>,
+}
+
+/// One of a personal account's addresses.
+#[derive(serde::Deserialize)]
+struct EmailInfo {
+    #[serde(default)]
+    address: Option<String>,
+}
+
+/// `value` if it says something.
+fn said(value: Option<String>) -> Option<String> {
+    value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
 }
 
 impl ShortProfile {
@@ -312,12 +343,22 @@ impl ShortProfile {
             .map(id_of_mri)
             .filter(|id| !id.is_empty())
             .or_else(|| self.object_id.filter(|id| !id.is_empty()))?;
+        let email = said(self.email).or_else(|| {
+            self.emails_info
+                .into_iter()
+                .find_map(|info| said(info.address))
+        });
         Some(UserDetails {
             id,
             display_name: self.display_name.filter(|n| !n.trim().is_empty()),
-            email: self.email,
+            email,
             user_principal_name: self.user_principal_name,
             image_uri: self.image_uri.filter(|u| !u.is_empty()),
+            job_title: said(self.job_title),
+            department: said(self.department),
+            organization: said(self.company_name).or_else(|| said(self.tenant_name)),
+            phone: said(self.telephone_number).or_else(|| said(self.mobile)),
+            office: said(self.office_name).or_else(|| said(self.user_location)),
         })
     }
 }
@@ -1971,6 +2012,7 @@ impl TeamsClient {
             email,
             user_principal_name,
             image_uri: None,
+            ..UserDetails::default()
         })
     }
 
@@ -2237,6 +2279,48 @@ mod tests {
         ] {
             assert!(!is_media_url(url), "{url}");
         }
+    }
+
+    #[test]
+    fn profiles_say_where_people_work_and_how_to_reach_them() {
+        // A work account's, in the middle tier's fields (recorded shape).
+        let work: ShortProfile = serde_json::from_value(serde_json::json!({
+            "mri": "8:orgid:aaaa-bbbb",
+            "displayName": "Pim Example",
+            "email": "pim@example.com",
+            "jobTitle": "Engineer",
+            "department": "Platform",
+            "companyName": "",
+            "tenantName": "Example Inc.",
+            "telephoneNumber": null,
+            "mobile": "+31 6 0000 0000",
+            "physicalDeliveryOfficeName": "Utrecht",
+        }))
+        .expect("reads");
+        let details = work.into_details().expect("an id");
+        assert_eq!(details.job_title.as_deref(), Some("Engineer"));
+        assert_eq!(details.department.as_deref(), Some("Platform"));
+        assert_eq!(
+            details.organization.as_deref(),
+            Some("Example Inc."),
+            "the tenant's, the company's empty"
+        );
+        assert_eq!(
+            details.phone.as_deref(),
+            Some("+31 6 0000 0000"),
+            "the mobile, with no office phone"
+        );
+        assert_eq!(details.office.as_deref(), Some("Utrecht"));
+        // A personal account's address comes in `emailsInfo`.
+        let personal: ShortProfile = serde_json::from_value(serde_json::json!({
+            "mri": "8:live:someone",
+            "displayName": "Someone",
+            "emailsInfo": [{"address": "someone@example.com"}],
+        }))
+        .expect("reads");
+        let details = personal.into_details().expect("an id");
+        assert_eq!(details.email.as_deref(), Some("someone@example.com"));
+        assert_eq!(details.job_title, None);
     }
 
     #[test]

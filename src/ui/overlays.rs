@@ -835,6 +835,43 @@ fn tone_picker(ui: &mut egui::Ui, palette: &crate::theme::Palette, tone: &mut u8
     });
 }
 
+/// How to reach someone and where they work, a row each for what their
+/// profile says; the values can be selected to copy.
+fn contact(ui: &mut egui::Ui, palette: &theme::Palette, contact: &crate::model::Contact) {
+    let rows = [
+        (t("Organization"), &contact.organization),
+        (t("Department"), &contact.department),
+        (t("Office"), &contact.office),
+        (t("Email"), &contact.email),
+        (t("Phone"), &contact.phone),
+    ];
+    egui::Grid::new("profile-contact")
+        .num_columns(2)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            for (label, value) in rows {
+                if value.is_empty() {
+                    continue;
+                }
+                let name = ui.label(
+                    RichText::new(label)
+                        .font(theme::regular(13.0))
+                        .color(palette.dim),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(value.as_str())
+                            .font(theme::regular(13.0))
+                            .color(palette.text),
+                    )
+                    .selectable(true),
+                )
+                .labelled_by(name.id);
+                ui.end_row();
+            }
+        });
+}
+
 fn profile(app: &mut App, ctx: &egui::Context) {
     let Some(user_id) = app.profile.clone() else {
         return;
@@ -898,11 +935,15 @@ fn profile(app: &mut App, ctx: &egui::Context) {
                                     .color(palette.secondary),
                             );
                         }
-                        ui.label(
-                            RichText::new(format!("@{}", user.name))
-                                .font(theme::regular(13.0))
-                                .color(palette.dim),
-                        );
+                        // A Teams sign-in name (an address, or `live:…`)
+                        // is no handle; the address shows below.
+                        if !user.name.contains(['@', ':']) {
+                            ui.label(
+                                RichText::new(format!("@{}", user.name))
+                                    .font(theme::regular(13.0))
+                                    .color(palette.dim),
+                            );
+                        }
                     }
                     if external {
                         super::people::external_tag(ui, &palette, true);
@@ -924,6 +965,10 @@ fn profile(app: &mut App, ctx: &egui::Context) {
                             .font(theme::regular(13.0))
                             .color(palette.dim),
                     );
+                }
+                if !user.contact.is_empty() {
+                    ui.add_space(8.0);
+                    contact(ui, &palette, &user.contact);
                 }
                 if user.deleted {
                     ui.label(
