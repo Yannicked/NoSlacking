@@ -101,6 +101,16 @@ pub(crate) async fn refused(resp: reqwest::Response, what: &str) -> Failure {
     Failure::Http(status.as_u16())
 }
 
+/// Why a service answered 401, as its `WWW-Authenticate` header says
+/// (the scheme and error, never a token): "unknown" without one.
+fn why_unauthorized(resp: &reqwest::Response) -> String {
+    resp.headers()
+        .get(reqwest::header::WWW_AUTHENTICATE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.chars().take(200).collect())
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
 /// What `fetchShortProfile` answers.
 #[derive(serde::Deserialize)]
 struct ShortProfiles {
@@ -1372,15 +1382,27 @@ impl TeamsClient {
                     "members": members,
                     "properties": { "threadType": "chat", "isStickyThread": "true" },
                 });
-                self.bearer(RESOURCE_GROUPS_PERSONAL, |http, token| {
-                    crate::teams::auth::consumer_headers(
-                        http.post(PERSONAL_THREADS_URL)
-                            .bearer_auth(token)
-                            .header("x-skypetoken", &skype)
-                            .json(&body),
-                    )
-                })
-                .await?
+                let resp = self
+                    .bearer(RESOURCE_GROUPS_PERSONAL, |http, token| {
+                        crate::teams::auth::consumer_headers(
+                            http.post(PERSONAL_THREADS_URL)
+                                .bearer_auth(token)
+                                .header("x-skypetoken", &skype)
+                                .json(&body),
+                        )
+                    })
+                    .await?;
+                if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                    // Refused even with a fresh groups token, as for a chat
+                    // with a work account, where the web client's request
+                    // (the same address, body and tokens) is taken: the
+                    // service's own reason says what differs.
+                    log::warn!(
+                        "the groups service refused to start a chat: {}",
+                        why_unauthorized(&resp)
+                    );
+                }
+                resp
             }
             // The chat service's own way, which work clients have used:
             // not yet seen in a recording of the work web client.
