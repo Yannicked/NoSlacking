@@ -218,6 +218,12 @@ pub struct CpconvAnswer {
     /// it before us, cameras and all (recorded: the meeting pushes only
     /// changes after we join).
     pub roster: Option<RosterUpdate>,
+    /// A meeting's organizer and their organization (`organizerId`,
+    /// `tenantId`), which joining sends back as they came (recorded).
+    pub meeting_info: Option<serde_json::Value>,
+    /// What the conversation has going on: for a meeting, its chat.
+    #[serde(deserialize_with = "nullable")]
+    pub active_modalities: ActiveModalities,
 }
 
 /// The conversation's links we use; the rest are for group calls.
@@ -657,6 +663,9 @@ pub struct GroupChat {
     /// `19:meeting_…@thread.v2`.
     #[serde(deserialize_with = "nullable")]
     pub thread_id: String,
+    /// Sent back with the thread when joining, as it came (recorded: a
+    /// one-character string).
+    pub message_id: serde_json::Value,
 }
 
 /// The `call/controlVideoStreaming` push: what the meeting wants of a

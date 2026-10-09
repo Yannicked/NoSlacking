@@ -1,7 +1,10 @@
 //! The meetings dialog of a Teams workspace: "Meet now", which starts a
 //! meeting and joins it (its link to copy from the call bar), and joining
 //! one by its link or by its ID and passcode. Opened from the sidebar's
-//! header, and by opening a meeting link, which it then holds.
+//! header, and by opening a meeting link, which it then holds. With more
+//! than one Teams account signed in, it asks which to meet as: a link from
+//! the browser does not say whose meeting it is, and either account can
+//! join another organization's.
 
 use egui::{Key, Margin, RichText};
 
@@ -28,6 +31,36 @@ fn problem_text(problem: NotAMeeting) -> String {
     .into_owned()
 }
 
+/// The account to meet as, of `accounts` (team id and name), as
+/// `team`.
+fn account_picker(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    accounts: &[(String, String)],
+    team: &mut String,
+) {
+    ui.horizontal(|ui| {
+        let name = ui.label(
+            RichText::new(t("Account"))
+                .font(theme::regular(13.0))
+                .color(palette.secondary),
+        );
+        let current = accounts.iter().position(|(id, _)| id == team).unwrap_or(0);
+        let indices: Vec<usize> = (0..accounts.len()).collect();
+        let picked = super::settings::choice(
+            ui,
+            "meeting-account",
+            ui.available_width(),
+            name.id,
+            (current, &indices),
+            |index| accounts[index].1.clone(),
+        );
+        if let Some((id, _)) = accounts.get(picked) {
+            team.clone_from(id);
+        }
+    });
+}
+
 /// What the dialog was told.
 enum Answer {
     Cancel,
@@ -45,12 +78,23 @@ pub fn dialog(app: &mut App, ctx: &egui::Context) {
     let mut answer: Option<Answer> = None;
     let frame = super::overlays::modal_frame(app);
     let before = (dialog.link.clone(), dialog.passcode.clone());
+    // The accounts that can meet, by their workspace's name.
+    let accounts: Vec<(String, String)> = app
+        .workspaces
+        .iter()
+        .filter(|w| w.info.offers(crate::model::Ability::Meetings))
+        .map(|w| (w.info.team_id.clone(), w.info.name.clone()))
+        .collect();
     let response = egui::Modal::new(egui::Id::new("meetings-dialog"))
         .frame(frame)
         .show(ctx, |ui| {
             ui.set_width(380.0);
             theme::dialog_heading(ui, &palette, t("Meetings"));
             ui.add_space(8.0);
+            if accounts.len() > 1 {
+                account_picker(ui, &palette, &accounts, &mut dialog.team);
+                ui.add_space(10.0);
+            }
             ui.horizontal(|ui| {
                 if theme::primary_button(ui, &palette, &t("Meet now")).clicked() {
                     answer = Some(Answer::MeetNow);

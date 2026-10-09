@@ -549,7 +549,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     // pins it; a move while the content holds still is the reader's and
     // decides; growth (pictures, new messages, older history) keeps the
     // intent, and a pinned view follows the new end.
-    let pin_id = egui::Id::new(("pinned", &scroll_key));
+    let pin_id = egui::Id::new(("pinned", &scroll_key, window));
     let (mut pinned, last_content) = ui
         .data(|d| d.get_temp::<(bool, f32)>(pin_id))
         .unwrap_or((true, content));
