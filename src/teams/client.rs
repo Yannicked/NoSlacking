@@ -1052,6 +1052,50 @@ impl TeamsClient {
         }
     }
 
+    /// Takes up the chat `thread` of a meeting we are in, as the web
+    /// client does once let in: accepts being a member, then turns its
+    /// alerts on (recorded, a personal account in another organization's
+    /// meeting). The chat service knows us in the thread only a few
+    /// seconds after the join; until then this is `Failure::Http(404)`,
+    /// which is not logged, so it can be tried again.
+    pub async fn take_up_meeting_chat(&self, thread: &str) -> Result<(), Failure> {
+        let me = self
+            .user_from_token()
+            .ok_or_else(|| Failure::Unexpected("who you are is not known".into()))?;
+        let url = format!(
+            "{}/v1/threads/{}/members/{}",
+            self.chat_service_url(),
+            crate::percent::encode_strict(thread),
+            crate::percent::encode_strict(&user_mri(&me.id))
+        );
+        let resp = self
+            .authed_skype_request(|http, token| {
+                http.put(&url)
+                    .header("Authentication", format!("skypetoken={token}"))
+                    .json(&serde_json::json!({"relationshipState": "Accepted"}))
+            })
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(Failure::Http(404));
+        }
+        if !resp.status().is_success() {
+            return Err(refused(resp, "join the meeting's chat").await);
+        }
+        let url = format!("{}/properties?name=alerts", self.conversation_url(thread));
+        let resp = self
+            .authed_skype_request(|http, token| {
+                http.put(&url)
+                    .header("Authentication", format!("skypetoken={token}"))
+                    .json(&serde_json::json!({"alerts": "true"}))
+            })
+            .await?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(refused(resp, "turn the meeting chat's alerts on").await)
+        }
+    }
+
     /// Fetches joined teams and channels from the chat service aggregator,
     /// which wants a bearer token of its own audience.
     /// The newest posts of the channel `channel`, with their replies, as
