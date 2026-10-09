@@ -1004,7 +1004,7 @@ impl Sink {
     /// The interface's waker, for what reaches it other than as an event:
     /// a huddle share's pictures, or your camera's preview, which wait in
     /// a slot of their own.
-    #[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
+    #[cfg(feature = "video-helper")]
     pub fn waker(&self) -> Waker {
         self.waker.clone()
     }

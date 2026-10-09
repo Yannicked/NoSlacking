@@ -17,10 +17,9 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use noslacking::huddle_audio::bitstream;
-use noslacking::huddle_audio::decode::{self, H264, Outcome, Yuv};
-use noslacking::huddle_audio::helper::{Helper, ProcessLauncher};
-use noslacking_video_ipc::{self as ipc, Reply};
+use noslacking::huddle_audio::decode::{H264, Outcome};
+use noslacking::huddle_audio::helper::{self, Helper, ProcessLauncher};
+use noslacking_video_ipc::{self as ipc, Planes, Reply};
 
 const SCREEN: &[u8] = include_bytes!("../src/huddle_audio/fixtures/screen-1920x1080.h264");
 const CAMERA: &[u8] = include_bytes!("../src/huddle_audio/fixtures/camera-480x480.h264");
@@ -75,8 +74,8 @@ fn round_trip(
     name: &str,
     stream: &[u8],
     fit: (usize, usize),
-) -> Vec<Yuv> {
-    let frames = bitstream::access_units(stream);
+) -> Vec<Planes> {
+    let frames = noslacking_video_ipc::h264::access_units(stream);
     let mut decoder = H264::with_helper(Some(helper.clone()), Some(gpu));
     decoder.set_fit(fit.0, fit.1);
     let mut pictures = Vec::new();
@@ -114,17 +113,10 @@ fn round_trip(
 /// `picture` framed as the helper's reply, through `cat` and read back as
 /// the app reads replies: wall time a picture and the reading thread's
 /// CPU a picture.
-fn pipe_alone(picture: &Yuv) {
-    let side = |n: usize| u32::try_from(n).unwrap_or(0);
+fn pipe_alone(picture: &Planes) {
     let reply = Reply::Picture(ipc::Decoded {
-        planes: ipc::Planes {
-            width: side(picture.width),
-            height: side(picture.height),
-            y: picture.y.clone(),
-            u: picture.u.clone(),
-            v: picture.v.clone(),
-        },
-        source: (side(picture.width), side(picture.height)),
+        planes: picture.clone(),
+        source: (picture.width, picture.height),
         hardware: false,
     });
     let mut child = Command::new("cat")
@@ -163,13 +155,13 @@ fn pipe_alone(picture: &Yuv) {
 }
 
 /// Turning `pictures` into RGBA as the app does, and the parts of it.
-fn convert(pictures: &[Yuv]) {
+fn convert(pictures: &[Planes]) {
     let rounds = (200_000_000 / pictures[0].y.len().max(1)).clamp(3, 400);
     let count = rounds * pictures.len();
     let started = Instant::now();
     for _ in 0..rounds {
         for picture in pictures {
-            std::hint::black_box(decode::to_image(picture).expect("converts"));
+            std::hint::black_box(helper::to_image(picture, false).expect("converts"));
         }
     }
     let whole = per(started.elapsed(), count);
@@ -177,7 +169,7 @@ fn convert(pictures: &[Yuv]) {
     let started = Instant::now();
     for _ in 0..rounds {
         for picture in pictures {
-            let pixels = vec![egui::Color32::BLACK; picture.width * picture.height];
+            let pixels = vec![egui::Color32::BLACK; (picture.width * picture.height) as usize];
             std::hint::black_box(pixels);
         }
     }
@@ -191,12 +183,12 @@ fn convert(pictures: &[Yuv]) {
 /// Handing a picture to egui as the call window does: a texture set to
 /// each new image, and the frame's texture changes taken as a painter
 /// takes them (the upload itself needs a GL context).
-fn hand_to_egui(pictures: &[Yuv]) {
+fn hand_to_egui(pictures: &[Planes]) {
     let ctx = egui::Context::default();
     let images: Vec<Arc<egui::ColorImage>> = pictures
         .iter()
         .take(8)
-        .map(|p| Arc::new(decode::to_image(p).expect("converts")))
+        .map(|p| Arc::new(helper::to_image(p, false).expect("converts")))
         .collect();
     let mut texture = ctx.load_texture(
         "bench",

@@ -743,7 +743,7 @@ mod tests {
 
     #[test]
     fn without_hardware_streams_decode_in_software() {
-        let frames = crate::nal::access_units(CAMERA);
+        let frames = noslacking_video_ipc::h264::access_units(CAMERA);
         let (replies, ok) = talk(&mut Nothing::new("none: no libva"), &[hello()]);
         assert!(ok);
         assert!(matches!(
@@ -826,7 +826,7 @@ mod tests {
 
     #[test]
     fn software_takes_over_where_the_gpu_fails() {
-        let frames = crate::nal::access_units(CAMERA);
+        let frames = noslacking_video_ipc::h264::access_units(CAMERA);
         let gpu = |reply: &Reply| matches!(reply, Reply::Picture(p) if p.hardware);
         // The GPU cannot decode the stream: software decodes the
         // keyframe in hand, and what follows.

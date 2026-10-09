@@ -51,6 +51,29 @@ pub enum Direction {
     Inactive,
 }
 
+impl Direction {
+    /// Every direction.
+    pub const ALL: [Self; 4] = [
+        Self::SendRecv,
+        Self::SendOnly,
+        Self::RecvOnly,
+        Self::Inactive,
+    ];
+
+    /// The word SDP's attribute and the call's JSON write it as.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::SendRecv => "sendrecv",
+            Self::SendOnly => "sendonly",
+            Self::RecvOnly => "recvonly",
+            Self::Inactive => "inactive",
+        }
+    }
+}
+
+/// The label of the audio line.
+pub const AUDIO_LABEL: &str = "main-audio";
+
 /// What an m-line carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineKind {

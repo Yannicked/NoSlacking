@@ -941,7 +941,6 @@ impl Pipeline {
 mod tests {
     use super::*;
     use crate::capture::pattern::pattern;
-    use crate::nal;
 
     fn settings(gpu: Option<GpuOpener>) -> Settings {
         Settings::share(gpu.is_some(), 1_000_000, gpu)
@@ -990,7 +989,7 @@ mod tests {
             .expect("a frame");
         assert!(frame.keyframe && !frame.hardware);
         assert_eq!((frame.width, frame.height), (1280, 720));
-        assert!(nal::types(&frame.data).starts_with(&[7, 8]));
+        assert!(noslacking_video_ipc::h264::nal_types(&frame.data).starts_with(&[7, 8]));
         // The same picture again is not new.
         later();
         pipeline.put(&packed(1920, 1080, &grey), Instant::now());
@@ -1010,7 +1009,7 @@ mod tests {
             .expect("fine")
             .expect("a frame");
         assert!(!changed.keyframe);
-        assert!(nal::types(&changed.data).contains(&1));
+        assert!(noslacking_video_ipc::h264::nal_types(&changed.data).contains(&1));
     }
 
     #[test]

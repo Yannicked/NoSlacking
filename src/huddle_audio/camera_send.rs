@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use egui::{Color32, ColorImage};
+use egui::ColorImage;
 use noslacking_video_ipc as ipc;
 use tokio::sync::{mpsc, watch};
 
@@ -362,36 +362,10 @@ impl Preview {
 /// mirrored left to right. The helper made it small already; none for
 /// one wider than the preview is ever shown or broken.
 pub fn preview_image(picture: &ipc::Planes) -> Option<ColorImage> {
-    if picture.check().is_err() || picture.width > ipc::MAX_PREVIEW_SIDE {
+    if picture.width > ipc::MAX_PREVIEW_SIDE {
         return None;
     }
-    let (width, height) = (
-        usize::try_from(picture.width).ok()?,
-        usize::try_from(picture.height).ok()?,
-    );
-    let image = yuv::YuvPlanarImage {
-        y_plane: &picture.y,
-        y_stride: picture.width,
-        u_plane: &picture.u,
-        u_stride: picture.width.div_ceil(2),
-        v_plane: &picture.v,
-        v_stride: picture.width.div_ceil(2),
-        width: picture.width,
-        height: picture.height,
-    };
-    let mut pixels = vec![Color32::BLACK; width * height];
-    yuv::yuv420_to_rgba(
-        &image,
-        bytemuck::cast_slice_mut(&mut pixels),
-        picture.width * 4,
-        yuv::YuvRange::Limited,
-        yuv::YuvStandardMatrix::Bt601,
-    )
-    .ok()?;
-    for row in pixels.chunks_exact_mut(width) {
-        row.reverse();
-    }
-    Some(ColorImage::new([width, height], pixels))
+    super::helper::to_image(picture, true).ok()
 }
 
 /// What the sender did, for the log.
@@ -527,6 +501,19 @@ pub enum Ending {
     Failed(Failure),
 }
 
+/// How the capture behind `ended` ended, once it has; never if its
+/// sender is gone without saying.
+pub async fn ended(ended: &mut watch::Receiver<Option<Ending>>) -> Ending {
+    loop {
+        if let Some(ending) = ended.borrow_and_update().clone() {
+            return ending;
+        }
+        if ended.changed().await.is_err() {
+            return std::future::pending().await;
+        }
+    }
+}
+
 /// What a camera that would not start, or stopped, tells the interface:
 /// a camera the helper could not open, or no helper (`given_up`: none
 /// installed, or it keeps failing) or one that stopped.
@@ -619,6 +606,14 @@ pub struct Encoding {
 }
 
 impl Encoding {
+    /// Stops the sending thread, and with it the capture in the helper,
+    /// off the async threads: joining it waits on the helper.
+    pub async fn stop(encoding: Option<Self>) {
+        if encoding.is_some() {
+            let _ = tokio::task::spawn_blocking(move || drop(encoding)).await;
+        }
+    }
+
     /// Starts sending what `capture` encodes into `frames` (none: only
     /// its self-view is wanted, the demo's camera), as `control` says;
     /// tells `ended` if the capture ends by itself.
@@ -677,7 +672,7 @@ fn send(
         let fps = gate.fps();
         gate.set_max_fps(control.max_fps());
         if gate.fps() != fps {
-            log::info!("huddle {what}: {} pictures a second", gate.fps());
+            log::info!("video {what}: {} pictures a second", gate.fps());
         }
         let wait = gate.wait(now);
         if !wait.is_zero() {
@@ -700,7 +695,7 @@ fn send(
                 capture.set_max_size(wanted_box)?;
                 boxed = wanted_box;
                 log::info!(
-                    "huddle {what}: pictures at most {}",
+                    "video {what}: pictures at most {}",
                     wanted_box.map_or_else(
                         || "as large as they come".to_owned(),
                         |(w, h)| format!("{w}x{h}")
@@ -721,7 +716,7 @@ fn send(
             Ok((_, None)) => continue,
             Ok((asking, Some(frame))) => (asking, frame),
             Err(CaptureTrouble::Lost(why)) if options.restart.is_some() => {
-                log::warn!("huddle {what}: the video helper failed ({why}): starting again");
+                log::warn!("video {what}: the video helper failed ({why}): starting again");
                 match options.restart.as_mut().map(|restart| restart()) {
                     Some(Ok(fresh)) => {
                         counts.restarts += 1;
@@ -735,14 +730,14 @@ fn send(
                         continue;
                     }
                     Some(Err(trouble)) => {
-                        log::warn!("huddle {what}: it did not start again: {trouble:?}");
+                        log::warn!("video {what}: it did not start again: {trouble:?}");
                         break Some((options.ending)(&trouble));
                     }
                     None => break Some((options.ending)(&CaptureTrouble::Lost(why))),
                 }
             }
             Err(trouble) => {
-                log::info!("huddle {what}: the capture stopped: {trouble:?}");
+                log::info!("video {what}: the capture stopped: {trouble:?}");
                 break Some((options.ending)(&trouble));
             }
         };
@@ -775,7 +770,7 @@ fn send(
         if (frame.width, frame.height) != size {
             size = (frame.width, frame.height);
             log::info!(
-                "huddle {what}: sending {}x{} at {} kbit/s, {} a second, encoded {}",
+                "video {what}: sending {}x{} at {} kbit/s, {} a second, encoded {}",
                 size.0,
                 size.1,
                 bitrate / 1000,
@@ -807,13 +802,13 @@ fn send(
         }
         if now >= next_report {
             next_report += REPORT_EVERY;
-            log::info!("huddle {what}: {counts:?}");
+            log::info!("video {what}: {counts:?}");
         }
     };
     if let Some(preview) = &options.preview {
         preview.clear();
     }
-    log::info!("huddle {what}: stopped sending; {counts:?}");
+    log::info!("video {what}: stopped sending; {counts:?}");
     ending
 }
 

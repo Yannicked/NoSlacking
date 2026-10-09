@@ -214,7 +214,7 @@ pub struct VideoLine {
 }
 
 /// Whether this build shows or sends video at all.
-const HAS_VIDEO: bool = cfg!(any(feature = "huddle-video", feature = "huddle-camera"));
+const HAS_VIDEO: bool = cfg!(feature = "video-helper");
 
 /// The H.264 payload type of a meeting's media server, and of its
 /// resends (recorded).

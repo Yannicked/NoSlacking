@@ -36,6 +36,8 @@
 use std::fmt;
 use std::io::{self, Read, Write};
 
+pub mod h264;
+
 /// The first four bytes of the hello and the welcome, so a program that
 /// is not the helper is told apart from a helper that is the wrong
 /// version.
@@ -449,16 +451,6 @@ pub struct Capability {
     pub max_width: u32,
     /// The tallest picture, in pixels.
     pub max_height: u32,
-}
-
-impl Capability {
-    /// Whether this covers `codec` going `direction` at `width`×`height`.
-    pub fn covers(&self, codec: Codec, direction: Direction, width: u32, height: u32) -> bool {
-        self.codec == codec
-            && self.direction == direction
-            && width <= self.max_width
-            && height <= self.max_height
-    }
 }
 
 /// Why the helper could not do what was asked.
@@ -2093,19 +2085,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn capabilities_cover_what_they_say() {
-        let decode = Capability {
-            codec: Codec::H264,
-            direction: Direction::Decode,
-            max_width: 1920,
-            max_height: 1088,
-        };
-        assert!(decode.covers(Codec::H264, Direction::Decode, 1920, 1080));
-        assert!(!decode.covers(Codec::H264, Direction::Encode, 640, 480));
-        assert!(!decode.covers(Codec::H264, Direction::Decode, 2560, 1440));
     }
 
     #[test]

@@ -576,7 +576,7 @@ impl Devices {
         // Ours: nothing captured until asked.
         #[cfg(feature = "huddle-share")]
         let (share, share_feed) = share_task(place, share_requests, call, sink);
-        #[cfg(not(any(feature = "huddle-video", feature = "huddle-camera")))]
+        #[cfg(not(feature = "video-helper"))]
         let _ = tell;
         let video = crate::teams::calling::video::Video {
             #[cfg(feature = "huddle-video")]
@@ -782,19 +782,12 @@ async fn share(
             },
             ending = async {
                 match ended.as_mut() {
-                    Some(ended) => loop {
-                        if let Some(ending) = ended.borrow_and_update().clone() {
-                            return ending;
-                        }
-                        if ended.changed().await.is_err() {
-                            return std::future::pending().await;
-                        }
-                    },
+                    Some(ended) => crate::huddle_audio::camera_send::ended(ended).await,
                     None => std::future::pending().await,
                 }
             } => {
                 let running = stop(&mut encoding, &mut ended);
-                let _ = tokio::task::spawn_blocking(move || drop(running)).await;
+                Encoding::stop(running).await;
                 tell(match ending {
                     Ending::Ended => ShareNews::Ended,
                     Ending::Failed(failure) => ShareNews::Failed(failure),
@@ -805,7 +798,7 @@ async fn share(
         let asked = match request {
             ShareRequest::Stop => {
                 let running = stop(&mut encoding, &mut ended);
-                let _ = tokio::task::spawn_blocking(move || drop(running)).await;
+                Encoding::stop(running).await;
                 tell(ShareNews::Off);
                 continue;
             }
@@ -813,9 +806,7 @@ async fn share(
             ShareRequest::Pick(id) => Begin::Pick(id),
         };
         // A new choice replaces what is shared.
-        if let Some(running) = encoding.take() {
-            let _ = tokio::task::spawn_blocking(move || drop(running)).await;
-        }
+        Encoding::stop(encoding.take()).await;
         // The helper, the system's dialog and the user all take their
         // time: not on this thread.
         let step = match tokio::task::spawn_blocking(move || begin(asked)).await {

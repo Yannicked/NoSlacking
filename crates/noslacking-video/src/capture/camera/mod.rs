@@ -447,7 +447,6 @@ impl Cameras for Pretend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nal;
     use crate::pipeline::{Answer, Settings};
     use noslacking_video_ipc::SourceKind;
     use std::sync::Mutex;
@@ -517,7 +516,7 @@ mod tests {
         let got = frames(&capture, 5);
         assert_eq!(got.len(), 5);
         assert!(got[0].keyframe);
-        assert!(nal::types(&got[0].data).starts_with(&[7, 8]));
+        assert!(noslacking_video_ipc::h264::nal_types(&got[0].data).starts_with(&[7, 8]));
         for frame in &got {
             assert_eq!((frame.width, frame.height), (640, 480));
             let preview = frame.preview.as_ref().expect("a self-view");

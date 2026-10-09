@@ -59,7 +59,7 @@ pub mod dtls;
 pub mod encoder;
 #[cfg(feature = "huddle-video")]
 pub mod gallery;
-#[cfg(any(feature = "huddle-video", feature = "huddle-camera"))]
+#[cfg(feature = "video-helper")]
 pub mod helper;
 pub mod jitter;
 pub mod join;

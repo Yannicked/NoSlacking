@@ -20,6 +20,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use egui::ColorImage;
+use noslacking_video_ipc::h264;
 
 use super::decode::{self, H264, Outcome, Trouble};
 use super::helper::Lane;
@@ -478,7 +479,7 @@ fn show(
             timings.gpu = picture.gpu;
             let started = Instant::now();
             let source = picture.source;
-            match decode::to_image(&picture.yuv) {
+            match super::helper::to_image(&picture.yuv, false) {
                 Ok(image) => {
                     timings.pictures += 1;
                     timings.size = source;
@@ -540,13 +541,13 @@ fn run(jobs: &Jobs, screen: &Screen) {
                 }
                 let started = Instant::now();
                 decoder.set_fit(screen.fit().0, screen.fit().1);
-                let keyframe = decode::is_keyframe(&unit);
+                let keyframe = h264::is_keyframe(&unit);
                 let decoded = decoder.decode(&unit, screen.wants_picture());
                 if keyframe {
                     log::debug!(
                         "video: the share's decoder on a keyframe ({} bytes, NAL units {:?}): {}",
                         unit.len(),
-                        super::bitstream::nal_types(&unit),
+                        h264::nal_types(&unit),
                         match &decoded {
                             Ok(decode::Outcome::Picture(_)) => "a picture".to_owned(),
                             Ok(decode::Outcome::Kept) => "kept back".to_owned(),
@@ -575,16 +576,7 @@ fn run(jobs: &Jobs, screen: &Screen) {
 /// frames a second into `screen` while `watched` is set.
 #[cfg(feature = "demo")]
 pub fn demo_feed(screen: Screen, watched: Arc<AtomicBool>) -> std::io::Result<()> {
-    let stream = include_bytes!("fixtures/screen-1920x1080.h264");
-    let mut frames: Vec<Vec<u8>> = Vec::new();
-    let mut frame = Vec::new();
-    for nal in super::bitstream::nal_units(stream) {
-        frame.extend_from_slice(&[0, 0, 0, 1]);
-        frame.extend_from_slice(nal);
-        if matches!(super::bitstream::nal_type(nal), Some(1 | 5)) {
-            frames.push(std::mem::take(&mut frame));
-        }
-    }
+    let frames = h264::access_units(include_bytes!("fixtures/screen-1920x1080.h264"));
     let mut decoding = Decoding::spawn(screen)?;
     std::thread::Builder::new()
         .name("huddle-video-demo".into())
@@ -663,16 +655,7 @@ mod tests {
     /// asks, asks for a keyframe when it must, and goes idle on stop.
     #[test]
     fn the_decoder_thread_fills_the_screen() {
-        let stream = include_bytes!("fixtures/camera-480x480.h264");
-        let mut frames: Vec<Vec<u8>> = Vec::new();
-        let mut frame = Vec::new();
-        for nal in super::super::bitstream::nal_units(stream) {
-            frame.extend_from_slice(&[0, 0, 0, 1]);
-            frame.extend_from_slice(nal);
-            if matches!(super::super::bitstream::nal_type(nal), Some(1 | 5)) {
-                frames.push(std::mem::take(&mut frame));
-            }
-        }
+        let frames = h264::access_units(include_bytes!("fixtures/camera-480x480.h264"));
         let screen = Screen::new(|| {});
         screen.set_fit(200, 200);
         let mut decoding = Decoding::spawn(screen.clone()).expect("a thread");
@@ -708,7 +691,8 @@ mod tests {
                 last = Some(picture);
             }
         }
-        let last = decode::to_image(&last.expect("pictures").yuv).expect("converts");
+        let last =
+            super::super::helper::to_image(&last.expect("pictures").yuv, false).expect("converts");
         assert_eq!(*screen.take().expect("the newest").image, last);
         // Hidden: decoded, nothing sent; seen again: the newest comes.
         screen.set_visible(false);

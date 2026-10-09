@@ -470,19 +470,13 @@ fn camera_on(
 /// How the camera that is on stopped by itself, or never while none is.
 #[cfg(feature = "huddle-camera")]
 async fn camera_ended(live: &mut Option<CameraOn>) -> Failure {
-    use crate::huddle_audio::camera_send::Ending;
-    let Some(CameraOn { ended, .. }) = live else {
+    use crate::huddle_audio::camera_send::{Ending, ended};
+    let Some(CameraOn { ended: end, .. }) = live else {
         return std::future::pending().await;
     };
-    loop {
-        match ended.borrow_and_update().clone() {
-            Some(Ending::Failed(failure)) => return failure,
-            Some(Ending::Ended) => return Failure::Huddle(HuddleTrouble::CameraGone),
-            None => {}
-        }
-        if ended.changed().await.is_err() {
-            return std::future::pending().await;
-        }
+    match ended(end).await {
+        Ending::Failed(failure) => failure,
+        Ending::Ended => Failure::Huddle(HuddleTrouble::CameraGone),
     }
 }
 
