@@ -136,10 +136,17 @@ fn read(device: &mut dyn Device, feed: &mpsc::Sender<Ask>, stop: &AtomicBool) {
     let mut failures = 0;
     // The background blurred here, on the reader's thread, beside the
     // pipeline's encoding.
-    let mut blur = if crate::blur::wanted() {
-        match crate::blur::Blur::new() {
+    let mut blur = if let Some(every) = crate::blur::wanted() {
+        match crate::blur::Blur::new(every) {
             Ok(blur) => {
-                eprintln!("noslacking-video: camera: blurring the background");
+                eprintln!(
+                    "noslacking-video: camera: blurring the background, finding the person {}",
+                    if every == 1 {
+                        "in every picture".to_owned()
+                    } else {
+                        format!("once in {every} pictures")
+                    }
+                );
                 Some(blur)
             }
             Err(error) => {

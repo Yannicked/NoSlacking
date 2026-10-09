@@ -1,5 +1,5 @@
 //! A blurred background behind the person on camera (a first try, on with
-//! `NOSLACKING_BLUR=1`).
+//! `NOSLACKING_BLUR=N`: the model runs on every Nth picture, 1 for all).
 //!
 //! Google's MediaPipe selfie segmenter (Apache-2.0, see `models/README.md`)
 //! says where the person is, run by tract on the processor: on every
@@ -22,7 +22,8 @@ const MODEL: &[u8] = include_bytes!("../models/selfie_segmenter_landscape.onnx")
 /// Its input, in pixels.
 const MODEL_W: usize = 256;
 const MODEL_H: usize = 144;
-/// The model runs on every this many pictures.
+/// The model runs on every this many pictures when the setting names no
+/// number.
 const MODEL_EVERY: u64 = 3;
 /// How much of a new mask goes into the one kept, so its edges do not
 /// flicker.
@@ -37,10 +38,19 @@ const RADIUS_CHROMA: usize = 2;
 /// How often the cost is told.
 const REPORT_EVERY: Duration = Duration::from_secs(10);
 
-/// Whether the background is wanted blurred: `NOSLACKING_BLUR` set to
-/// anything but empty or `0`, for now.
-pub fn wanted() -> bool {
-    std::env::var_os("NOSLACKING_BLUR").is_some_and(|v| !v.is_empty() && v != "0")
+/// Whether the background is wanted blurred, and on every how many
+/// pictures the model runs: `NOSLACKING_BLUR` set to a number (1 for every
+/// picture), or to anything else but empty or `0` for every third.
+pub fn wanted() -> Option<u64> {
+    every(&std::env::var("NOSLACKING_BLUR").ok()?)
+}
+
+/// What a `NOSLACKING_BLUR` setting asks for (see [`wanted`]).
+fn every(setting: &str) -> Option<u64> {
+    match setting.trim() {
+        "" | "0" => None,
+        number => Some(number.parse().unwrap_or(MODEL_EVERY).max(1)),
+    }
 }
 
 /// The blur for one camera: the model, the mask kept between pictures,
@@ -50,6 +60,7 @@ pub struct Blur {
     input: Vec<f32>,
     mask: Vec<f32>,
     pictures: u64,
+    every: u64,
     cost: Cost,
 }
 
@@ -64,8 +75,8 @@ struct Cost {
 }
 
 impl Blur {
-    /// Loads the model (about 50 ms).
-    pub fn new() -> Result<Self, String> {
+    /// Loads the model (about 50 ms), to run on every `every`th picture.
+    pub fn new(every: u64) -> Result<Self, String> {
         let model = tract_onnx::onnx()
             .model_for_read(&mut &MODEL[..])
             .and_then(|m| m.into_optimized())
@@ -76,6 +87,7 @@ impl Blur {
             input: vec![0.0; MODEL_W * MODEL_H * 3],
             mask: Vec::new(),
             pictures: 0,
+            every: every.max(1),
             cost: Cost::default(),
         })
     }
@@ -93,7 +105,7 @@ impl Blur {
             return;
         }
         let start = Instant::now();
-        if self.pictures.is_multiple_of(MODEL_EVERY) || self.mask.is_empty() {
+        if self.pictures.is_multiple_of(self.every) || self.mask.is_empty() {
             match self.segment(picture) {
                 Ok(mask) => {
                     if self.mask.len() == mask.len() {
@@ -421,7 +433,7 @@ mod tests {
 
     #[test]
     fn the_model_loads_and_says_where_nobody_is() {
-        let mut blur = Blur::new().expect("the built-in model loads");
+        let mut blur = Blur::new(MODEL_EVERY).expect("the built-in model loads");
         // A flat grey picture: nobody in it.
         let mask = blur.segment(&picture(640, 480, 120)).expect("runs");
         assert_eq!(mask.len(), MODEL_W * MODEL_H);
@@ -433,8 +445,17 @@ mod tests {
     }
 
     #[test]
+    fn the_setting_says_how_often_the_model_runs() {
+        assert_eq!(every(""), None);
+        assert_eq!(every("0"), None);
+        assert_eq!(every("1"), Some(1));
+        assert_eq!(every(" 2 "), Some(2));
+        assert_eq!(every("yes"), Some(MODEL_EVERY));
+    }
+
+    #[test]
     fn a_flat_picture_stays_flat() {
-        let mut blur = Blur::new().expect("loads");
+        let mut blur = Blur::new(MODEL_EVERY).expect("loads");
         let mut p = picture(640, 480, 120);
         blur.apply(&mut p);
         assert!(p.y.iter().all(|&v| v.abs_diff(120) <= 1));
@@ -443,7 +464,7 @@ mod tests {
 
     #[test]
     fn odd_and_tiny_pictures_are_left_alone() {
-        let mut blur = Blur::new().expect("loads");
+        let mut blur = Blur::new(MODEL_EVERY).expect("loads");
         let mut tiny = picture(8, 8, 50);
         blur.apply(&mut tiny);
         assert!(tiny.y.iter().all(|&v| v == 50));
