@@ -1180,6 +1180,23 @@ mod tests {
         generation
     }
 
+    /// Closing a Teams chat is the sidebar's alone: nothing is asked of
+    /// Microsoft, and no error comes back.
+    #[cfg(feature = "teams")]
+    #[tokio::test]
+    async fn closing_a_teams_chat_says_nothing() {
+        let (mut worker, events) = worker();
+        worker.waiting = None;
+        teams(&mut worker, "TT");
+        worker.command(Command::CloseConversation {
+            team: "TT".into(),
+            channel: "19:abc@unq.gbl.spaces".into(),
+        });
+        tokio::task::yield_now().await;
+        let events: Vec<Event> = events.try_iter().collect();
+        assert!(events.is_empty(), "{events:?}");
+    }
+
     /// The next event, waiting for tasks the worker started to send it.
     #[cfg(feature = "teams")]
     async fn next_event(events: &std::sync::mpsc::Receiver<Event>) -> Option<Event> {

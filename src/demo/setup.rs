@@ -77,6 +77,8 @@ views! {
     /// A message with every kind of formatting sent to the DM, as its rich
     /// text comes back from the pretend Slack.
     RichSend = "rich-send",
+    /// #design open, and popped out into a window of its own too.
+    Popout = "popout",
     /// #design, with a huddle going on.
     Huddle = "huddle",
     /// Listening to #design's huddle: the call bar.
@@ -616,6 +618,10 @@ impl Setup {
                     thread: None,
                     broadcast: false,
                 });
+            }
+            View::Popout => {
+                open(app, "C03");
+                app.actions.push(Action::PopOut("C03".into()));
             }
             View::Huddle | View::Media => open(app, "C03"),
             View::Listening => {

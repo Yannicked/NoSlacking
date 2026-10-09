@@ -2,6 +2,8 @@
 //! dialogs and details, the views at the top of the sidebar, and sidebar
 //! edits.
 
+#[cfg(feature = "teams")]
+use super::Backend;
 use super::{Otherwise, Worker};
 use crate::backend::Event;
 use crate::backend::api::Call;
@@ -40,8 +42,16 @@ impl Worker {
         );
     }
 
-    /// Closes a direct message; closed already is as asked.
+    /// Closes a direct message in Slack too. The sidebar has hidden it
+    /// already (`Settings::closed`) until something new comes; a Teams
+    /// chat has no closing on Microsoft's side that we know of, so there
+    /// it stays the sidebar's alone. Closed already is as asked.
     pub(super) fn close_conversation(&self, team: String, channel: String) {
+        #[cfg(feature = "teams")]
+        if matches!(self.workspaces.get(&team), Some(Backend::Teams(_))) {
+            log::debug!("closing a Teams chat: the sidebar's alone");
+            return;
+        }
         self.act(
             team,
             Doing::CloseConversation,
