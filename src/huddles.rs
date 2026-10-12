@@ -229,7 +229,7 @@ impl CallPicture {
     /// Pixels handed to the textures in the call window's last frame, for
     /// the demo's frame times (`NOSLACKING_DEMO_FRAME_TIMES`).
     pub fn uploaded(&self) -> usize {
-        crate::sync::lock(&self.window).uploaded
+        crate::sync::lock_or_reset(&self.window).uploaded
     }
 }
 

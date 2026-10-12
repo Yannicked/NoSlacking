@@ -42,7 +42,7 @@ use crate::model::{Bot, Conversation, Message, SidebarSection, Ts, User, UserGro
 use crate::paths::AppDirs;
 use crate::settings::{Redirect, WorkspaceMeta};
 use crate::sidebar::SidebarCall;
-use crate::sync::lock;
+use crate::sync::lock_whole;
 
 /// What the interface asks the worker to do.
 pub enum Command {
@@ -996,7 +996,8 @@ pub struct Sink {
     sender: mpsc::Sender<Event>,
     waker: Waker,
     /// For one workspace's tasks: whether the workspace is still signed
-    /// in. Closed, the sink drops everything.
+    /// in. Closed, the sink drops everything. A plain flag, set whole,
+    /// so a panic cannot tear it (it is locked with `lock_whole`).
     gate: Option<Arc<Mutex<bool>>>,
 }
 
@@ -1014,7 +1015,7 @@ impl Sink {
             Some(gate) => {
                 // The lock is held across the send, so once `close` has
                 // returned no event from this sink can still arrive.
-                let open = lock(gate);
+                let open = lock_whole(gate);
                 if !*open {
                     return;
                 }
@@ -1061,7 +1062,7 @@ impl Gate {
     /// Drops every later event from the gated sinks. Events already sent
     /// stay sent.
     pub fn close(&self) {
-        *lock(&self.0) = false;
+        *lock_whole(&self.0) = false;
     }
 }
 

@@ -36,7 +36,7 @@ use std::sync::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 
 use crate::failure::Failure;
-use crate::sync::lock;
+use crate::sync::lock_whole;
 
 /// What a claim replaced, to be put back.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,7 +53,8 @@ pub struct Claim {
 }
 
 /// This run's claim, if it holds one. Also keeps a claim and a release
-/// from running at once.
+/// from running at once. Set or cleared whole, only once the work it
+/// records is done, so a panic mid-claim leaves it as it was.
 static HELD: Mutex<Option<Claim>> = Mutex::new(None);
 
 /// The record of a claim in progress, in the state folder.
@@ -66,7 +67,7 @@ const BACKUP: &str = "slack-links.reg";
 const MIME: &str = "x-scheme-handler/slack";
 
 fn held() -> MutexGuard<'static, Option<Claim>> {
-    lock(&HELD)
+    lock_whole(&HELD)
 }
 
 /// Whether this run holds the `slack://` links now.

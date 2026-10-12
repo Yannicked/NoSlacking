@@ -17,7 +17,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-use crate::sync::{lock, write};
+use crate::sync::{lock_or_reset, lock_whole, read_whole, write_whole};
 
 /// The spell-checking setting.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -164,13 +164,15 @@ struct Loaded {
     tag: String,
     dictionary: spellbook::Dictionary,
     /// Words checked already: typing re-checks the whole draft every frame.
+    /// A cache, emptied if a check panicked.
     known: Mutex<HashMap<String, bool>>,
 }
 
-/// The dictionary in use, if any has loaded.
+/// The dictionary in use, if any has loaded. Replaced whole, so a panic
+/// cannot tear it.
 static CURRENT: RwLock<Option<Arc<Loaded>>> = RwLock::new(None);
 /// What [`configure`] was last asked for, so a load that finishes after a
-/// newer choice is dropped.
+/// newer choice is dropped. Replaced whole, so a panic cannot tear it.
 static WANTED: Mutex<Option<String>> = Mutex::new(None);
 
 /// Uses `settings` from now on: loads the chosen dictionary on a thread of
@@ -187,12 +189,12 @@ pub fn configure(settings: &SpellSettings, config_dir: &Path) {
         None
     };
     let tag = found.as_ref().map(|f| f.tag.clone());
-    *lock(&WANTED) = tag.clone();
+    *lock_whole(&WANTED) = tag.clone();
     let current = read_current().map(|loaded| loaded.tag.clone());
     if current == tag {
         return;
     }
-    *write(&CURRENT) = None;
+    *write_whole(&CURRENT) = None;
     let Some(found) = found else {
         return;
     };
@@ -206,7 +208,7 @@ pub fn configure(settings: &SpellSettings, config_dir: &Path) {
             };
             match spellbook::Dictionary::new(&decode(aff), &decode(dic)) {
                 Ok(dictionary) => {
-                    if lock(&WANTED).as_deref() != Some(found.tag.as_str()) {
+                    if lock_whole(&WANTED).as_deref() != Some(found.tag.as_str()) {
                         return;
                     }
                     log::info!(
@@ -214,7 +216,7 @@ pub fn configure(settings: &SpellSettings, config_dir: &Path) {
                         found.tag,
                         started.elapsed().as_secs_f32() * 1e3
                     );
-                    *write(&CURRENT) = Some(Arc::new(Loaded {
+                    *write_whole(&CURRENT) = Some(Arc::new(Loaded {
                         tag: found.tag,
                         dictionary,
                         known: Mutex::new(HashMap::new()),
@@ -229,7 +231,7 @@ pub fn configure(settings: &SpellSettings, config_dir: &Path) {
 }
 
 fn read_current() -> Option<Arc<Loaded>> {
-    CURRENT.read().ok().and_then(|current| current.clone())
+    read_whole(&CURRENT).clone()
 }
 
 /// How many checked words are remembered before the memory starts over.
@@ -241,7 +243,7 @@ pub fn misspelt(text: &str) -> Vec<Range<usize>> {
     let Some(loaded) = read_current() else {
         return Vec::new();
     };
-    let mut known = lock(&loaded.known);
+    let mut known = lock_or_reset(&loaded.known);
     if known.len() > KNOWN_MAX {
         known.clear();
     }

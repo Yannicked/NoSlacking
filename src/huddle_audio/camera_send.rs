@@ -24,7 +24,7 @@
 //! a picture of its own: it never captures, converts or encodes one.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use egui::ColorImage;
@@ -327,10 +327,8 @@ impl Preview {
     }
 
     fn newest(&self) -> std::sync::MutexGuard<'_, Option<Arc<ColorImage>>> {
-        self.shared
-            .newest
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        // A picture not taken yet is safe to drop after a panic.
+        crate::sync::lock_or_reset(&self.shared.newest)
     }
 
     /// Puts the newest picture in place of one not taken.

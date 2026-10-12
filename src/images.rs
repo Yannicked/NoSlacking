@@ -22,7 +22,7 @@ use egui::load::{Bytes, BytesLoadResult, BytesLoader, BytesPoll, LoadError};
 use sha1::{Digest as _, Sha1};
 
 use crate::slack;
-use crate::sync::{lock, read, write};
+use crate::sync::{lock_or_reset, read_whole, write_whole};
 
 /// Bytes held in memory at most.
 const HELD_BYTES: usize = 96 * 1024 * 1024;
@@ -223,7 +223,11 @@ impl Fetcher {
 }
 
 struct Inner {
+    /// The pictures in memory: a cache, emptied after a panic.
     entries: Mutex<HashMap<String, Entry>>,
+    /// Each signed-in workspace's way to fetch. Changed one whole entry at
+    /// a time, so a panic cannot tear it; emptying it would sign every
+    /// workspace's pictures out.
     clients: RwLock<HashMap<String, Fetcher>>,
     runtime: tokio::runtime::Handle,
     cache_dir: PathBuf,
@@ -266,9 +270,9 @@ impl ImageLoader {
     }
 
     fn set_fetcher(&self, team: &str, fetcher: Fetcher) {
-        write(&self.inner.clients).insert(team.to_owned(), fetcher);
+        write_whole(&self.inner.clients).insert(team.to_owned(), fetcher);
         let prefix = authed(team, "");
-        lock(&self.inner.entries).retain(|uri, entry| {
+        lock_or_reset(&self.inner.entries).retain(|uri, entry| {
             !(uri.starts_with(&prefix)
                 && matches!(
                     entry,
@@ -294,9 +298,9 @@ impl ImageLoader {
     /// Stops fetching `team`'s files and deletes the ones already fetched,
     /// from memory and from disk: they are private to the workspace.
     pub fn remove_client(&self, team: &str) {
-        write(&self.inner.clients).remove(team);
+        write_whole(&self.inner.clients).remove(team);
         let prefix = authed(team, "");
-        lock(&self.inner.entries).retain(|uri, _| !uri.starts_with(&prefix));
+        lock_or_reset(&self.inner.entries).retain(|uri, _| !uri.starts_with(&prefix));
         let dir = self.inner.private_dir(team);
         self.inner.runtime.spawn(async move {
             match tokio::fs::remove_dir_all(&dir).await {
@@ -342,7 +346,7 @@ impl Inner {
         }
         let bytes = match team {
             Some(team) => {
-                let client = read(&self.clients).get(team).cloned();
+                let client = read_whole(&self.clients).get(team).cloned();
                 let client = client.ok_or(Failure::SignedOut)?;
                 client.get_bytes(url, MAX_IMAGE_BYTES).await?
             }
@@ -493,7 +497,7 @@ impl BytesLoader for ImageLoader {
             return Err(LoadError::NotSupported);
         };
         {
-            let mut entries = lock(&self.inner.entries);
+            let mut entries = lock_or_reset(&self.inner.entries);
             let failures = match entries.get_mut(uri) {
                 Some(Entry::Ready { bytes, used }) => {
                     *used = Instant::now();
@@ -526,7 +530,7 @@ impl BytesLoader for ImageLoader {
         let url = url.to_owned();
         self.inner.runtime.spawn(async move {
             let result = inner.fetch(team.as_deref(), &url).await;
-            let mut entries = lock(&inner.entries);
+            let mut entries = lock_or_reset(&inner.entries);
             // A `forget` while fetching drops the result.
             let Some(&Entry::Pending { failures }) = entries.get(&uri) else {
                 return;
@@ -568,15 +572,15 @@ impl BytesLoader for ImageLoader {
     }
 
     fn forget(&self, uri: &str) {
-        lock(&self.inner.entries).remove(uri);
+        lock_or_reset(&self.inner.entries).remove(uri);
     }
 
     fn forget_all(&self) {
-        lock(&self.inner.entries).clear();
+        lock_or_reset(&self.inner.entries).clear();
     }
 
     fn byte_size(&self) -> usize {
-        lock(&self.inner.entries)
+        lock_or_reset(&self.inner.entries)
             .values()
             .map(|e| match e {
                 Entry::Ready { bytes, .. } => bytes.len(),
@@ -586,7 +590,7 @@ impl BytesLoader for ImageLoader {
     }
 
     fn has_pending(&self) -> bool {
-        lock(&self.inner.entries)
+        lock_or_reset(&self.inner.entries)
             .values()
             .any(|e| matches!(e, Entry::Pending { .. }))
     }

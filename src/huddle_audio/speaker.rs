@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use super::jitter::{CLOCK, Counts, FRAME, Jitter, Pull, opus_samples};
 use super::processing::RenderTap;
 use crate::audio::guard::{self, Health};
-use crate::sync::lock;
+use crate::sync::lock_or_reset;
 
 /// Channels played: Chime's Opus is stereo-capable; mono comes out on
 /// both.
@@ -56,13 +56,21 @@ const STALL: Duration = Duration::from_secs(2);
 struct Shared {
     jitter: Mutex<Jitter>,
     /// Frames the decoder could not read.
-    broken: Mutex<u64>,
+    broken: AtomicU64,
     /// Times the decoder panicked and was started afresh.
     restarts: AtomicU64,
     /// The loudest frame decoded since [`Feed::take_loudness`] last
     /// asked: its RMS, as `f32` bits (which order as the values do, for
     /// these never negative).
     loudest: AtomicU32,
+}
+
+impl Shared {
+    /// Locks the jitter buffer. If a holder panicked it starts empty: the
+    /// device plays silence while it fills again, as at the start.
+    fn jitter(&self) -> std::sync::MutexGuard<'_, Jitter> {
+        lock_or_reset(&self.jitter)
+    }
 }
 
 /// One open device's state, shared with its thread and its callback.
@@ -95,7 +103,7 @@ pub struct Feed {
 impl Feed {
     /// One Opus frame with its RTP timestamp.
     pub fn push(&self, timestamp: u32, payload: &[u8]) {
-        lock(&self.shared.jitter).push(timestamp, payload.to_vec());
+        self.shared.jitter().push(timestamp, payload.to_vec());
     }
 
     /// How loud the loudest frame played since the last call was: its
@@ -107,8 +115,8 @@ impl Feed {
     /// What was played so far.
     pub fn played(&self) -> Played {
         Played {
-            jitter: lock(&self.shared.jitter).counts(),
-            broken: *lock(&self.shared.broken),
+            jitter: self.shared.jitter().counts(),
+            broken: self.shared.broken.load(Ordering::Relaxed),
             restarts: self.shared.restarts.load(Ordering::Relaxed),
         }
     }
@@ -206,7 +214,7 @@ impl Decoded {
 
     /// Decodes what comes next into `self.samples`.
     fn decode(&mut self) {
-        let pull = lock(&self.shared.jitter).pull();
+        let pull = self.shared.jitter().pull();
         let room = self.decoder.room() * usize::from(CHANNELS);
         self.samples.resize(room, 0.0);
         self.at = 0;
@@ -247,7 +255,7 @@ impl Decoded {
             Some(_) | None => {
                 let mut length = FRAME;
                 if let Pull::Frame(payload) = &pull {
-                    *lock(&self.shared.broken) += 1;
+                    self.shared.broken.fetch_add(1, Ordering::Relaxed);
                     length = opus_samples(payload).unwrap_or(FRAME);
                 }
                 self.samples.clear();

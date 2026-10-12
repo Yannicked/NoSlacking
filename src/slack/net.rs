@@ -23,7 +23,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::http::{HeaderValue, Uri};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-use crate::sync::write;
+use crate::sync::{read_whole, write_whole};
 
 /// Which proxy NoSlacking uses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -122,6 +122,9 @@ struct Net {
     transfers: reqwest::Client,
 }
 
+/// The clients in use, built on first use. Only ever replaced whole, so
+/// a panic cannot tear it; forgetting it would quietly drop a manual
+/// proxy for the system's.
 static NET: RwLock<Option<Arc<Net>>> = RwLock::new(None);
 
 /// How long a transfer may go without a single byte moving.
@@ -191,10 +194,10 @@ fn blackhole() -> reqwest::Proxy {
 }
 
 fn current() -> Arc<Net> {
-    if let Some(net) = NET.read().ok().and_then(|net| net.clone()) {
+    if let Some(net) = read_whole(&NET).clone() {
         return net;
     }
-    let mut slot = write(&NET);
+    let mut slot = write_whole(&NET);
     slot.get_or_insert_with(|| Arc::new(Net::build(Route::System)))
         .clone()
 }
@@ -204,11 +207,9 @@ fn current() -> Arc<Net> {
 /// not check out changes nothing.
 pub fn configure(settings: &ProxySettings) -> Result<(), ProxyError> {
     let route = settings.route()?;
-    if NET
-        .read()
-        .ok()
-        .and_then(|net| net.as_ref().map(|net| net.route == route))
-        .unwrap_or(false)
+    if read_whole(&NET)
+        .as_ref()
+        .is_some_and(|net| net.route == route)
     {
         return Ok(());
     }
@@ -218,7 +219,7 @@ pub fn configure(settings: &ProxySettings) -> Result<(), ProxyError> {
         Route::Manual(url) => log::info!("network: proxy {url}"),
     }
     let net = Arc::new(Net::build(route));
-    *write(&NET) = Some(net);
+    *write_whole(&NET) = Some(net);
     Ok(())
 }
 
