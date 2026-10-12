@@ -91,6 +91,7 @@ fn quoted(quote: &Quote) -> Option<(String, Ts)> {
 /// is never quoted twice.
 pub fn own_quotes(message: &Message) -> Vec<Link> {
     let unfurled: Vec<(String, Ts)> = message
+        .extra
         .attachments
         .iter()
         .filter_map(|a| a.quote.as_ref())
@@ -249,6 +250,7 @@ pub fn from_message(
     if text.trim().is_empty() {
         // A message of only files says which.
         text = message
+            .extra
             .files
             .iter()
             .map(|f| {
@@ -266,7 +268,7 @@ pub fn from_message(
         channel: Some(channel.to_owned()),
         channel_name: workspace.conversation(channel).map(|c| workspace.title(c)),
         ts: Some(message.ts),
-        user: message.user.clone(),
+        user: message.user.map(String::from),
         author: Some(workspace.author(message)),
         author_icon: workspace.author_icon(message).map(str::to_owned),
         text,
@@ -348,24 +350,14 @@ pub fn excerpt(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Extra;
     use crate::model::{Attachment, Conversation, ConversationKind, Delivery, User, Workspace};
 
     fn message(text: &str) -> Message {
         Message {
             ts: Ts::new("1790000000.000100"),
             user: Some("U1".into()),
-            username: None,
-            bot_icon: None,
-            bot_id: None,
             text: text.into(),
-            thread_ts: None,
-            reply_count: 0,
-            replies_known: false,
-            reply_users: Vec::new(),
-            latest_reply: None,
-            reactions: Vec::new(),
-            files: Vec::new(),
-            attachments: Vec::new(),
             blocks: Vec::new(),
             edited: false,
             subtype: None,
@@ -373,7 +365,8 @@ mod tests {
             broadcast: false,
             pinned: false,
             client_msg_id: None,
-            subscribed: None,
+            replies_known: false,
+            extra: Extra::default(),
         }
     }
 
@@ -447,12 +440,12 @@ mod tests {
         // No unfurl: it needs a quote of its own.
         assert_eq!(own_quotes(&posted).len(), 1);
         // Slack's unfurl, however its link is written, covers it.
-        posted.attachments.push(unfurl(&format!(
+        posted.extra.attachments.push(unfurl(&format!(
             "{LINK}?thread_ts=1700000000.000100&amp;cid=C1"
         )));
         assert!(own_quotes(&posted).is_empty());
         // An unfurl without a link is matched by what it says it quotes.
-        posted.attachments = vec![Attachment {
+        posted.extra.attachments = vec![Attachment {
             quote: Some(Quote {
                 channel: Some("C1".into()),
                 ts: Some(Ts::new("1700000000.000100")),
@@ -462,7 +455,7 @@ mod tests {
         }];
         assert!(own_quotes(&posted).is_empty());
         // An unfurl of another message leaves this one to quote.
-        posted.attachments = vec![unfurl(
+        posted.extra.attachments = vec![unfurl(
             "https://acme.slack.com/archives/C1/p1700000000000200",
         )];
         assert_eq!(own_quotes(&posted).len(), 1);
@@ -472,7 +465,7 @@ mod tests {
             .collect();
         let mut list = message(&many.join(" "));
         assert_eq!(own_quotes(&list).len(), MAX_QUOTES);
-        list.attachments.push(unfurl(
+        list.extra.attachments.push(unfurl(
             "https://acme.slack.com/archives/C9/p1700000000000900",
         ));
         assert_eq!(own_quotes(&list).len(), MAX_QUOTES - 1);
@@ -581,7 +574,7 @@ mod tests {
         assert!(!quote.unavailable);
         // A message of only a file names it.
         let mut file = message("");
-        file.files.push(crate::model::File {
+        file.extra.files.push(crate::model::File {
             name: "plan.pdf".into(),
             ..crate::model::File::default()
         });

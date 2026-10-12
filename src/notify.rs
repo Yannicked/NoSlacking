@@ -544,6 +544,7 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Extra;
 
     #[test]
     fn invitations_shown_are_taken_away_by_conversation() {
@@ -560,24 +561,13 @@ mod tests {
         assert_eq!(shown.0.len(), WITHDRAWABLE);
         assert_eq!(shown.take("T3", "C3").first(), Some(&24));
     }
-    use crate::model::{Delivery, Ts};
+    use crate::model::{Delivery, Id, Ts};
 
     fn message(user: &str, text: &str) -> Message {
         Message {
             ts: Ts::new("1700000000.000100"),
-            user: Some(user.to_owned()),
-            username: None,
-            bot_icon: None,
-            bot_id: None,
+            user: Some(Id::new(user)),
             text: text.to_owned(),
-            thread_ts: None,
-            reply_count: 0,
-            replies_known: false,
-            reply_users: Vec::new(),
-            latest_reply: None,
-            reactions: Vec::new(),
-            files: Vec::new(),
-            attachments: Vec::new(),
             blocks: Vec::new(),
             edited: false,
             subtype: None,
@@ -585,7 +575,8 @@ mod tests {
             broadcast: false,
             pinned: false,
             client_msg_id: None,
-            subscribed: None,
+            replies_known: false,
+            extra: Extra::default(),
         }
     }
 
@@ -690,7 +681,7 @@ mod tests {
     #[test]
     fn replies_notify_only_when_they_name_you() {
         let mut reply = message("U2", "agreed");
-        reply.thread_ts = Some(Ts::new("1600000000.000100"));
+        reply.extra.thread_ts = Some(Ts::new("1600000000.000100"));
         assert_eq!(why(ConversationKind::Channel, &reply, Level::All), None);
         reply.text = "<@U1> agreed".into();
         assert_eq!(

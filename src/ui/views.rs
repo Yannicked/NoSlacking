@@ -386,7 +386,7 @@ pub fn jump(channel: &str, message: &Message) -> Action {
     Action::JumpTo {
         channel: channel.to_owned(),
         ts: message.ts,
-        thread: message.thread_ts.filter(|_| message.is_reply()),
+        thread: message.extra.thread_ts.filter(|_| message.is_reply()),
     }
 }
 
@@ -984,7 +984,7 @@ fn threads(
             ThreadRow::Foot(i) => {
                 let thread = &threads[i];
                 let shown = crate::i18n::count(thread.replies.len());
-                let total = thread.parent.reply_count.max(shown);
+                let total = thread.parent.extra.reply_count.max(shown);
                 egui::Frame::new()
                     .inner_margin(Margin {
                         left: 48,

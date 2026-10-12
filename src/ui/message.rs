@@ -134,7 +134,7 @@ pub fn continues(previous: Option<&Message>, message: &Message) -> bool {
     if previous.is_system() || message.is_system() {
         return false;
     }
-    if previous.user != message.user || previous.username != message.username {
+    if previous.user != message.user || previous.extra.username != message.extra.username {
         return false;
     }
     match (previous.ts.seconds(), message.ts.seconds()) {
@@ -169,7 +169,7 @@ pub fn guess_height(message: &Message, lead: Lead, look: Look) -> f32 {
             PLACEHOLDER + 4.0
         }
     };
-    for file in &message.files {
+    for file in &message.extra.files {
         height += if file.deleted {
             // "This file was deleted."
             20.0
@@ -182,7 +182,7 @@ pub fn guess_height(message: &Message, lead: Lead, look: Look) -> f32 {
             card_height(file) + 4.0
         };
     }
-    for attachment in &message.attachments {
+    for attachment in &message.extra.attachments {
         height += 90.0
             + attachment_media(attachment, 560.0).map_or(0.0, |(_, size)| picture(size.y + 4.0));
     }
@@ -192,10 +192,10 @@ pub fn guess_height(message: &Message, lead: Lead, look: Look) -> f32 {
             height += picture(kit_image_size(*size, 440.0).y);
         }
     }
-    if !message.reactions.is_empty() {
+    if !message.extra.reactions.is_empty() {
         height += 32.0;
     }
-    if message.reply_count > 0 {
+    if message.extra.reply_count > 0 {
         height += 32.0;
     }
     height
@@ -402,13 +402,13 @@ fn gutter(
     let seed = message
         .user
         .as_deref()
-        .or(message.bot_id.as_deref())
+        .or(message.extra.bot_id.as_deref())
         .unwrap_or(&name);
     let response = super::avatar(ui, url, &name, seed, theme::AVATAR);
     if response.clicked()
-        && let Some(user) = &message.user
+        && let Some(user) = message.user
     {
-        actions.push(Action::OpenProfile(user.clone()));
+        actions.push(Action::OpenProfile(user.to_string()));
     }
 }
 
@@ -459,9 +459,9 @@ fn compact_lead(
         egui::Label::new(RichText::new(&name).font(theme::bold(13.5)).color(color)).truncate(),
     );
     if response.clicked()
-        && let Some(user) = &message.user
+        && let Some(user) = message.user
     {
-        actions.push(Action::OpenProfile(user.clone()));
+        actions.push(Action::OpenProfile(user.to_string()));
     }
     ui.allocate_exact_size(Vec2::new(COMPACT_NAME, line), Sense::hover());
 }
@@ -480,13 +480,13 @@ fn header(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec
             ),
         );
         if response.clicked()
-            && let Some(user) = &message.user
+            && let Some(user) = message.user
         {
-            actions.push(Action::OpenProfile(user.clone()));
+            actions.push(Action::OpenProfile(user.to_string()));
         }
         // A person posting through an app (/giphy) keeps their own name.
-        let bot = message.username.is_some()
-            || (message.bot_id.is_some() && message.user.is_none())
+        let bot = message.extra.username.is_some()
+            || (message.extra.bot_id.is_some() && message.user.is_none())
             || message
                 .user
                 .as_deref()
@@ -536,17 +536,17 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
         let rich = Rich::new(palette, row.workspace);
         rich::message(ui, &rich, message, message.edited, actions);
     }
-    for file in &message.files {
+    for file in &message.extra.files {
         file_view(ui, row, message, file, actions);
     }
-    for attachment in &message.attachments {
+    for attachment in &message.extra.attachments {
         attachment_view(ui, row, message, attachment, actions);
     }
     quote::own_quotes(ui, row, message, actions);
-    if !message.reactions.is_empty() {
+    if !message.extra.reactions.is_empty() {
         reactions(ui, row, message, actions);
     }
-    if message.reply_count > 0 && !row.in_thread && !message.is_reply() {
+    if message.extra.reply_count > 0 && !row.in_thread && !message.is_reply() {
         thread_summary(ui, row, message, actions);
     }
     if message.is_reply() && message.broadcast && !row.in_thread {
@@ -554,7 +554,7 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
             .font(theme::regular(12.0))
             .color(palette.secondary);
         if theme::link_label(ui, egui::Label::new(text)).clicked()
-            && let Some(parent) = &message.thread_ts
+            && let Some(parent) = &message.extra.thread_ts
         {
             actions.push(Action::OpenThread {
                 channel: row.channel.to_owned(),
@@ -710,7 +710,7 @@ fn reactions(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
     };
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-        for reaction in &message.reactions {
+        for reaction in &message.extra.reactions {
             let mine = reaction.users.contains(me);
             let (fill, stroke) = if mine {
                 (
@@ -822,18 +822,22 @@ fn thread_summary(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: 
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                for id in message.reply_users.iter().take(5) {
+                for id in message.extra.reply_users.iter().take(5) {
                     let user = row.workspace.user(id);
                     let name = row.workspace.user_label(id);
                     super::avatar(ui, user.and_then(|u| u.avatar.as_deref()), &name, id, 20.0);
                 }
                 ui.add_space(4.0);
                 ui.label(
-                    RichText::new(tn("{count} reply", "{count} replies", message.reply_count))
-                        .font(theme::bold(13.0))
-                        .color(palette.link),
+                    RichText::new(tn(
+                        "{count} reply",
+                        "{count} replies",
+                        message.extra.reply_count,
+                    ))
+                    .font(theme::bold(13.0))
+                    .color(palette.link),
                 );
-                if let Some(latest) = &message.latest_reply {
+                if let Some(latest) = &message.extra.latest_reply {
                     ui.label(
                         RichText::new(tf(
                             "Last reply {when}",
@@ -860,7 +864,11 @@ fn thread_summary(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: 
     theme::describe(
         &response,
         egui::WidgetType::Button,
-        &tn("{count} reply", "{count} replies", message.reply_count),
+        &tn(
+            "{count} reply",
+            "{count} replies",
+            message.extra.reply_count,
+        ),
     );
     if response.clicked() {
         actions.push(Action::OpenThread {
@@ -873,6 +881,7 @@ fn thread_summary(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Extra;
 
     #[test]
     fn copied_text_names_user_groups() {
@@ -895,18 +904,7 @@ mod tests {
         let message = Message {
             ts: crate::model::Ts::new("1.0"),
             user: None,
-            username: None,
-            bot_icon: None,
-            bot_id: None,
             text: "<!subteam^S1> and <!subteam^S9> and <!subteam^S8|@ops>".into(),
-            thread_ts: None,
-            reply_count: 0,
-            replies_known: false,
-            reply_users: Vec::new(),
-            latest_reply: None,
-            reactions: Vec::new(),
-            files: Vec::new(),
-            attachments: Vec::new(),
             blocks: Vec::new(),
             edited: false,
             subtype: None,
@@ -914,7 +912,8 @@ mod tests {
             broadcast: false,
             pinned: false,
             client_msg_id: None,
-            subscribed: None,
+            replies_known: false,
+            extra: Extra::default(),
         };
         assert_eq!(plain_text(&w, &message), "@design and @S9 and @ops");
     }

@@ -495,9 +495,9 @@ mod tests {
         )[..]
         {
             [Translated::Event(Event::Message { message, .. })] => {
-                assert_eq!(message.files.len(), 1);
-                assert!(message.files[0].deleted);
-                assert_eq!(message.files[0].id, "F1");
+                assert_eq!(message.extra.files.len(), 1);
+                assert!(message.extra.files[0].deleted);
+                assert_eq!(message.extra.files[0].id, "F1");
             }
             other => panic!("{other:?}"),
         }

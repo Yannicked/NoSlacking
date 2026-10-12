@@ -190,7 +190,7 @@ impl App {
                 team,
                 channel: channel.to_owned(),
                 text: message.text,
-                thread: message.thread_ts,
+                thread: message.extra.thread_ts,
                 broadcast: message.broadcast,
                 local: *local,
                 client_msg_id: message.client_msg_id,
