@@ -1511,10 +1511,8 @@ impl Id {
         static IDS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<&'static str>>> =
             std::sync::OnceLock::new();
         let text = text.as_ref();
-        let mut ids = IDS
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Changed one whole entry at a time, so a panic cannot tear it.
+        let mut ids = crate::sync::lock_whole(IDS.get_or_init(Default::default));
         if let Some(&id) = ids.get(text) {
             return Self(id);
         }
