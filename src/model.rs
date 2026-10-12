@@ -340,8 +340,33 @@ fn interned_texts() -> std::sync::MutexGuard<'static, Interned> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// How many texts each interning table keeps at most. Real workspaces
+/// stay far below it; a server or bot sending endless new ones fills it,
+/// and from then on every new text reads as [`OVERFLOW`] instead of
+/// growing memory for good.
+const MOST_INTERNED: usize = 1 << 16;
+
+/// What a text reads as once its table is full.
+const OVERFLOW: &str = "<overflow>";
+
+/// `text`, or [`OVERFLOW`] once a table already holds `held` texts (and
+/// so does not know `text`), saying so once per table.
+fn or_overflow<'a>(text: &'a str, held: usize, table: &str) -> &'a str {
+    if held < MOST_INTERNED {
+        return text;
+    }
+    if held == MOST_INTERNED {
+        log::warn!("{table}: {MOST_INTERNED} texts kept; new ones are no longer kept apart");
+    }
+    OVERFLOW
+}
+
 fn intern(text: &str) -> u32 {
     let mut interned = interned_texts();
+    if let Some(&place) = interned.places.get(text) {
+        return place;
+    }
+    let text = or_overflow(text, interned.texts.len(), "timestamps");
     if let Some(&place) = interned.places.get(text) {
         return place;
     }
@@ -1474,7 +1499,9 @@ pub enum Delivery {
 /// The same few ids repeat on every message a conversation holds, so
 /// each message keeps a pointer to the one copy instead of a string of
 /// its own: 16 bytes, `Copy`, and no allocation per message. There are
-/// only as many as the people and bots you meet, so they are never freed.
+/// only as many as the people and bots you meet, so they are never freed
+/// (and at most 65,536 of them, so a flood of new ones cannot grow
+/// memory for good).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Id(&'static str);
 
@@ -1488,6 +1515,10 @@ impl Id {
             .get_or_init(Default::default)
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(&id) = ids.get(text) {
+            return Self(id);
+        }
+        let text = or_overflow(text, ids.len(), "ids");
         if let Some(&id) = ids.get(text) {
             return Self(id);
         }
@@ -2693,6 +2724,13 @@ mod tests {
         timeline.upsert(message("1.0"));
         assert!(!timeline.messages[0].extra.has_room());
         assert!(!Extra::from(ExtraFields::default()).has_room());
+    }
+
+    #[test]
+    fn a_full_table_keeps_no_more() {
+        assert_eq!(or_overflow("U1", MOST_INTERNED - 1, "ids"), "U1");
+        assert_eq!(or_overflow("U1", MOST_INTERNED, "ids"), OVERFLOW);
+        assert_eq!(or_overflow("U2", MOST_INTERNED + 1, "ids"), OVERFLOW);
     }
 
     #[test]
