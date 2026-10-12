@@ -73,7 +73,7 @@ pub fn dialog(app: &mut App, ctx: &egui::Context) {
     let Some(mut dialog) = app.meeting_dialog.take() else {
         return;
     };
-    let focus = std::mem::take(&mut app.focus_overlay);
+    let focus = app.take_focus(crate::app::Focus::Overlay);
     let palette = app.palette;
     let mut answer: Option<Answer> = None;
     let frame = super::overlays::modal_frame(app);

@@ -30,7 +30,7 @@ impl App {
             return;
         }
         self.picker = None;
-        self.focus_overlay = true;
+        self.focus_next = Some(crate::app::Focus::Overlay);
         self.add_emoji = Some(Dialog {
             team,
             ..Dialog::default()

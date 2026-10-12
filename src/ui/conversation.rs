@@ -291,8 +291,9 @@ fn footer(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     let palette = app.palette;
     let key = App::draft_key(team, channel, None);
     let mut taken = app.drafts.take(&key);
-    let focus =
-        std::mem::take(&mut app.focus_composer) && app.picker.is_none() && app.switcher.is_none();
+    let focus = app.take_focus(crate::app::Focus::Composer)
+        && app.picker.is_none()
+        && app.switcher.is_none();
     let App {
         workspaces,
         settings,

@@ -342,7 +342,7 @@ impl App {
         if !draft.attachments.contains(&path) {
             draft.attachments.push(path);
         }
-        self.focus_composer = true;
+        self.focus_next = Some(crate::app::Focus::Composer);
     }
 
     /// A file taken out of a composer before sending: a pasted picture is

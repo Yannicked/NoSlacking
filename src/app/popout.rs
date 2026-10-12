@@ -107,7 +107,7 @@ impl App {
         let mut borrowed = Borrowed {
             active_workspace: self.settings.active_workspace.clone(),
             active_channel: None,
-            focus_composer: std::mem::take(&mut self.focus_composer),
+            focus_composer: self.take_focus(super::Focus::Composer),
             prepended,
             actions: std::mem::take(&mut self.actions),
             page: self.page,
@@ -133,7 +133,10 @@ impl App {
             }
             self.settings.active_workspace = borrowed.active_workspace;
             self.page = borrowed.page;
-            self.focus_composer |= borrowed.focus_composer;
+            // An ask made while the pop-out drew is the newer one.
+            if borrowed.focus_composer && self.focus_next.is_none() {
+                self.focus_next = Some(super::Focus::Composer);
+            }
         }
         // Otherwise the pop-out moved on (a link, a mention): the action
         // that opened the other conversation did so as in the main window,

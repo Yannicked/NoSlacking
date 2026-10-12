@@ -1333,7 +1333,7 @@ fn scheduled(
 pub fn dialog(app: &mut App, ctx: &egui::Context) {
     use crate::views::schedule::Target;
     let palette = app.palette;
-    let focus = std::mem::take(&mut app.focus_overlay);
+    let focus = app.take_focus(crate::app::Focus::Overlay);
     let frame = super::overlays::modal_frame(app);
     let Some(dialog) = app.views.dialog.as_mut() else {
         return;

@@ -582,7 +582,7 @@ impl Setup {
                     query: ">".into(),
                     selected: 0,
                 });
-                app.focus_overlay = true;
+                app.focus_next = Some(crate::app::Focus::Overlay);
             }
             View::Picker => app.actions.push(Action::PickReaction {
                 channel: "C02".into(),

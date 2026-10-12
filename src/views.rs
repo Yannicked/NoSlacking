@@ -875,7 +875,7 @@ pub fn apply(app: &mut App, action: Action) {
             let Some((key, channel)) = composer(app, &team, thread.as_ref()) else {
                 return;
             };
-            app.focus_overlay = true;
+            app.focus_next = Some(crate::app::Focus::Overlay);
             app.views.dialog = Some(schedule::Dialog::new(
                 schedule::Target::Draft {
                     key,
@@ -901,7 +901,7 @@ pub fn apply(app: &mut App, action: Action) {
                 .active_workspace()
                 .map(|w| w.editable(&message.text))
                 .unwrap_or_default();
-            app.focus_overlay = true;
+            app.focus_next = Some(crate::app::Focus::Overlay);
             let at = Some(message.post_at);
             let mut dialog = schedule::Dialog::new(
                 schedule::Target::Edit(message),
@@ -935,7 +935,7 @@ pub fn apply(app: &mut App, action: Action) {
             ts,
             thread,
         } => {
-            app.focus_overlay = true;
+            app.focus_next = Some(crate::app::Focus::Overlay);
             app.views.dialog = Some(schedule::Dialog::new(
                 schedule::Target::Remind {
                     channel,
