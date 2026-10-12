@@ -389,7 +389,7 @@ pub fn with_typing(
 ) {
     let before = draft.text.clone();
     show(ui, composer, draft, actions);
-    let thread = composer.thread.clone();
+    let thread = composer.thread;
     if crate::people::is_typing(&before, &draft.text) {
         let channel = channel.to_owned();
         let typing = crate::people::Action::Typing { channel, thread };
@@ -457,7 +457,7 @@ pub fn show(
             });
             if pasted && files {
                 actions.push(Action::PasteImage {
-                    thread: composer.thread.clone(),
+                    thread: composer.thread,
                 });
             }
             // Files copied in a file manager paste as `file://` addresses:
@@ -473,7 +473,7 @@ pub fn show(
                     Some(paths) => {
                         for path in paths {
                             actions.push(Action::Upload {
-                                thread: composer.thread.clone(),
+                                thread: composer.thread,
                                 path,
                                 comment: String::new(),
                             });
@@ -659,7 +659,7 @@ pub fn show(
                     .clicked()
             {
                 actions.push(Action::PickUpload {
-                    thread: composer.thread.clone(),
+                    thread: composer.thread,
                 });
             }
             if theme::icon_button(ui, palette, Icon::Smile, 17.0, &t("Emoji")).clicked() {
@@ -785,7 +785,7 @@ pub fn show(
     if send && (!draft.text.trim().is_empty() || !draft.attachments.is_empty()) {
         actions.push(Action::Send {
             text: draft.text.clone(),
-            thread: composer.thread.clone(),
+            thread: composer.thread,
             broadcast: draft.broadcast,
         });
     }
@@ -943,7 +943,7 @@ pub fn drop_target(
             .input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
         for path in files.iter().map(|file| file.path().to_path_buf()) {
             actions.push(Action::Upload {
-                thread: thread.clone(),
+                thread,
                 path,
                 comment: String::new(),
             });

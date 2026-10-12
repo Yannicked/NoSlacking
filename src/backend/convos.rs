@@ -171,7 +171,10 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
         Command::Pin { channel, ts, pin } => {
             let method = if pin { "pins.add" } else { "pins.remove" };
             let pinned = client
-                .act::<serde_json::Value>(method, &[("channel", channel), ("timestamp", ts.0)])
+                .act::<serde_json::Value>(
+                    method,
+                    &[("channel", channel), ("timestamp", ts.to_string())],
+                )
                 .await;
             // Already as asked: nothing to undo.
             done_if(pinned, &["already_pinned", "no_pin"])

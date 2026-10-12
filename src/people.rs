@@ -763,7 +763,7 @@ pub fn apply(app: &mut App, action: Action) {
             command: Command::SetAway(away),
         }),
         Action::Typing { channel, thread } => {
-            let place = (team.clone(), channel.clone(), thread.clone());
+            let place = (team.clone(), channel.clone(), thread);
             if app.people.may_say_typing(place, Instant::now()) {
                 app.backend.send(backend::Command::People {
                     team,

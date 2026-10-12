@@ -16,13 +16,64 @@ pub use crate::slack::client::is_slack_file_url;
 /// A Slack message timestamp: `"1700000000.123456"`. Unique per conversation
 /// and ordered by time. Optimistic messages carry `local-<n>` until Slack
 /// answers, and sort after every real one.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct Ts(pub String);
+///
+/// Kept as numbers, not text: 16 bytes, `Copy`, no allocation, and two
+/// real timestamps compare as two integers. Only what writes back exactly
+/// as it came is kept as numbers (seconds, a dot, six digits, as Slack and
+/// our Teams ids are written; `local-<n>`); anything else (a test's
+/// `"1.0"`, an odd id) is kept as its text, interned, so every timestamp
+/// reads back exactly as it was given.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Ts(Repr);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Repr {
+    /// Seconds and microseconds, written `{secs}.{micros:06}`.
+    Real { secs: u64, micros: u32 },
+    /// An optimistic message's counter, written `local-{n}`.
+    Local(u64),
+    /// Any other text, by its place in [`interned`].
+    Other(u32),
+}
+
+impl Default for Ts {
+    /// No timestamp at all: the empty text.
+    fn default() -> Self {
+        Self::new("")
+    }
+}
 
 impl Ts {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+    /// `text` as a timestamp, kept as numbers where it writes back exactly.
+    pub fn new(text: impl AsRef<str>) -> Self {
+        let text = text.as_ref();
+        if let Some(counter) = text.strip_prefix("local-")
+            && let Some(counter) = canonical_number(counter)
+        {
+            return Self(Repr::Local(counter));
+        }
+        if let Some((secs, micros)) = text.split_once('.')
+            && micros.len() == 6
+            && micros.bytes().all(|b| b.is_ascii_digit())
+            && let Some(secs) = canonical_number(secs)
+            && let Ok(micros) = micros.parse()
+        {
+            return Self(Repr::Real { secs, micros });
+        }
+        Self(Repr::Other(intern(text)))
+    }
+
+    /// The timestamp `secs.micros` (`micros` below a million).
+    pub fn from_parts(secs: u64, micros: u32) -> Self {
+        Self(Repr::Real {
+            secs,
+            micros: micros.min(999_999),
+        })
+    }
+
+    /// An optimistic message's timestamp, `local-{counter}`.
+    pub fn local(counter: u64) -> Self {
+        Self(Repr::Local(counter))
     }
 
     /// `text` as a timestamp if it has a real one's shape, digits, a dot,
@@ -42,39 +93,37 @@ impl Ts {
         }
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
+    /// The timestamp as it was written, e.g. for Slack's API or a link.
+    pub fn text(&self) -> TsText {
+        match self.0 {
+            Repr::Real { secs, micros } => TsText::inline(format_args!("{secs}.{micros:06}")),
+            Repr::Local(counter) => TsText::inline(format_args!("local-{counter}")),
+            Repr::Other(index) => TsText(Text::Interned(interned(index))),
+        }
+    }
+
+    /// Whether there is no timestamp at all (the empty text).
+    pub fn is_empty(&self) -> bool {
+        matches!(self.0, Repr::Other(_)) && self.text().is_empty()
     }
 
     pub fn is_local(&self) -> bool {
-        self.0.starts_with("local-")
+        match self.0 {
+            Repr::Local(_) => true,
+            Repr::Real { .. } => false,
+            Repr::Other(index) => interned(index).starts_with("local-"),
+        }
     }
 
     /// What orders timestamps: real ones by time, then local ones by their
     /// counter (so `local-10` comes after `local-9`), then anything
     /// malformed.
     fn key(&self) -> Key {
-        if let Some(counter) = self.0.strip_prefix("local-") {
-            return match counter.parse() {
-                Ok(counter) => Key::Local(counter),
-                Err(_) => Key::Malformed,
-            };
+        match self.0 {
+            Repr::Real { secs, micros } => Key::Real(secs, u64::from(micros)),
+            Repr::Local(counter) => Key::Local(counter),
+            Repr::Other(index) => text_key(interned(index)),
         }
-        let (secs, fraction) = self.0.split_once('.').unwrap_or((&self.0, ""));
-        let Ok(secs) = secs.parse() else {
-            return Key::Malformed;
-        };
-        if !fraction.bytes().all(|b| b.is_ascii_digit()) {
-            return Key::Malformed;
-        }
-        // Slack always writes six digits, but read "1.5" as half a second
-        // rather than five microseconds.
-        let micros = fraction
-            .bytes()
-            .chain(std::iter::repeat(b'0'))
-            .take(6)
-            .fold(0, |micros, digit| micros * 10 + u64::from(digit - b'0'));
-        Key::Real(secs, micros)
     }
 
     /// Seconds since the epoch.
@@ -97,13 +146,219 @@ impl Ts {
             Some(micros) => (secs, micros),
             None => (secs.checked_sub(1)?, 999_999),
         };
-        Some(Ts(format!("{secs}.{micros:06}")))
+        Some(Ts::from_parts(
+            secs,
+            u32::try_from(micros).unwrap_or(999_999),
+        ))
     }
 
     pub fn zoned(&self) -> Option<jiff::Zoned> {
         let ts = jiff::Timestamp::from_second(self.seconds()?).ok()?;
         Some(ts.to_zoned(jiff::tz::TimeZone::system()))
     }
+}
+
+impl std::fmt::Debug for Ts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Ts({:?})", &*self.text())
+    }
+}
+
+impl std::fmt::Display for Ts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text())
+    }
+}
+
+impl serde::Serialize for Ts {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.text())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Ts {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = std::borrow::Cow::<str>::deserialize(deserializer)?;
+        Ok(Ts::new(text))
+    }
+}
+
+impl PartialEq<str> for Ts {
+    fn eq(&self, other: &str) -> bool {
+        *self.text() == *other
+    }
+}
+
+impl PartialEq<&str> for Ts {
+    fn eq(&self, other: &&str) -> bool {
+        *self.text() == **other
+    }
+}
+
+/// A [`Ts`] written out: on the stack for a real or local one (at most 27
+/// bytes), borrowed from the interned texts otherwise. Reads as a `&str`.
+#[derive(Clone, Copy)]
+pub struct TsText(Text);
+
+#[derive(Clone, Copy)]
+enum Text {
+    Inline { bytes: [u8; 28], len: u8 },
+    Interned(&'static str),
+}
+
+impl TsText {
+    fn inline(args: std::fmt::Arguments<'_>) -> Self {
+        struct Buffer {
+            bytes: [u8; 28],
+            len: usize,
+        }
+        impl std::fmt::Write for Buffer {
+            fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                let end = self.len + s.len();
+                self.bytes
+                    .get_mut(self.len..end)
+                    .ok_or(std::fmt::Error)?
+                    .copy_from_slice(s.as_bytes());
+                self.len = end;
+                Ok(())
+            }
+        }
+        let mut buffer = Buffer {
+            bytes: [0; 28],
+            len: 0,
+        };
+        // Twenty digits, a dot and six more fit; nothing longer is made.
+        let _ = std::fmt::write(&mut buffer, args);
+        Self(Text::Inline {
+            bytes: buffer.bytes,
+            len: u8::try_from(buffer.len).unwrap_or(0),
+        })
+    }
+}
+
+impl std::ops::Deref for TsText {
+    type Target = str;
+    fn deref(&self) -> &str {
+        match &self.0 {
+            // Written from ASCII digits and letters only.
+            Text::Inline { bytes, len } => {
+                std::str::from_utf8(&bytes[..usize::from(*len)]).unwrap_or_default()
+            }
+            Text::Interned(text) => text,
+        }
+    }
+}
+
+impl AsRef<str> for TsText {
+    fn as_ref(&self) -> &str {
+        self
+    }
+}
+
+impl std::fmt::Display for TsText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self)
+    }
+}
+
+impl PartialEq<str> for TsText {
+    fn eq(&self, other: &str) -> bool {
+        **self == *other
+    }
+}
+
+impl PartialEq<&str> for TsText {
+    fn eq(&self, other: &&str) -> bool {
+        **self == **other
+    }
+}
+
+impl serde::Serialize for TsText {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self)
+    }
+}
+
+impl std::fmt::Debug for TsText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, f)
+    }
+}
+
+/// A number written as Rust writes it: digits, no sign, no leading zero
+/// (but "0" itself), so that writing it back gives the same text.
+fn canonical_number(text: &str) -> Option<u64> {
+    let fine = !text.is_empty()
+        && text.bytes().all(|b| b.is_ascii_digit())
+        && (text == "0" || !text.starts_with('0'));
+    fine.then(|| text.parse().ok()).flatten()
+}
+
+/// How a timestamp's text orders (see [`Ts::key`]).
+fn text_key(text: &str) -> Key {
+    if let Some(counter) = text.strip_prefix("local-") {
+        return match counter.parse() {
+            Ok(counter) => Key::Local(counter),
+            Err(_) => Key::Malformed,
+        };
+    }
+    let (secs, fraction) = text.split_once('.').unwrap_or((text, ""));
+    let Ok(secs) = secs.parse() else {
+        return Key::Malformed;
+    };
+    if !fraction.bytes().all(|b| b.is_ascii_digit()) {
+        return Key::Malformed;
+    }
+    // Slack always writes six digits, but read "1.5" as half a second
+    // rather than five microseconds.
+    let micros = fraction
+        .bytes()
+        .chain(std::iter::repeat(b'0'))
+        .take(6)
+        .fold(0, |micros, digit| micros * 10 + u64::from(digit - b'0'));
+    Key::Real(secs, micros)
+}
+
+/// The texts of timestamps that are not kept as numbers, each once: rare
+/// (tests, a mangled link, an id of an unexpected shape), and kept for the
+/// life of the process so a [`Ts`] stays `Copy`.
+struct Interned {
+    texts: Vec<&'static str>,
+    places: std::collections::HashMap<&'static str, u32>,
+}
+
+fn interned_texts() -> std::sync::MutexGuard<'static, Interned> {
+    static TEXTS: std::sync::OnceLock<std::sync::Mutex<Interned>> = std::sync::OnceLock::new();
+    TEXTS
+        .get_or_init(|| {
+            std::sync::Mutex::new(Interned {
+                texts: Vec::new(),
+                places: std::collections::HashMap::new(),
+            })
+        })
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn intern(text: &str) -> u32 {
+    let mut interned = interned_texts();
+    if let Some(&place) = interned.places.get(text) {
+        return place;
+    }
+    let place = u32::try_from(interned.texts.len()).unwrap_or(u32::MAX);
+    let text: &'static str = Box::leak(text.to_owned().into_boxed_str());
+    interned.texts.push(text);
+    interned.places.insert(text, place);
+    place
+}
+
+fn interned(place: u32) -> &'static str {
+    let interned = interned_texts();
+    usize::try_from(place)
+        .ok()
+        .and_then(|place| interned.texts.get(place))
+        .copied()
+        .unwrap_or_default()
 }
 
 /// A [`Ts`] taken apart for ordering; the variants sort in this order.
@@ -124,38 +379,18 @@ impl PartialOrd for Ts {
 
 impl Ord for Ts {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Two of Slack's own, written alike (as nearly all are), order as
-        // their text does, without taking either apart.
-        if self.0.len() == other.0.len()
-            && let Some(dot) = plain_dot(&self.0)
-            && plain_dot(&other.0) == Some(dot)
-        {
-            return self.0.cmp(&other.0);
+        match (self.0, other.0) {
+            // Equal numbers are equal texts: these are written one way.
+            (Repr::Real { secs: a, micros: x }, Repr::Real { secs: b, micros: y }) => {
+                (a, x).cmp(&(b, y))
+            }
+            (Repr::Local(a), Repr::Local(b)) => a.cmp(&b),
+            _ => self
+                .key()
+                .cmp(&other.key())
+                .then_with(|| (*self.text()).cmp(&*other.text())),
         }
-        self.key()
-            .cmp(&other.key())
-            .then_with(|| self.0.cmp(&other.0))
     }
-}
-
-/// Where the dot of a plainly written real timestamp is (its length when
-/// it has none): one to 19 digits, which always fit [`Ts::key`]'s seconds,
-/// then perhaps a dot and more digits. Two of the same length with the dot
-/// in the same place order by their text exactly as by [`Ts::key`] and
-/// then their text: digit by digit is number by number at equal widths,
-/// and the microseconds the key reads are the fraction's first digits.
-fn plain_dot(ts: &str) -> Option<usize> {
-    let bytes = ts.as_bytes();
-    let dot = bytes
-        .iter()
-        .position(|&b| !b.is_ascii_digit())
-        .unwrap_or(bytes.len());
-    let fraction = match bytes.get(dot) {
-        None => &[][..],
-        Some(b'.') => &bytes[dot + 1..],
-        Some(_) => return None,
-    };
-    ((1..=19).contains(&dot) && fraction.iter().all(u8::is_ascii_digit)).then_some(dot)
 }
 
 /// The chat service backing a workspace.
@@ -1020,7 +1255,7 @@ impl Menu {
         egui::Id::new((
             "kit-menu",
             channel,
-            ts.as_str(),
+            ts,
             in_thread,
             self.block_id.as_deref(),
             self.action_id.as_deref(),
@@ -1073,7 +1308,7 @@ pub fn menu_use(
     };
     Ok(Press {
         channel: channel.to_owned(),
-        ts: message.ts.clone(),
+        ts: message.ts,
         bot_id,
         block_id,
         action_id,
@@ -1152,7 +1387,7 @@ pub fn button_use<'a>(
     ) {
         Ok((bot_id, block_id, action_id)) => ButtonUse::Press(Press {
             channel: channel.to_owned(),
-            ts: message.ts.clone(),
+            ts: message.ts,
             bot_id,
             block_id,
             action_id,
@@ -1477,7 +1712,7 @@ impl Timeline {
         let (mut fresh, local): (Vec<Message>, Vec<Message>) =
             page.into_iter().partition(|m| !m.ts.is_local());
         // Stable, so copies of one message keep the page's order.
-        fresh.sort_by(|a, b| a.ts.cmp(&b.ts));
+        fresh.sort_by_key(|a| a.ts);
         let mut old = std::mem::take(&mut self.messages).into_iter().peekable();
         let mut merged = Vec::with_capacity(old.len() + fresh.len());
         for message in fresh {
@@ -1514,7 +1749,7 @@ impl Timeline {
             Some(existing) => *existing = message,
             None => self.held.push(message),
         }
-        self.held.sort_by(|a, b| a.ts.cmp(&b.ts));
+        self.held.sort_by_key(|a| a.ts);
         let over = self.held.len().saturating_sub(HELD_LIMIT);
         self.held.drain(..over);
     }
@@ -2098,7 +2333,11 @@ mod tests {
 
     #[test]
     fn the_quick_order_of_timestamps_is_the_parsed_one() {
-        let parsed = |a: &Ts, b: &Ts| a.key().cmp(&b.key()).then_with(|| a.0.cmp(&b.0));
+        let parsed = |a: &Ts, b: &Ts| {
+            a.key()
+                .cmp(&b.key())
+                .then_with(|| (*a.text()).cmp(&*b.text()))
+        };
         let tricky = [
             "1700000000.000100",
             "1700000000.000200",
@@ -2159,6 +2398,45 @@ mod tests {
     }
 
     #[test]
+    fn timestamps_read_back_exactly_as_given() {
+        for text in [
+            "1700000000.123456",
+            "0.000000",
+            "18446744073709551615.999999",
+            "local-0",
+            "local-12",
+            "1.0",
+            "1700000000.1234567",
+            "01.000000",
+            "local-007",
+            "garbage",
+            "",
+        ] {
+            let ts = Ts::new(text);
+            assert_eq!(*ts.text(), *text, "{text}");
+            assert_eq!(ts.to_string(), text);
+            let json = serde_json::to_string(&ts).expect("serializes");
+            assert_eq!(serde_json::from_str::<Ts>(&json).expect("reads back"), ts);
+        }
+        // Slack's own are kept as numbers, and equal numbers are one value.
+        assert_eq!(
+            Ts::new("1700000000.000100"),
+            Ts::from_parts(1_700_000_000, 100)
+        );
+        assert_eq!(Ts::new("local-3"), Ts::local(3));
+        assert!(Ts::new("local-3").is_local() && Ts::new("local-x").is_local());
+        assert!(Ts::default().is_empty() && !Ts::new("1.0").is_empty());
+    }
+
+    #[test]
+    fn a_timestamp_is_small_and_copied() {
+        fn copied<T: Copy>() {}
+        copied::<Ts>();
+        assert_eq!(std::mem::size_of::<Ts>(), 16);
+        assert_eq!(std::mem::size_of::<Option<Ts>>(), 16);
+    }
+
+    #[test]
     fn timestamps_order_numerically() {
         assert!(Ts::new("1700000000.000200") > Ts::new("1700000000.000100"));
         assert!(Ts::new("1700000001.000000") > Ts::new("999999999.999999"));
@@ -2189,7 +2467,7 @@ mod tests {
             Ts::new("1.0"),
         ];
         sorted.sort();
-        let order: Vec<&str> = sorted.iter().map(Ts::as_str).collect();
+        let order: Vec<String> = sorted.iter().map(Ts::to_string).collect();
         assert_eq!(order, ["1.0", "2.0", "local-9", "local-10", "bad"]);
     }
 
@@ -2216,7 +2494,7 @@ mod tests {
         timeline.upsert(message("local-1"));
         timeline.upsert(message("1.0"));
         timeline.upsert(message("3.0"));
-        let order: Vec<_> = timeline.messages.iter().map(|m| m.ts.as_str()).collect();
+        let order: Vec<_> = timeline.messages.iter().map(|m| m.ts.text()).collect();
         assert_eq!(order, ["1.0", "2.0", "3.0", "local-1"]);
         assert_eq!(timeline.newest(), Some(&Ts::new("3.0")));
     }
@@ -2269,7 +2547,7 @@ mod tests {
 
     #[test]
     fn just_before_is_one_microsecond_earlier() {
-        let before = |ts: &str| Ts::new(ts).just_before().map(|t| t.0);
+        let before = |ts: &str| Ts::new(ts).just_before().map(|t| t.to_string());
         assert_eq!(
             before("1700000000.000100").as_deref(),
             Some("1700000000.000099")

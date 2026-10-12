@@ -204,7 +204,7 @@ impl Command {
             Self::Save { channel, ts, save } => Event::Failed {
                 what: Doing::Save {
                     channel: channel.clone(),
-                    ts: ts.clone(),
+                    ts: *ts,
                     save: *save,
                 },
                 error,
@@ -234,7 +234,7 @@ impl Command {
             } => Event::Failed {
                 what: Doing::Follow {
                     channel: channel.clone(),
-                    thread: thread.clone(),
+                    thread: *thread,
                     follow: *follow,
                 },
                 error,
@@ -366,7 +366,7 @@ impl Followed {
             return;
         }
         self.replies.push(reply.clone());
-        self.replies.sort_by(|a, b| a.ts.cmp(&b.ts));
+        self.replies.sort_by_key(|a| a.ts);
         let extra = self.replies.len().saturating_sub(THREAD_REPLIES);
         self.replies.drain(..extra);
         self.parent.reply_count += 1;
@@ -407,8 +407,8 @@ pub fn follow_request(
         method,
         vec![
             ("channel", channel.to_owned()),
-            ("thread_ts", thread.as_str().to_owned()),
-            ("last_read", last_read.as_str().to_owned()),
+            ("thread_ts", thread.to_string()),
+            ("last_read", last_read.to_string()),
         ],
     )
 }
@@ -428,7 +428,7 @@ pub fn show_followed(app: &mut App, team: &str, channel: &str, thread: &Ts, foll
     let parent = workspace.find_message(channel, thread).cloned();
     let replies: Vec<Message> = workspace
         .threads
-        .get(&(channel.to_owned(), thread.clone()))
+        .get(&(channel.to_owned(), *thread))
         .map(|t| {
             t.messages
                 .iter()
@@ -644,9 +644,9 @@ pub fn merge_activity<'a>(fetched: &'a [Activity], live: &'a [Activity]) -> Vec<
     let mut out: Vec<&Activity> = fetched
         .iter()
         .chain(live.iter().rev())
-        .filter(|a| seen.insert((a.channel.clone(), a.message.ts.clone())))
+        .filter(|a| seen.insert((a.channel.clone(), a.message.ts)))
         .collect();
-    out.sort_by(|a, b| b.message.ts.cmp(&a.message.ts));
+    out.sort_by_key(|a| std::cmp::Reverse(a.message.ts));
     out
 }
 
@@ -680,7 +680,7 @@ pub fn live_reason(workspace: &WorkspaceState, channel: &str, message: &Message)
     let started = workspace.find_message(channel, parent).is_some_and(&mine);
     let replied = workspace
         .threads
-        .get(&(channel.to_owned(), parent.clone()))
+        .get(&(channel.to_owned(), *parent))
         .is_some_and(|t| t.messages.iter().any(mine));
     (started || replied).then_some(Reason::Reply)
 }
@@ -961,9 +961,9 @@ pub fn apply(app: &mut App, action: Action) {
             // Followed from here, read up to its newest reply known here.
             let last_read = workspace
                 .threads
-                .get(&(channel.clone(), thread.clone()))
+                .get(&(channel.clone(), thread))
                 .and_then(|t| t.messages.iter().rev().find(|m| !m.ts.is_local()))
-                .map_or_else(|| thread.clone(), |m| m.ts.clone());
+                .map_or_else(|| thread, |m| m.ts);
             show_followed(app, &team, &channel, &thread, follow);
             send(
                 app,
@@ -988,7 +988,7 @@ pub fn apply(app: &mut App, action: Action) {
                         .iter_mut()
                         .find(|t| t.channel == channel && t.parent.ts == ts)?;
                     let unread = std::mem::take(&mut thread.unread);
-                    (unread > 0).then(|| thread.latest().clone())
+                    (unread > 0).then(|| *thread.latest())
                 });
             if let Some(newest) = newest {
                 send(
@@ -996,7 +996,7 @@ pub fn apply(app: &mut App, action: Action) {
                     &team,
                     Command::ReadThread {
                         channel: channel.clone(),
-                        thread: ts.clone(),
+                        thread: ts,
                         ts: newest,
                     },
                 );
@@ -1210,7 +1210,7 @@ fn scheduled(
 /// saved list when it is loaded (a message saved that is not loaded here
 /// joins the list when it is next read).
 pub fn saved(views: &mut TeamViews, channel: &str, ts: &Ts, save: bool, message: Option<Message>) {
-    let key = (channel.to_owned(), ts.clone());
+    let key = (channel.to_owned(), *ts);
     let keys = std::sync::Arc::make_mut(&mut views.saved_keys);
     if save {
         keys.insert(key);
@@ -1239,7 +1239,7 @@ fn load_unread(app: &mut App, team: &str, channel: &str) {
         .iter()
         .find(|w| w.info.team_id == team)
         .and_then(|w| w.conversation(channel))
-        .map(|c| c.last_read.clone())
+        .map(|c| c.last_read)
     else {
         return;
     };
@@ -1402,7 +1402,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                 views.starred = starred;
                 views.saved_keys = std::sync::Arc::new(
                     list.iter()
-                        .map(|s| (s.channel.clone(), s.message.ts.clone()))
+                        .map(|s| (s.channel.clone(), s.message.ts))
                         .collect(),
                 );
             }
@@ -1570,11 +1570,14 @@ mod tests {
         let fetched = [item("C1", "1.0", "slack"), item("C1", "3.0", "slack")];
         let live = [item("C1", "3.0", "live"), item("C2", "2.0", "live")];
         let merged = merge_activity(&fetched, &live);
-        let order: Vec<(&str, &str)> = merged
+        let order: Vec<(&str, String)> = merged
             .iter()
-            .map(|a| (a.channel.as_str(), a.message.ts.as_str()))
+            .map(|a| (a.channel.as_str(), a.message.ts.to_string()))
             .collect();
-        assert_eq!(order, [("C1", "3.0"), ("C2", "2.0"), ("C1", "1.0")]);
+        assert_eq!(
+            order,
+            [("C1", "3.0"), ("C2", "2.0"), ("C1", "1.0")].map(|(c, t)| (c, t.to_owned()))
+        );
         assert_eq!(merged[0].message.text, "slack", "Slack's copy wins");
     }
 
@@ -1707,7 +1710,7 @@ mod tests {
             thread.add_reply(&reply, "U0");
             thread.add_reply(&reply, "U0");
         }
-        let kept: Vec<&str> = thread.replies.iter().map(|m| m.ts.as_str()).collect();
+        let kept: Vec<String> = thread.replies.iter().map(|m| m.ts.to_string()).collect();
         assert_eq!(kept, ["3.0", "4.0", "5.0"], "the newest few, oldest first");
         assert_eq!(
             thread.unread, 3,

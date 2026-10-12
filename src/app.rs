@@ -704,7 +704,7 @@ impl App {
     /// The key a draft is stored under.
     pub fn draft_key(team: &str, channel: &str, thread: Option<&Ts>) -> String {
         match thread {
-            Some(ts) => format!("{team}/{channel}/{}", ts.as_str()),
+            Some(ts) => format!("{team}/{channel}/{}", ts.text()),
             None => format!("{team}/{channel}"),
         }
     }
@@ -960,7 +960,7 @@ impl App {
         let Some(conversation) = workspace.conversation_mut(channel) else {
             return;
         };
-        let Some(latest) = newest.or_else(|| conversation.latest.clone()) else {
+        let Some(latest) = newest.or(conversation.latest) else {
             return;
         };
         conversation.mentions = 0;
@@ -972,7 +972,7 @@ impl App {
         {
             return;
         }
-        conversation.last_read = Some(latest.clone());
+        conversation.last_read = Some(latest);
         self.pending_marks
             .insert((team.to_owned(), channel.to_owned()), latest);
     }
@@ -992,7 +992,7 @@ impl App {
         };
         // Replaces a read mark not sent yet, which would undo this one.
         self.pending_marks
-            .insert((team.clone(), channel.to_owned()), marker.clone());
+            .insert((team.clone(), channel.to_owned()), marker);
         if self.active_workspace().and_then(|w| w.active.as_deref()) == Some(channel) {
             self.read_line = Some(ReadLine {
                 list: format!("{team}/{channel}"),
@@ -1061,8 +1061,8 @@ impl App {
         let latest = self
             .workspace_mut(&team)
             .and_then(|w| w.conversation(&channel))
-            .and_then(|c| c.latest.clone())
-            .map_or_else(|| "0".to_owned(), |ts| ts.0);
+            .and_then(|c| c.latest)
+            .map_or_else(|| "0".to_owned(), |ts| ts.to_string());
         self.settings
             .closed
             .entry(team.clone())
@@ -1125,7 +1125,7 @@ impl App {
             .find(|w| w.info.team_id == team)
             .and_then(|w| w.conversation(channel))
             .filter(|c| c.has_unread())
-            .and_then(|c| c.last_read.clone());
+            .and_then(|c| c.last_read);
         self.read_line = Some(ReadLine {
             list: format!("{team}/{channel}"),
             read,
@@ -1532,12 +1532,12 @@ impl App {
         let Some(team) = self.active_team() else {
             return;
         };
-        self.thread = Some((channel.clone(), ts.clone()));
+        self.thread = Some((channel.clone(), ts));
         self.focus_thread_composer = true;
         if let Some(workspace) = self.workspace_mut(&team) {
             workspace
                 .threads
-                .entry((channel.clone(), ts.clone()))
+                .entry((channel.clone(), ts))
                 .or_default()
                 .loading = true;
         }
@@ -1628,7 +1628,7 @@ impl App {
             .read_line
             .as_ref()
             .filter(|line| line.list == list)
-            .and_then(|line| line.read.clone())
+            .and_then(|line| line.read)
         else {
             return;
         };
@@ -1692,7 +1692,7 @@ impl App {
         let reply = thread.filter(|parent| *parent != ts);
         // What the conversation's own list shows: the message, or for a
         // reply its parent.
-        let anchor = reply.clone().unwrap_or_else(|| ts.clone());
+        let anchor = reply.unwrap_or(ts);
         let opening = self.active_workspace().and_then(|w| w.active.as_deref()) != Some(channel);
         if opening {
             if let Some(workspace) = self.workspace_mut(team) {
@@ -1723,11 +1723,11 @@ impl App {
             // What is there stays until the stretch around this message
             // replaces it; meanwhile no newest page is asked for.
             timeline.loading = true;
-            timeline.around = Some(anchor.clone());
+            timeline.around = Some(anchor);
             self.backend.send(Command::LoadAround {
                 team: team.to_owned(),
                 channel: channel.to_owned(),
-                ts: anchor.clone(),
+                ts: anchor,
             });
         }
         self.backend.send(Command::Focus {
@@ -1869,7 +1869,7 @@ impl App {
                 ts,
                 thread,
             } if known(channel) => {
-                self.jump_to(&team, channel, ts.clone(), thread.clone());
+                self.jump_to(&team, channel, *ts, *thread);
             }
             Target::User(user) => {
                 if self.active_team().as_deref() != Some(team.as_str()) {
@@ -2019,7 +2019,7 @@ impl App {
         let lightbox = match thread {
             Some(parent) => workspace
                 .threads
-                .get(&(channel.to_owned(), parent.clone()))
+                .get(&(channel.to_owned(), *parent))
                 .and_then(|t| crate::lightbox::open(team, &t.messages, ts, file)),
             None => workspace.timelines.get(channel).and_then(|t| {
                 let listed = t.messages.iter().filter(|m| m.in_channel());

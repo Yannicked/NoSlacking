@@ -89,7 +89,7 @@ pub fn keys(app: &mut App, ctx: &egui::Context) {
         match step(&list, index, down) {
             Some(after) => {
                 next = Some(Selected {
-                    ts: after.ts.clone(),
+                    ts: after.ts,
                     reveal: true,
                     ..selected.clone()
                 });
@@ -175,7 +175,7 @@ fn start(app: &mut App, ctx: &egui::Context, focused: Option<egui::Id>) {
     };
     let selected = Selected {
         channel: channel.to_owned(),
-        ts: last.ts.clone(),
+        ts: last.ts,
         in_thread,
         reveal: true,
     };
@@ -195,7 +195,7 @@ fn panel<'a>(
     let selectable = |m: &&Message| m.delivery == Delivery::Sent && !m.is_system();
     if in_thread {
         let (channel, ts) = app.thread.as_ref()?;
-        let replies = workspace.threads.get(&(channel.clone(), ts.clone()));
+        let replies = workspace.threads.get(&(channel.clone(), *ts));
         let parent = replies
             .and_then(|t| t.messages.iter().find(|m| m.ts == *ts))
             .or_else(|| {

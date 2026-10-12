@@ -77,8 +77,8 @@ pub async fn run(client: Client, team: String, command: Command, sink: Sink) {
                         "subscriptions.thread.mark",
                         &[
                             ("channel", channel),
-                            ("thread_ts", thread.0),
-                            ("ts", ts.0),
+                            ("thread_ts", thread.to_string()),
+                            ("ts", ts.to_string()),
                             ("read", "1".to_owned()),
                         ],
                     )
@@ -298,7 +298,7 @@ fn schedule_params(
     with_text(&mut params, text.to_owned());
     params.push(("post_at", post_at.to_string()));
     if let Some(thread) = thread {
-        params.push(("thread_ts", thread.0.clone()));
+        params.push(("thread_ts", thread.to_string()));
     }
     params
 }
@@ -462,7 +462,7 @@ async fn keep(client: &Client, channel: &str, ts: &Ts, save: bool) -> Result<(),
                 &[
                     ("item_type", "message".to_owned()),
                     ("item_id", channel.to_owned()),
-                    ("ts", ts.0.clone()),
+                    ("ts", ts.to_string()),
                 ],
             )
             .await;
@@ -476,7 +476,10 @@ async fn keep(client: &Client, channel: &str, ts: &Ts, save: bool) -> Result<(),
     let result = client
         .act::<serde_json::Value>(
             method,
-            &[("channel", channel.to_owned()), ("timestamp", ts.0.clone())],
+            &[
+                ("channel", channel.to_owned()),
+                ("timestamp", ts.to_string()),
+            ],
         )
         .await;
     done_if(result, &["already_starred", "not_starred"])
@@ -556,7 +559,7 @@ fn viewed_threads(view: ThreadView) -> Vec<Followed> {
                 .filter_map(|r| r.message.into_model())
                 .filter(|m| m.ts != parent.ts)
                 .collect();
-            replies.sort_by(|a, b| a.ts.cmp(&b.ts));
+            replies.sort_by_key(|a| a.ts);
             let unread = unread_count(
                 thread.unread_replies.len(),
                 last_read.as_ref(),
@@ -597,7 +600,7 @@ fn replied_thread(
     if replies.is_empty() {
         return None;
     }
-    replies.sort_by(|a, b| a.ts.cmp(&b.ts));
+    replies.sort_by_key(|a| a.ts);
     let mine = |m: &Message| m.user.as_deref() == Some(me);
     let last_mine = replies
         .iter()
@@ -664,7 +667,7 @@ async fn threads(client: &Client, me: &str) -> Result<(Vec<Followed>, bool), Sla
     let read = futures_util::future::join_all(found.iter().map(|(channel, parent)| async move {
         let params = [
             ("channel", channel.clone()),
-            ("ts", parent.0.clone()),
+            ("ts", parent.to_string()),
             ("limit", THREAD_PAGE.to_string()),
         ];
         match client
@@ -715,7 +718,7 @@ fn unread_page(page: types::HistoryPage, after: Option<&Ts>) -> (Vec<Message>, b
         .filter_map(types::Message::into_model)
         .filter(|m| after.is_none_or(|after| m.ts > *after))
         .collect();
-    messages.sort_by(|a, b| a.ts.cmp(&b.ts));
+    messages.sort_by_key(|a| a.ts);
     (messages, page.has_more)
 }
 
@@ -920,10 +923,10 @@ async fn feed(client: &Client) -> Result<Vec<Activity>, SlackError> {
 async fn fill(client: &Client, reference: Reference) -> Option<Activity> {
     let message = match &reference.text {
         Some(text) => views::bare_message(
-            reference.ts.clone(),
+            reference.ts,
             reference.user.clone(),
             text.clone(),
-            reference.thread.clone(),
+            reference.thread,
         ),
         None => match fetch_message(client, &reference.channel, &reference.ts).await {
             Ok(Some(message)) => message,
@@ -953,20 +956,20 @@ pub async fn fetch_message(
     let around = |method: &'static str| {
         let mut params = vec![
             ("channel", channel.to_owned()),
-            ("oldest", ts.0.clone()),
-            ("latest", ts.0.clone()),
+            ("oldest", ts.to_string()),
+            ("latest", ts.to_string()),
             ("inclusive", "true".to_owned()),
             ("limit", "1".to_owned()),
         ];
         if method == "conversations.replies" {
-            params.push(("ts", ts.0.clone()));
+            params.push(("ts", ts.to_string()));
         }
         async move { client.call::<types::HistoryPage>(method, &params).await }
     };
     let pick = |page: types::HistoryPage| {
         page.messages
             .into_iter()
-            .filter(|m| m.ts == ts.0)
+            .filter(|m| m.ts == ts.to_string())
             .find_map(types::Message::into_model)
     };
     match around("conversations.replies").await {

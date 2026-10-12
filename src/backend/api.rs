@@ -200,14 +200,14 @@ impl HistoryQuery {
 
     /// Reads back from `ts`, which is included.
     pub fn up_to(mut self, ts: &Ts) -> Self {
-        self.latest = Some(ts.clone());
+        self.latest = Some(*ts);
         self
     }
 
     /// Reads on from `ts`. `inclusive` is sent when given; left out,
     /// Slack's default leaves `ts` itself out.
     pub fn after(mut self, ts: &Ts, inclusive: Option<bool>) -> Self {
-        self.oldest = Some((ts.clone(), inclusive));
+        self.oldest = Some((*ts, inclusive));
         self
     }
 
@@ -227,11 +227,11 @@ impl HistoryQuery {
             params.push(("include_all_metadata", "false".to_owned()));
         }
         if let Some(latest) = &self.latest {
-            params.push(("latest", latest.0.clone()));
+            params.push(("latest", latest.to_string()));
             params.push(("inclusive", "true".to_owned()));
         }
         if let Some((oldest, inclusive)) = &self.oldest {
-            params.push(("oldest", oldest.0.clone()));
+            params.push(("oldest", oldest.to_string()));
             if let Some(inclusive) = inclusive {
                 params.push(("inclusive", inclusive.to_string()));
             }

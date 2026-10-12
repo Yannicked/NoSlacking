@@ -88,13 +88,13 @@ const PLACEHOLDER: f32 = 30.0;
 /// The id of a message's row, which holds keyboard focus while the message
 /// is selected.
 pub fn row_id(channel: &str, ts: &crate::model::Ts, in_thread: bool) -> egui::Id {
-    egui::Id::new(("message-row", channel, ts.as_str(), in_thread))
+    egui::Id::new(("message-row", channel, ts, in_thread))
 }
 
 /// The id of a message's "More" menu, which keeps its toolbar up while it
 /// is open.
 pub fn more_id(channel: &str, ts: &crate::model::Ts, in_thread: bool) -> egui::Id {
-    egui::Id::new(("message-more", channel, ts.as_str(), in_thread))
+    egui::Id::new(("message-more", channel, ts, in_thread))
 }
 
 /// A message's text as plain words, with people and channels by name, for
@@ -558,7 +558,7 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
         {
             actions.push(Action::OpenThread {
                 channel: row.channel.to_owned(),
-                ts: parent.clone(),
+                ts: *parent,
             });
         }
     }
@@ -585,7 +585,7 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
             {
                 actions.push(Action::Retry {
                     channel: row.channel.to_owned(),
-                    local: message.ts.clone(),
+                    local: message.ts,
                 });
             }
             if ui
@@ -601,7 +601,7 @@ fn body(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut Vec<A
             {
                 actions.push(Action::Delete {
                     channel: row.channel.to_owned(),
-                    ts: message.ts.clone(),
+                    ts: message.ts,
                 });
             }
         });
@@ -616,7 +616,7 @@ pub fn edit_id(ctx: &egui::Context, editing: &Editing) -> egui::Id {
         "edit",
         ctx.viewport_id(),
         editing.channel.as_str(),
-        editing.ts.as_str(),
+        editing.ts,
         editing.in_thread,
     ))
 }
@@ -677,7 +677,7 @@ fn edit(
         } else if save || save_clicked {
             actions.push(Action::Edit {
                 channel: current.channel.clone(),
-                ts: current.ts.clone(),
+                ts: current.ts,
                 text: current.text.clone(),
             });
         }
@@ -781,7 +781,7 @@ fn reactions(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
             if reacts && response.clicked() {
                 actions.push(Action::React {
                     channel: row.channel.to_owned(),
-                    ts: message.ts.clone(),
+                    ts: message.ts,
                     name: reaction.name.clone(),
                 });
             }
@@ -808,7 +808,7 @@ fn reactions(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
         if add.clicked() {
             actions.push(Action::PickReaction {
                 channel: row.channel.to_owned(),
-                ts: message.ts.clone(),
+                ts: message.ts,
             });
         }
     });
@@ -865,7 +865,7 @@ fn thread_summary(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: 
     if response.clicked() {
         actions.push(Action::OpenThread {
             channel: row.channel.to_owned(),
-            ts: message.ts.clone(),
+            ts: message.ts,
         });
     }
 }

@@ -167,7 +167,7 @@ pub fn picture(team: &str, ts: &Ts, file: &File) -> Option<Picture> {
         download: file.download_url.clone().or(file.url_private.clone()),
         permalink: file.permalink.clone(),
         source: Some(Origin {
-            ts: ts.clone(),
+            ts: *ts,
             file: file.id.clone(),
         }),
     })

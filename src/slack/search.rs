@@ -118,10 +118,10 @@ impl MessagesAnswer {
                 let ts = Ts::new(m.ts);
                 let thread = thread_of(m.permalink.as_deref()).filter(|parent| *parent != ts);
                 Hit {
-                    key: format!("{}/{}", m.channel.id, ts.as_str()),
+                    key: format!("{}/{}", m.channel.id, ts.text()),
                     channel: Some(m.channel.id),
                     channel_name: m.channel.name,
-                    ts: Some(ts.clone()),
+                    ts: Some(ts),
                     thread,
                     when: Some(ts),
                     user: m.user.filter(|u| !u.is_empty()),

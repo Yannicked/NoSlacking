@@ -81,7 +81,7 @@ impl Worker {
 
     /// Message `ts` by itself, to quote; always answered.
     pub(super) fn fetch_quote(&self, team: String, channel: String, ts: Ts, thread: Option<Ts>) {
-        let (to, at) = (channel.clone(), ts.clone());
+        let (to, at) = (channel.clone(), ts);
         self.spawn_slack(
             team,
             Otherwise::Answer(Box::new(move |team, error| Event::Quoted {
@@ -249,7 +249,7 @@ impl Worker {
                 Doing::MarkRead,
                 Call::new(
                     "conversations.mark",
-                    vec![("channel", channel), ("ts", ts.0)],
+                    vec![("channel", channel), ("ts", ts.to_string())],
                     &["not_in_channel", "channel_not_found"],
                 ),
             ),
@@ -300,7 +300,7 @@ async fn post(client: Client, outgoing: Outgoing, sink: Sink) {
                 .message
                 .and_then(types::Message::into_model)
                 .ok_or(Failure::NoMessage)?;
-            if message.ts.as_str().is_empty() {
+            if message.ts.text().is_empty() {
                 message.ts = Ts::new(posted.ts);
             }
             Ok(message)
@@ -336,7 +336,7 @@ fn post_params(
         params.push(("unfurl_links", "true".into()));
     }
     if let Some(thread) = thread {
-        params.push(("thread_ts", thread.0.clone()));
+        params.push(("thread_ts", thread.to_string()));
         if broadcast {
             params.push(("reply_broadcast", "true".into()));
         }
@@ -350,13 +350,13 @@ fn request(channel: &str, change: &Change) -> Call {
     let channel = ("channel", channel.to_owned());
     match change {
         Change::Edit { ts, text, .. } => {
-            let mut params = vec![channel, ("ts", ts.0.clone())];
+            let mut params = vec![channel, ("ts", ts.to_string())];
             with_text(&mut params, text.clone());
             Call::new("chat.update", params, &[])
         }
         Change::Delete { ts, .. } => Call::new(
             "chat.delete",
-            vec![channel, ("ts", ts.0.clone())],
+            vec![channel, ("ts", ts.to_string())],
             &["message_not_found"],
         ),
         Change::React { ts, name, added } => Call::new(
@@ -365,7 +365,11 @@ fn request(channel: &str, change: &Change) -> Call {
             } else {
                 "reactions.remove"
             },
-            vec![channel, ("timestamp", ts.0.clone()), ("name", name.clone())],
+            vec![
+                channel,
+                ("timestamp", ts.to_string()),
+                ("name", name.clone()),
+            ],
             &["already_reacted", "no_reaction"],
         ),
     }

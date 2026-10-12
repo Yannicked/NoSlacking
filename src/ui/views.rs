@@ -39,7 +39,7 @@ pub fn saved_id() -> egui::Id {
 /// Whether a message is saved for later, as far as is known.
 pub fn is_saved(ui: &egui::Ui, channel: &str, ts: &Ts) -> bool {
     ui.data(|d| d.get_temp::<std::sync::Arc<std::collections::HashSet<(String, Ts)>>>(saved_id()))
-        .is_some_and(|saved| saved.contains(&(channel.to_owned(), ts.clone())))
+        .is_some_and(|saved| saved.contains(&(channel.to_owned(), *ts)))
 }
 
 /// What a view's sidebar row counts: unread activity, unread
@@ -385,8 +385,8 @@ pub fn when(ts: &Ts) -> String {
 pub fn jump(channel: &str, message: &Message) -> Action {
     Action::JumpTo {
         channel: channel.to_owned(),
-        ts: message.ts.clone(),
-        thread: message.thread_ts.clone().filter(|_| message.is_reply()),
+        ts: message.ts,
+        thread: message.thread_ts.filter(|_| message.is_reply()),
     }
 }
 
@@ -608,12 +608,7 @@ fn activity(
         }
         return;
     }
-    let spec = |a: &&Activity| {
-        (
-            key((&a.channel, a.message.ts.as_str())),
-            card_guess(&a.message),
-        )
-    };
+    let spec = |a: &&Activity| (key((&a.channel, a.message.ts)), card_guess(&a.message));
     list(ui, "activity", &items, spec, |ui, index| {
         let item = items[index];
         let above = item.reason.label(&place(workspace, &item.channel));
@@ -707,7 +702,7 @@ fn unreads(
     let spec = |row: &UnreadRow| match *row {
         UnreadRow::Head(c) => (key(("head", &conversations[c].id)), 52.0),
         UnreadRow::Message(c, m) => (
-            key((&conversations[c].id, messages(c)[m].ts.as_str())),
+            key((&conversations[c].id, messages(c)[m].ts)),
             card_guess(&messages(c)[m]) - 20.0,
         ),
         UnreadRow::Status(c) => (key(("status", &conversations[c].id)), 34.0),
@@ -896,7 +891,7 @@ fn threads(
         rows.extend((0..thread.replies.len()).map(|r| ThreadRow::Reply(index, r)));
         rows.push(ThreadRow::Foot(index));
     }
-    let thread_key = |t: &crate::views::Followed| (t.channel.clone(), t.parent.ts.0.clone());
+    let thread_key = |t: &crate::views::Followed| (t.channel.clone(), t.parent.ts.to_string());
     let spec = |row: &ThreadRow| match *row {
         ThreadRow::Head(i) => (key(("head", thread_key(&threads[i]))), 52.0),
         ThreadRow::Parent(i) => (
@@ -904,7 +899,7 @@ fn threads(
             card_guess(&threads[i].parent) - 20.0,
         ),
         ThreadRow::Reply(i, r) => (
-            key(("reply", threads[i].replies[r].ts.as_str())),
+            key(("reply", threads[i].replies[r].ts)),
             card_guess(&threads[i].replies[r]) - 20.0,
         ),
         ThreadRow::Foot(i) => (key(("foot", thread_key(&threads[i]))), 36.0),
@@ -912,7 +907,7 @@ fn threads(
     let open = |thread: &crate::views::Followed| {
         Action::Views(Views::OpenThread {
             channel: thread.channel.clone(),
-            ts: thread.parent.ts.clone(),
+            ts: thread.parent.ts,
         })
     };
     list(ui, "threads", &rows, spec, |ui, index| {
@@ -1063,7 +1058,7 @@ fn later(
     let spec = |row: &LaterRow| match *row {
         LaterRow::Heading(first) => (key(("heading", first)), 40.0),
         LaterRow::Saved(i) => (
-            key((&saved[i].channel, saved[i].message.ts.as_str())),
+            key((&saved[i].channel, saved[i].message.ts)),
             card_guess(&saved[i].message),
         ),
         LaterRow::Reminder(i) => (key(("reminder", &reminders[i].id)), 56.0),
@@ -1128,7 +1123,7 @@ fn later(
                     {
                         actions.push(Action::Views(Views::Save {
                             channel: item.channel.clone(),
-                            ts: item.message.ts.clone(),
+                            ts: item.message.ts,
                             save: false,
                         }));
                     }

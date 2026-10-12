@@ -75,7 +75,7 @@ pub(super) fn press_params(press: &Press, now_ms: u64) -> Vec<(&'static str, Str
     }
     let container = json!({
         "type": "message",
-        "message_ts": press.ts.as_str(),
+        "message_ts": press.ts.text(),
         "channel_id": press.channel,
         "is_ephemeral": false,
     });

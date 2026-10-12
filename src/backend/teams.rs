@@ -642,9 +642,9 @@ fn send_thread(
         .filter_map(translate_message)
         .filter(|m| m.ts == post || m.thread_ts.as_ref() == Some(&post))
         .collect();
-    messages.sort_by(|a, b| a.ts.cmp(&b.ts));
+    messages.sort_by_key(|a| a.ts);
     for message in &mut messages {
-        message.thread_ts = Some(post.clone());
+        message.thread_ts = Some(post);
     }
     crate::backend::teams_translate::thread_posts(&mut messages);
     name_the_rest(client, &team, &messages, &named, sink);

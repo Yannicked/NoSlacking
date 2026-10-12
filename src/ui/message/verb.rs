@@ -61,12 +61,12 @@ impl Verb {
     /// What doing it to `subject` asks for.
     pub fn action(self, subject: &Subject<'_>) -> Action {
         let channel = subject.channel.to_owned();
-        let ts = subject.message.ts.clone();
+        let ts = subject.message.ts;
         match self {
             Self::React => Action::PickReaction { channel, ts },
             Self::Reply => Action::OpenThread {
                 channel,
-                ts: subject.message.thread_root().clone(),
+                ts: *subject.message.thread_root(),
             },
             Self::Copy => Action::Copy(super::plain_text(subject.workspace, subject.message)),
             Self::Edit => Action::StartEdit {
@@ -79,7 +79,7 @@ impl Verb {
             Self::Share => Action::Share {
                 channel,
                 ts,
-                thread: subject.message.thread_ts.clone(),
+                thread: subject.message.thread_ts,
             },
         }
     }

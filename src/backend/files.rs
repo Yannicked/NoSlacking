@@ -114,7 +114,7 @@ pub(super) async fn upload(
         sent: 0,
         total: size,
     });
-    let thread = thread.as_ref().map(Ts::as_str);
+    let thread = thread.as_ref().map(Ts::text);
     let progress = {
         let sink = sink.clone();
         // Told only at each further hundredth, so a big file does not
@@ -148,7 +148,7 @@ pub(super) async fn upload(
     match client
         .upload(
             &channel,
-            thread,
+            thread.as_deref(),
             crate::slack::client::Outgoing {
                 file,
                 length: size,

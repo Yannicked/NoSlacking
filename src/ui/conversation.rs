@@ -409,7 +409,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, team: &str, channel: &str) {
     let read_line: Option<Ts> = read_line
         .as_ref()
         .filter(|line| line.list == scroll_key)
-        .and_then(|line| line.read.clone());
+        .and_then(|line| line.read);
     // Only the rows in and near the view are laid out; the rest are
     // placed by the heights they were last drawn at.
     let heights_id = egui::Id::new(("row-heights", &scroll_key, window));
@@ -663,7 +663,7 @@ impl Item<'_> {
                 new_day,
                 unread,
             } => rows::Entry {
-                key: egui::Id::new(message.ts.as_str()).value(),
+                key: egui::Id::new(message.ts).value(),
                 guess: message::guess_height(message, *lead, look)
                     + if *new_day { DAY_SEPARATOR } else { 0.0 }
                     + if *unread { NEW_LINE } else { 0.0 },

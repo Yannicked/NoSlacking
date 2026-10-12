@@ -1698,7 +1698,7 @@ mod tests {
                 Event::Settled { change: Change::Delete { .. }, result: Err(_), .. },
                 Event::HistoryFailed { .. },
                 Event::HistoryFailed { .. },
-            ] if local.as_str() == "local-1"),
+            ] if local.text() == "local-1"),
             "{events:?}"
         );
     }

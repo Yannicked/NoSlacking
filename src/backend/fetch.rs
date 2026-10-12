@@ -765,7 +765,7 @@ pub(super) async fn thread(client: Client, team: String, channel: String, ts: Ts
             let params = with_cursor(
                 vec![
                     ("channel", channel.clone()),
-                    ("ts", ts.0.clone()),
+                    ("ts", ts.to_string()),
                     ("limit", "200".to_owned()),
                 ],
                 cursor,

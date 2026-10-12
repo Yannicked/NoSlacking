@@ -55,10 +55,10 @@ pub fn permalink(domain: &str, channel: &str, ts: &Ts, thread: Option<&Ts>) -> O
     if domain.is_empty() || ts.is_local() || ts.seconds().is_none() {
         return None;
     }
-    let digits: String = ts.as_str().chars().filter(char::is_ascii_digit).collect();
+    let digits: String = ts.text().chars().filter(char::is_ascii_digit).collect();
     let mut link = format!("https://{domain}.slack.com/archives/{channel}/p{digits}");
     if let Some(parent) = thread.filter(|parent| *parent != ts) {
-        link.push_str(&format!("?thread_ts={}&cid={channel}", parent.as_str()));
+        link.push_str(&format!("?thread_ts={}&cid={channel}", parent.text()));
     }
     Some(link)
 }

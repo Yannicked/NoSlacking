@@ -467,7 +467,7 @@ mod tests {
                 };
                 Conversation {
                     kind: ConversationKind::Direct,
-                    last_read: Some(latest.clone()),
+                    last_read: Some(latest),
                     latest: Some(latest),
                     ..channel(&format!("D{i}"), &format!("person {i}"), false)
                 }

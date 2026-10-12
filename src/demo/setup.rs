@@ -507,7 +507,7 @@ impl Setup {
         if let Some(ts) = self.share.take_if(|ts| arrived(app, ts)) {
             app.actions.push(Action::Share {
                 channel: "C02".into(),
-                ts: ts.clone(),
+                ts,
                 thread: Some(ts),
             });
         }

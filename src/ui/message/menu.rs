@@ -95,7 +95,7 @@ pub(super) fn toolbar(
             {
                 actions.push(Action::React {
                     channel: row.channel.to_owned(),
-                    ts: message.ts.clone(),
+                    ts: message.ts,
                     name: name.to_owned(),
                 });
             }
@@ -183,8 +183,8 @@ pub(super) fn context_menu(
                 if ui.button(t("Open image")).clicked() {
                     actions.push(Action::ViewImage {
                         channel: channel.clone(),
-                        thread: thread.clone(),
-                        ts: ts.clone(),
+                        thread: *thread,
+                        ts: *ts,
                         file: file.clone(),
                     });
                     ui.close();
@@ -269,7 +269,7 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
     if offers(Ability::Later) && ui.button(save).clicked() {
         actions.push(Action::Views(crate::views::Action::Save {
             channel: row.channel.to_owned(),
-            ts: message.ts.clone(),
+            ts: message.ts,
             save: !saved,
         }));
         ui.close();
@@ -283,8 +283,8 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
     if offers(Ability::Links) && ui.button(t("Copy link")).clicked() {
         actions.push(Action::CopyLink {
             channel: row.channel.to_owned(),
-            ts: message.ts.clone(),
-            thread: message.thread_ts.clone(),
+            ts: message.ts,
+            thread: message.thread_ts,
         });
         ui.close();
     }
@@ -293,8 +293,8 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
     if !message.ts.is_local() && offers(Ability::Cards) && ui.button(t("Open in Slack")).clicked() {
         actions.push(Action::OpenInSlack {
             channel: row.channel.to_owned(),
-            ts: message.ts.clone(),
-            thread: message.thread_ts.clone(),
+            ts: message.ts,
+            thread: message.thread_ts,
         });
         ui.close();
     }
@@ -307,7 +307,7 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
     if offers(Ability::Pins) && ui.button(pin).clicked() {
         actions.push(Action::Convos(crate::convos::Action::Pin {
             channel: row.channel.to_owned(),
-            ts: message.ts.clone(),
+            ts: message.ts,
             pin: !message.pinned,
         }));
         ui.close();
@@ -322,8 +322,8 @@ fn remind_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mu
             if ui.button(when.label()).clicked() {
                 actions.push(Action::Views(Views::Remind {
                     channel: row.channel.to_owned(),
-                    ts: message.ts.clone(),
-                    thread: message.thread_ts.clone(),
+                    ts: message.ts,
+                    thread: message.thread_ts,
                     when,
                 }));
                 ui.close();
@@ -333,8 +333,8 @@ fn remind_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mu
         if ui.button(t("Custom time…")).clicked() {
             actions.push(Action::Views(Views::AskRemind {
                 channel: row.channel.to_owned(),
-                ts: message.ts.clone(),
-                thread: message.thread_ts.clone(),
+                ts: message.ts,
+                thread: message.thread_ts,
             }));
             ui.close();
         }
