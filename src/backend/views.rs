@@ -548,11 +548,11 @@ fn viewed_threads(view: ThreadView) -> Vec<Followed> {
             let last_read = root.last_read.filter(|t| !t.is_empty()).map(Ts::new);
             let mut parent = root.message.into_model()?;
             // A thread you stopped following is not yours to list.
-            if parent.subscribed == Some(false) {
+            if parent.extra.subscribed == Some(false) {
                 return None;
             }
             // The list holds only the threads you follow.
-            parent.subscribed = Some(true);
+            parent.extra.subscribed = Some(true);
             let mut replies: Vec<Message> = thread
                 .latest_replies
                 .into_iter()
@@ -563,7 +563,7 @@ fn viewed_threads(view: ThreadView) -> Vec<Followed> {
             let unread = unread_count(
                 thread.unread_replies.len(),
                 last_read.as_ref(),
-                parent.latest_reply.as_ref(),
+                parent.extra.latest_reply.as_ref(),
                 &replies,
             );
             let extra = replies.len().saturating_sub(views::THREAD_REPLIES);
@@ -880,7 +880,9 @@ fn searched_mentions(answer: MessagesAnswer) -> Vec<Activity> {
             let channel = hit.channel?;
             let ts = hit.ts?;
             let mut message = views::bare_message(ts, hit.user, hit.text, hit.thread);
-            message.username = hit.username;
+            if hit.username.is_some() {
+                message.extra.username = hit.username;
+            }
             Some(Activity {
                 reason: Reason::Mention,
                 channel,
@@ -1077,7 +1079,7 @@ mod tests {
         let threads = viewed_threads(view);
         assert_eq!(threads.len(), 1, "an unfollowed thread is left out");
         assert_eq!(threads[0].unread, 2);
-        assert_eq!(threads[0].parent.subscribed, Some(true));
+        assert_eq!(threads[0].parent.extra.subscribed, Some(true));
     }
 
     #[test]
@@ -1229,7 +1231,7 @@ mod tests {
         let items = searched_mentions(answer);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].channel, "C1");
-        assert_eq!(items[0].message.thread_ts, Some(Ts::new("8.000100")));
+        assert_eq!(items[0].message.extra.thread_ts, Some(Ts::new("8.000100")));
         assert_eq!(items[0].message.user.as_deref(), Some("U2"));
     }
 }

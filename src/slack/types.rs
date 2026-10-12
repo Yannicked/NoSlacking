@@ -7,7 +7,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::model::{self, ConversationKind, Delivery, Ts};
+use crate::model::{self, ConversationKind, Delivery, Id, Ts};
 
 /// A field's value, with an explicit `null` read as its default. Slack
 /// sends `null` where it would usually leave a field out, and
@@ -1085,48 +1085,51 @@ impl Message {
         let broadcast = self.subtype.as_deref() == Some("thread_broadcast") || self.root.is_some();
         Some(model::Message {
             ts: Ts::new(self.ts),
-            user: self.user,
-            // A person's message never shows a bot name.
-            username: if self.bot_id.is_some() {
-                username
-            } else {
-                None
-            },
-            bot_icon,
-            bot_id: self.bot_id,
+            user: self.user.map(Id::new),
             text,
-            thread_ts: self.thread_ts.map(Ts::new),
-            reply_count: self.reply_count.unwrap_or(0),
-            replies_known: self.reply_count.is_some(),
-            reply_users: self.reply_users,
-            latest_reply: self.latest_reply.map(Ts::new),
-            reactions: self
-                .reactions
-                .into_iter()
-                .map(|r| model::Reaction {
-                    name: r.name,
-                    count: r.count,
-                    users: r.users,
-                })
-                .collect(),
-            files: self
-                .files
-                .into_iter()
-                .filter_map(File::into_model)
-                .collect(),
-            attachments: self
-                .attachments
-                .into_iter()
-                .filter_map(Attachment::into_model)
-                .collect(),
             blocks,
             edited: self.edited.is_some(),
-            subtype: self.subtype,
+            subtype: self.subtype.map(Id::new),
             delivery: Delivery::Sent,
             broadcast,
             pinned: !self.pinned_to.is_empty(),
             client_msg_id: self.client_msg_id.filter(|id| !id.is_empty()),
-            subscribed: self.subscribed,
+            replies_known: self.reply_count.is_some(),
+            extra: model::ExtraFields {
+                // A person's message never shows a bot name.
+                username: if self.bot_id.is_some() {
+                    username
+                } else {
+                    None
+                },
+                bot_icon,
+                bot_id: self.bot_id.map(Id::new),
+                thread_ts: self.thread_ts.map(Ts::new),
+                reply_count: self.reply_count.unwrap_or(0),
+                reply_users: self.reply_users.into_iter().map(Id::from).collect(),
+                latest_reply: self.latest_reply.map(Ts::new),
+                reactions: self
+                    .reactions
+                    .into_iter()
+                    .map(|r| model::Reaction {
+                        name: r.name,
+                        count: r.count,
+                        users: r.users,
+                    })
+                    .collect(),
+                files: self
+                    .files
+                    .into_iter()
+                    .filter_map(File::into_model)
+                    .collect(),
+                attachments: self
+                    .attachments
+                    .into_iter()
+                    .filter_map(Attachment::into_model)
+                    .collect(),
+                subscribed: self.subscribed,
+            }
+            .into(),
         })
     }
 }
@@ -2102,8 +2105,11 @@ mod tests {
             "color":"D0D0D0","footer":"Posted in #general","mrkdwn_in":["text"]},
             {"is_msg_unfurl":true,"text":"no link, so not a quote"}]}"#,
         );
-        assert_eq!(message.attachments.len(), 1);
-        let quote = message.attachments[0].quote.as_ref().expect("a quote");
+        assert_eq!(message.extra.attachments.len(), 1);
+        let quote = message.extra.attachments[0]
+            .quote
+            .as_ref()
+            .expect("a quote");
         assert_eq!(
             quote.url,
             "https://acme.slack.com/archives/C1/p1700000000000100"
@@ -2120,7 +2126,7 @@ mod tests {
         assert_eq!(quote.text, "Hi <@U3> :wave:");
         assert!(!quote.unavailable);
         // The footer is not drawn as a link card's would be.
-        assert_eq!(message.attachments[0].footer, None);
+        assert_eq!(message.extra.attachments[0].footer, None);
         assert!(crate::quotes::own_quotes(&message).is_empty());
     }
 
@@ -2136,13 +2142,13 @@ mod tests {
             {"service_name":"Blog","title":"Post","title_link":"https://blog.example/p",
             "image_url":"https://blog.example/p.png","image_width":1200,"image_height":630}]}"#,
         );
-        let video = &message.attachments[0];
+        let video = &message.extra.attachments[0];
         assert_eq!(video.service.as_deref(), Some("YouTube"));
         assert_eq!(video.author.as_deref(), Some("Rust Channel"));
         assert_eq!(video.video.as_deref(), Some("https://youtu.be/x"));
         assert_eq!(video.thumb_size, Some([480.0, 360.0]), "text numbers too");
         assert_eq!(video.image_size, None, "a zero size is no size");
-        let post = &message.attachments[1];
+        let post = &message.extra.attachments[1];
         assert_eq!(post.video, None);
         assert_eq!(post.image_size, Some([1200.0, 630.0]));
     }
@@ -2158,7 +2164,7 @@ mod tests {
             {"id":"F2","name":"tiny.gif","mimetype":"image/gif","size":2000,
             "url_private":"https://files.slack.com/tiny.gif","original_w":64,"original_h":48}]}"#,
         );
-        let [big, tiny] = &message.files[..] else {
+        let [big, tiny] = &message.extra.files[..] else {
             panic!("two files");
         };
         assert_eq!(
@@ -2184,8 +2190,8 @@ mod tests {
         let mut message = parsed(&format!(
             r#"{{"type":"message","ts":"1.0","user":"U1","text":"","files":[{file}]}}"#
         ));
-        assert_eq!(message.files.len(), 1, "one file");
-        message.files.remove(0)
+        assert_eq!(message.extra.files.len(), 1, "one file");
+        message.extra.files.remove(0)
     }
 
     // The fixtures below are files from public Slack exports, cut down to
@@ -2414,7 +2420,7 @@ mod tests {
             {"id":"F3","name":"a.png","mimetype":"image/png","size":10,
             "thumb_360":"https://files.slack.com/t.png"}]}"#,
         );
-        let [video, pdf, image] = &message.files[..] else {
+        let [video, pdf, image] = &message.extra.files[..] else {
             panic!("three files");
         };
         assert_eq!(video.media(), Some(model::Media::Video));
@@ -2443,14 +2449,24 @@ mod tests {
             timeline.upsert(edit);
             let parent = &timeline.messages[0];
             assert_eq!(parent.text, "edited");
-            assert_eq!(parent.reply_count, 2);
-            assert_eq!(parent.reply_users, ["U2"]);
+            assert_eq!(parent.extra.reply_count, 2);
+            assert_eq!(parent.extra.reply_users, ["U2"]);
             assert_eq!(
-                parent.latest_reply.as_ref().map(Ts::to_string).as_deref(),
+                parent
+                    .extra
+                    .latest_reply
+                    .as_ref()
+                    .map(Ts::to_string)
+                    .as_deref(),
                 Some("3.0")
             );
             assert_eq!(
-                parent.thread_ts.as_ref().map(Ts::to_string).as_deref(),
+                parent
+                    .extra
+                    .thread_ts
+                    .as_ref()
+                    .map(Ts::to_string)
+                    .as_deref(),
                 Some("1.0")
             );
         }
@@ -2460,9 +2476,9 @@ mod tests {
             r#"{"type":"message","ts":"1.0","user":"U1","text":"edited","reply_count":0}"#,
         ));
         let parent = &timeline.messages[0];
-        assert_eq!(parent.reply_count, 0);
-        assert!(parent.reply_users.is_empty());
-        assert_eq!(parent.latest_reply, None);
+        assert_eq!(parent.extra.reply_count, 0);
+        assert!(parent.extra.reply_users.is_empty());
+        assert_eq!(parent.extra.latest_reply, None);
     }
 
     #[test]
@@ -2484,16 +2500,16 @@ mod tests {
             .filter_map(Message::into_model)
             .collect();
         assert_eq!(messages.len(), 4);
-        assert_eq!(messages[0].reactions[0].users, ["U2"]);
+        assert_eq!(messages[0].extra.reactions[0].users, ["U2"]);
         assert_eq!(messages[1].text, "*build* ok");
-        assert_eq!(messages[1].username.as_deref(), Some("CI"));
-        assert!(messages[2].files[0].is_image());
-        assert_eq!(messages[2].files[0].thumb_size, Some([360.0, 200.0]));
+        assert_eq!(messages[1].extra.username.as_deref(), Some("CI"));
+        assert!(messages[2].extra.files[0].is_image());
+        assert_eq!(messages[2].extra.files[0].thumb_size, Some([360.0, 200.0]));
         assert!(
-            messages[3].files[0].deleted,
+            messages[3].extra.files[0].deleted,
             "a deleted file keeps its place"
         );
-        assert_eq!(messages[3].files[0].id, "F2");
+        assert_eq!(messages[3].extra.files[0].id, "F2");
     }
 
     #[test]
@@ -2508,7 +2524,7 @@ mod tests {
         .expect("parses");
         let message = message.into_model().expect("model");
         assert!(!message.uses_blocks());
-        let card = &message.attachments[0];
+        let card = &message.extra.attachments[0];
         assert_eq!(card.title.as_deref(), Some("ValueError: boom"));
         assert_eq!(card.text, "app.views in get");
         assert_eq!(card.color, Some(egui::Color32::from_rgb(0xe5, 0x2b, 0x50)));
@@ -2792,7 +2808,7 @@ mod tests {
         )
         .expect("parses");
         let message = message.into_model().expect("a message");
-        assert_eq!(message.bot_id.as_deref(), Some("B09"));
+        assert_eq!(message.extra.bot_id.as_deref(), Some("B09"));
         let KitBlock::Section {
             accessory: Some(Accessory::Button(details)),
             ..

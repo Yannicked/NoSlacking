@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use crate::model::{
-    Conversation, ConversationKind, Delivery, KitBlock, Message, Reaction, SectionKind,
-    SidebarSection, Ts, User,
+    Conversation, ConversationKind, Delivery, ExtraFields, Id, KitBlock, Message, Reaction,
+    SectionKind, SidebarSection, Ts, User,
 };
 use crate::teams::html::{html_to_blocks, strip_tags};
 use crate::teams::types;
@@ -469,22 +469,22 @@ pub fn channel_posts(posts: &[crate::teams::client::Post]) -> Vec<Message> {
             .iter()
             .filter_map(translate_message)
             .map(|mut reply| {
-                reply.thread_ts = Some(root.ts);
+                reply.extra.thread_ts = Some(root.ts);
                 reply
             })
             .collect();
         if post.reply_count > 0 || !replies.is_empty() {
-            root.thread_ts = Some(root.ts);
-            root.reply_count = post
+            root.extra.thread_ts = Some(root.ts);
+            root.extra.reply_count = post
                 .reply_count
                 .max(u32::try_from(replies.len()).unwrap_or(u32::MAX));
-            root.reply_users = Vec::new();
-            for user in replies.iter().filter_map(|r| r.user.clone()) {
-                if !root.reply_users.contains(&user) {
-                    root.reply_users.push(user);
+            root.extra.reply_users = Vec::new();
+            for user in replies.iter().filter_map(|r| r.user) {
+                if !root.extra.reply_users.contains(&user) {
+                    root.extra.reply_users.push(user);
                 }
             }
-            root.latest_reply = replies.iter().map(|r| r.ts).max();
+            root.extra.latest_reply = replies.iter().map(|r| r.ts).max();
             root.replies_known = true;
         }
         out.push(root);
@@ -498,20 +498,20 @@ pub fn channel_posts(posts: &[crate::teams::client::Post]) -> Vec<Message> {
 /// a thread's parent. A Teams history holds a channel's replies among
 /// its posts; posts with no reply here are left as they are.
 pub fn thread_posts(messages: &mut [Message]) {
-    let mut threads: std::collections::HashMap<Ts, (u32, Vec<String>, Ts)> =
+    let mut threads: std::collections::HashMap<Ts, (u32, Vec<Id>, Ts)> =
         std::collections::HashMap::new();
     for reply in messages.iter().filter(|m| m.is_reply()) {
-        let Some(post) = reply.thread_ts else {
+        let Some(post) = reply.extra.thread_ts else {
             continue;
         };
         let entry = threads
             .entry(post)
             .or_insert_with(|| (0, Vec::new(), reply.ts));
         entry.0 += 1;
-        if let Some(user) = &reply.user
-            && !entry.1.contains(user)
+        if let Some(user) = reply.user
+            && !entry.1.contains(&user)
         {
-            entry.1.push(user.clone());
+            entry.1.push(user);
         }
         if reply.ts > entry.2 {
             entry.2 = reply.ts;
@@ -519,10 +519,10 @@ pub fn thread_posts(messages: &mut [Message]) {
     }
     for post in messages.iter_mut().filter(|m| !m.is_reply()) {
         if let Some((count, users, latest)) = threads.remove(&post.ts) {
-            post.thread_ts = Some(post.ts);
-            post.reply_count = count;
-            post.reply_users = users;
-            post.latest_reply = Some(latest);
+            post.extra.thread_ts = Some(post.ts);
+            post.extra.reply_count = count;
+            post.extra.reply_users = users;
+            post.extra.latest_reply = Some(latest);
             post.replies_known = true;
         }
     }
@@ -642,28 +642,25 @@ pub fn translate_message(msg: &types::Message) -> Option<Message> {
 
     Some(Message {
         ts,
-        user,
-        username,
-        bot_icon: None,
-        bot_id: None,
+        user: user.map(Id::new),
         text: plain_text,
-        // A reply in a channel belongs to its post's thread.
-        thread_ts: msg.post_id().map(|post| teams_id_to_ts(&post)),
-        reply_count: 0,
-        replies_known: msg.post_id().is_none(),
-        reply_users: Vec::new(),
-        latest_reply: None,
-        reactions,
-        files,
-        attachments: Vec::new(),
         blocks: kit_blocks,
         edited,
-        subtype,
+        subtype: subtype.map(Id::new),
         delivery: Delivery::Sent,
         broadcast: false,
         pinned: false,
         client_msg_id: msg.client_message_id.clone(),
-        subscribed: None,
+        replies_known: msg.post_id().is_none(),
+        extra: ExtraFields {
+            username,
+            // A reply in a channel belongs to its post's thread.
+            thread_ts: msg.post_id().map(|post| teams_id_to_ts(&post)),
+            reactions,
+            files,
+            ..Default::default()
+        }
+        .into(),
     })
 }
 
@@ -882,10 +879,13 @@ mod tests {
             .collect();
         thread_posts(&mut page);
         let root = &page[0];
-        assert_eq!(root.thread_ts, Some(root.ts));
-        assert_eq!(root.reply_count, 2);
-        assert_eq!(root.reply_users, ["ann"]);
-        assert_eq!(root.latest_reply, Some(teams_id_to_ts("1700000000900")));
+        assert_eq!(root.extra.thread_ts, Some(root.ts));
+        assert_eq!(root.extra.reply_count, 2);
+        assert_eq!(root.extra.reply_users, ["ann"]);
+        assert_eq!(
+            root.extra.latest_reply,
+            Some(teams_id_to_ts("1700000000900"))
+        );
         assert!(page[1].is_reply() && page[2].is_reply());
         assert!(!page[1].in_channel(), "a reply stays in its thread");
     }
@@ -932,7 +932,11 @@ mod tests {
             }),
             ..Default::default()
         };
-        let reactions = translate_message(&message).expect("a message").reactions;
+        let reactions = translate_message(&message)
+            .expect("a message")
+            .extra
+            .into_fields()
+            .reactions;
         let names: Vec<&str> = reactions.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["heart"]);
     }
@@ -1010,12 +1014,12 @@ mod tests {
         let msg = translate_message(&teams_msg).expect("a message");
         assert_eq!(msg.user.as_deref(), Some("alice-id"));
         // A person is named through the people list, not as an app is.
-        assert_eq!(msg.username, None);
+        assert_eq!(msg.extra.username, None);
         assert_eq!(msg.text, "Hello team");
         assert!(msg.rich_text().is_some());
-        assert_eq!(msg.reactions.len(), 1);
-        assert_eq!(msg.reactions[0].name, "thumbsup");
-        assert_eq!(msg.reactions[0].users, ["bob-id"]);
+        assert_eq!(msg.extra.reactions.len(), 1);
+        assert_eq!(msg.extra.reactions[0].name, "thumbsup");
+        assert_eq!(msg.extra.reactions[0].users, ["bob-id"]);
     }
 
     #[test]
@@ -1061,7 +1065,9 @@ mod tests {
         assert_eq!(msg.subtype.as_deref(), Some("channel_join"));
         assert!(msg.is_system());
         assert!(msg.user.is_none());
-        assert!(msg.username.is_none());
+        assert!(msg.extra.username.is_none());
+        // Nothing but its text: no room made for what few messages have.
+        assert!(!msg.extra.has_room());
 
         let call_ended_msg = types::Message {
             id: "1702370363758".into(),

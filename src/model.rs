@@ -1355,14 +1355,14 @@ fn press_target(
         return Err(NotHere::NeedsSession);
     }
     let (Some(bot_id), Some(block_id), Some(action_id)) =
-        (message.bot_id.as_ref(), block_id, action_id)
+        (message.extra.bot_id.as_ref(), block_id, action_id)
     else {
         return Err(NotHere::NoApp);
     };
     if message.ts.is_local() {
         return Err(NotHere::NoApp);
     }
-    Ok((bot_id.clone(), block_id.clone(), action_id.clone()))
+    Ok((bot_id.to_string(), block_id.clone(), action_id.clone()))
 }
 
 /// What `button` on `message` (in `channel`) does in a workspace signed in
@@ -1468,48 +1468,218 @@ pub enum Delivery {
     Failed(crate::failure::Failure),
 }
 
+/// A person's, a bot's or a subtype's id (`U0123ABCD`, `8:live:someone`,
+/// `channel_join`), kept once for the whole process.
+///
+/// The same few ids repeat on every message a conversation holds, so
+/// each message keeps a pointer to the one copy instead of a string of
+/// its own: 16 bytes, `Copy`, and no allocation per message. There are
+/// only as many as the people and bots you meet, so they are never freed.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Id(&'static str);
+
+impl Id {
+    /// The one copy of `text`, made the first time it is seen.
+    pub fn new(text: impl AsRef<str>) -> Self {
+        static IDS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<&'static str>>> =
+            std::sync::OnceLock::new();
+        let text = text.as_ref();
+        let mut ids = IDS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(&id) = ids.get(text) {
+            return Self(id);
+        }
+        let id: &'static str = Box::leak(text.to_owned().into_boxed_str());
+        ids.insert(id);
+        Self(id)
+    }
+
+    /// The id as text.
+    pub fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl std::ops::Deref for Id {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.0
+    }
+}
+
+impl From<&str> for Id {
+    fn from(text: &str) -> Self {
+        Self::new(text)
+    }
+}
+
+impl From<String> for Id {
+    fn from(text: String) -> Self {
+        Self::new(text)
+    }
+}
+
+impl From<Id> for String {
+    fn from(id: Id) -> Self {
+        id.0.to_owned()
+    }
+}
+
+impl PartialEq<str> for Id {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for Id {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl std::fmt::Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::fmt::Debug for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.0, f)
+    }
+}
+
+impl serde::Serialize for Id {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0)
+    }
+}
+
+/// One message, as a conversation or thread holds it.
+///
+/// Kept small, as a conversation holds hundreds: what nearly every message
+/// has sits here, and what few have (a bot's name, thread counters,
+/// reactions, files) sits in [`Extra`], allocated only when used.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Message {
     pub ts: Ts,
     /// Who wrote it, for people.
-    pub user: Option<String>,
+    pub user: Option<Id>,
+    /// Slack mrkdwn as Slack sends it, still escaped: [`crate::mrkdwn`] parses it.
+    pub text: String,
+    /// Block Kit layout. When it holds more than rich text, it is drawn
+    /// instead of `text`, which apps send only as the notification fallback.
+    pub blocks: Vec<KitBlock>,
+    /// Slack's subtype (`channel_join`, `bot_message`, ...), if any.
+    pub subtype: Option<Id>,
+    /// The id the sending client gave the message (see
+    /// [`new_client_msg_id`]). Slack keeps it, so a message you send here
+    /// comes back from Slack carrying the id of its optimistic copy.
+    pub client_msg_id: Option<String>,
+    pub delivery: Delivery,
+    pub edited: bool,
+    /// A reply also sent to the channel.
+    pub broadcast: bool,
+    /// Pinned to its conversation.
+    pub pinned: bool,
+    /// Whether Slack said how many replies there are (even none). A copy
+    /// that does not, such as some edits, keeps the counters already known.
+    pub replies_known: bool,
+    /// What few messages have.
+    pub extra: Extra,
+}
+
+/// What few messages have, apart from [`Message`] so the many without any
+/// of it do not carry its room. Read it as an [`ExtraFields`]; writing to
+/// it makes room for it the first time.
+#[derive(Clone, Default)]
+pub struct Extra(Option<Box<ExtraFields>>);
+
+/// The fields of [`Extra`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExtraFields {
     /// The name a bot or integration posted under.
     pub username: Option<String>,
     pub bot_icon: Option<String>,
     /// The app or integration that posted it. Webhook messages often carry
     /// only this, and the name comes from `bots.info`.
-    pub bot_id: Option<String>,
-    /// Slack mrkdwn as Slack sends it, still escaped: [`crate::mrkdwn`] parses it.
-    pub text: String,
+    pub bot_id: Option<Id>,
     /// Set on replies and on a thread's parent.
     pub thread_ts: Option<Ts>,
     pub reply_count: u32,
-    /// Whether Slack said how many replies there are (even none). A copy
-    /// that does not, such as some edits, keeps the counters already known.
-    pub replies_known: bool,
-    pub reply_users: Vec<String>,
+    pub reply_users: Vec<Id>,
     pub latest_reply: Option<Ts>,
     pub reactions: Vec<Reaction>,
     pub files: Vec<File>,
     pub attachments: Vec<Attachment>,
-    /// Block Kit layout. When it holds more than rich text, it is drawn
-    /// instead of `text`, which apps send only as the notification fallback.
-    pub blocks: Vec<KitBlock>,
-    pub edited: bool,
-    /// Slack's subtype (`channel_join`, `bot_message`, ...), if any.
-    pub subtype: Option<String>,
-    pub delivery: Delivery,
-    /// A reply also sent to the channel.
-    pub broadcast: bool,
-    /// Pinned to its conversation.
-    pub pinned: bool,
-    /// The id the sending client gave the message (see
-    /// [`new_client_msg_id`]). Slack keeps it, so a message you send here
-    /// comes back from Slack carrying the id of its optimistic copy.
-    pub client_msg_id: Option<String>,
     /// On a thread's parent, whether you follow the thread, when Slack
     /// said (browser sessions are told; other sign-ins are not).
     pub subscribed: Option<bool>,
+}
+
+/// What a message without any [`Extra`] reads as.
+static NO_EXTRA: ExtraFields = ExtraFields {
+    username: None,
+    bot_icon: None,
+    bot_id: None,
+    thread_ts: None,
+    reply_count: 0,
+    reply_users: Vec::new(),
+    latest_reply: None,
+    reactions: Vec::new(),
+    files: Vec::new(),
+    attachments: Vec::new(),
+    subscribed: None,
+};
+
+impl Extra {
+    /// Whether room was made for the fields: false for a message that has
+    /// none of them.
+    pub fn has_room(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// The fields, taken out.
+    pub fn into_fields(self) -> ExtraFields {
+        self.0.map(|fields| *fields).unwrap_or_default()
+    }
+}
+
+impl From<ExtraFields> for Extra {
+    /// Room only for fields that hold something.
+    fn from(fields: ExtraFields) -> Self {
+        Self((fields != NO_EXTRA).then(|| Box::new(fields)))
+    }
+}
+
+impl std::ops::Deref for Extra {
+    type Target = ExtraFields;
+
+    fn deref(&self) -> &ExtraFields {
+        self.0.as_deref().unwrap_or(&NO_EXTRA)
+    }
+}
+
+impl std::ops::DerefMut for Extra {
+    fn deref_mut(&mut self) -> &mut ExtraFields {
+        self.0.get_or_insert_default()
+    }
+}
+
+impl PartialEq for Extra {
+    /// Equal when the fields are, with room made or not.
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl std::fmt::Debug for Extra {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, f)
+    }
 }
 
 /// A fresh id for a message about to be sent, in the form Slack's own
@@ -1550,12 +1720,13 @@ impl Message {
     /// The thread this message starts or is in: its parent's timestamp,
     /// or its own for a message with no thread yet.
     pub fn thread_root(&self) -> &Ts {
-        self.thread_ts.as_ref().unwrap_or(&self.ts)
+        self.extra.thread_ts.as_ref().unwrap_or(&self.ts)
     }
 
     /// Whether this is a reply inside a thread (not the parent).
     pub fn is_reply(&self) -> bool {
-        self.thread_ts
+        self.extra
+            .thread_ts
             .as_ref()
             .is_some_and(|parent| *parent != self.ts)
     }
@@ -1591,9 +1762,9 @@ impl Message {
 
     /// Adds or removes one person's reaction.
     pub fn toggle_reaction(&mut self, name: &str, user: &str, added: bool) {
-        match self.reactions.iter_mut().position(|r| r.name == name) {
+        match self.extra.reactions.iter_mut().position(|r| r.name == name) {
             Some(index) => {
-                let reaction = &mut self.reactions[index];
+                let reaction = &mut self.extra.reactions[index];
                 let has = reaction.users.iter().any(|u| u == user);
                 if added && !has {
                     reaction.users.push(user.to_owned());
@@ -1603,10 +1774,10 @@ impl Message {
                     reaction.count = reaction.count.saturating_sub(1);
                 }
                 if reaction.count == 0 {
-                    self.reactions.remove(index);
+                    self.extra.reactions.remove(index);
                 }
             }
-            None if added => self.reactions.push(Reaction {
+            None if added => self.extra.reactions.push(Reaction {
                 name: name.to_owned(),
                 count: 1,
                 users: vec![user.to_owned()],
@@ -1622,18 +1793,22 @@ fn replace(existing: &mut Message, mut message: Message) {
     // edits and API answers are: keep the thread counters already
     // known. One that gives a count, even zero, carries Slack's
     // real counters, and zero then means the replies are gone.
+    // (Only an `existing` with extras has counters to keep, and asking
+    // first leaves the many messages without any of them small.)
     if !message.replies_known {
-        message.reply_count = existing.reply_count;
         message.replies_known = existing.replies_known;
-        message.reply_users = std::mem::take(&mut existing.reply_users);
-        message.latest_reply = existing.latest_reply.take();
-        if message.thread_ts.is_none() {
-            message.thread_ts = existing.thread_ts.take();
+        if existing.extra.has_room() {
+            message.extra.reply_count = existing.extra.reply_count;
+            message.extra.reply_users = std::mem::take(&mut existing.extra.reply_users);
+            message.extra.latest_reply = existing.extra.latest_reply.take();
+            if message.extra.thread_ts.is_none() {
+                message.extra.thread_ts = existing.extra.thread_ts.take();
+            }
         }
     }
     // Only some copies say whether you follow the thread.
-    if message.subscribed.is_none() {
-        message.subscribed = existing.subscribed;
+    if message.extra.subscribed.is_none() && existing.extra.subscribed.is_some() {
+        message.extra.subscribed = existing.extra.subscribed;
     }
     *existing = message;
 }
@@ -2081,18 +2256,7 @@ mod tests {
         Message {
             ts: Ts::new(ts),
             user: None,
-            username: None,
-            bot_icon: None,
-            bot_id: None,
             text: ts.to_owned(),
-            thread_ts: None,
-            reply_count: 0,
-            replies_known: false,
-            reply_users: Vec::new(),
-            latest_reply: None,
-            reactions: Vec::new(),
-            files: Vec::new(),
-            attachments: Vec::new(),
             blocks: Vec::new(),
             edited: false,
             subtype: None,
@@ -2100,14 +2264,19 @@ mod tests {
             broadcast: false,
             pinned: false,
             client_msg_id: None,
-            subscribed: None,
+            replies_known: false,
+            extra: Extra::default(),
         }
     }
 
     #[test]
     fn buttons_press_only_from_a_browser_session() {
         let posted = Message {
-            bot_id: Some("B09".into()),
+            extra: ExtraFields {
+                bot_id: Some("B09".into()),
+                ..Default::default()
+            }
+            .into(),
             ..message("1790171950.000100")
         };
         let approve = Button {
@@ -2145,7 +2314,7 @@ mod tests {
             "links open whatever the sign-in"
         );
         let unknown_app = Message {
-            bot_id: None,
+            extra: Extra::default(),
             ..posted.clone()
         };
         assert_eq!(
@@ -2167,7 +2336,11 @@ mod tests {
     #[test]
     fn menu_choices_go_only_from_a_browser_session() {
         let posted = Message {
-            bot_id: Some("B10".into()),
+            extra: ExtraFields {
+                bot_id: Some("B10".into()),
+                ..Default::default()
+            }
+            .into(),
             ..message("1790171970.000100")
         };
         let beta = MenuChoice {
@@ -2304,11 +2477,15 @@ mod tests {
             Message {
                 text: format!("{ts} copy {copy}"),
                 replies_known: next(2) == 0,
-                reply_count: next(4) as u32,
-                reply_users: (0..next(3)).map(|i| format!("U{i}")).collect(),
-                latest_reply: (next(2) == 0).then(|| Ts::new("1700000009.000000")),
-                thread_ts: (next(2) == 0).then(|| Ts::new(ts)),
-                subscribed: [None, Some(true), Some(false)][next(3) as usize],
+                extra: ExtraFields {
+                    reply_count: next(4) as u32,
+                    reply_users: (0..next(3)).map(|i| Id::new(format!("U{i}"))).collect(),
+                    latest_reply: (next(2) == 0).then(|| Ts::new("1700000009.000000")),
+                    thread_ts: (next(2) == 0).then(|| Ts::new(ts)),
+                    subscribed: [None, Some(true), Some(false)][next(3) as usize],
+                    ..Default::default()
+                }
+                .into(),
                 ..message(ts)
             }
         };
@@ -2475,16 +2652,24 @@ mod tests {
     fn a_copy_that_does_not_say_keeps_whether_you_follow_the_thread() {
         let mut timeline = Timeline::default();
         timeline.upsert(Message {
-            subscribed: Some(true),
+            extra: ExtraFields {
+                subscribed: Some(true),
+                ..Default::default()
+            }
+            .into(),
             ..message("1.0")
         });
         timeline.upsert(message("1.0"));
-        assert_eq!(timeline.messages[0].subscribed, Some(true));
+        assert_eq!(timeline.messages[0].extra.subscribed, Some(true));
         timeline.upsert(Message {
-            subscribed: Some(false),
+            extra: ExtraFields {
+                subscribed: Some(false),
+                ..Default::default()
+            }
+            .into(),
             ..message("1.0")
         });
-        assert_eq!(timeline.messages[0].subscribed, Some(false));
+        assert_eq!(timeline.messages[0].extra.subscribed, Some(false));
     }
 
     #[test]
@@ -2500,15 +2685,34 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_message_makes_no_room_for_extras() {
+        assert!(std::mem::size_of::<Message>() <= 168);
+        let mut timeline = Timeline::default();
+        timeline.upsert(message("1.0"));
+        // A fresh copy, as every reload brings, keeps it so.
+        timeline.upsert(message("1.0"));
+        assert!(!timeline.messages[0].extra.has_room());
+        assert!(!Extra::from(ExtraFields::default()).has_room());
+    }
+
+    #[test]
+    fn an_id_is_kept_once() {
+        let id = Id::new(String::from("U0123ABCD"));
+        assert_eq!(id, "U0123ABCD");
+        assert!(std::ptr::eq(id.as_str(), Id::new("U0123ABCD").as_str()));
+        assert_eq!(std::mem::size_of::<Option<Id>>(), 16);
+    }
+
+    #[test]
     fn edits_keep_thread_counters() {
         let mut timeline = Timeline::default();
         let mut parent = message("1.0");
-        parent.reply_count = 3;
+        parent.extra.reply_count = 3;
         timeline.upsert(parent);
         let mut edited = message("1.0");
         edited.text = "edited".into();
         timeline.upsert(edited);
-        assert_eq!(timeline.messages[0].reply_count, 3);
+        assert_eq!(timeline.messages[0].extra.reply_count, 3);
         assert_eq!(timeline.messages[0].text, "edited");
     }
 
@@ -2516,21 +2720,21 @@ mod tests {
     fn a_parent_reporting_no_replies_clears_its_counters() {
         let mut timeline = Timeline::default();
         let mut parent = message("1.0");
-        parent.thread_ts = Some(Ts::new("1.0"));
-        parent.reply_count = 1;
-        parent.reply_users = vec!["U1".into()];
-        parent.latest_reply = Some(Ts::new("2.0"));
+        parent.extra.thread_ts = Some(Ts::new("1.0"));
+        parent.extra.reply_count = 1;
+        parent.extra.reply_users = vec!["U1".into()];
+        parent.extra.latest_reply = Some(Ts::new("2.0"));
         timeline.upsert(parent);
         // Slack's copy after the last reply was deleted: still a thread
         // parent, with nothing in it.
         let mut emptied = message("1.0");
-        emptied.thread_ts = Some(Ts::new("1.0"));
+        emptied.extra.thread_ts = Some(Ts::new("1.0"));
         emptied.replies_known = true;
         timeline.upsert(emptied);
         let parent = &timeline.messages[0];
-        assert_eq!(parent.reply_count, 0);
-        assert!(parent.reply_users.is_empty());
-        assert_eq!(parent.latest_reply, None);
+        assert_eq!(parent.extra.reply_count, 0);
+        assert!(parent.extra.reply_users.is_empty());
+        assert_eq!(parent.extra.latest_reply, None);
     }
 
     #[test]
@@ -2539,10 +2743,10 @@ mod tests {
         m.toggle_reaction("tada", "U1", true);
         m.toggle_reaction("tada", "U2", true);
         m.toggle_reaction("tada", "U1", true);
-        assert_eq!(m.reactions[0].count, 2);
+        assert_eq!(m.extra.reactions[0].count, 2);
         m.toggle_reaction("tada", "U1", false);
         m.toggle_reaction("tada", "U2", false);
-        assert!(m.reactions.is_empty());
+        assert!(m.extra.reactions.is_empty());
     }
 
     #[test]

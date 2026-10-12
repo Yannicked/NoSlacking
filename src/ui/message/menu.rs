@@ -284,7 +284,7 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
         actions.push(Action::CopyLink {
             channel: row.channel.to_owned(),
             ts: message.ts,
-            thread: message.thread_ts,
+            thread: message.extra.thread_ts,
         });
         ui.close();
     }
@@ -294,7 +294,7 @@ fn more_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mut 
         actions.push(Action::OpenInSlack {
             channel: row.channel.to_owned(),
             ts: message.ts,
-            thread: message.thread_ts,
+            thread: message.extra.thread_ts,
         });
         ui.close();
     }
@@ -323,7 +323,7 @@ fn remind_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mu
                 actions.push(Action::Views(Views::Remind {
                     channel: row.channel.to_owned(),
                     ts: message.ts,
-                    thread: message.thread_ts,
+                    thread: message.extra.thread_ts,
                     when,
                 }));
                 ui.close();
@@ -334,7 +334,7 @@ fn remind_menu(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &mu
             actions.push(Action::Views(Views::AskRemind {
                 channel: row.channel.to_owned(),
                 ts: message.ts,
-                thread: message.thread_ts,
+                thread: message.extra.thread_ts,
             }));
             ui.close();
         }

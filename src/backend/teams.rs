@@ -640,11 +640,11 @@ fn send_thread(
     let mut messages: Vec<crate::model::Message> = raw
         .iter()
         .filter_map(translate_message)
-        .filter(|m| m.ts == post || m.thread_ts.as_ref() == Some(&post))
+        .filter(|m| m.ts == post || m.extra.thread_ts.as_ref() == Some(&post))
         .collect();
     messages.sort_by_key(|a| a.ts);
     for message in &mut messages {
-        message.thread_ts = Some(post);
+        message.extra.thread_ts = Some(post);
     }
     crate::backend::teams_translate::thread_posts(&mut messages);
     name_the_rest(client, &team, &messages, &named, sink);
@@ -670,7 +670,8 @@ fn name_the_rest(
     sink: &Sink,
 ) {
     let mentioned = messages.iter().flat_map(|m| {
-        m.reactions
+        m.extra
+            .reactions
             .iter()
             .flat_map(|r| r.users.iter().cloned())
             .chain(mentions(&m.text))
@@ -969,7 +970,7 @@ fn posted(
     })
     .map(|mut message| {
         // A reply shows in its thread at once.
-        message.thread_ts.clone_from(&post.thread);
+        message.extra.thread_ts.clone_from(&post.thread);
         message
     })
     .ok_or(Failure::NoMessage)
@@ -1368,7 +1369,10 @@ mod tests {
         )
         .expect("a message");
         assert!(message.is_reply());
-        assert_eq!(message.thread_ts, Some(teams_id_to_ts("1700000000000")));
+        assert_eq!(
+            message.extra.thread_ts,
+            Some(teams_id_to_ts("1700000000000"))
+        );
     }
 
     #[test]

@@ -168,7 +168,11 @@ pub fn payload(
         ConversationKind::Direct => "direct",
         ConversationKind::Group => "group",
     };
-    let thread = message.thread_ts.as_ref().filter(|t| **t != message.ts);
+    let thread = message
+        .extra
+        .thread_ts
+        .as_ref()
+        .filter(|t| **t != message.ts);
     let mut value = json!({
         "version": VERSION,
         "event": "message",
@@ -265,24 +269,14 @@ fn run_now(argv: &[String], input: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Extra;
     use crate::model::{Delivery, Ts};
 
     fn message(text: &str) -> Message {
         Message {
             ts: Ts::new("1700000000.000100"),
             user: Some("U2".into()),
-            username: None,
-            bot_icon: None,
-            bot_id: None,
             text: text.into(),
-            thread_ts: None,
-            reply_count: 0,
-            replies_known: false,
-            reply_users: Vec::new(),
-            latest_reply: None,
-            reactions: Vec::new(),
-            files: Vec::new(),
-            attachments: Vec::new(),
             blocks: Vec::new(),
             edited: false,
             subtype: None,
@@ -290,7 +284,8 @@ mod tests {
             broadcast: false,
             pinned: false,
             client_msg_id: None,
-            subscribed: None,
+            replies_known: false,
+            extra: Extra::default(),
         }
     }
 
@@ -350,8 +345,8 @@ mod tests {
     #[test]
     fn the_payload_says_what_and_where_and_nothing_secret() {
         let mut reply = message("<@U1> deploy?");
-        reply.thread_ts = Some(Ts::new("1699999999.000100"));
-        reply.files.push(crate::model::File {
+        reply.extra.thread_ts = Some(Ts::new("1699999999.000100"));
+        reply.extra.files.push(crate::model::File {
             id: "F1".into(),
             name: "a.png".into(),
             title: String::new(),
