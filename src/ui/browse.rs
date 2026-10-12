@@ -152,7 +152,7 @@ fn new_message(app: &mut App, ctx: &egui::Context) {
     let Some(mut dialog) = app.convos.new_message.take() else {
         return;
     };
-    let focus = std::mem::take(&mut app.focus_overlay);
+    let focus = app.take_focus(crate::app::Focus::Overlay);
     let palette = app.palette;
     let Some(workspace) = crate::app::active_in(&app.workspaces, &app.settings) else {
         return;
@@ -368,7 +368,7 @@ fn new_message(app: &mut App, ctx: &egui::Context) {
     }
     if let Some(id) = pick {
         dialog.pick(id);
-        app.focus_overlay = true;
+        app.focus_next = Some(crate::app::Focus::Overlay);
     }
     if let Some(id) = unpick {
         dialog.picked.retain(|p| *p != id);
@@ -394,7 +394,7 @@ fn browse(app: &mut App, ctx: &egui::Context) {
     let Some(mut browse) = app.convos.browse.take() else {
         return;
     };
-    let focus = std::mem::take(&mut app.focus_overlay);
+    let focus = app.take_focus(crate::app::Focus::Overlay);
     let palette = app.palette;
     let escape = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
     let found = browse.matches();
@@ -589,7 +589,7 @@ fn new_channel(app: &mut App, ctx: &egui::Context) {
     let Some(mut dialog) = app.convos.new_channel.take() else {
         return;
     };
-    let focus = std::mem::take(&mut app.focus_overlay);
+    let focus = app.take_focus(crate::app::Focus::Overlay);
     let palette = app.palette;
     let Some(workspace) = crate::app::active_in(&app.workspaces, &app.settings) else {
         return;
@@ -766,7 +766,7 @@ fn bookmark_dialog(app: &mut App, ctx: &egui::Context) {
     let Some(mut dialog) = app.convos.bookmark.take() else {
         return;
     };
-    let focus = std::mem::take(&mut app.focus_overlay);
+    let focus = app.take_focus(crate::app::Focus::Overlay);
     let palette = app.palette;
     let checked = crate::convos::bookmark_form(&dialog.title, &dialog.link, &dialog.emoji);
     let mut close = false;

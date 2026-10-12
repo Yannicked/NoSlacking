@@ -76,6 +76,19 @@ impl Tone {
     }
 }
 
+/// The text input that takes focus on the next frame. One at a time: two
+/// asking at once would leave the winner to drawing order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Focus {
+    /// The conversation's composer.
+    Composer,
+    /// The thread's reply field: a thread just opened.
+    ThreadComposer,
+    /// The field of the dialog or picker just opened, once: asking every
+    /// frame would keep Tab from reaching its buttons.
+    Overlay,
+}
+
 /// What the emoji picker adds to.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PickerTarget {
@@ -415,15 +428,10 @@ pub struct App {
     /// [`App::draft_key`]: a reply sent in a thread must not move the
     /// conversation beside it.
     pub scroll_to_bottom: HashSet<String>,
-    /// Focus the composer next frame.
-    pub focus_composer: bool,
-    /// Focus the thread's reply field next frame: a thread just opened.
-    pub focus_thread_composer: bool,
+    /// The input to focus next frame, taken by the one that does.
+    pub focus_next: Option<Focus>,
     /// Conversations open in windows of their own.
     pub popouts: Vec<Popout>,
-    /// Focus the field of the dialog or picker just opened, once: asking
-    /// every frame would keep Tab from reaching its buttons.
-    pub focus_overlay: bool,
     /// The search window and its results.
     pub search: crate::search::Search,
     /// Messages being brought into view, at most one per list.
@@ -601,10 +609,8 @@ impl App {
             demo: options.demo,
             prepended: None,
             scroll_to_bottom: HashSet::new(),
-            focus_composer: true,
-            focus_thread_composer: false,
+            focus_next: Some(Focus::Composer),
             popouts: Vec::new(),
-            focus_overlay: false,
             jumps: Vec::new(),
             search: crate::search::Search::default(),
             local_counter: 0,
@@ -1112,7 +1118,7 @@ impl App {
             .insert(Self::draft_key(&team, channel, None));
         // An anchor kept for another conversation's older page.
         self.prepended = None;
-        self.focus_composer = true;
+        self.focus_next = Some(Focus::Composer);
         self.remember_read_line(&team, channel);
         self.ensure_loaded(&team, channel);
         self.mark_read(&team, channel);
@@ -1372,7 +1378,7 @@ impl App {
                 file,
             } => self.view_image(&channel, thread.as_ref(), &ts, &file),
             Action::OpenSwitcher => {
-                self.focus_overlay = true;
+                self.focus_next = Some(Focus::Overlay);
                 self.switcher = Some(Switcher::default());
             }
             Action::OpenProfile(user) => self.profile = Some(user),
@@ -1432,7 +1438,7 @@ impl App {
                 ts,
                 thread,
             } => {
-                self.focus_overlay = true;
+                self.focus_next = Some(Focus::Overlay);
                 self.share = Some(crate::share::Share::new(channel, ts, thread));
             }
             Action::ShareTo {
@@ -1533,7 +1539,7 @@ impl App {
             return;
         };
         self.thread = Some((channel.clone(), ts));
-        self.focus_thread_composer = true;
+        self.focus_next = Some(Focus::ThreadComposer);
         if let Some(workspace) = self.workspace_mut(&team) {
             workspace
                 .threads
@@ -1749,7 +1755,7 @@ impl App {
     }
 
     fn open_picker(&mut self, target: PickerTarget) {
-        self.focus_overlay = true;
+        self.focus_next = Some(Focus::Overlay);
         self.picker_query.clear();
         self.picker = Some(target);
     }
@@ -1766,7 +1772,7 @@ impl App {
                     .map(|s| s.name.clone())
             })
             .unwrap_or_default();
-        self.focus_overlay = true;
+        self.focus_next = Some(Focus::Overlay);
         self.section_dialog = Some(SectionDialog {
             rename,
             channel,
@@ -1784,7 +1790,7 @@ impl App {
         else {
             return;
         };
-        self.focus_overlay = true;
+        self.focus_next = Some(Focus::Overlay);
         self.meeting_dialog = Some(crate::meetings::Dialog::new(&team, link));
     }
 
@@ -1816,7 +1822,7 @@ impl App {
             .map(|meeting| meeting.url())
             .or_else(|_| crate::meetings::web_form(link).ok_or(()))
             .unwrap_or_else(|()| link.to_owned());
-        self.focus_overlay = true;
+        self.focus_next = Some(Focus::Overlay);
         self.meeting_dialog = Some(crate::meetings::Dialog::new(&team, &link));
     }
 
@@ -1900,7 +1906,7 @@ impl App {
         match crate::model::press_step(confirm.as_ref(), confirmed, link.as_deref()) {
             PressStep::Ask => {
                 if let Some(confirm) = confirm {
-                    self.focus_overlay = true;
+                    self.focus_next = Some(Focus::Overlay);
                     self.confirm_press = Some(PressConfirmation {
                         press,
                         confirm,
@@ -2035,6 +2041,12 @@ impl App {
         if lightbox.is_some() {
             self.preview = lightbox;
         }
+    }
+
+    /// Whether `input` was asked to take focus; the ask is used up, so it
+    /// takes it once.
+    pub fn take_focus(&mut self, input: Focus) -> bool {
+        self.focus_next.take_if(|f| *f == input).is_some()
     }
 
     /// Whether a dialog or picker covers the window, so its keys come

@@ -728,7 +728,7 @@ pub fn apply(app: &mut App, action: Action) {
                 text,
                 expiry: Expiry::Never,
             });
-            app.focus_overlay = true;
+            app.focus_next = Some(crate::app::Focus::Overlay);
         }
         Action::SetStatus {
             emoji,

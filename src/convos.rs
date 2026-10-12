@@ -997,7 +997,7 @@ pub fn apply(app: &mut App, action: Action) {
     };
     match action {
         Action::NewMessage => {
-            app.focus_overlay = true;
+            app.focus_next = Some(crate::app::Focus::Overlay);
             app.convos.new_message = Some(NewMessage::default());
         }
         Action::Open { users } => open(app, users),
@@ -1007,7 +1007,7 @@ pub fn apply(app: &mut App, action: Action) {
             }
         }
         Action::Browse => {
-            app.focus_overlay = true;
+            app.focus_next = Some(crate::app::Focus::Overlay);
             app.convos.browse = Some(Browse {
                 team: team.clone(),
                 ..Browse::default()
@@ -1035,7 +1035,7 @@ pub fn apply(app: &mut App, action: Action) {
             send(app, team, Command::Leave { channel });
         }
         Action::NewChannel => {
-            app.focus_overlay = true;
+            app.focus_next = Some(crate::app::Focus::Overlay);
             app.convos.browse = None;
             app.convos.new_channel = Some(NewChannel::default());
         }
@@ -1084,7 +1084,7 @@ pub fn apply(app: &mut App, action: Action) {
             send(app, team, Command::Pin { channel, ts, pin });
         }
         Action::AskBookmark { channel, bookmark } => {
-            app.focus_overlay = true;
+            app.focus_next = Some(crate::app::Focus::Overlay);
             app.convos.bookmark = Some(BookmarkDialog::new(channel, bookmark));
         }
         Action::SaveBookmark { channel, id, form } => {

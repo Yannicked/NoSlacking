@@ -33,7 +33,7 @@ fn section_dialog(app: &mut App, ctx: &egui::Context) {
     let Some(mut dialog) = app.section_dialog.take() else {
         return;
     };
-    let focus = std::mem::take(&mut app.focus_overlay);
+    let focus = app.take_focus(crate::app::Focus::Overlay);
     let palette = app.palette;
     let mut answer: Option<bool> = None;
     let frame = modal_frame(app);
@@ -123,7 +123,7 @@ fn switcher(app: &mut App, ctx: &egui::Context) {
     else {
         return;
     };
-    let focus = std::mem::take(&mut app.focus_overlay);
+    let focus = app.take_focus(crate::app::Focus::Overlay);
     let palette = app.palette;
     let Some(workspace) = app.active_workspace() else {
         return;
@@ -589,7 +589,7 @@ fn picker(app: &mut App, ctx: &egui::Context) {
     };
     let palette = app.palette;
     let mut query = std::mem::take(&mut app.picker_query);
-    let focus = std::mem::take(&mut app.focus_overlay);
+    let focus = app.take_focus(crate::app::Focus::Overlay);
     let Some(workspace) = app.active_workspace() else {
         app.picker = None;
         return;
@@ -771,7 +771,7 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                     draft.text.push(' ');
                 }
                 draft.text.push_str(&format!(":{name}: "));
-                app.focus_composer = true;
+                app.focus_next = Some(crate::app::Focus::Composer);
             }
         }
         app.picker = None;

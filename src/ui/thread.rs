@@ -25,7 +25,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let to_bottom = app.scroll_to_bottom.remove(&key);
     let width = app.settings.thread_width;
     let overlay = app.overlay_open();
-    let focus = std::mem::take(&mut app.focus_thread_composer) && !overlay;
+    let focus = app.take_focus(crate::app::Focus::ThreadComposer) && !overlay;
     let App {
         workspaces,
         settings,

@@ -196,7 +196,7 @@ pub fn status_dialog(app: &mut App, ctx: &egui::Context) {
     let Some(mut dialog) = app.people.status.take() else {
         return;
     };
-    let focus = std::mem::take(&mut app.focus_overlay);
+    let focus = app.take_focus(crate::app::Focus::Overlay);
     let palette = app.palette;
     let mut answer: Option<Option<Action>> = None;
     let response = egui::Modal::new(egui::Id::new("status-dialog"))
