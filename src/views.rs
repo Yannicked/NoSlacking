@@ -19,7 +19,7 @@ use crate::app::{App, LentDraft, Tone, WorkspaceState};
 use crate::backend;
 use crate::failure::Failure;
 use crate::i18n::{t, tf};
-use crate::model::{Delivery, Message, Ts};
+use crate::model::{Delivery, ExtraFields, Id, Message, Ts};
 
 /// The most live mentions kept per workspace: enough for a day of chatter,
 /// few enough that the list stays quick.
@@ -369,7 +369,7 @@ impl Followed {
         self.replies.sort_by_key(|a| a.ts);
         let extra = self.replies.len().saturating_sub(THREAD_REPLIES);
         self.replies.drain(..extra);
-        self.parent.reply_count += 1;
+        self.parent.extra.reply_count += 1;
         if reply.user.as_deref() != Some(me) {
             self.unread += 1;
         }
@@ -422,7 +422,7 @@ pub fn show_followed(app: &mut App, team: &str, channel: &str, thread: &Ts, foll
     };
     for timeline in workspace.timelines_for_mut(channel) {
         if let Some(parent) = timeline.messages.iter_mut().find(|m| m.ts == *thread) {
-            parent.subscribed = Some(follow);
+            parent.extra.subscribed = Some(follow);
         }
     }
     let parent = workspace.find_message(channel, thread).cloned();
@@ -675,7 +675,11 @@ pub fn live_reason(workspace: &WorkspaceState, channel: &str, message: &Message)
     if let Some(reason) = mention_reason(&message.text, me) {
         return Some(reason);
     }
-    let parent = message.thread_ts.as_ref().filter(|_| message.is_reply())?;
+    let parent = message
+        .extra
+        .thread_ts
+        .as_ref()
+        .filter(|_| message.is_reply())?;
     let mine = |m: &Message| m.user.as_deref() == Some(me);
     let started = workspace.find_message(channel, parent).is_some_and(&mine);
     let replied = workspace
@@ -690,19 +694,8 @@ pub fn live_reason(workspace: &WorkspaceState, channel: &str, message: &Message)
 pub fn bare_message(ts: Ts, user: Option<String>, text: String, thread: Option<Ts>) -> Message {
     Message {
         ts,
-        user,
-        username: None,
-        bot_icon: None,
-        bot_id: None,
+        user: user.map(Id::new),
         text,
-        thread_ts: thread,
-        reply_count: 0,
-        replies_known: false,
-        reply_users: Vec::new(),
-        latest_reply: None,
-        reactions: Vec::new(),
-        files: Vec::new(),
-        attachments: Vec::new(),
         blocks: Vec::new(),
         edited: false,
         subtype: None,
@@ -710,7 +703,12 @@ pub fn bare_message(ts: Ts, user: Option<String>, text: String, thread: Option<T
         broadcast: false,
         pinned: false,
         client_msg_id: None,
-        subscribed: None,
+        replies_known: false,
+        extra: ExtraFields {
+            thread_ts: thread,
+            ..Default::default()
+        }
+        .into(),
     }
 }
 
@@ -742,16 +740,24 @@ pub fn arrived(app: &mut App, team: &str, channel: &str, message: &Message) {
     }
     // A list of threads already read stays fresh; one never read is read
     // whole when it is opened.
-    if let Some(parent) = message.thread_ts.as_ref().filter(|_| message.is_reply())
+    if let Some(parent) = message
+        .extra
+        .thread_ts
+        .as_ref()
+        .filter(|_| message.is_reply())
         && let Some(threads) = views.threads.value.as_mut()
     {
         let me = workspace.info.user_id.as_str();
         let known = workspace.find_message(channel, parent).cloned();
         // Whether you follow the thread, as any loaded copy of its parent
         // says: one you stopped following stays off the list.
-        let followed = workspace
-            .timelines_for(channel)
-            .find_map(|t| t.messages.iter().find(|m| m.ts == *parent)?.subscribed);
+        let followed = workspace.timelines_for(channel).find_map(|t| {
+            t.messages
+                .iter()
+                .find(|m| m.ts == *parent)?
+                .extra
+                .subscribed
+        });
         match threads
             .iter_mut()
             .find(|t| t.channel == channel && t.parent.ts == *parent)
@@ -1349,7 +1355,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
             if let Ok(items) = &result {
                 let people: Vec<String> = items
                     .iter()
-                    .filter_map(|a| a.message.user.clone())
+                    .filter_map(|a| a.message.user.map(String::from))
                     .collect();
                 crate::convos::fetch_unknown(app, team, &people);
             }
@@ -1363,7 +1369,10 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
         }
         Event::Unread { channel, result } => {
             if let Ok((messages, _)) = &result {
-                let people: Vec<String> = messages.iter().filter_map(|m| m.user.clone()).collect();
+                let people: Vec<String> = messages
+                    .iter()
+                    .filter_map(|m| m.user.map(String::from))
+                    .collect();
                 crate::convos::fetch_unknown(app, team, &people);
             }
             app.views
@@ -1378,7 +1387,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
                 let people: Vec<String> = threads
                     .iter()
                     .flat_map(|t| std::iter::once(&t.parent).chain(&t.replies))
-                    .filter_map(|m| m.user.clone())
+                    .filter_map(|m| m.user.map(String::from))
                     .collect();
                 crate::convos::fetch_unknown(app, team, &people);
             }
@@ -1393,8 +1402,10 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
         }
         Event::Saved { result, starred } => {
             if let Ok(list) = &result {
-                let people: Vec<String> =
-                    list.iter().filter_map(|s| s.message.user.clone()).collect();
+                let people: Vec<String> = list
+                    .iter()
+                    .filter_map(|s| s.message.user.map(String::from))
+                    .collect();
                 crate::convos::fetch_unknown(app, team, &people);
             }
             let views = app.views.team_mut(team);
@@ -1613,7 +1624,7 @@ mod tests {
     fn replies_to_your_threads_count_as_activity() {
         let mut workspace = workspace();
         let mut parent = bare_message(Ts::new("1.0"), Some("U0".into()), "plan".into(), None);
-        parent.thread_ts = Some(Ts::new("1.0"));
+        parent.extra.thread_ts = Some(Ts::new("1.0"));
         workspace
             .timelines
             .entry("C1".into())
@@ -1716,7 +1727,7 @@ mod tests {
             thread.unread, 3,
             "your own reply is read, a repeat counts once"
         );
-        assert_eq!(thread.parent.reply_count, 4);
+        assert_eq!(thread.parent.extra.reply_count, 4);
         assert_eq!(thread.latest(), &Ts::new("5.0"));
         let quiet = Followed {
             channel: "C2".into(),

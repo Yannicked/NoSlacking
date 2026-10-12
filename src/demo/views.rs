@@ -2,7 +2,7 @@
 
 use super::{ME, NOW, history, message, thread, ts};
 use crate::backend::Event;
-use crate::model::Message;
+use crate::model::{ExtraFields, Message};
 use crate::views::schedule::Scheduled;
 use crate::views::{self, Activity, Command, Followed, Reason, Reminder, Saved};
 
@@ -162,13 +162,21 @@ fn threads() -> Vec<Followed> {
     let mut release = thread();
     let parent = release.remove(0);
     let reply = |seconds, user, text| Message {
-        thread_ts: Some(ts(NOW - 9500)),
+        extra: ExtraFields {
+            thread_ts: Some(ts(NOW - 9500)),
+            ..Default::default()
+        }
+        .into(),
         ..message(seconds, user, text)
     };
     let design_parent = Message {
-        thread_ts: Some(ts(NOW - 9500)),
-        reply_count: 2,
         replies_known: true,
+        extra: ExtraFields {
+            thread_ts: Some(ts(NOW - 9500)),
+            reply_count: 2,
+            ..Default::default()
+        }
+        .into(),
         ..message(NOW - 9500, ME, "Which icon set should the new views use?")
     };
     vec![

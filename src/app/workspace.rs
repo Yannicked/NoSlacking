@@ -12,8 +12,8 @@ use crate::emoji::EmojiSet;
 use crate::failure::Failure;
 use crate::i18n::t;
 use crate::model::{
-    Bot, Conversation, ConversationKind, Delivery, KitBlock, Message, SidebarSection, Timeline, Ts,
-    User, UserGroup, Workspace,
+    Bot, Conversation, ConversationKind, Delivery, ExtraFields, Id, KitBlock, Message,
+    SidebarSection, Timeline, Ts, User, UserGroup, Workspace,
 };
 use crate::revision::Revised;
 use crate::settings::Settings;
@@ -354,13 +354,14 @@ impl WorkspaceState {
     /// The label for a message's author: the name a bot posted under, the
     /// person, or the app behind the `bot_id`.
     pub fn author(&self, message: &Message) -> String {
-        if let Some(name) = message.username.as_ref().filter(|n| !n.is_empty()) {
+        if let Some(name) = message.extra.username.as_ref().filter(|n| !n.is_empty()) {
             return name.clone();
         }
         if let Some(user) = message.user.as_deref().and_then(|id| self.users.get(id)) {
             return user.label().to_owned();
         }
         if let Some(bot) = message
+            .extra
             .bot_id
             .as_deref()
             .and_then(|id| self.bots.get(id))
@@ -368,8 +369,8 @@ impl WorkspaceState {
         {
             return bot.name.clone();
         }
-        match (&message.user, &message.bot_id) {
-            (Some(id), _) => id.clone(),
+        match (&message.user, &message.extra.bot_id) {
+            (Some(id), _) => id.to_string(),
             (None, Some(_)) => t("App").into_owned(),
             (None, None) => t("Unknown").into_owned(),
         }
@@ -378,6 +379,7 @@ impl WorkspaceState {
     /// The picture for a message's author.
     pub fn author_icon<'a>(&'a self, message: &'a Message) -> Option<&'a str> {
         message
+            .extra
             .bot_icon
             .as_deref()
             .or_else(|| {
@@ -389,6 +391,7 @@ impl WorkspaceState {
             })
             .or_else(|| {
                 message
+                    .extra
                     .bot_id
                     .as_deref()
                     .and_then(|id| self.bots.get(id))
@@ -398,7 +401,7 @@ impl WorkspaceState {
 
     fn unknown_bots<'a>(&self, messages: impl Iterator<Item = &'a Message>) -> Vec<String> {
         let mut out: Vec<String> = messages
-            .filter_map(|m| m.bot_id.as_deref())
+            .filter_map(|m| m.extra.bot_id.as_deref())
             .filter(|id| !id.is_empty() && !self.bots.contains_key(*id))
             .filter(|id| !self.requested_bots.contains(*id))
             .map(str::to_owned)
@@ -450,7 +453,7 @@ impl WorkspaceState {
             .or_else(|| {
                 let timeline = self.timelines.get(channel)?;
                 let message = timeline.messages.iter().find(|m| m.ts == *ts)?;
-                message.thread_ts.filter(|_| message.is_reply())
+                message.extra.thread_ts.filter(|_| message.is_reply())
             });
         self.threads.remove(&(channel.to_owned(), *ts));
         for timeline in self.timelines_for_mut(channel) {
@@ -468,7 +471,7 @@ impl WorkspaceState {
             .into_iter()
             .chain(thread.and_then(|t| t.find_mut(&parent)));
         for message in copies {
-            message.reply_count = message.reply_count.saturating_sub(1);
+            message.extra.reply_count = message.extra.reply_count.saturating_sub(1);
         }
     }
 
@@ -630,7 +633,7 @@ impl WorkspaceState {
                 m.user
                     .as_deref()
                     .into_iter()
-                    .chain(m.reply_users.iter().map(String::as_str))
+                    .chain(m.extra.reply_users.iter().map(|u| u.as_str()))
             })),
             bots: self.unknown_bots(messages.iter()),
         };
@@ -947,7 +950,7 @@ impl WorkspaceState {
                 m.user
                     .as_deref()
                     .into_iter()
-                    .chain(m.reply_users.iter().map(String::as_str))
+                    .chain(m.extra.reply_users.iter().map(|u| u.as_str()))
             })),
             bots: self.unknown_bots(messages.iter()),
         }
@@ -1008,12 +1011,18 @@ impl WorkspaceState {
         {
             match fresh {
                 Some(fresh) => {
-                    parent.reply_count = fresh.reply_count;
+                    parent.extra.reply_count = fresh.extra.reply_count;
                     parent.replies_known = true;
-                    parent.reply_users.clone_from(&fresh.reply_users);
-                    parent.latest_reply.clone_from(&fresh.latest_reply);
+                    parent
+                        .extra
+                        .reply_users
+                        .clone_from(&fresh.extra.reply_users);
+                    parent
+                        .extra
+                        .latest_reply
+                        .clone_from(&fresh.extra.latest_reply);
                 }
-                None => parent.reply_count = replies.saturating_add(extra),
+                None => parent.extra.reply_count = replies.saturating_add(extra),
             }
         }
         let timeline = self.threads.entry(key).or_default();
@@ -1053,7 +1062,7 @@ impl WorkspaceState {
         let counts_all = !self.desktop.is_muted(channel);
         if message.is_reply() {
             self.count_reply(channel, &message);
-            let parent_ts = message.thread_ts.unwrap_or_default();
+            let parent_ts = message.extra.thread_ts.unwrap_or_default();
             let key = (channel.to_owned(), parent_ts);
             if let Some(thread) = self.threads.get_mut(&key) {
                 remove_echoed_local(thread, &message, from_me);
@@ -1169,14 +1178,15 @@ impl WorkspaceState {
     /// a latest reply counted here says nothing of the older ones, as your
     /// own reply can be answered by Slack after someone else's later one.
     fn count_reply(&mut self, channel: &str, reply: &Message) {
-        let Some(parent) = reply.thread_ts else {
+        let Some(parent) = reply.extra.thread_ts else {
             return;
         };
         if self.reply_counted(channel, &reply.ts) {
             return;
         }
         let slacks_line = |copy: &Message, counted: &VecDeque<(String, Ts)>| {
-            copy.latest_reply
+            copy.extra
+                .latest_reply
                 .as_ref()
                 .filter(|latest| !counted.iter().any(|(c, t)| c == channel && t == *latest))
                 .is_some_and(|latest| reply.ts <= *latest)
@@ -1193,12 +1203,12 @@ impl WorkspaceState {
             if slacks_line(copy, counted) {
                 continue;
             }
-            copy.reply_count += 1;
-            copy.latest_reply = max_ts(copy.latest_reply.take(), Some(reply.ts));
+            copy.extra.reply_count += 1;
+            copy.extra.latest_reply = max_ts(copy.extra.latest_reply.take(), Some(reply.ts));
             if let Some(user) = &reply.user
-                && !copy.reply_users.contains(user)
+                && !copy.extra.reply_users.contains(user)
             {
-                copy.reply_users.push(user.clone());
+                copy.extra.reply_users.push(*user);
             }
         }
         if self.counted_replies.len() >= SEEN_LIMIT {
@@ -1423,7 +1433,7 @@ impl WorkspaceState {
     /// thread's and the conversation's own.
     fn place(&mut self, channel: &str, message: Message) {
         if message.is_reply()
-            && let Some(parent) = message.thread_ts
+            && let Some(parent) = message.extra.thread_ts
             && let Some(thread) = self.threads.get_mut(&(channel.to_owned(), parent))
         {
             thread.upsert(message.clone());
@@ -1438,7 +1448,7 @@ impl WorkspaceState {
     /// Shows a message you are sending before Slack has it.
     pub(super) fn add_local(&mut self, channel: &str, message: Message) {
         self.sending.insert(message.ts, message.clone());
-        let timeline = match &message.thread_ts {
+        let timeline = match &message.extra.thread_ts {
             Some(parent) => self
                 .threads
                 .entry((channel.to_owned(), *parent))
@@ -1575,7 +1585,7 @@ impl WorkspaceState {
             return;
         }
         if message.is_reply() {
-            let parent = message.thread_ts.unwrap_or_default();
+            let parent = message.extra.thread_ts.unwrap_or_default();
             let key = (channel.to_owned(), parent);
             if let Some(thread) = self.threads.get_mut(&key) {
                 thread.upsert(message.clone());
@@ -1588,7 +1598,7 @@ impl WorkspaceState {
                 .into_iter()
                 .chain(thread.and_then(|t| t.find_mut(&parent)));
             for copy in copies {
-                copy.reply_count += 1;
+                copy.extra.reply_count += 1;
             }
         }
         if message.in_channel()
@@ -1612,6 +1622,7 @@ impl WorkspaceState {
             if let Some(message) = timeline.find_mut(ts) {
                 let adding = *add.get_or_insert_with(|| {
                     !message
+                        .extra
                         .reactions
                         .iter()
                         .any(|r| r.name == name && r.users.contains(&me))
@@ -1772,19 +1783,8 @@ pub(super) fn local_message(
 ) -> Message {
     Message {
         ts: *local,
-        user: Some(me.to_owned()),
-        username: None,
-        bot_icon: None,
-        bot_id: None,
+        user: Some(Id::new(me)),
         text: wire.to_owned(),
-        thread_ts: *thread,
-        reply_count: 0,
-        replies_known: false,
-        reply_users: Vec::new(),
-        latest_reply: None,
-        reactions: Vec::new(),
-        files: Vec::new(),
-        attachments: Vec::new(),
         blocks: sent_layout(wire),
         edited: false,
         subtype: None,
@@ -1792,20 +1792,25 @@ pub(super) fn local_message(
         broadcast,
         pinned: false,
         client_msg_id: Some(crate::model::new_client_msg_id()),
-        subscribed: None,
+        replies_known: false,
+        extra: ExtraFields {
+            thread_ts: *thread,
+            ..Default::default()
+        }
+        .into(),
     }
 }
 
 /// Counts `live` replies, `extra` of them, on a copy of their parent
 /// that Slack's count does not cover yet.
 fn add_replies(parent: &mut Message, live: &[&Message], extra: u32) {
-    parent.reply_count = parent.reply_count.saturating_add(extra);
+    parent.extra.reply_count = parent.extra.reply_count.saturating_add(extra);
     for reply in live {
-        parent.latest_reply = max_ts(parent.latest_reply.take(), Some(reply.ts));
+        parent.extra.latest_reply = max_ts(parent.extra.latest_reply.take(), Some(reply.ts));
         if let Some(user) = &reply.user
-            && !parent.reply_users.contains(user)
+            && !parent.extra.reply_users.contains(user)
         {
-            parent.reply_users.push(user.clone());
+            parent.extra.reply_users.push(*user);
         }
     }
 }
@@ -1849,6 +1854,7 @@ pub(super) fn first_unread(timeline: &Timeline, read: &Ts, me: &str) -> Option<T
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Extra;
 
     #[test]
     fn fresher_conversations_keep_newer_markers() {
@@ -1974,18 +1980,7 @@ mod tests {
         Message {
             ts: Ts::new(ts),
             user: Some("U1".into()),
-            username: None,
-            bot_icon: None,
-            bot_id: None,
             text: format!("text {ts}"),
-            thread_ts: thread.map(Ts::new),
-            reply_count: 0,
-            replies_known: false,
-            reply_users: Vec::new(),
-            latest_reply: None,
-            reactions: Vec::new(),
-            files: Vec::new(),
-            attachments: Vec::new(),
             blocks: Vec::new(),
             edited: false,
             subtype: None,
@@ -1993,7 +1988,12 @@ mod tests {
             broadcast: false,
             pinned: false,
             client_msg_id: None,
-            subscribed: None,
+            replies_known: false,
+            extra: ExtraFields {
+                thread_ts: thread.map(Ts::new),
+                ..Default::default()
+            }
+            .into(),
         }
     }
 
@@ -2013,12 +2013,16 @@ mod tests {
     /// A message of yours in C1 at `ts` sharing file F1.
     fn with_file(ts: &str) -> Message {
         Message {
-            files: vec![crate::model::File {
-                id: "F1".into(),
-                name: "sidebar-v2.png".into(),
-                user: Some("U1".into()),
-                ..crate::model::File::default()
-            }],
+            extra: ExtraFields {
+                files: vec![crate::model::File {
+                    id: "F1".into(),
+                    name: "sidebar-v2.png".into(),
+                    user: Some("U1".into()),
+                    ..crate::model::File::default()
+                }],
+                ..Default::default()
+            }
+            .into(),
             ..message(ts, None)
         }
     }
@@ -2042,8 +2046,8 @@ mod tests {
             "refused: it shows again"
         );
         assert!(w.shows_file("F1"));
-        assert_eq!(w.timelines["C1"].messages[0].files.len(), 1);
-        assert!(!w.timelines["C1"].messages[0].files[0].deleted);
+        assert_eq!(w.timelines["C1"].messages[0].extra.files.len(), 1);
+        assert!(!w.timelines["C1"].messages[0].extra.files[0].deleted);
         // Taken: it stays hidden, whatever copy comes later.
         w.hide_file("F1");
         assert!(!w.file_delete_settled("F1", true));
@@ -2063,7 +2067,7 @@ mod tests {
         // good, and the message stays once, with the file in its place.
         w.file_gone("F1");
         let mut tombstone = with_file("1.0");
-        tombstone.files = vec![crate::model::File {
+        tombstone.extra.files = vec![crate::model::File {
             id: "F1".into(),
             deleted: true,
             ..crate::model::File::default()
@@ -2071,7 +2075,7 @@ mod tests {
         w.message_changed("C1", tombstone);
         let messages = &w.timelines["C1"].messages;
         assert_eq!(messages.len(), 1, "no duplicate");
-        assert!(messages[0].files[0].deleted);
+        assert!(messages[0].extra.files[0].deleted);
         // A late refusal (a retry that found nothing to delete) does not
         // bring back what Slack itself says is gone.
         assert!(!w.file_delete_settled("F1", false));
@@ -2150,7 +2154,7 @@ mod tests {
     fn workspace_with_thread() -> WorkspaceState {
         let mut w = workspace();
         let mut parent = message("1.0", Some("1.0"));
-        parent.reply_count = 2;
+        parent.extra.reply_count = 2;
         let main = w.timelines.entry("C1".into()).or_default();
         main.upsert(parent.clone());
         main.upsert(message("5.0", None));
@@ -2165,12 +2169,12 @@ mod tests {
         let parent = Ts::new("1.0");
         let thread = &w.threads[&("C1".to_owned(), parent)];
         (
-            w.timelines["C1"].messages[0].reply_count,
+            w.timelines["C1"].messages[0].extra.reply_count,
             thread
                 .messages
                 .iter()
                 .find(|m| m.ts == parent)
-                .map_or(0, |m| m.reply_count),
+                .map_or(0, |m| m.extra.reply_count),
         )
     }
 
@@ -2179,9 +2183,9 @@ mod tests {
         let mut w = workspace_with_thread();
         // Slack's copy of the parent, already counting reply 4.0.
         let mut parent = message("1.0", Some("1.0"));
-        parent.reply_count = 3;
+        parent.extra.reply_count = 3;
         parent.replies_known = true;
-        parent.latest_reply = Some(Ts::new("4.0"));
+        parent.extra.latest_reply = Some(Ts::new("4.0"));
         w.message_changed("C1", parent);
         w.message_arrived("C1", message("4.0", Some("1.0")), true);
         assert_eq!(counts(&w), (3, 3));
@@ -2193,7 +2197,7 @@ mod tests {
         w.threads.clear();
         w.message_arrived("C1", message("4.0", Some("1.0")), false);
         w.message_arrived("C1", message("4.0", Some("1.0")), false);
-        assert_eq!(w.timelines["C1"].messages[0].reply_count, 3);
+        assert_eq!(w.timelines["C1"].messages[0].extra.reply_count, 3);
     }
 
     #[test]
@@ -2234,7 +2238,7 @@ mod tests {
         w.message_arrived("C1", real, true);
         assert_eq!(counts(&w), (4, 4));
         assert_eq!(
-            w.timelines["C1"].messages[0].latest_reply,
+            w.timelines["C1"].messages[0].extra.latest_reply,
             Some(Ts::new("5.0"))
         );
     }
@@ -2247,10 +2251,10 @@ mod tests {
             .get_mut("C1")
             .and_then(|t| t.find_mut(&Ts::new("1.0")))
         {
-            parent.reply_count = 9;
+            parent.extra.reply_count = 9;
         }
         let mut parent = message("1.0", Some("1.0"));
-        parent.reply_count = 2;
+        parent.extra.reply_count = 2;
         parent.replies_known = true;
         let thread = vec![
             parent,
@@ -2265,7 +2269,7 @@ mod tests {
     fn deleting_a_reply_lowers_the_count() {
         let mut w = workspace_with_thread();
         w.remove_message("C1", &Ts::new("2.0"));
-        let count = |t: &Timeline| t.messages[0].reply_count;
+        let count = |t: &Timeline| t.messages[0].extra.reply_count;
         assert_eq!(count(&w.timelines["C1"]), 1);
         let thread = &w.threads[&("C1".to_owned(), Ts::new("1.0"))];
         assert_eq!(count(thread), 1);
@@ -2484,8 +2488,8 @@ mod tests {
         w.message_arrived("C1", reply(), true);
         w.message_arrived("C1", reply(), true);
         let parent = &w.timelines["C1"].messages[0];
-        assert_eq!(parent.reply_count, 3);
-        assert_eq!(parent.latest_reply, Some(Ts::new("4.0")));
+        assert_eq!(parent.extra.reply_count, 3);
+        assert_eq!(parent.extra.latest_reply, Some(Ts::new("4.0")));
         // Replies stay out of the channel's own list.
         assert_eq!(w.timelines["C1"].messages.len(), 2);
     }
@@ -2576,7 +2580,7 @@ mod tests {
         let count = |w: &WorkspaceState| {
             w.timelines_for("C1")
                 .filter_map(|t| t.messages.iter().find(|m| m.ts == Ts::new("1.0")))
-                .map(|m| m.reactions.len())
+                .map(|m| m.extra.reactions.len())
                 .collect::<Vec<_>>()
         };
         assert_eq!(count(&w), [1, 1]);
@@ -2783,8 +2787,8 @@ mod tests {
         let thread = &w.threads[&("C1".to_owned(), Ts::new("1.0"))];
         let order: Vec<String> = thread.messages.iter().map(|m| m.ts.to_string()).collect();
         assert_eq!(order, ["1.0", "2.0", "3.0"]);
-        assert_eq!(thread.messages[0].reply_count, 2);
-        assert_eq!(w.timelines["C1"].messages[0].reply_count, 2);
+        assert_eq!(thread.messages[0].extra.reply_count, 2);
+        assert_eq!(w.timelines["C1"].messages[0].extra.reply_count, 2);
         assert_eq!(
             w.timelines["C1"].messages.len(),
             2,
@@ -2824,7 +2828,7 @@ mod tests {
         );
         assert!(
             w.timelines_for("C1")
-                .all(|t| t.messages[0].reactions.is_empty())
+                .all(|t| t.messages[0].extra.reactions.is_empty())
         );
     }
 
@@ -2840,18 +2844,18 @@ mod tests {
         w.message_changed("C1", reply);
         let thread = &w.threads[&("C1".to_owned(), Ts::new("1.0"))];
         assert_eq!(thread.messages[1].text, "now for <@U1>");
-        assert_eq!(thread.messages[0].reply_count, 2);
-        assert_eq!(w.timelines["C1"].messages[0].reply_count, 2);
+        assert_eq!(thread.messages[0].extra.reply_count, 2);
+        assert_eq!(w.timelines["C1"].messages[0].extra.reply_count, 2);
         let c = w.conversation("C1").expect("C1");
         assert_eq!((c.mentions, c.latest), (0, Some(Ts::new("5.0"))));
         assert_eq!(w.timelines["C1"].messages.len(), 2);
 
         // A parent's new thread details replace the loaded copies.
         let mut parent = message("1.0", Some("1.0"));
-        parent.reply_count = 3;
+        parent.extra.reply_count = 3;
         parent.replies_known = true;
         w.message_changed("C1", parent);
-        assert_eq!(w.timelines["C1"].messages[0].reply_count, 3);
+        assert_eq!(w.timelines["C1"].messages[0].extra.reply_count, 3);
     }
 
     #[test]
@@ -3051,9 +3055,9 @@ mod tests {
         // Slack's page was asked for before 4.0 was sent.
         w.message_arrived("C1", theirs_in_thread("4.0"), true);
         let mut parent = message("1.0", Some("1.0"));
-        parent.reply_count = 2;
+        parent.extra.reply_count = 2;
         parent.replies_known = true;
-        parent.latest_reply = Some(Ts::new("3.0"));
+        parent.extra.latest_reply = Some(Ts::new("3.0"));
         let page = vec![
             parent,
             message("2.0", Some("1.0")),
@@ -3064,8 +3068,8 @@ mod tests {
         assert_eq!(stamps(&thread.messages), ["1.0", "2.0", "3.0", "4.0"]);
         assert_eq!(counts(&w), (3, 3));
         let parent = &w.timelines["C1"].messages[0];
-        assert_eq!(parent.latest_reply, Some(Ts::new("4.0")));
-        assert!(parent.reply_users.iter().any(|u| u == "U2"));
+        assert_eq!(parent.extra.latest_reply, Some(Ts::new("4.0")));
+        assert!(parent.extra.reply_users.iter().any(|u| u == "U2"));
     }
 
     /// A reply in C1's thread 1.0 from someone else.
@@ -3352,7 +3356,7 @@ mod tests {
         let copy = &w.sending[&Ts::new(local)];
         Message {
             client_msg_id: copy.client_msg_id.clone(),
-            subscribed: None,
+            extra: Extra::default(),
             ..mine(ts, &copy.text)
         }
     }
@@ -3404,7 +3408,7 @@ mod tests {
         sending(&mut w, "local-1", "ok", None);
         let elsewhere = Message {
             client_msg_id: Some(crate::model::new_client_msg_id()),
-            subscribed: None,
+            extra: Extra::default(),
             ..mine("5.0", "ok")
         };
         w.message_arrived("C1", elsewhere, true);

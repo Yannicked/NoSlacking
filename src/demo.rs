@@ -14,8 +14,8 @@ pub use setup::View;
 use crate::backend::{Command, Event, Sink, Socket, UploadGate};
 use crate::credentials::AppCredentials;
 use crate::model::{
-    Attachment, Bot, Conversation, ConversationKind, Delivery, File, Message, Reaction,
-    SectionKind, SidebarSection, SignInKind, Ts, User, UserGroup, Workspace,
+    Attachment, Bot, Conversation, ConversationKind, Delivery, Extra, ExtraFields, File, Message,
+    Reaction, SectionKind, SidebarSection, SignInKind, Ts, User, UserGroup, Workspace,
 };
 use crate::notice::Notice;
 
@@ -286,18 +286,7 @@ fn message(seconds: u64, user: &str, text: &str) -> Message {
     Message {
         ts: ts(seconds),
         user: Some(user.into()),
-        username: None,
-        bot_icon: None,
-        bot_id: None,
         text: text.into(),
-        thread_ts: None,
-        reply_count: 0,
-        replies_known: false,
-        reply_users: Vec::new(),
-        latest_reply: None,
-        reactions: Vec::new(),
-        files: Vec::new(),
-        attachments: Vec::new(),
         blocks: Vec::new(),
         edited: false,
         subtype: None,
@@ -305,7 +294,8 @@ fn message(seconds: u64, user: &str, text: &str) -> Message {
         broadcast: false,
         pinned: false,
         client_msg_id: None,
-        subscribed: None,
+        replies_known: false,
+        extra: Extra::default(),
     }
 }
 
@@ -591,7 +581,7 @@ fn long_history() -> Vec<Message> {
             // A link preview now and then, with a picture whose size is only
             // known once it arrives.
             if i % 4 == 1 {
-                message.attachments.push(Attachment {
+                message.extra.attachments.push(Attachment {
                     color: None,
                     service: Some("GitHub".into()),
                     pretext: None,
@@ -639,7 +629,11 @@ fn history(channel: &str) -> Vec<Message> {
                 "Morning! The Socket Mode reconnect fix is in review: <https://github.com/example/noslacking/pull/42|#42>",
             ),
             Message {
-                reactions: vec![reaction("eyes", &["U01", "U03"])],
+                extra: ExtraFields {
+                    reactions: vec![reaction("eyes", &["U01", "U03"])],
+                    ..Default::default()
+                }
+                .into(),
                 ..message(
                     NOW - 86_400 - 4900,
                     "U02",
@@ -647,15 +641,19 @@ fn history(channel: &str) -> Vec<Message> {
                 )
             },
             Message {
-                thread_ts: Some(ts(THREAD)),
-                reply_count: 3,
                 replies_known: true,
-                reply_users: vec!["U01".into(), "U04".into()],
-                latest_reply: Some(ts(NOW - 1200)),
-                reactions: vec![
-                    reaction("tada", &["U01", "U02", "U04"]),
-                    reaction("rocket", &[ME]),
-                ],
+                extra: ExtraFields {
+                    thread_ts: Some(ts(THREAD)),
+                    reply_count: 3,
+                    reply_users: vec!["U01".into(), "U04".into()],
+                    latest_reply: Some(ts(NOW - 1200)),
+                    reactions: vec![
+                        reaction("tada", &["U01", "U02", "U04"]),
+                        reaction("rocket", &[ME]),
+                    ],
+                    ..Default::default()
+                }
+                .into(),
                 ..message(
                     THREAD,
                     "U03",
@@ -663,20 +661,24 @@ fn history(channel: &str) -> Vec<Message> {
                 )
             },
             Message {
-                files: vec![File {
-                    id: "F01".into(),
-                    name: "sidebar-v2.png".into(),
-                    title: "sidebar-v2.png".into(),
-                    mimetype: "image/png".into(),
-                    size: 48_213,
-                    url_private: None,
-                    download_url: None,
-                    thumb: Some("slow://sidebar-v2.png".into()),
-                    thumb_size: Some([480.0, 270.0]),
-                    permalink: None,
-                    original_size: Some([480.0, 270.0]),
-                    ..File::default()
-                }],
+                extra: ExtraFields {
+                    files: vec![File {
+                        id: "F01".into(),
+                        name: "sidebar-v2.png".into(),
+                        title: "sidebar-v2.png".into(),
+                        mimetype: "image/png".into(),
+                        size: 48_213,
+                        url_private: None,
+                        download_url: None,
+                        thumb: Some("slow://sidebar-v2.png".into()),
+                        thumb_size: Some([480.0, 270.0]),
+                        permalink: None,
+                        original_size: Some([480.0, 270.0]),
+                        ..File::default()
+                    }],
+                    ..Default::default()
+                }
+                .into(),
                 ..message(
                     NOW - 2400,
                     "U01",
@@ -684,20 +686,24 @@ fn history(channel: &str) -> Vec<Message> {
                 )
             },
             Message {
-                files: vec![File {
-                    id: "F02".into(),
-                    name: "sidebar-v2-light.png".into(),
-                    title: "sidebar-v2-light.png".into(),
-                    mimetype: "image/png".into(),
-                    size: 51_002,
-                    thumb: Some("slow://sidebar-v2-light.png".into()),
-                    thumb_size: Some([480.0, 270.0]),
-                    original_size: Some([480.0, 270.0]),
-                    permalink: Some(
-                        "https://acme.slack.com/files/U01/F02/sidebar-v2-light.png".into(),
-                    ),
-                    ..File::default()
-                }],
+                extra: ExtraFields {
+                    files: vec![File {
+                        id: "F02".into(),
+                        name: "sidebar-v2-light.png".into(),
+                        title: "sidebar-v2-light.png".into(),
+                        mimetype: "image/png".into(),
+                        size: 51_002,
+                        thumb: Some("slow://sidebar-v2-light.png".into()),
+                        thumb_size: Some([480.0, 270.0]),
+                        original_size: Some([480.0, 270.0]),
+                        permalink: Some(
+                            "https://acme.slack.com/files/U01/F02/sidebar-v2-light.png".into(),
+                        ),
+                        ..File::default()
+                    }],
+                    ..Default::default()
+                }
+                .into(),
                 ..message(NOW - 2380, "U01", "And in the light theme.")
             },
             message(
@@ -706,7 +712,11 @@ fn history(channel: &str) -> Vec<Message> {
                 "I tightened the rows to 28px and gave unread channels a bolder weight.",
             ),
             Message {
-                reactions: vec![reaction("heart", &["U01"])],
+                extra: ExtraFields {
+                    reactions: vec![reaction("heart", &["U01"])],
+                    ..Default::default()
+                }
+                .into(),
                 ..message(
                     NOW - 2000,
                     ME,
@@ -714,23 +724,27 @@ fn history(channel: &str) -> Vec<Message> {
                 )
             },
             Message {
-                username: Some("Deploy Bot".into()),
                 user: None,
                 subtype: Some("bot_message".into()),
-                attachments: vec![Attachment {
-                    color: Some(egui::Color32::from_rgb(0x2e, 0xb6, 0x7d)),
-                    service: Some("CI".into()),
-                    pretext: None,
-                    title: Some("Build #1287 passed".into()),
-                    title_link: Some("https://ci.example.com/1287".into()),
-                    text: "`noslacking` on `main` in 6m 12s".into(),
-                    fields: Vec::new(),
-                    image: None,
-                    thumb: None,
-                    footer: Some("ci.example.com".into()),
-                    blocks: Vec::new(),
-                    ..Attachment::default()
-                }],
+                extra: ExtraFields {
+                    username: Some("Deploy Bot".into()),
+                    attachments: vec![Attachment {
+                        color: Some(egui::Color32::from_rgb(0x2e, 0xb6, 0x7d)),
+                        service: Some("CI".into()),
+                        pretext: None,
+                        title: Some("Build #1287 passed".into()),
+                        title_link: Some("https://ci.example.com/1287".into()),
+                        text: "`noslacking` on `main` in 6m 12s".into(),
+                        fields: Vec::new(),
+                        image: None,
+                        thumb: None,
+                        footer: Some("ci.example.com".into()),
+                        blocks: Vec::new(),
+                        ..Attachment::default()
+                    }],
+                    ..Default::default()
+                }
+                .into(),
                 ..message(NOW - 900, "U05", "")
             },
             message(
@@ -755,10 +769,14 @@ fn history(channel: &str) -> Vec<Message> {
         ],
         "C05" => vec![
             Message {
-                reactions: vec![
-                    reaction("partyparrot", &["U01", ME]),
-                    reaction("tada", &["U02"]),
-                ],
+                extra: ExtraFields {
+                    reactions: vec![
+                        reaction("partyparrot", &["U01", ME]),
+                        reaction("tada", &["U02"]),
+                    ],
+                    ..Default::default()
+                }
+                .into(),
                 ..message(
                     NOW - 4000,
                     "U04",
@@ -803,18 +821,22 @@ fn history(channel: &str) -> Vec<Message> {
         // a voice memo and a PDF.
         "C03" => vec![
             Message {
-                attachments: vec![Attachment {
-                    service: Some("YouTube".into()),
-                    author: Some("Rust Conference".into()),
-                    author_link: Some("https://www.youtube.com/@rustconf".into()),
-                    title: Some("Immediate mode interfaces in practice".into()),
-                    title_link: Some("https://www.youtube.com/watch?v=demo".into()),
-                    thumb: Some("slow://talk-thumb.jpg".into()),
-                    thumb_size: Some([480.0, 270.0]),
-                    video: Some("https://www.youtube.com/watch?v=demo".into()),
-                    color: Some(egui::Color32::from_rgb(0xff, 0x00, 0x33)),
-                    ..Attachment::default()
-                }],
+                extra: ExtraFields {
+                    attachments: vec![Attachment {
+                        service: Some("YouTube".into()),
+                        author: Some("Rust Conference".into()),
+                        author_link: Some("https://www.youtube.com/@rustconf".into()),
+                        title: Some("Immediate mode interfaces in practice".into()),
+                        title_link: Some("https://www.youtube.com/watch?v=demo".into()),
+                        thumb: Some("slow://talk-thumb.jpg".into()),
+                        thumb_size: Some([480.0, 270.0]),
+                        video: Some("https://www.youtube.com/watch?v=demo".into()),
+                        color: Some(egui::Color32::from_rgb(0xff, 0x00, 0x33)),
+                        ..Attachment::default()
+                    }],
+                    ..Default::default()
+                }
+                .into(),
                 ..message(
                     NOW - 9600,
                     "U01",
@@ -822,63 +844,75 @@ fn history(channel: &str) -> Vec<Message> {
                 )
             },
             Message {
-                attachments: vec![Attachment {
-                    service: Some("Design Notes".into()),
-                    title: Some("Density, revisited".into()),
-                    title_link: Some("https://design.example/density".into()),
-                    text:
-                        "How much should fit on one screen? Notes from a year of compact layouts."
-                            .into(),
-                    image: Some("slow://density.png".into()),
-                    image_size: Some([1200.0, 675.0]),
-                    ..Attachment::default()
-                }],
+                extra: ExtraFields {
+                    attachments: vec![Attachment {
+                        service: Some("Design Notes".into()),
+                        title: Some("Density, revisited".into()),
+                        title_link: Some("https://design.example/density".into()),
+                        text:
+                            "How much should fit on one screen? Notes from a year of compact layouts."
+                                .into(),
+                        image: Some("slow://density.png".into()),
+                        image_size: Some([1200.0, 675.0]),
+                        ..Attachment::default()
+                    }],
+                    ..Default::default()
+                }
+                .into(),
                 ..message(NOW - 9500, "U03", "<https://design.example/density>")
             },
             Message {
-                files: vec![
-                    File {
-                        id: "F10".into(),
-                        name: "sidebar-walkthrough.mp4".into(),
-                        mimetype: "video/mp4".into(),
-                        size: 8_412_000,
-                        url_private: Some(
-                            "https://files.slack.com/files-pri/TDEMO-F10/walkthrough.mp4".into(),
-                        ),
-                        poster: Some("slow://walkthrough.jpg".into()),
-                        poster_size: Some([640.0, 360.0]),
-                        ..File::default()
-                    },
-                    File {
-                        id: "F11".into(),
-                        name: "voice-memo.m4a".into(),
-                        mimetype: "audio/mp4".into(),
-                        size: 412_000,
-                        url_private: Some(
-                            "https://files.slack.com/files-pri/TDEMO-F11/memo.m4a".into(),
-                        ),
-                        ..File::default()
-                    },
-                ],
+                extra: ExtraFields {
+                    files: vec![
+                        File {
+                            id: "F10".into(),
+                            name: "sidebar-walkthrough.mp4".into(),
+                            mimetype: "video/mp4".into(),
+                            size: 8_412_000,
+                            url_private: Some(
+                                "https://files.slack.com/files-pri/TDEMO-F10/walkthrough.mp4".into(),
+                            ),
+                            poster: Some("slow://walkthrough.jpg".into()),
+                            poster_size: Some([640.0, 360.0]),
+                            ..File::default()
+                        },
+                        File {
+                            id: "F11".into(),
+                            name: "voice-memo.m4a".into(),
+                            mimetype: "audio/mp4".into(),
+                            size: 412_000,
+                            url_private: Some(
+                                "https://files.slack.com/files-pri/TDEMO-F11/memo.m4a".into(),
+                            ),
+                            ..File::default()
+                        },
+                    ],
+                    ..Default::default()
+                }
+                .into(),
                 ..message(NOW - 9200, "U01", "Screen recording and my notes:")
             },
             Message {
-                files: vec![File {
-                    id: "F12".into(),
-                    name: "style-guide.pdf".into(),
-                    mimetype: "application/pdf".into(),
-                    size: 1_204_000,
-                    download_url: Some(
-                        "https://files.slack.com/files-pri/TDEMO-F12/download/style-guide.pdf"
-                            .into(),
-                    ),
-                    url_private: Some(
-                        "https://files.slack.com/files-pri/TDEMO-F12/style-guide.pdf".into(),
-                    ),
-                    poster: Some("slow://style-guide.png".into()),
-                    poster_size: Some([480.0, 270.0]),
-                    ..File::default()
-                }],
+                extra: ExtraFields {
+                    files: vec![File {
+                        id: "F12".into(),
+                        name: "style-guide.pdf".into(),
+                        mimetype: "application/pdf".into(),
+                        size: 1_204_000,
+                        download_url: Some(
+                            "https://files.slack.com/files-pri/TDEMO-F12/download/style-guide.pdf"
+                                .into(),
+                        ),
+                        url_private: Some(
+                            "https://files.slack.com/files-pri/TDEMO-F12/style-guide.pdf".into(),
+                        ),
+                        poster: Some("slow://style-guide.png".into()),
+                        poster_size: Some([480.0, 270.0]),
+                        ..File::default()
+                    }],
+                    ..Default::default()
+                }
+                .into(),
                 ..message(NOW - 9000, "U03", "The style guide, updated.")
             },
         ],
@@ -902,7 +936,7 @@ fn demo_sound() -> crate::audio::Bytes {
 pub fn voice_clip() -> Option<File> {
     shared_files()
         .into_iter()
-        .flat_map(|message| message.files)
+        .flat_map(|message| message.extra.into_fields().files)
         .find(|file| file.voice)
 }
 
@@ -931,7 +965,11 @@ fn shared_files() -> Vec<Message> {
         ..File::default()
     };
     let with = |files: Vec<File>, seconds: u64, user: &str, text: &str| Message {
-        files,
+        extra: ExtraFields {
+            files,
+            ..Default::default()
+        }
+        .into(),
         ..message(NOW - seconds, user, text)
     };
     vec![
@@ -1133,11 +1171,11 @@ fn search(query: &crate::search::Query, page: u32) -> crate::search::Page {
                     key: format!("{channel}/{}", message.ts.text()),
                     channel: Some(channel.to_owned()),
                     channel_name: channel.to_owned(),
-                    thread: message.thread_ts.filter(|t| *t != message.ts),
+                    thread: message.extra.thread_ts.filter(|t| *t != message.ts),
                     ts: Some(message.ts),
                     when: Some(message.ts),
-                    user: message.user.clone(),
-                    username: message.username.clone(),
+                    user: message.user.map(String::from),
+                    username: message.extra.username.clone(),
                     text,
                     file: None,
                     permalink: None,
@@ -1611,11 +1649,15 @@ fn thread() -> Vec<Message> {
         .into_iter()
         .find(|m| m.ts == ts(THREAD))
         .unwrap_or_else(|| message(THREAD, "U03", ""));
-    parent.thread_ts = Some(ts(THREAD));
+    parent.extra.thread_ts = Some(ts(THREAD));
     // You follow it, as Slack tells a browser session.
-    parent.subscribed = Some(true);
+    parent.extra.subscribed = Some(true);
     let reply = |seconds, user, text| Message {
-        thread_ts: Some(ts(THREAD)),
+        extra: ExtraFields {
+            thread_ts: Some(ts(THREAD)),
+            ..Default::default()
+        }
+        .into(),
         ..message(seconds, user, text)
     };
     vec![
@@ -1870,7 +1912,7 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
             } => {
                 sent += 1;
                 let mut message = echo(NOW + sent, &text, client_msg_id);
-                message.thread_ts = thread;
+                message.extra.thread_ts = thread;
                 sink.send(Event::Sent {
                     team,
                     channel,

@@ -107,9 +107,10 @@ pub(super) fn plain_text(workspace: &WorkspaceState, message: &Message) -> Strin
         return text;
     }
     // A file with no comment, or an app's message that is all layout.
-    match message.files.iter().find(|file| !file.deleted) {
+    match message.extra.files.iter().find(|file| !file.deleted) {
         Some(file) => crate::i18n::tf("Shared {name}", &[("name", &file.name)]),
         None => message
+            .extra
             .attachments
             .iter()
             .find_map(|a| a.title.clone().or_else(|| Some(a.text.clone())))
@@ -619,6 +620,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Extra;
 
     #[test]
     fn unread_adds_up_every_workspace() {
@@ -731,18 +733,7 @@ mod tests {
         let message = Message {
             ts: crate::model::Ts::new("1.0"),
             user: None,
-            username: None,
-            bot_icon: None,
-            bot_id: None,
             text: "<!subteam^S1> and <!subteam^S9> and <!subteam^S8|@ops>".into(),
-            thread_ts: None,
-            reply_count: 0,
-            replies_known: false,
-            reply_users: Vec::new(),
-            latest_reply: None,
-            reactions: Vec::new(),
-            files: Vec::new(),
-            attachments: Vec::new(),
             blocks: Vec::new(),
             edited: false,
             subtype: None,
@@ -750,7 +741,8 @@ mod tests {
             broadcast: false,
             pinned: false,
             client_msg_id: None,
-            subscribed: None,
+            replies_known: false,
+            extra: Extra::default(),
         };
         assert_eq!(plain_text(&w, &message), "@design and @S9 and @ops");
     }

@@ -179,6 +179,7 @@ pub fn gallery<'a>(team: &str, messages: impl IntoIterator<Item = &'a Message>) 
         .into_iter()
         .flat_map(|message| {
             message
+                .extra
                 .files
                 .iter()
                 .filter_map(|file| picture(team, &message.ts, file))
@@ -205,6 +206,7 @@ pub fn open<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ExtraFields;
 
     fn image(id: &str, size: u64, mimetype: &str) -> File {
         File {
@@ -223,18 +225,7 @@ mod tests {
         Message {
             ts: Ts::new(ts),
             user: Some("U1".into()),
-            username: None,
-            bot_icon: None,
-            bot_id: None,
             text: String::new(),
-            thread_ts: None,
-            reply_count: 0,
-            replies_known: false,
-            reply_users: Vec::new(),
-            latest_reply: None,
-            reactions: Vec::new(),
-            files,
-            attachments: Vec::new(),
             blocks: Vec::new(),
             edited: false,
             subtype: None,
@@ -242,7 +233,12 @@ mod tests {
             broadcast: false,
             pinned: false,
             client_msg_id: None,
-            subscribed: None,
+            replies_known: false,
+            extra: ExtraFields {
+                files,
+                ..Default::default()
+            }
+            .into(),
         }
     }
 

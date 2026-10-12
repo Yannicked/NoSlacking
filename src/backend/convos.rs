@@ -798,18 +798,7 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
             let mut message = crate::model::Message {
                 ts: crate::model::Ts::new("1790168400.000100"),
                 user: Some("U03".into()),
-                username: None,
-                bot_icon: None,
-                bot_id: None,
                 text: "Release checklist: tag, build, notarize, announce in #general.".into(),
-                thread_ts: None,
-                reply_count: 0,
-                replies_known: true,
-                reply_users: Vec::new(),
-                latest_reply: None,
-                reactions: Vec::new(),
-                files: Vec::new(),
-                attachments: Vec::new(),
                 blocks: Vec::new(),
                 edited: false,
                 subtype: None,
@@ -817,7 +806,11 @@ pub fn demo(team: &str, command: Command) -> Vec<Event> {
                 broadcast: false,
                 pinned: true,
                 client_msg_id: None,
-                subscribed: None,
+                replies_known: true,
+                extra: crate::model::ExtraFields {
+                    ..Default::default()
+                }
+                .into(),
             };
             let first = convos::Pin {
                 message: message.clone(),
