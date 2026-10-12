@@ -204,7 +204,7 @@ pub fn groups(hits: &[Hit], sort: Sort, day_of: impl Fn(&Ts) -> Option<i64>) -> 
                 ),
             ),
             Sort::Newest => {
-                let when = hit.when.clone().unwrap_or_default();
+                let when = hit.when.unwrap_or_default();
                 (day_of(&when), Heading::Day(when))
             }
         };

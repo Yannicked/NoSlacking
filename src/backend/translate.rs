@@ -363,7 +363,7 @@ mod tests {
             ));
             assert!(
                 matches!(&read[..], [Translated::Event(Event::Read { team, channel, ts })]
-                    if team == "T1" && channel == "C1" && ts.0 == "1700000000.000200"),
+                    if team == "T1" && channel == "C1" && ts.text() == "1700000000.000200"),
                 "{kind}"
             );
         }
@@ -403,7 +403,7 @@ mod tests {
             matches!(&followed[..], [Translated::Event(Event::Views {
                 team,
                 event: crate::views::Event::Followed { channel, thread, follow: true },
-            })] if team == "T1" && channel == "C1" && thread.0 == "1700000000.000100"),
+            })] if team == "T1" && channel == "C1" && thread.text() == "1700000000.000100"),
             "{followed:?}"
         );
         let dropped = events(
@@ -477,7 +477,7 @@ mod tests {
             r#"{"type":"message","subtype":"message_deleted","channel":"C1","deleted_ts":"1.0"}"#,
         )[..]
         {
-            [Translated::Event(Event::Deleted { ts, .. })] => assert_eq!(ts.as_str(), "1.0"),
+            [Translated::Event(Event::Deleted { ts, .. })] => assert_eq!(ts.text(), "1.0"),
             other => panic!("{other:?}"),
         }
     }

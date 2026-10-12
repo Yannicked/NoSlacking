@@ -178,8 +178,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         match (&hit.channel, &hit.ts) {
             (Some(channel), Some(ts)) => actions.push(Action::JumpTo {
                 channel: channel.clone(),
-                ts: ts.clone(),
-                thread: hit.thread.clone(),
+                ts: *ts,
+                thread: hit.thread,
             }),
             // A file never shared in a conversation: its page in Slack.
             _ => {

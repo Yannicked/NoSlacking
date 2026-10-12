@@ -262,7 +262,7 @@ impl App {
                         (has_older, cursor),
                         has_newer,
                     );
-                    log::debug!("loaded the messages around {} in {channel}", ts.as_str());
+                    log::debug!("loaded the messages around {} in {channel}", ts.text());
                     self.fetch_arrived(&team, arrived);
                 }
                 // An anchor kept for the list as it was is stale now.
@@ -275,7 +275,7 @@ impl App {
                 result,
             } => {
                 if let Err(error) = &result {
-                    log::debug!("could not quote {} in {channel}: {error:?}", ts.as_str());
+                    log::debug!("could not quote {} in {channel}: {error:?}", ts.text());
                 }
                 if let Some(workspace) = self.workspace_mut(&team) {
                     let arrived = workspace.quote_arrived(&channel, &ts, result);

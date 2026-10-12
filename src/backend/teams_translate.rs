@@ -32,7 +32,7 @@ pub fn teams_id_to_ts(id: &str) -> Ts {
 
 /// Converts a [`Ts`] back into a Teams millisecond epoch ID string.
 pub fn ts_to_teams_id(ts: &Ts) -> String {
-    if ts.as_str().contains('.')
+    if ts.text().contains('.')
         && let Some((secs, micros)) = ts.parts()
     {
         return secs
@@ -40,7 +40,7 @@ pub fn ts_to_teams_id(ts: &Ts) -> String {
             .saturating_add(micros / 1000)
             .to_string();
     }
-    ts.as_str().to_string()
+    ts.text().to_string()
 }
 
 /// Extracts a clean user ID from a Teams `from` field (which may be a contacts URL or MRI).
@@ -469,12 +469,12 @@ pub fn channel_posts(posts: &[crate::teams::client::Post]) -> Vec<Message> {
             .iter()
             .filter_map(translate_message)
             .map(|mut reply| {
-                reply.thread_ts = Some(root.ts.clone());
+                reply.thread_ts = Some(root.ts);
                 reply
             })
             .collect();
         if post.reply_count > 0 || !replies.is_empty() {
-            root.thread_ts = Some(root.ts.clone());
+            root.thread_ts = Some(root.ts);
             root.reply_count = post
                 .reply_count
                 .max(u32::try_from(replies.len()).unwrap_or(u32::MAX));
@@ -484,7 +484,7 @@ pub fn channel_posts(posts: &[crate::teams::client::Post]) -> Vec<Message> {
                     root.reply_users.push(user);
                 }
             }
-            root.latest_reply = replies.iter().map(|r| r.ts.clone()).max();
+            root.latest_reply = replies.iter().map(|r| r.ts).max();
             root.replies_known = true;
         }
         out.push(root);
@@ -501,12 +501,12 @@ pub fn thread_posts(messages: &mut [Message]) {
     let mut threads: std::collections::HashMap<Ts, (u32, Vec<String>, Ts)> =
         std::collections::HashMap::new();
     for reply in messages.iter().filter(|m| m.is_reply()) {
-        let Some(post) = reply.thread_ts.clone() else {
+        let Some(post) = reply.thread_ts else {
             continue;
         };
         let entry = threads
             .entry(post)
-            .or_insert_with(|| (0, Vec::new(), reply.ts.clone()));
+            .or_insert_with(|| (0, Vec::new(), reply.ts));
         entry.0 += 1;
         if let Some(user) = &reply.user
             && !entry.1.contains(user)
@@ -514,12 +514,12 @@ pub fn thread_posts(messages: &mut [Message]) {
             entry.1.push(user.clone());
         }
         if reply.ts > entry.2 {
-            entry.2 = reply.ts.clone();
+            entry.2 = reply.ts;
         }
     }
     for post in messages.iter_mut().filter(|m| !m.is_reply()) {
         if let Some((count, users, latest)) = threads.remove(&post.ts) {
-            post.thread_ts = Some(post.ts.clone());
+            post.thread_ts = Some(post.ts);
             post.reply_count = count;
             post.reply_users = users;
             post.latest_reply = Some(latest);
@@ -882,7 +882,7 @@ mod tests {
             .collect();
         thread_posts(&mut page);
         let root = &page[0];
-        assert_eq!(root.thread_ts, Some(root.ts.clone()));
+        assert_eq!(root.thread_ts, Some(root.ts));
         assert_eq!(root.reply_count, 2);
         assert_eq!(root.reply_users, ["ann"]);
         assert_eq!(root.latest_reply, Some(teams_id_to_ts("1700000000900")));
@@ -954,7 +954,7 @@ mod tests {
     fn timestamp_lossless_round_trip() {
         let teams_id = "1728287364123";
         let ts = teams_id_to_ts(teams_id);
-        assert_eq!(ts.as_str(), "1728287364.123000");
+        assert_eq!(ts.text(), "1728287364.123000");
         let back = ts_to_teams_id(&ts);
         assert_eq!(back, teams_id);
     }
@@ -985,7 +985,7 @@ mod tests {
         assert_eq!(conv.last_read, Some(teams_id_to_ts("1728287300000")));
         assert!(conv.has_unread(), "read up to before the last message");
         assert_eq!(
-            conv.latest.as_ref().map(|t| t.as_str()),
+            conv.latest.as_ref().map(Ts::to_string).as_deref(),
             Some("1728287364.000000")
         );
 

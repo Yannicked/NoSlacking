@@ -418,8 +418,8 @@ fn open_in_slack(ui: &mut egui::Ui, row: &Row<'_>, message: &Message, actions: &
     if response.clicked() {
         actions.push(Action::OpenInSlack {
             channel: row.channel.to_owned(),
-            ts: message.ts.clone(),
-            thread: message.thread_ts.clone(),
+            ts: message.ts,
+            thread: message.thread_ts,
         });
     }
 }

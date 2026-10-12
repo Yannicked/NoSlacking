@@ -446,13 +446,13 @@ impl WorkspaceState {
             .find(|((c, parent), t)| {
                 c == channel && parent != ts && t.messages.iter().any(|m| m.ts == *ts)
             })
-            .map(|((_, parent), _)| parent.clone())
+            .map(|((_, parent), _)| *parent)
             .or_else(|| {
                 let timeline = self.timelines.get(channel)?;
                 let message = timeline.messages.iter().find(|m| m.ts == *ts)?;
-                message.thread_ts.clone().filter(|_| message.is_reply())
+                message.thread_ts.filter(|_| message.is_reply())
             });
-        self.threads.remove(&(channel.to_owned(), ts.clone()));
+        self.threads.remove(&(channel.to_owned(), *ts));
         for timeline in self.timelines_for_mut(channel) {
             timeline.remove(ts);
         }
@@ -460,7 +460,7 @@ impl WorkspaceState {
         let Some(parent) = parent.filter(|_| !ts.is_local()) else {
             return;
         };
-        let thread = self.threads.get_mut(&(channel.to_owned(), parent.clone()));
+        let thread = self.threads.get_mut(&(channel.to_owned(), parent));
         let copies = self
             .timelines
             .get_mut(channel)
@@ -641,7 +641,7 @@ impl WorkspaceState {
             // copy may hold messages deleted since, or end before a gap.
             // What is newer than both the page and the copy came live
             // while the page was on its way, and stays.
-            let line = max_ts(newest.clone(), timeline.cached_newest.take());
+            let line = max_ts(newest, timeline.cached_newest.take());
             timeline.cached = false;
             timeline.loaded = false;
             timeline
@@ -780,8 +780,7 @@ impl WorkspaceState {
         if self.counted_mentions.len() >= SEEN_LIMIT {
             self.counted_mentions.pop_front();
         }
-        self.counted_mentions
-            .push_back((channel.to_owned(), ts.clone()));
+        self.counted_mentions.push_back((channel.to_owned(), *ts));
     }
 
     /// What a poll learnt about a conversation (see
@@ -837,7 +836,7 @@ impl WorkspaceState {
         if self.seen.len() >= SEEN_LIMIT {
             self.seen.pop_front();
         }
-        self.seen.push_back((channel.to_owned(), ts.clone()));
+        self.seen.push_back((channel.to_owned(), *ts));
         true
     }
 
@@ -974,7 +973,7 @@ impl WorkspaceState {
             users: self.unknown_users(messages.iter().filter_map(|m| m.user.as_deref())),
             bots: self.unknown_bots(messages.iter()),
         };
-        let key = (channel.to_owned(), ts.clone());
+        let key = (channel.to_owned(), ts);
         let newest = messages.iter().map(|m| &m.ts).max().cloned();
         let kept: Vec<Message> = self
             .threads
@@ -1054,7 +1053,7 @@ impl WorkspaceState {
         let counts_all = !self.desktop.is_muted(channel);
         if message.is_reply() {
             self.count_reply(channel, &message);
-            let parent_ts = message.thread_ts.clone().unwrap_or_default();
+            let parent_ts = message.thread_ts.unwrap_or_default();
             let key = (channel.to_owned(), parent_ts);
             if let Some(thread) = self.threads.get_mut(&key) {
                 remove_echoed_local(thread, &message, from_me);
@@ -1065,7 +1064,7 @@ impl WorkspaceState {
             let timeline = self.timelines.entry(channel.to_owned()).or_default();
             remove_echoed_local(timeline, &message, from_me);
             let new = timeline.find_mut(&message.ts).is_none();
-            let ts = message.ts.clone();
+            let ts = message.ts;
             // A list of older history shows new messages once it is read up
             // to them, not after a gap.
             if new && timeline.has_newer {
@@ -1080,7 +1079,7 @@ impl WorkspaceState {
             let mut mention = false;
             if new && let Some(conversation) = self.conversation_mut(channel) {
                 if conversation.latest.as_ref().is_none_or(|l| *l < ts) {
-                    conversation.latest = Some(ts.clone());
+                    conversation.latest = Some(ts);
                 }
                 // Something new opens a closed direct message again, as
                 // in Slack; this does not wait for Slack to say so.
@@ -1088,7 +1087,7 @@ impl WorkspaceState {
                     conversation.is_open = Some(true);
                 }
                 if from_me {
-                    conversation.last_read = Some(ts.clone());
+                    conversation.last_read = Some(ts);
                     conversation.mentions = 0;
                 } else {
                     mention =
@@ -1122,10 +1121,9 @@ impl WorkspaceState {
             return false;
         };
         self.sending.remove(&local);
-        self.echoed.insert(local.clone(), message.ts.clone());
+        self.echoed.insert(local, message.ts);
         if self.cancelled.contains(&local) {
-            self.suppressed
-                .insert((channel.to_owned(), message.ts.clone()));
+            self.suppressed.insert((channel.to_owned(), message.ts));
             return true;
         }
         false
@@ -1137,7 +1135,7 @@ impl WorkspaceState {
         self.sending
             .iter()
             .find(|(_, copy)| copy.client_msg_id.as_deref() == Some(id))
-            .map(|(local, _)| local.clone())
+            .map(|(local, _)| *local)
     }
 
     /// Whether a message is the echo of one you deleted while it was
@@ -1171,7 +1169,7 @@ impl WorkspaceState {
     /// a latest reply counted here says nothing of the older ones, as your
     /// own reply can be answered by Slack after someone else's later one.
     fn count_reply(&mut self, channel: &str, reply: &Message) {
-        let Some(parent) = reply.thread_ts.clone() else {
+        let Some(parent) = reply.thread_ts else {
             return;
         };
         if self.reply_counted(channel, &reply.ts) {
@@ -1184,7 +1182,7 @@ impl WorkspaceState {
                 .is_some_and(|latest| reply.ts <= *latest)
         };
         let counted = &self.counted_replies;
-        let thread = self.threads.get_mut(&(channel.to_owned(), parent.clone()));
+        let thread = self.threads.get_mut(&(channel.to_owned(), parent));
         let copies = self
             .timelines
             .get_mut(channel)
@@ -1196,7 +1194,7 @@ impl WorkspaceState {
                 continue;
             }
             copy.reply_count += 1;
-            copy.latest_reply = max_ts(copy.latest_reply.take(), Some(reply.ts.clone()));
+            copy.latest_reply = max_ts(copy.latest_reply.take(), Some(reply.ts));
             if let Some(user) = &reply.user
                 && !copy.reply_users.contains(user)
             {
@@ -1207,7 +1205,7 @@ impl WorkspaceState {
             self.counted_replies.pop_front();
         }
         self.counted_replies
-            .push_back((channel.to_owned(), reply.ts.clone()));
+            .push_back((channel.to_owned(), reply.ts));
     }
 
     /// Whether reply `ts` was counted on its parent here already.
@@ -1255,14 +1253,10 @@ impl WorkspaceState {
         let echoed = self.echoed.remove(local);
         if self.cancelled.remove(local) {
             self.sending.remove(local);
-            let delete = result
-                .as_ref()
-                .ok()
-                .map(|message| message.ts.clone())
-                .or(echoed);
+            let delete = result.as_ref().ok().map(|message| message.ts).or(echoed);
             if let Some(ts) = &delete {
                 // Its echo may be here already.
-                self.suppressed.insert((channel.to_owned(), ts.clone()));
+                self.suppressed.insert((channel.to_owned(), *ts));
                 self.remove_message(channel, ts);
             }
             return SendOutcome::Cancelled { delete };
@@ -1324,9 +1318,8 @@ impl WorkspaceState {
             && message.in_channel()
             && let Some(conversation) = self.conversation_mut(channel)
         {
-            conversation.latest = max_ts(conversation.latest.take(), Some(message.ts.clone()));
-            conversation.last_read =
-                max_ts(conversation.last_read.take(), Some(message.ts.clone()));
+            conversation.latest = max_ts(conversation.latest.take(), Some(message.ts));
+            conversation.last_read = max_ts(conversation.last_read.take(), Some(message.ts));
         }
         SendOutcome::Settled
     }
@@ -1340,7 +1333,7 @@ impl WorkspaceState {
             .is_some_and(|m| m.delivery == Delivery::Sending);
         if sending {
             // Its entry stays until Slack answers, so its echo is known.
-            self.cancelled.insert(local.clone());
+            self.cancelled.insert(*local);
         } else {
             self.sending.remove(local);
         }
@@ -1349,7 +1342,7 @@ impl WorkspaceState {
     /// Whether a message is one you deleted while it was sending, whose
     /// echo is not to show.
     pub(super) fn is_suppressed(&self, channel: &str, ts: &Ts) -> bool {
-        self.suppressed.contains(&(channel.to_owned(), ts.clone()))
+        self.suppressed.contains(&(channel.to_owned(), *ts))
     }
 
     /// Someone reacted, or took a reaction back.
@@ -1375,7 +1368,7 @@ impl WorkspaceState {
         let Some(conversation) = self.conversation_mut(channel) else {
             return;
         };
-        let before = conversation.last_read.clone();
+        let before = conversation.last_read;
         read_up_to(conversation, ts);
         // Read further on another device: no longer to keep unread here.
         if conversation.last_read != before {
@@ -1415,11 +1408,11 @@ impl WorkspaceState {
             .filter(|m| counts_all || self.mentions_me(m))
             .count();
         let mentions = u32::try_from(mentions).unwrap_or(u32::MAX);
-        let newest = listed.last().map(|m| m.ts.clone());
+        let newest = listed.last().map(|m| m.ts);
         let conversation = self.conversation_mut(channel)?;
-        conversation.last_read = Some(marker.clone());
+        conversation.last_read = Some(marker);
         // The chosen message may be newer than the latest Slack last told.
-        conversation.latest = max_ts(conversation.latest.take(), newest.or(Some(ts.clone())));
+        conversation.latest = max_ts(conversation.latest.take(), newest.or(Some(*ts)));
         conversation.unread = unread;
         conversation.mentions = mentions;
         self.held_unread.insert(channel.to_owned());
@@ -1430,7 +1423,7 @@ impl WorkspaceState {
     /// thread's and the conversation's own.
     fn place(&mut self, channel: &str, message: Message) {
         if message.is_reply()
-            && let Some(parent) = message.thread_ts.clone()
+            && let Some(parent) = message.thread_ts
             && let Some(thread) = self.threads.get_mut(&(channel.to_owned(), parent))
         {
             thread.upsert(message.clone());
@@ -1444,11 +1437,11 @@ impl WorkspaceState {
 
     /// Shows a message you are sending before Slack has it.
     pub(super) fn add_local(&mut self, channel: &str, message: Message) {
-        self.sending.insert(message.ts.clone(), message.clone());
+        self.sending.insert(message.ts, message.clone());
         let timeline = match &message.thread_ts {
             Some(parent) => self
                 .threads
-                .entry((channel.to_owned(), parent.clone()))
+                .entry((channel.to_owned(), *parent))
                 .or_default(),
             None => self.timelines.entry(channel.to_owned()).or_default(),
         };
@@ -1582,8 +1575,8 @@ impl WorkspaceState {
             return;
         }
         if message.is_reply() {
-            let parent = message.thread_ts.clone().unwrap_or_default();
-            let key = (channel.to_owned(), parent.clone());
+            let parent = message.thread_ts.unwrap_or_default();
+            let key = (channel.to_owned(), parent);
             if let Some(thread) = self.threads.get_mut(&key) {
                 thread.upsert(message.clone());
             }
@@ -1640,7 +1633,7 @@ impl WorkspaceState {
             }
         }
         if let Some(message) = &found {
-            self.sending.insert(local.clone(), message.clone());
+            self.sending.insert(*local, message.clone());
         }
         found
     }
@@ -1658,8 +1651,7 @@ impl WorkspaceState {
             .find(|m| {
                 m.user.as_deref() == Some(me) && m.delivery == Delivery::Sent && !m.is_system()
             })?
-            .ts
-            .clone();
+            .ts;
         Some((channel, ts))
     }
 }
@@ -1684,17 +1676,13 @@ pub fn active_in<'a>(
 /// Slack still has the old marker and would read it again.
 fn merge_conversation(existing: &mut Conversation, fresh: Conversation, held: bool) {
     if held {
-        let kept = (
-            existing.last_read.clone(),
-            existing.unread,
-            existing.mentions,
-        );
+        let kept = (existing.last_read, existing.unread, existing.mentions);
         merge_conversation(existing, fresh, false);
         (existing.last_read, existing.unread, existing.mentions) = kept;
         return;
     }
-    let latest = max_ts(existing.latest.take(), fresh.latest.clone());
-    let last_read = max_ts(existing.last_read.take(), fresh.last_read.clone());
+    let latest = max_ts(existing.latest.take(), fresh.latest);
+    let last_read = max_ts(existing.last_read.take(), fresh.last_read);
     let mentions = existing.mentions;
     let unread = if fresh.unread > 0 {
         fresh.unread
@@ -1754,7 +1742,7 @@ fn unread_marker(listed: &[&Message], ts: &Ts) -> Option<Ts> {
         .iter()
         .take_while(|m| m.ts < *ts)
         .last()
-        .map(|m| m.ts.clone());
+        .map(|m| m.ts);
     before.or_else(|| ts.just_before())
 }
 
@@ -1783,13 +1771,13 @@ pub(super) fn local_message(
     broadcast: bool,
 ) -> Message {
     Message {
-        ts: local.clone(),
+        ts: *local,
         user: Some(me.to_owned()),
         username: None,
         bot_icon: None,
         bot_id: None,
         text: wire.to_owned(),
-        thread_ts: thread.clone(),
+        thread_ts: *thread,
         reply_count: 0,
         replies_known: false,
         reply_users: Vec::new(),
@@ -1813,7 +1801,7 @@ pub(super) fn local_message(
 fn add_replies(parent: &mut Message, live: &[&Message], extra: u32) {
     parent.reply_count = parent.reply_count.saturating_add(extra);
     for reply in live {
-        parent.latest_reply = max_ts(parent.latest_reply.take(), Some(reply.ts.clone()));
+        parent.latest_reply = max_ts(parent.latest_reply.take(), Some(reply.ts));
         if let Some(user) = &reply.user
             && !parent.reply_users.contains(user)
         {
@@ -1855,7 +1843,7 @@ pub(super) fn first_unread(timeline: &Timeline, read: &Ts, me: &str) -> Option<T
         .iter()
         .filter(|m| m.in_channel() && !m.ts.is_local())
         .find(|m| m.ts > *read && m.user.as_deref() != Some(me))
-        .map(|m| m.ts.clone())
+        .map(|m| m.ts)
 }
 
 #[cfg(test)]
@@ -2175,7 +2163,7 @@ mod tests {
 
     fn counts(w: &WorkspaceState) -> (u32, u32) {
         let parent = Ts::new("1.0");
-        let thread = &w.threads[&("C1".to_owned(), parent.clone())];
+        let thread = &w.threads[&("C1".to_owned(), parent)];
         (
             w.timelines["C1"].messages[0].reply_count,
             thread
@@ -2328,11 +2316,21 @@ mod tests {
         );
     }
 
-    fn texts(timeline: &Timeline) -> Vec<(&str, &str)> {
+    /// A message's timestamp and text, compared with `("ts", "text")`.
+    #[derive(Debug)]
+    struct Row<'a>(String, &'a str);
+
+    impl PartialEq<(&str, &str)> for Row<'_> {
+        fn eq(&self, other: &(&str, &str)) -> bool {
+            self.0 == other.0 && self.1 == other.1
+        }
+    }
+
+    fn texts(timeline: &Timeline) -> Vec<Row<'_>> {
         timeline
             .messages
             .iter()
-            .map(|m| (m.ts.as_str(), m.text.as_str()))
+            .map(|m| Row(m.ts.to_string(), m.text.as_str()))
             .collect()
     }
 
@@ -2506,7 +2504,7 @@ mod tests {
         // Writing there yourself means you have read it.
         w.message_arrived("C1", mine("7.0", "on it"), false);
         let c = w.conversation("C1").expect("C1");
-        assert_eq!((c.mentions, c.last_read.clone()), (0, Some(Ts::new("7.0"))));
+        assert_eq!((c.mentions, c.last_read), (0, Some(Ts::new("7.0"))));
     }
 
     #[test]
@@ -2618,7 +2616,7 @@ mod tests {
         assert!(w.is_unread(c));
         assert!(w.holds_unread("C1"));
         // The "New" line goes above the message marked.
-        let read = c.last_read.clone().expect("marker");
+        let read = c.last_read.expect("marker");
         assert_eq!(
             first_unread(&w.timelines["C1"], &read, "U1"),
             Some(Ts::new("4.0"))
@@ -2631,7 +2629,10 @@ mod tests {
     fn marking_the_first_loaded_message_unread_goes_just_before_it() {
         let mut w = general_read_through();
         let marker = w.mark_unread("C1", &Ts::new("2.0"));
-        assert_eq!(marker.as_ref().map(Ts::as_str), Some("1.999999"));
+        assert_eq!(
+            marker.as_ref().map(Ts::to_string).as_deref(),
+            Some("1.999999")
+        );
         let c = w.conversation("C1").expect("C1");
         assert_eq!((c.unread, c.mentions), (4, 1));
         assert_eq!(
@@ -2666,7 +2667,7 @@ mod tests {
         w.message_arrived("C1", mine("6.0", "back"), true);
         assert!(!w.holds_unread("C1"));
         assert_eq!(
-            w.conversation("C1").and_then(|c| c.last_read.clone()),
+            w.conversation("C1").and_then(|c| c.last_read),
             Some(Ts::new("6.0"))
         );
         w.mark_unread("C1", &Ts::new("5.0"));
@@ -2700,7 +2701,7 @@ mod tests {
         let before = w.edit_locally("C1", &ts, "new").map(Box::new);
         assert!(before.is_some());
         let edit = Change::Edit {
-            ts: ts.clone(),
+            ts,
             text: "new".into(),
             before,
         };
@@ -2716,7 +2717,7 @@ mod tests {
         w.undo(
             "C1",
             Change::Edit {
-                ts: ts.clone(),
+                ts,
                 text: "first".into(),
                 before,
             },
@@ -2750,7 +2751,7 @@ mod tests {
         w.undo(
             "C1",
             Change::Edit {
-                ts: ts.clone(),
+                ts,
                 text: "*new*".into(),
                 before,
             },
@@ -2780,7 +2781,7 @@ mod tests {
             },
         );
         let thread = &w.threads[&("C1".to_owned(), Ts::new("1.0"))];
-        let order: Vec<&str> = thread.messages.iter().map(|m| m.ts.as_str()).collect();
+        let order: Vec<String> = thread.messages.iter().map(|m| m.ts.to_string()).collect();
         assert_eq!(order, ["1.0", "2.0", "3.0"]);
         assert_eq!(thread.messages[0].reply_count, 2);
         assert_eq!(w.timelines["C1"].messages[0].reply_count, 2);
@@ -2799,10 +2800,10 @@ mod tests {
         w.undo("C1", undo.clone());
         // Twice, as if Slack had sent it back meanwhile: still one copy.
         w.undo("C1", undo);
-        let order: Vec<&str> = w.timelines["C1"]
+        let order: Vec<String> = w.timelines["C1"]
             .messages
             .iter()
-            .map(|m| m.ts.as_str())
+            .map(|m| m.ts.to_string())
             .collect();
         assert_eq!(order, ["1.0", "5.0"]);
     }
@@ -2816,7 +2817,7 @@ mod tests {
         w.undo(
             "C1",
             Change::React {
-                ts: ts.clone(),
+                ts,
                 name: "tada".into(),
                 added: true,
             },
@@ -2842,7 +2843,7 @@ mod tests {
         assert_eq!(thread.messages[0].reply_count, 2);
         assert_eq!(w.timelines["C1"].messages[0].reply_count, 2);
         let c = w.conversation("C1").expect("C1");
-        assert_eq!((c.mentions, c.latest.clone()), (0, Some(Ts::new("5.0"))));
+        assert_eq!((c.mentions, c.latest), (0, Some(Ts::new("5.0"))));
         assert_eq!(w.timelines["C1"].messages.len(), 2);
 
         // A parent's new thread details replace the loaded copies.
@@ -2861,10 +2862,10 @@ mod tests {
         old.edited = true;
         let arrived = w.message_changed("C1", old.clone());
         assert_eq!(arrived, Arrived::default());
-        let order: Vec<&str> = w.timelines["C1"]
+        let order: Vec<String> = w.timelines["C1"]
             .messages
             .iter()
-            .map(|m| m.ts.as_str())
+            .map(|m| m.ts.to_string())
             .collect();
         assert_eq!(order, ["1.0", "5.0"]);
         // Nor in a conversation that is not loaded at all.
@@ -2902,7 +2903,7 @@ mod tests {
             w.timelines["C1"]
                 .messages
                 .iter()
-                .map(|m| m.ts.0.clone())
+                .map(|m| m.ts.to_string())
                 .collect()
         };
         assert!(
@@ -2968,7 +2969,7 @@ mod tests {
             w.timelines["C1"]
                 .messages
                 .iter()
-                .map(|m| m.ts.0.clone())
+                .map(|m| m.ts.to_string())
                 .collect()
         };
         assert_eq!(order(&w), ["2.0", "3.0", "local-1"]);
@@ -2980,7 +2981,7 @@ mod tests {
         w.message_arrived("C1", message("10.0", None), false);
         assert_eq!(order(&w), ["2.0", "3.0", "local-1"]);
         assert_eq!(
-            w.conversation("C1").and_then(|c| c.latest.clone()),
+            w.conversation("C1").and_then(|c| c.latest),
             Some(Ts::new("10.0"))
         );
         // An older page still does, and so do newer pages, up to the end.
@@ -3083,8 +3084,8 @@ mod tests {
         }
     }
 
-    fn stamps(messages: &[Message]) -> Vec<&str> {
-        messages.iter().map(|m| m.ts.as_str()).collect()
+    fn stamps(messages: &[Message]) -> Vec<String> {
+        messages.iter().map(|m| m.ts.to_string()).collect()
     }
 
     #[test]
@@ -3176,7 +3177,7 @@ mod tests {
         // The page moves the latest on, and is not kept as a timeline.
         w.polled_unopened("C1", &page);
         assert_eq!(
-            w.conversation("C1").and_then(|c| c.latest.clone()),
+            w.conversation("C1").and_then(|c| c.latest),
             Some(Ts::new("4.0"))
         );
         assert!(w.unopened("C1"));
@@ -3314,7 +3315,7 @@ mod tests {
         let timeline = &w.timelines["C1"];
         assert_eq!(timeline.messages.len(), UNOPENED_LIMIT);
         let newest = format!("{}.0", UNOPENED_LIMIT + 12);
-        assert_eq!(timeline.newest().map(Ts::as_str), Some(newest.as_str()));
+        assert_eq!(timeline.newest().map(Ts::to_string), Some(newest.clone()));
         let c = w.conversation("C1").expect("C1");
         assert_eq!(c.mentions as usize, UNOPENED_LIMIT + 10);
         assert_eq!(c.latest, Some(Ts::new(newest)));

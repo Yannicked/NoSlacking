@@ -646,7 +646,7 @@ fn order(
 ) {
     match sort {
         Sort::Name => rows.sort_by_cached_key(|c| titled(c).to_lowercase()),
-        Sort::Recent => rows.sort_by(|a, b| b.latest.cmp(&a.latest)),
+        Sort::Recent => rows.sort_by_key(|c| std::cmp::Reverse(c.latest)),
     }
     if arrange.unread_first {
         rows.sort_by_cached_key(|c| placed_rank(c, rank, arrange.hold));
@@ -1296,7 +1296,7 @@ mod tests {
         let (sections, mut conversations) = unread_sample();
         // Ann's is the newest, but read; Bob's is older and unread.
         if let Some(d3) = conversations.iter_mut().find(|c| c.id == "D3") {
-            d3.last_read = d3.latest.clone();
+            d3.last_read = d3.latest;
         }
         let shown = arranged(&sections, &conversations, &first(Sort::Recent));
         assert_eq!(shown[3], ["D2", "D1", "D3"]);
@@ -1382,7 +1382,7 @@ mod tests {
         assert_eq!(before[2], ["C5", "C3", "C2", "C6", "C1", "C4"]);
         // Opening beta reads it at once, before the sidebar draws again.
         if let Some(beta) = conversations.iter_mut().find(|c| c.id == "C2") {
-            beta.last_read = beta.latest.clone();
+            beta.last_read = beta.latest;
         }
         let open = frame(&mut memo, &conversations, Some("C2"));
         assert_eq!(open[2], before[2], "beta stays where it was");
@@ -1395,7 +1395,7 @@ mod tests {
         // Opening alpha reads it; beta goes down with the read ones and
         // alpha, opened while unread, keeps its place.
         if let Some(alpha) = conversations.iter_mut().find(|c| c.id == "C1") {
-            alpha.last_read = alpha.latest.clone();
+            alpha.last_read = alpha.latest;
         }
         let switched = frame(&mut memo, &conversations, Some("C1"));
         assert_eq!(switched[2], ["C5", "C3", "C1", "C6", "C2", "C4"]);
@@ -1615,7 +1615,7 @@ mod tests {
             })
         );
         let mut read = conversations.clone();
-        read[4].last_read = read[4].latest.clone();
+        read[4].last_read = read[4].latest;
         assert_ne!(
             plain,
             fingerprint(
@@ -2441,12 +2441,12 @@ mod tests {
         // Everything a year quiet and read.
         for c in &mut conversations {
             let at = Ts::new(format!("{}.000100", NOW - 365 * DAY));
-            c.latest = Some(at.clone());
+            c.latest = Some(at);
             c.last_read = Some(at);
         }
         // But one channel spoke yesterday.
         conversations[3].latest = Some(Ts::new(format!("{}.000100", NOW - DAY)));
-        conversations[3].last_read = conversations[3].latest.clone();
+        conversations[3].last_read = conversations[3].latest;
         let shown = layout(
             Some(&sections),
             &conversations,

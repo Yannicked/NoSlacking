@@ -192,7 +192,7 @@ impl App {
                 text: message.text,
                 thread: message.thread_ts,
                 broadcast: message.broadcast,
-                local: local.clone(),
+                local: *local,
                 client_msg_id: message.client_msg_id,
             });
         }
@@ -212,7 +212,7 @@ impl App {
             self.backend.send(Command::React {
                 team,
                 channel: channel.to_owned(),
-                ts: ts.clone(),
+                ts: *ts,
                 name: name.to_owned(),
                 add,
             });

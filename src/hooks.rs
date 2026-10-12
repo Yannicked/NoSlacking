@@ -184,8 +184,8 @@ pub fn payload(
             "kind": kind,
         },
         "message": {
-            "ts": message.ts.as_str(),
-            "thread_ts": thread.map(crate::model::Ts::as_str),
+            "ts": message.ts.text(),
+            "thread_ts": thread.map(crate::model::Ts::to_string),
             "user": message.user,
             "author": author,
             "text": message.text,

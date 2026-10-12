@@ -71,7 +71,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .frame(egui::Frame::new().fill(palette.window))
         .show(ui, |ui| {
             if files {
-                composer::drop_target(ui, &palette, Some(ts.clone()), false, actions);
+                composer::drop_target(ui, &palette, Some(ts), false, actions);
             }
             let rect = ui.max_rect();
             ui.painter().vline(
@@ -109,7 +109,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         {
                             actions.push(Action::Views(crate::views::Action::Follow {
                                 channel: channel.clone(),
-                                thread: ts.clone(),
+                                thread: ts,
                                 follow: !following,
                             }));
                         }
@@ -131,7 +131,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         workspace,
                         key: key.clone(),
                         placeholder: t("Reply…").into_owned(),
-                        thread: Some(ts.clone()),
+                        thread: Some(ts),
                         enter_sends: settings.enter_sends,
                         focus,
                         // Teams has no "also send to the channel".
@@ -143,7 +143,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             egui::CentralPanel::default()
                 .frame(egui::Frame::new())
                 .show(ui, |ui| {
-                    let timeline = workspace.threads.get(&(channel.clone(), ts.clone()));
+                    let timeline = workspace.threads.get(&(channel.clone(), ts));
                     let parent = timeline
                         .and_then(|t| t.messages.iter().find(|m| m.ts == ts))
                         .or_else(|| {
@@ -166,9 +166,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             .as_ref()
                             .filter(|s| s.in_thread && s.channel == channel),
                     };
-                    let heights_id = egui::Id::new(("thread-heights", &channel, ts.as_str()));
+                    let heights_id = egui::Id::new(("thread-heights", &channel, ts));
                     let output = egui::ScrollArea::vertical()
-                        .id_salt(("thread", &channel, ts.as_str()))
+                        .id_salt(("thread", &channel, ts))
                         .auto_shrink([false, false])
                         .stick_to_bottom(!steering)
                         .show_viewport(ui, |ui, viewport| {
@@ -194,7 +194,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                 };
                                 leads.push(lead);
                                 entries.push(rows::Entry {
-                                    key: egui::Id::new(reply.ts.as_str()).value(),
+                                    key: egui::Id::new(reply.ts).value(),
                                     guess: message::guess_height(reply, lead, look),
                                 });
                                 previous = Some(*reply);

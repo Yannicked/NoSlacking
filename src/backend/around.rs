@@ -55,7 +55,7 @@ async fn side(
 /// Slack answered them in.
 pub fn window(pages: impl IntoIterator<Item = Vec<Message>>) -> Vec<Message> {
     let mut messages: Vec<Message> = pages.into_iter().flatten().collect();
-    messages.sort_by(|a, b| a.ts.cmp(&b.ts));
+    messages.sort_by_key(|a| a.ts);
     messages.dedup_by(|a, b| a.ts == b.ts);
     messages
 }
@@ -117,14 +117,14 @@ pub async fn quote(
 ) {
     let mut params = vec![
         ("channel", channel.clone()),
-        ("latest", ts.0.clone()),
+        ("latest", ts.to_string()),
         ("inclusive", "true".to_owned()),
     ];
     let method = match &thread {
         Some(parent) => {
             // The parent comes first whatever the range, so room for two.
-            params.push(("ts", parent.0.clone()));
-            params.push(("oldest", ts.0.clone()));
+            params.push(("ts", parent.to_string()));
+            params.push(("oldest", ts.to_string()));
             params.push(("limit", "2".to_owned()));
             "conversations.replies"
         }
@@ -150,7 +150,7 @@ pub async fn quote(
 fn picked(messages: Vec<types::Message>, ts: &Ts) -> Option<Message> {
     messages
         .into_iter()
-        .filter(|m| m.ts == ts.0)
+        .filter(|m| m.ts == ts.to_string())
         .find_map(types::Message::into_model)
 }
 
@@ -194,7 +194,7 @@ mod tests {
         let after = vec![message("7.0"), message("6.0"), message("5.0")];
         let order: Vec<String> = window([before, after])
             .into_iter()
-            .map(|m| m.ts.0)
+            .map(|m| m.ts.to_string())
             .collect();
         assert_eq!(order, ["3.0", "4.0", "5.0", "6.0", "7.0"]);
         assert!(window([Vec::new(), Vec::new()]).is_empty());

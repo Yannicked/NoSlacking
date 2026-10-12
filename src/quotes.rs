@@ -83,7 +83,7 @@ fn quoted(quote: &Quote) -> Option<(String, Ts)> {
     {
         return Some((channel, ts));
     }
-    Some((quote.channel.clone()?, quote.ts.clone()?))
+    Some((quote.channel.clone()?, quote.ts?))
 }
 
 /// The message links of `message` it needs a quote of its own for: those
@@ -128,8 +128,8 @@ pub fn resolve<'a>(
     Some(Key {
         team: team.to_owned(),
         channel: channel.clone(),
-        ts: ts.clone(),
-        thread: thread.clone().filter(|parent| parent != ts),
+        ts: *ts,
+        thread: (*thread).filter(|parent| parent != ts),
     })
 }
 
@@ -160,13 +160,13 @@ pub struct Cache {
 impl Cache {
     /// What is known of message `ts` of `channel`, if it was asked for.
     pub fn get(&self, channel: &str, ts: &Ts) -> Option<&Fetched> {
-        self.entries.get(&(channel.to_owned(), ts.clone()))
+        self.entries.get(&(channel.to_owned(), *ts))
     }
 
     /// Notes that message `ts` of `channel` is being fetched. Returns
     /// whether to fetch it: only the first time.
     pub fn ask(&mut self, channel: &str, ts: &Ts) -> bool {
-        let key = (channel.to_owned(), ts.clone());
+        let key = (channel.to_owned(), *ts);
         if self.entries.contains_key(&key) {
             return false;
         }
@@ -184,7 +184,7 @@ impl Cache {
     /// none (it is not there), or why it could not be read. An answer
     /// nobody asked for (or one forgotten since) is dropped.
     pub fn arrived(&mut self, channel: &str, ts: &Ts, result: Result<Option<Message>, Failure>) {
-        let Some(entry) = self.entries.get_mut(&(channel.to_owned(), ts.clone())) else {
+        let Some(entry) = self.entries.get_mut(&(channel.to_owned(), *ts)) else {
             return;
         };
         *entry = match result {
@@ -265,7 +265,7 @@ pub fn from_message(
         url: url.to_owned(),
         channel: Some(channel.to_owned()),
         channel_name: workspace.conversation(channel).map(|c| workspace.title(c)),
-        ts: Some(message.ts.clone()),
+        ts: Some(message.ts),
         user: message.user.clone(),
         author: Some(workspace.author(message)),
         author_icon: workspace.author_icon(message).map(str::to_owned),

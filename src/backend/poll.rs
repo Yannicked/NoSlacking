@@ -233,7 +233,7 @@ fn pick(
         .filter(|id| known.get(*id).is_some_and(|k| k.latest.is_some()))
         .collect();
     by_activity.sort_by(|a, b| {
-        let latest = |id: &String| known.get(id).and_then(|k| k.latest.clone());
+        let latest = |id: &String| known.get(id).and_then(|k| k.latest);
         latest(b).cmp(&latest(a)).then_with(|| a.cmp(b))
     });
     let mut picked: Vec<String> = by_activity
@@ -395,8 +395,8 @@ fn report(team: &str, channel: &str, seen: &Known, counted: bool, sink: &Sink) {
     sink.send(Event::Activity {
         team: team.to_owned(),
         channel: channel.to_owned(),
-        latest: seen.latest.clone(),
-        last_read: seen.last_read.clone().filter(|_| counted),
+        latest: seen.latest,
+        last_read: seen.last_read.filter(|_| counted),
         mentions: counted.then_some(seen.mentions),
     });
 }

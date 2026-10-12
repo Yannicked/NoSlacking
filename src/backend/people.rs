@@ -167,7 +167,7 @@ impl Hub {
                 };
                 let mut frame = json!({"type": "typing", "channel": channel});
                 if let Some(thread) = thread {
-                    frame["thread_ts"] = thread.as_str().into();
+                    frame["thread_ts"] = thread.to_string().into();
                 }
                 let _ = rtm.send(frame);
             }

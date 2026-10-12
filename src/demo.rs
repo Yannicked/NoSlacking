@@ -315,7 +315,7 @@ fn message(seconds: u64, user: &str, text: &str) -> Message {
 fn echo(seconds: u64, text: &str, client_msg_id: Option<String>) -> Message {
     let mut json = serde_json::json!({
         "type": "message",
-        "ts": ts(seconds).as_str(),
+        "ts": ts(seconds).text(),
         "user": ME,
         "text": text,
     });
@@ -1130,12 +1130,12 @@ fn search(query: &crate::search::Query, page: u32) -> crate::search::Page {
                 }
                 text.push_str(rest);
                 hits.push(Hit {
-                    key: format!("{channel}/{}", message.ts.as_str()),
+                    key: format!("{channel}/{}", message.ts.text()),
                     channel: Some(channel.to_owned()),
                     channel_name: channel.to_owned(),
-                    thread: message.thread_ts.clone().filter(|t| *t != message.ts),
-                    ts: Some(message.ts.clone()),
-                    when: Some(message.ts.clone()),
+                    thread: message.thread_ts.filter(|t| *t != message.ts),
+                    ts: Some(message.ts),
+                    when: Some(message.ts),
                     user: message.user.clone(),
                     username: message.username.clone(),
                     text,
@@ -1164,7 +1164,7 @@ fn search(query: &crate::search::Query, page: u32) -> crate::search::Page {
         }),
     }
     if query.sort == Sort::Newest {
-        hits.sort_by(|a, b| b.when.cmp(&a.when));
+        hits.sort_by_key(|h| std::cmp::Reverse(h.when));
     }
     let total = hits.len() as u32;
     let pages = total.div_ceil(PAGE_SIZE).max(1);
@@ -1187,10 +1187,7 @@ const SIDE: usize = 15;
 /// The timestamp of message `index` of #general's long history, for
 /// jumping to it.
 pub fn long_history_ts(index: usize) -> Ts {
-    long_history()
-        .get(index)
-        .map(|m| m.ts.clone())
-        .unwrap_or_default()
+    long_history().get(index).map(|m| m.ts).unwrap_or_default()
 }
 
 /// The demo huddle's pretend screen share: where its pictures go, and

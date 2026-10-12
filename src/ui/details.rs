@@ -665,7 +665,7 @@ fn pins(
                                     {
                                         actions.push(Action::Convos(Convos::Pin {
                                             channel: conversation.id.clone(),
-                                            ts: message.ts.clone(),
+                                            ts: message.ts,
                                             pin: false,
                                         }));
                                     }
@@ -693,7 +693,7 @@ fn pins(
                 if open.clicked() {
                     actions.push(Action::OpenThread {
                         channel: conversation.id.clone(),
-                        ts: message.thread_root().clone(),
+                        ts: *message.thread_root(),
                     });
                 }
                 ui.add_space(6.0);

@@ -163,7 +163,7 @@ impl Command {
             },
             Self::Pin { channel, ts, pin } => Doing::Pin {
                 channel: channel.clone(),
-                ts: ts.clone(),
+                ts: *ts,
                 pin: *pin,
             },
             Self::Describe { channel, field, .. } => Doing::Describe {

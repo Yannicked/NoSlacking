@@ -2445,8 +2445,14 @@ mod tests {
             assert_eq!(parent.text, "edited");
             assert_eq!(parent.reply_count, 2);
             assert_eq!(parent.reply_users, ["U2"]);
-            assert_eq!(parent.latest_reply.as_ref().map(Ts::as_str), Some("3.0"));
-            assert_eq!(parent.thread_ts.as_ref().map(Ts::as_str), Some("1.0"));
+            assert_eq!(
+                parent.latest_reply.as_ref().map(Ts::to_string).as_deref(),
+                Some("3.0")
+            );
+            assert_eq!(
+                parent.thread_ts.as_ref().map(Ts::to_string).as_deref(),
+                Some("1.0")
+            );
         }
         // Slack's copy after the last reply was deleted: an explicit 0,
         // even without `thread_ts`, clears the counters.

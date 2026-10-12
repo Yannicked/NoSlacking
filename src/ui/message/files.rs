@@ -80,14 +80,14 @@ pub(super) fn file_view(
         .on_hover_text(&file.name);
         // In the thread panel the viewer steps through the thread's
         // pictures; a parent is its own thread.
-        let thread = row.in_thread.then(|| message.thread_root().clone());
+        let thread = row.in_thread.then(|| *message.thread_root());
         if response.hovered() {
             crate::ui::context::hover(
                 ui,
                 crate::ui::context::Target::Image {
                     channel: row.channel.to_owned(),
-                    thread: thread.clone(),
-                    ts: message.ts.clone(),
+                    thread,
+                    ts: message.ts,
                     file: file.id.clone(),
                     name: file.name.clone(),
                     download: file
@@ -109,7 +109,7 @@ pub(super) fn file_view(
             actions.push(Action::ViewImage {
                 channel: row.channel.to_owned(),
                 thread,
-                ts: message.ts.clone(),
+                ts: message.ts,
                 file: file.id.clone(),
             });
         }
