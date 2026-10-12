@@ -239,9 +239,8 @@ static SECTIONS_NOTED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec
 
 /// Whether `key` is new to `seen`, remembering it.
 fn first_time(seen: &std::sync::Mutex<Vec<String>>, key: &str) -> bool {
-    let mut seen = seen
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Forgotten after a panic: at worst a note is logged again.
+    let mut seen = crate::sync::lock_or_reset(seen);
     if seen.iter().any(|k| k == key) {
         return false;
     }

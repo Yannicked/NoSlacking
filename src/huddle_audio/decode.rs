@@ -259,7 +259,6 @@ mod tests {
         helper::to_image(planes, false)
     }
     use crate::huddle_audio::helper::pretend::{Act, Pretend, picture, welcome};
-    use crate::sync::lock;
     use noslacking_video_ipc::{FailKind, Reply, Request};
     use sha2::{Digest, Sha256};
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -461,18 +460,19 @@ mod tests {
         let pretend = Pretend::new(move |request| match request {
             Request::Hello { .. } => Act::Reply(welcome()),
             Request::OpenDecoder { hardware, .. } => {
-                *lock(&gpu) = *hardware;
-                lock(&noted).push(*hardware);
+                *gpu.lock().expect("a lock") = *hardware;
+                noted.lock().expect("a lock").push(*hardware);
                 Act::Reply(Reply::Opened { id: 1 })
             }
             Request::SetOutputSize { width, height, .. } => {
-                *lock(&fit) = (*width, *height);
+                *fit.lock().expect("a lock") = (*width, *height);
                 Act::Reply(Reply::Done)
             }
             Request::Decode { .. } => {
                 let n = decodes.fetch_add(1, Ordering::Relaxed);
-                let (width, height) = noslacking_video_ipc::output_size((480, 480), *lock(&fit));
-                let hardware = *lock(&gpu);
+                let (width, height) =
+                    noslacking_video_ipc::output_size((480, 480), *fit.lock().expect("a lock"));
+                let hardware = *gpu.lock().expect("a lock");
                 failing(n).unwrap_or_else(|| {
                     let Reply::Picture(decoded) = picture(width, height, 200) else {
                         return Act::Crash;
@@ -496,7 +496,7 @@ mod tests {
     }
 
     fn opened(opens: &Mutex<Vec<bool>>) -> Vec<bool> {
-        lock(opens).clone()
+        opens.lock().expect("a lock").clone()
     }
 
     #[test]

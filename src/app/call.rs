@@ -15,7 +15,7 @@
 //! the same actions as the call bar's, the room it has for tiles) and
 //! wakes the main window to apply it.
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use super::App;
@@ -86,10 +86,11 @@ impl std::fmt::Debug for CallWindow {
     }
 }
 
-/// Locks the window's state, going on with what a panicked frame left:
-/// at worst a picture is drawn once more.
+/// Locks the window's state. If a frame panicked holding it, it starts
+/// over as when the window closes: the main window writes the view and
+/// the picture sources again on its next frame.
 fn lock(window: &Mutex<CallWindow>) -> MutexGuard<'_, CallWindow> {
-    window.lock().unwrap_or_else(PoisonError::into_inner)
+    crate::sync::lock_or_reset(window)
 }
 
 impl App {

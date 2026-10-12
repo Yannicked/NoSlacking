@@ -27,7 +27,7 @@ use noslacking_video_ipc::h264;
 use super::decode::{H264, Outcome, Trouble};
 use super::helper::Lane;
 use super::screen::Picture;
-use crate::sync::{lock, wait};
+use crate::sync::{lock_or_recover, lock_or_reset, lock_whole, wait_or_recover};
 
 /// What a new picture calls to be drawn.
 type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -54,7 +54,8 @@ struct Shared {
     /// The cameras whose helper kept back a newer picture than the window
     /// has: fetched once the window can take it.
     kept: Mutex<BTreeSet<String>>,
-    /// Has the decoder thread fetch a camera's kept picture.
+    /// Has the decoder thread fetch a camera's kept picture. Set whole, so a
+    /// panic cannot tear it.
     fetch: Mutex<Option<Fetch>>,
     /// A tile's size in pixels, width in the high half.
     fit: AtomicU64,
@@ -71,6 +72,7 @@ struct Shared {
     tints: Mutex<BTreeMap<String, [i16; 2]>>,
     /// Wakes whoever draws the pictures: the whole interface at first,
     /// the call window alone once it is open ([`Gallery::set_wake`]).
+    /// Replaced whole, so a panic cannot tear it.
     wake: Mutex<Wake>,
 }
 
@@ -118,12 +120,12 @@ impl Gallery {
     /// called: the call window has new pictures repaint only itself, not
     /// the main window behind it.
     pub fn set_wake(&self, wake: impl Fn() + Send + Sync + 'static) {
-        *lock(&self.shared.wake) = Arc::new(wake);
+        *lock_whole(&self.shared.wake) = Arc::new(wake);
     }
 
     /// Calls the wake, not holding its lock while it runs.
     fn wake(&self) {
-        let wake = Arc::clone(&lock(&self.shared.wake));
+        let wake = Arc::clone(&lock_whole(&self.shared.wake));
         wake();
     }
 
@@ -131,7 +133,7 @@ impl Gallery {
     /// interface only if nothing else was waiting.
     pub fn put(&self, key: &str, picture: Picture) {
         let was_empty = {
-            let mut newest = lock(&self.shared.newest);
+            let mut newest = lock_or_reset(&self.shared.newest);
             let was_empty = newest.is_empty();
             newest.insert(key.to_owned(), picture);
             was_empty
@@ -145,7 +147,7 @@ impl Gallery {
     /// The newest picture of each camera that has a new one. The helper
     /// is then asked for any of theirs it kept back meanwhile.
     pub fn take(&self) -> BTreeMap<String, Picture> {
-        let taken = std::mem::take(&mut *lock(&self.shared.newest));
+        let taken = std::mem::take(&mut *lock_or_reset(&self.shared.newest));
         for key in taken.keys() {
             self.fetch_kept(key);
         }
@@ -155,21 +157,21 @@ impl Gallery {
     /// Forgets `key`'s picture not taken, and any kept back: its tile
     /// went, or its stream started again.
     pub fn clear(&self, key: &str) {
-        lock(&self.shared.newest).remove(key);
-        lock(&self.shared.kept).remove(key);
+        lock_or_reset(&self.shared.newest).remove(key);
+        lock_or_reset(&self.shared.kept).remove(key);
     }
 
     /// Whether `key`'s next picture should be sent: the window can be
     /// seen and has taken that camera's last one. Otherwise the helper
     /// keeps it back ([`Self::keep`]).
     pub fn wants_picture(&self, key: &str) -> bool {
-        self.visible() && !lock(&self.shared.newest).contains_key(key)
+        self.visible() && !lock_or_reset(&self.shared.newest).contains_key(key)
     }
 
     /// The helper kept a picture of `key` back: it is fetched as soon as
     /// the window can take it, which may be now.
     pub fn keep(&self, key: &str) {
-        lock(&self.shared.kept).insert(key.to_owned());
+        lock_or_reset(&self.shared.kept).insert(key.to_owned());
         // The window may have taken the last picture since it was asked.
         self.fetch_kept(key);
     }
@@ -177,15 +179,15 @@ impl Gallery {
     /// Asks the decoder thread for `key`'s kept picture if the window can
     /// take one; only one asker wins it.
     fn fetch_kept(&self, key: &str) {
-        let won = self.wants_picture(key) && lock(&self.shared.kept).remove(key);
-        if won && let Some(fetch) = lock(&self.shared.fetch).as_ref() {
+        let won = self.wants_picture(key) && lock_or_reset(&self.shared.kept).remove(key);
+        if won && let Some(fetch) = lock_whole(&self.shared.fetch).as_ref() {
             fetch(key);
         }
     }
 
     /// What has the decoder thread fetch a camera's kept picture.
     fn on_fetch(&self, fetch: impl Fn(&str) + Send + Sync + 'static) {
-        *lock(&self.shared.fetch) = Some(Box::new(fetch));
+        *lock_whole(&self.shared.fetch) = Some(Box::new(fetch));
     }
 
     /// Says whether the window showing the tiles can be seen; when it can
@@ -193,7 +195,7 @@ impl Gallery {
     pub fn set_visible(&self, visible: bool) {
         let was = self.shared.visible.swap(visible, Ordering::Relaxed);
         if visible && !was {
-            let kept: Vec<String> = lock(&self.shared.kept).iter().cloned().collect();
+            let kept: Vec<String> = lock_or_reset(&self.shared.kept).iter().cloned().collect();
             for key in kept {
                 self.fetch_kept(&key);
             }
@@ -238,24 +240,24 @@ impl Gallery {
 
     /// `key`'s decoder needs a keyframe to go on.
     pub fn want_keyframe(&self, key: &str) {
-        lock(&self.shared.keyframes).insert(key.to_owned());
+        lock_or_reset(&self.shared.keyframes).insert(key.to_owned());
     }
 
     /// Whether `key` wanted a keyframe since last asked.
     pub fn take_keyframe_wish(&self, key: &str) -> bool {
-        lock(&self.shared.keyframes).remove(key)
+        lock_or_reset(&self.shared.keyframes).remove(key)
     }
 
     /// The demo tints `key`'s pictures so one fixture plays several
     /// people: `[blue, red]` added to the chroma.
     #[cfg(feature = "demo")]
     pub fn tint(&self, key: &str, tint: [i16; 2]) {
-        lock(&self.shared.tints).insert(key.to_owned(), tint);
+        lock_or_reset(&self.shared.tints).insert(key.to_owned(), tint);
     }
 
     #[cfg(feature = "demo")]
     fn tinted(&self, key: &str, yuv: &mut noslacking_video_ipc::Planes) {
-        let Some([u, v]) = lock(&self.shared.tints).get(key).copied() else {
+        let Some([u, v]) = lock_or_reset(&self.shared.tints).get(key).copied() else {
             return;
         };
         let shift = |plane: &mut Vec<u8>, by: i16| {
@@ -292,6 +294,22 @@ struct Queue {
     closed: bool,
 }
 
+impl Queue {
+    /// Locks `queue`, stopping its thread if a holder panicked.
+    fn lock(queue: &Mutex<Queue>) -> std::sync::MutexGuard<'_, Queue> {
+        lock_or_recover(queue, Self::stop)
+    }
+
+    /// After a panic the jobs may be half-changed and out of step with the
+    /// decoders, so the thread stops rather than decode them; the tiles
+    /// keep their last pictures.
+    fn stop(&mut self) {
+        log::warn!("video: the camera decoder's queue broke; decoding stops");
+        self.jobs.clear();
+        self.closed = true;
+    }
+}
+
 type Jobs = Arc<(Mutex<Queue>, Condvar)>;
 
 /// The decoder thread for one session's camera tiles. Dropping it ends
@@ -318,7 +336,7 @@ impl CameraDecoding {
         let fetching = Arc::downgrade(&jobs);
         gallery.on_fetch(move |key| {
             if let Some(jobs) = fetching.upgrade() {
-                let mut queue = lock(&jobs.0);
+                let mut queue = Queue::lock(&jobs.0);
                 if !queue
                     .jobs
                     .iter()
@@ -342,7 +360,7 @@ impl CameraDecoding {
     }
 
     fn queue(&self) -> std::sync::MutexGuard<'_, Queue> {
-        lock(&self.jobs.0)
+        Queue::lock(&self.jobs.0)
     }
 
     /// Drops `key`'s frames and fetches still waiting: they are stale.
@@ -429,7 +447,7 @@ impl Drop for CameraDecoding {
 
 /// The next job, or none once the queue is closed.
 fn next(jobs: &Jobs) -> Option<Job> {
-    let mut queue = lock(&jobs.0);
+    let mut queue = Queue::lock(&jobs.0);
     loop {
         if queue.closed {
             return None;
@@ -437,7 +455,7 @@ fn next(jobs: &Jobs) -> Option<Job> {
         if let Some(job) = queue.jobs.pop_front() {
             return Some(job);
         }
-        queue = wait(&jobs.1, queue);
+        queue = wait_or_recover(&jobs.1, &jobs.0, queue, Queue::stop);
     }
 }
 
@@ -608,7 +626,7 @@ pub fn demo_feed(gallery: Gallery, playing: Arc<Mutex<Vec<String>>>) -> std::io:
             let mut started: Vec<String> = Vec::new();
             let mut n = 0usize;
             loop {
-                let now = lock(&playing).clone();
+                let now = lock_or_reset(&playing).clone();
                 for key in started.iter().filter(|k| !now.contains(k)) {
                     decoding.stop(key);
                 }

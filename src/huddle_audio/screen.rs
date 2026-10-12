@@ -24,7 +24,7 @@ use noslacking_video_ipc::h264;
 
 use super::decode::{self, H264, Outcome, Trouble};
 use super::helper::Lane;
-use crate::sync::{lock, wait};
+use crate::sync::{lock_or_recover, lock_or_reset, lock_whole, wait_or_recover};
 
 /// What a new picture calls to be drawn.
 type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -60,7 +60,8 @@ struct Shared {
     /// The helper kept back a newer picture than the window has: fetched
     /// once the window can take it.
     kept: AtomicBool,
-    /// Has the decoder thread fetch the kept picture.
+    /// Has the decoder thread fetch the kept picture. Set whole, so a
+    /// panic cannot tear it.
     fetch: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// The window's size for the share in pixels, width in the high half.
     fit: AtomicU64,
@@ -73,6 +74,7 @@ struct Shared {
     pictures: AtomicUsize,
     /// Wakes whoever draws the pictures: the whole interface at first,
     /// the call window alone once it is open ([`Screen::set_wake`]).
+    /// Replaced whole, so a panic cannot tear it.
     wake: Mutex<Wake>,
 }
 
@@ -111,20 +113,21 @@ impl Screen {
         }
     }
 
+    /// The picture not taken yet: dropped after a panic.
     fn newest(&self) -> std::sync::MutexGuard<'_, Option<Picture>> {
-        lock(&self.shared.newest)
+        lock_or_reset(&self.shared.newest)
     }
 
     /// Has a new picture call `wake` from now on in place of what it
     /// called: the call window has new pictures repaint only itself, not
     /// the main window behind it.
     pub fn set_wake(&self, wake: impl Fn() + Send + Sync + 'static) {
-        *lock(&self.shared.wake) = Arc::new(wake);
+        *lock_whole(&self.shared.wake) = Arc::new(wake);
     }
 
     /// Calls the wake, not holding its lock while it runs.
     fn wake(&self) {
-        let wake = Arc::clone(&lock(&self.shared.wake));
+        let wake = Arc::clone(&lock_whole(&self.shared.wake));
         wake();
     }
 
@@ -174,7 +177,7 @@ impl Screen {
     /// one; only one asker wins it.
     fn fetch_kept(&self) {
         if self.wants_picture() && self.shared.kept.swap(false, Ordering::Relaxed) {
-            let fetch = lock(&self.shared.fetch);
+            let fetch = lock_whole(&self.shared.fetch);
             if let Some(fetch) = fetch.as_ref() {
                 fetch();
             }
@@ -183,7 +186,7 @@ impl Screen {
 
     /// What has the decoder thread fetch a kept picture.
     fn on_fetch(&self, fetch: impl Fn() + Send + Sync + 'static) {
-        *lock(&self.shared.fetch) = Some(Box::new(fetch));
+        *lock_whole(&self.shared.fetch) = Some(Box::new(fetch));
     }
 
     /// Says whether the window showing the share can be seen; when it can
@@ -260,6 +263,22 @@ struct Queue {
     closed: bool,
 }
 
+impl Queue {
+    /// Locks `queue`, stopping its thread if a holder panicked.
+    fn lock(queue: &Mutex<Queue>) -> std::sync::MutexGuard<'_, Queue> {
+        lock_or_recover(queue, Self::stop)
+    }
+
+    /// After a panic the jobs may be half-changed and out of step with the
+    /// decoder, so the thread stops rather than decode them; the share
+    /// keeps its last picture.
+    fn stop(&mut self) {
+        log::warn!("video: the share decoder's queue broke; decoding stops");
+        self.jobs.clear();
+        self.closed = true;
+    }
+}
+
 type Jobs = Arc<(Mutex<Queue>, Condvar)>;
 
 /// The decoder thread for one session's watched share. Dropping it ends
@@ -286,7 +305,7 @@ impl Decoding {
         let fetching = Arc::downgrade(&jobs);
         screen.on_fetch(move || {
             if let Some(jobs) = fetching.upgrade() {
-                let mut queue = lock(&jobs.0);
+                let mut queue = Queue::lock(&jobs.0);
                 if !queue.jobs.iter().any(|job| matches!(job, Job::Fetch)) {
                     queue.jobs.push_back(Job::Fetch);
                 }
@@ -306,7 +325,7 @@ impl Decoding {
     }
 
     fn queue(&self) -> std::sync::MutexGuard<'_, Queue> {
-        lock(&self.jobs.0)
+        Queue::lock(&self.jobs.0)
     }
 
     /// Hands the thread `job`, dropping whatever frames still wait if
@@ -371,7 +390,7 @@ impl Drop for Decoding {
 
 /// The next job, or none once the queue is closed.
 fn next(jobs: &Jobs) -> Option<Job> {
-    let mut queue = lock(&jobs.0);
+    let mut queue = Queue::lock(&jobs.0);
     loop {
         if queue.closed {
             return None;
@@ -379,7 +398,7 @@ fn next(jobs: &Jobs) -> Option<Job> {
         if let Some(job) = queue.jobs.pop_front() {
             return Some(job);
         }
-        queue = wait(&jobs.1, queue);
+        queue = wait_or_recover(&jobs.1, &jobs.0, queue, Queue::stop);
     }
 }
 

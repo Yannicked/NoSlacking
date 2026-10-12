@@ -15,7 +15,7 @@ use tokio::sync::Semaphore;
 
 use super::types;
 use crate::scopes::Scopes;
-use crate::sync::lock;
+use crate::sync::lock_or_recover;
 
 pub const API: &str = "https://slack.com/api/";
 const MAX_IN_FLIGHT: usize = 6;
@@ -505,8 +505,17 @@ impl Client {
 
     /// The sign-in's state, for a moment: the guard must be gone before
     /// the next `.await`.
+    ///
+    /// If a holder panicked, the token, the app and the reporter stand
+    /// (each is only ever replaced whole, and losing the token would sign
+    /// the workspace out), while what was learnt alongside them is
+    /// forgotten: a refresh failure's pause and the scopes, which the
+    /// next answer brings back.
     fn auth(&self) -> std::sync::MutexGuard<'_, AuthState> {
-        lock(&self.shared.auth)
+        lock_or_recover(&self.shared.auth, |auth| {
+            auth.failure = None;
+            auth.scopes = None;
+        })
     }
 
     /// The access token for a call, renewed first when it is about to
@@ -1281,7 +1290,7 @@ mod tests {
             Box::pin(async move {
                 gate.notified().await;
                 let n = {
-                    let mut seen = lock(&seen);
+                    let mut seen = seen.lock().expect("a lock");
                     seen.push(refresh);
                     seen.len()
                 };
@@ -1302,7 +1311,10 @@ mod tests {
                 for _ in 0..10 {
                     tokio::task::yield_now().await;
                 }
-                lock(&reports).push(outcome.map(|token| token.access));
+                reports
+                    .lock()
+                    .expect("a lock")
+                    .push(outcome.map(|token| token.access));
             }
         });
         (client, reports)
@@ -1380,10 +1392,13 @@ mod tests {
         }
         quiet(&client).await;
         // Each refresh was handed the token the one before it got.
-        assert_eq!(*lock(&seen), ["xoxe-1", "xoxe-2", "xoxe-3", "xoxe-4"]);
+        assert_eq!(
+            *seen.lock().expect("a lock"),
+            ["xoxe-1", "xoxe-2", "xoxe-3", "xoxe-4"]
+        );
         let issued: Vec<Result<String, SlackError>> =
             (2..=5).map(|n| Ok(format!("xoxe.xoxp-{n}"))).collect();
-        assert_eq!(*lock(&reports), issued);
+        assert_eq!(*reports.lock().expect("a lock"), issued);
         assert_eq!(client.token().access, "xoxe.xoxp-5");
     }
 
@@ -1399,7 +1414,10 @@ mod tests {
         gate.notify_one();
         settle_tasks().await;
         quiet(&client).await;
-        assert_eq!(*lock(&reports), [Ok("xoxe.xoxp-2".to_owned())]);
+        assert_eq!(
+            *reports.lock().expect("a lock"),
+            [Ok("xoxe.xoxp-2".to_owned())]
+        );
         assert_eq!(client.token().access, "xoxe.xoxp-2");
     }
 
@@ -1415,7 +1433,7 @@ mod tests {
         gate.notify_one();
         assert_eq!(call.await.expect("joins"), Ok("xoxe.xoxp-2".into()));
         quiet(&client).await;
-        assert!(lock(&reports).is_empty());
+        assert!(reports.lock().expect("a lock").is_empty());
         // Still used until the client goes, just never saved.
         assert_eq!(client.token().access, "xoxe.xoxp-2");
     }
@@ -1434,7 +1452,7 @@ mod tests {
         assert_eq!(client.access_token().await, outage);
         assert_eq!(count(&refreshes), 1);
         quiet(&client).await;
-        assert_eq!(*lock(&reports), [outage]);
+        assert_eq!(*reports.lock().expect("a lock"), [outage]);
     }
 
     #[test]

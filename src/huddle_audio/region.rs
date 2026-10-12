@@ -12,6 +12,8 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::sync::lock_or_reset;
+
 /// Where AWS says which media region is nearest.
 pub const NEAREST_URL: &str = "https://nearest-media-region.l.chime.aws";
 /// How long the lookup may take before the fallback is used.
@@ -19,7 +21,8 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 /// The most of an answer read: it is a few dozen bytes.
 const MAX_ANSWER: usize = 1024;
 
-/// The region found this run.
+/// The region found this run: forgotten after a panic, and looked up
+/// again.
 static FOUND: Mutex<Option<String>> = Mutex::new(None);
 
 /// Whether `region` looks like an AWS region name (`eu-central-1`):
@@ -70,18 +73,14 @@ pub fn choose(asked: Option<&str>, nearest: Option<&str>) -> (String, Why) {
 
 /// Asks AWS for the nearest region, once per run while it answers.
 pub async fn nearest() -> Option<String> {
-    if let Some(found) = lock().clone() {
+    if let Some(found) = lock_or_reset(&FOUND).clone() {
         return Some(found);
     }
     let found = ask().await;
     if let Some(region) = &found {
-        *lock() = Some(region.clone());
+        *lock_or_reset(&FOUND) = Some(region.clone());
     }
     found
-}
-
-fn lock() -> std::sync::MutexGuard<'static, Option<String>> {
-    crate::sync::lock(&FOUND)
 }
 
 /// One lookup, logged when it fails.

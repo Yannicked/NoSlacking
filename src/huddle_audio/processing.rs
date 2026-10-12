@@ -32,7 +32,7 @@ use sonora_common_audio::push_sinc_resampler::PushSincResampler;
 
 use super::jitter::CLOCK;
 use super::uplink::TEN_MS;
-use crate::sync::lock;
+use crate::sync::lock_or_recover;
 
 /// What the output side adds to the echo path, as a first guess: rodio's
 /// mixer and the device's buffer. AEC3 measures the real delay.
@@ -60,9 +60,19 @@ pub struct RenderTap {
 }
 
 impl RenderTap {
+    /// Locks the tap. If a holder panicked, the samples may be half
+    /// pushed: they are dropped, which the echo canceller rides out like
+    /// a gap, and whether a microphone wants them stays as it was.
+    fn tap(&self) -> std::sync::MutexGuard<'_, Tap> {
+        lock_or_recover(&self.inner, |tap| {
+            tap.partial.clear();
+            tap.frames.clear();
+        })
+    }
+
     /// Starts or stops keeping what is played.
     pub fn set_on(&self, on: bool) {
-        let mut tap = lock(&self.inner);
+        let mut tap = self.tap();
         tap.on = on;
         if !on {
             tap.partial.clear();
@@ -72,7 +82,7 @@ impl RenderTap {
 
     /// Takes `samples` as played: 48 kHz, `channels` interleaved.
     pub fn push(&self, samples: &[f32], channels: usize) {
-        let mut tap = lock(&self.inner);
+        let mut tap = self.tap();
         if !tap.on || channels == 0 {
             return;
         }
@@ -92,7 +102,7 @@ impl RenderTap {
 
     /// Every whole frame played since the last call, oldest first.
     pub fn take(&self) -> Vec<Vec<f32>> {
-        lock(&self.inner).frames.drain(..).collect()
+        self.tap().frames.drain(..).collect()
     }
 }
 
