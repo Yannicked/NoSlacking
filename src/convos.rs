@@ -1400,7 +1400,13 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
             if let Ok(pins) = &result {
                 let people: Vec<String> = pins
                     .iter()
-                    .flat_map(|p| p.message.user.iter().chain(p.by.iter()).cloned())
+                    .flat_map(|p| {
+                        p.message
+                            .user
+                            .map(String::from)
+                            .into_iter()
+                            .chain(p.by.iter().cloned())
+                    })
                     .collect();
                 fetch_unknown(app, team, &people);
             }
@@ -1545,6 +1551,7 @@ pub fn handle(app: &mut App, team: &str, event: Event) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ExtraFields;
     use crate::model::{Conversation, Workspace};
 
     fn person(id: &str, handle: &str, real: &str) -> User {
@@ -1720,18 +1727,7 @@ mod tests {
         let message = Message {
             ts: Ts::new("1.0"),
             user: Some("U1".into()),
-            username: None,
-            bot_icon: None,
-            bot_id: None,
             text: "hi".into(),
-            thread_ts: Some(Ts::new("1.0")),
-            reply_count: 0,
-            replies_known: false,
-            reply_users: Vec::new(),
-            latest_reply: None,
-            reactions: Vec::new(),
-            files: Vec::new(),
-            attachments: Vec::new(),
             blocks: Vec::new(),
             edited: false,
             subtype: None,
@@ -1739,7 +1735,12 @@ mod tests {
             broadcast: false,
             pinned: false,
             client_msg_id: None,
-            subscribed: None,
+            replies_known: false,
+            extra: ExtraFields {
+                thread_ts: Some(Ts::new("1.0")),
+                ..Default::default()
+            }
+            .into(),
         };
         // A thread's parent is in the channel and in its thread.
         workspace

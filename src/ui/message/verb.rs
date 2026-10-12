@@ -79,7 +79,7 @@ impl Verb {
             Self::Share => Action::Share {
                 channel,
                 ts,
-                thread: subject.message.thread_ts,
+                thread: subject.message.extra.thread_ts,
             },
         }
     }

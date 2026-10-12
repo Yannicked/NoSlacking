@@ -59,7 +59,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     .then(|| {
         workspace
             .timelines_for(&channel)
-            .find_map(|t| t.messages.iter().find(|m| m.ts == ts)?.subscribed)
+            .find_map(|t| t.messages.iter().find(|m| m.ts == ts)?.extra.subscribed)
             .unwrap_or(false)
     });
     let files = workspace.info.offers(Ability::Files);
