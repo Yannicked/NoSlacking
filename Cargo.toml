@@ -95,10 +95,10 @@ open = "5"
 jiff = "0.2"
 # The native file picker for uploads.
 rfd = "0.17.2"
-# Images pasted into the composer. egui's clipboard only carries text;
-# egui-winit already links arboard with these features, so this adds no
-# crate to the build.
-arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+# Images pasted into the composer. egui's clipboard only carries text.
+# On Wayland, data-control reads the real clipboard: without it arboard
+# reads XWayland's, which does not see what Wayland apps copy.
+arboard = { version = "3.6", default-features = false, features = ["image-data", "wayland-data-control"] }
 # The offline cache's encryption (src/offline.rs). chacha20 is already in
 # the tree through rand; the nonces come from rand too.
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
