@@ -143,7 +143,6 @@ impl App {
             huddles::Phase::Live { since } => Some(since),
             _ => None,
         };
-        #[cfg_attr(not(feature = "huddle-camera"), allow(unused_mut))]
         let mut tiles: Vec<TileView> = cameras
             .iter()
             .filter(|c| c.tile)
@@ -156,31 +155,74 @@ impl App {
                     .user
                     .as_deref()
                     .and_then(|id| workspace.and_then(|w| w.user(id)));
+                // The workspace's name for someone it knows; the call's
+                // for one it does not (a Teams meeting names its roster).
+                let called = match (user, face.and_then(|f| f.name.clone())) {
+                    (None, Some(called)) => Some(called),
+                    _ => None,
+                };
                 TileView {
                     key: camera.key.clone(),
-                    name: name(camera.user.as_deref()),
+                    name: called.unwrap_or_else(|| name(camera.user.as_deref())),
                     avatar: user.and_then(|u| u.avatar.clone()),
                     seed: camera.user.clone().unwrap_or_default(),
                     speaking: face.is_some_and(|f| f.speaking),
                     muted: face.is_some_and(|f| f.muted),
                     paused: camera.paused,
+                    camera: true,
                     // The call window fills it in as it draws.
                     picture: None,
                 }
             })
             .collect();
-        // Your own camera, while it is on: one more tile, never received,
-        // its picture the call bar's self-preview.
+        // Everyone else in the call, by their face, after the cameras:
+        // the window is the whole room, not only those on camera.
+        for face in faces.iter().filter(|f| !f.me) {
+            let Some(user) = &face.user else {
+                continue;
+            };
+            if cameras.iter().any(|c| c.user.as_ref() == Some(user)) {
+                continue;
+            }
+            let called = match (workspace.and_then(|w| w.user(user)), &face.name) {
+                (None, Some(called)) => called.clone(),
+                _ => name(Some(user)),
+            };
+            tiles.push(TileView {
+                key: format!("face:{user}"),
+                name: called,
+                avatar: workspace
+                    .and_then(|w| w.user(user))
+                    .and_then(|u| u.avatar.clone()),
+                seed: user.clone(),
+                speaking: face.speaking,
+                muted: face.muted,
+                paused: false,
+                camera: false,
+                picture: None,
+            });
+        }
+        // You, last: your own camera while it is on (never received, its
+        // picture the call bar's self-preview), your face otherwise.
         #[cfg(feature = "huddle-camera")]
         let yours = listening.camera != crate::huddle_camera::Cam::Off;
         #[cfg(not(feature = "huddle-camera"))]
         let yours = false;
-        #[cfg(feature = "huddle-camera")]
-        if yours {
+        {
             let me = workspace
                 .map(|w| w.info.user_id.clone())
                 .unwrap_or_default();
             let face = faces.iter().find(|f| f.me);
+            #[cfg(feature = "huddle-camera")]
+            let picture = self
+                .huddles
+                .preview
+                .texture
+                .as_ref()
+                .filter(|_| yours)
+                .map(|t| (t.id(), self.huddles.preview.size));
+            #[cfg(not(feature = "huddle-camera"))]
+            let picture = None;
             tiles.push(TileView {
                 key: YOU.into(),
                 name: crate::i18n::tf("{name} (you)", &[("name", &name(Some(&me)))]),
@@ -191,12 +233,8 @@ impl App {
                 speaking: face.is_some_and(|f| f.speaking),
                 muted: listening.mic != crate::huddle_mic::Mic::Live,
                 paused: false,
-                picture: self
-                    .huddles
-                    .preview
-                    .texture
-                    .as_ref()
-                    .map(|t| (t.id(), self.huddles.preview.size)),
+                camera: yours,
+                picture,
             });
         }
         #[cfg(feature = "huddle-camera")]

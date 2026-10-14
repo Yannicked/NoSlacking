@@ -1584,9 +1584,9 @@ We do the same:
 **Several cameras.** The meeting sends one participant's camera per
 receiving video line, so the web client offers ten video lines (six
 `sendrecv` and four `recvonly`) and lists them in `mediaDescriptions`. We
-offer three more receive-only `main-video` lines after the data line
-(mids 4–6), or keep three more of the media server's camera lines in our
-answer to it. Like the web client's receive-only lines, each names the
+offer five more receive-only `main-video` lines after the data line
+(mids 4–8), or keep five more of the media server's camera lines in our
+answer to it: six camera lines in all, as the web client keeps. Like the web client's receive-only lines, each names the
 placeholder stream 1 (`a=x-ssrc-range:1-1`, `a=ssrc:1 cname:…`): without
 it the meeting rejected them (port 0). They are **not** listed in
 `mediaDescriptions`, which the web client keeps to its send-and-receive
@@ -1595,7 +1595,8 @@ left the call with no audio and no data channel answer. We send one `sr`
 per line the meeting kept, each with that line's
 `x-source-streamid`. A camera keeps its line
 while it stays on; newcomers take free lines in roster order. So up to
-four cameras show, each in a tile of its own.
+six cameras show, each in a tile of its own (four, until a meeting of
+ten with six cameras on showed the lines short).
 
 **Keyframes without parameter sets.** The media server does not repeat
 the SPS and PPS with every keyframe. After one frame failed to decode,
@@ -1632,9 +1633,15 @@ placeholder ones. Each `sr` asks for the size its tile needs (`max-fs`
 move to the new server the client opened a new `main-channel` there and
 started over with `syn`.
 
-We now write our three extra camera lines as its lines 5–9 are (we send
+We now write our extra camera lines as its lines 5–9 are (we send
 nothing on them), list them as receiving in `mediaDescriptions`, and ask
 for one camera on each.
+
+**Who speaks.** The meeting mixes everyone's sound into one stream, with
+no audio level header, so loudness alone says that *someone* speaks. The
+data channel's `dsh` says who spoke last (newest first, by audio source
+id). The bar and the tiles mark that person as speaking while the mixed
+sound is loud, as Teams' own speaking ring roughly does.
 
 ### H.10 Sharing a screen in a meeting (recorded: `teams.live.com11.har` and its data channel log)
 

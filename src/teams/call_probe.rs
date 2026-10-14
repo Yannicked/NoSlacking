@@ -152,6 +152,7 @@ async fn probe(options: &Options, handle: tokio::runtime::Handle) -> i32 {
                 Some(CallEvent::Watching(who)) => {
                     log::info!("teams call probe: watching {} cameras", who.iter().flatten().count());
                 }
+                Some(CallEvent::Speaker(_)) => log::info!("teams call probe: someone else spoke"),
                 Some(CallEvent::Lobby) => log::info!("teams call probe: waiting in the meeting's lobby"),
                 Some(CallEvent::Admitted) => log::info!("teams call probe: let in from the lobby"),
                 Some(CallEvent::People(people)) => {
