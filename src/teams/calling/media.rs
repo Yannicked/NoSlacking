@@ -471,6 +471,14 @@ pub enum MediaEvent {
     ChannelOpen,
     /// A message on the meeting's data channel.
     ChannelData(Vec<u8>),
+    /// An application message in RTCP from the far end (`x-message app`:
+    /// the audio line offers `dsh` this way), with the sender's and the
+    /// media's SSRCs.
+    Feedback {
+        sender: u32,
+        media: u32,
+        payload: Vec<u8>,
+    },
     /// The media broke; nothing more comes.
     Failed(Failure),
     /// Stopped as asked.
@@ -1705,6 +1713,13 @@ impl Session {
             }
             RtcEvent::ChannelClose(id) if Some(id) == self.channel => {
                 log::info!("media: the meeting's data channel closed");
+            }
+            RtcEvent::AppSpecificFeedback(feedback) => {
+                let _ = self.tell.send(MediaEvent::Feedback {
+                    sender: *feedback.sender_ssrc,
+                    media: *feedback.media_ssrc,
+                    payload: feedback.payload.to_vec(),
+                });
             }
             _ => {}
         }

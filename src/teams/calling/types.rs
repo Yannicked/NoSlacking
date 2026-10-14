@@ -1057,6 +1057,9 @@ pub enum Push {
     /// A renegotiation of ours was refused (`rejection`,
     /// `mediaNegotiationFailure`), by its event name.
     Refused(String),
+    /// The media controller says which contributing sources (CSRCs) are
+    /// whose; not yet understood, kept whole to be logged.
+    CsrcInfo(serde_json::Value),
     /// A callback a call does not act on (`progress`,
     /// `admitParticipantSuccess`, …), by its event name.
     Other(String),
@@ -1087,6 +1090,7 @@ impl Push {
             "end" => Self::CallEnd(CallEndPush::deserialize(body)?.call_end),
             "conversationEnd" => Self::ConversationEnd(ConversationEnd::deserialize(body)?),
             "rejection" | "mediaNegotiationFailure" => Self::Refused(event.to_owned()),
+            "csrcInfo" => Self::CsrcInfo(body.clone()),
             other => Self::Other(other.to_owned()),
         })
     }

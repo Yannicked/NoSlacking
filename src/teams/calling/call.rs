@@ -306,6 +306,7 @@ async fn run_meeting(
         watching_share: None,
         syns: 0,
         heard: 0,
+        feedback: 0,
         sharing: false,
         endpoint: endpoint.clone(),
         own_camera: None,
@@ -576,6 +577,8 @@ struct InMeeting {
     syns: u32,
     /// How many messages came on it since it opened.
     heard: u32,
+    /// How many application messages came in RTCP.
+    feedback: u32,
     /// Whether we share our screen, as the meeting was last told.
     sharing: bool,
     /// Our endpoint id, by which the roster lists our own streams.
@@ -897,6 +900,11 @@ impl Call {
                         }
                     }
                     Some(MediaEvent::ChannelData(message)) => self.on_channel(&message, session, tell),
+                    Some(MediaEvent::Feedback {
+                        sender,
+                        media,
+                        payload,
+                    }) => self.on_feedback(sender, media, &payload, session, tell),
                     Some(MediaEvent::AudioFlowing) => {
                         log::info!("Teams call: audio flows both ways");
                         tell(CallEvent::AudioFlowing);
@@ -1366,6 +1374,11 @@ impl Call {
                     self.offer_share(local).await;
                 }
             }
+            Push::CsrcInfo(body) => {
+                let text = body.to_string();
+                let cut = text.char_indices().nth(2000).map_or(text.len(), |(i, _)| i);
+                log::info!("Teams meeting: csrcInfo: {}", &text[..cut]);
+            }
             Push::Other(name) => log::debug!("Teams call: push {name} not acted on"),
         }
         None
@@ -1579,33 +1592,91 @@ impl Call {
                     }
                 }
                 super::channel::Heard::Speakers(history) => {
-                    let Some(meeting) = &mut self.meeting else {
-                        return;
-                    };
-                    // The newest last (seen: the first marked whoever spoke
-                    // long ago); ourselves (not in the list) aside.
-                    let speaker = history.iter().rev().find_map(|&source| {
-                        meeting
-                            .people
-                            .list()
-                            .into_iter()
-                            .find(|a| a.audio == Some(source))
-                            .map(|a| a.mri)
-                    });
-                    log::info!(
-                        "Teams meeting: spoke, by audio source: {history:?}; marking {}",
-                        speaker.as_deref().unwrap_or("no one")
-                    );
-                    if speaker.is_some() && speaker != meeting.speaker {
-                        meeting.speaker = speaker.clone();
-                        if let Some(mri) = speaker {
-                            tell(CallEvent::Speaker(mri));
-                        }
-                        self.ask_for_video(session, tell);
-                    }
+                    self.spoke(&history, "the data channel", session, tell);
                 }
             }
         }
+    }
+
+    /// Who spoke, as a speaker history (`dsh`) from `way` says: the
+    /// newest last (seen: the first marked whoever spoke long ago);
+    /// ourselves (not in the list) aside.
+    fn spoke(
+        &mut self,
+        history: &[i64],
+        way: &str,
+        session: &MediaSession,
+        tell: &(impl Fn(CallEvent) + Send),
+    ) {
+        let Some(meeting) = &mut self.meeting else {
+            return;
+        };
+        let speaker = history.iter().rev().find_map(|&source| {
+            meeting
+                .people
+                .list()
+                .into_iter()
+                .find(|a| a.audio == Some(source))
+                .map(|a| a.mri)
+        });
+        log::info!(
+            "Teams meeting: spoke, by audio source ({way}): {history:?}; marking {}",
+            speaker.as_deref().unwrap_or("no one")
+        );
+        if speaker.is_some() && speaker != meeting.speaker {
+            meeting.speaker = speaker.clone();
+            if let Some(mri) = speaker {
+                tell(CallEvent::Speaker(mri));
+            }
+            self.ask_for_video(session, tell);
+        }
+    }
+
+    /// An application message in RTCP: the audio line offers `dsh` this
+    /// way too. Its shape is not recorded, so the first few are logged
+    /// whole; one with a JSON `dsh` in it counts as a speaker history.
+    fn on_feedback(
+        &mut self,
+        sender: u32,
+        media: u32,
+        payload: &[u8],
+        session: &MediaSession,
+        tell: &(impl Fn(CallEvent) + Send),
+    ) {
+        let Some(meeting) = &mut self.meeting else {
+            return;
+        };
+        meeting.feedback += 1;
+        if meeting.feedback <= 5 || meeting.feedback % 100 == 0 {
+            let head: Vec<String> = payload
+                .iter()
+                .take(32)
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            log::info!(
+                "Teams meeting: RTCP application message {} from {sender} about {media}, {} bytes: {} / {:?}",
+                meeting.feedback,
+                payload.len(),
+                head.join(" "),
+                String::from_utf8_lossy(payload)
+            );
+        }
+        // JSON, if any, from its first brace.
+        let Some(start) = payload.iter().position(|&b| b == b'{') else {
+            return;
+        };
+        let Ok(message) = serde_json::from_slice::<serde_json::Value>(&payload[start..]) else {
+            return;
+        };
+        if message.get("type").and_then(|t| t.as_str()) != Some("dsh") {
+            return;
+        }
+        let history: Vec<i64> = message
+            .get("history")
+            .and_then(|h| h.as_array())
+            .map(|h| h.iter().filter_map(serde_json::Value::as_i64).collect())
+            .unwrap_or_default();
+        self.spoke(&history, "RTCP", session, tell);
     }
 
     /// Asks the meeting for the cameras to show, where that changed: one
