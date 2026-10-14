@@ -29,8 +29,13 @@ const PAGE: usize = 50;
 /// How many channel posts a channel's first page holds, as the web client
 /// asks (recorded).
 const POSTS_PAGE: usize = 20;
-/// How long to wait before connecting again after Trouter failed.
+/// How long to wait before connecting again after Trouter dropped,
+/// doubled with each drop in a row up to [`RETRY_AT_MOST`], so a Teams
+/// that keeps refusing is not asked in a loop.
 const RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+const RETRY_AT_MOST: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// A connection up this long was working: the next drop waits [`RETRY`].
+const STABLE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Where the Trouter task reports its status: to the worker, which shows
 /// it like a Slack socket's.
@@ -1137,9 +1142,14 @@ fn workspace_id(me: &str) -> String {
 /// passes live messages on. Reports each change of status.
 pub(crate) async fn trouter(team: String, client: TeamsClient, sink: Sink, report: Report) {
     let http = crate::slack::net::api();
+    let mut drops = 0;
     loop {
         report(Socket::Connecting);
+        let started = std::time::Instant::now();
         let ended = trouter_once(&team, &client, &http, &sink, &report).await;
+        if started.elapsed() > STABLE {
+            drops = 0;
+        }
         // A call's callbacks named the connection that just closed.
         client.calls().set_surl(None);
         match ended {
@@ -1149,7 +1159,8 @@ pub(crate) async fn trouter(team: String, client: TeamsClient, sink: Sink, repor
                 report(Socket::Disconnected(error));
             }
         }
-        tokio::time::sleep(RETRY).await;
+        tokio::time::sleep(crate::retry::backoff(RETRY, RETRY_AT_MOST, drops)).await;
+        drops = drops.saturating_add(1);
     }
 }
 

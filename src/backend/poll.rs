@@ -118,9 +118,7 @@ impl State {
 /// The rest after a round: `every`, doubled for each failure in a row, up
 /// to [`MAX_REST`].
 fn rest(every: Duration, failures: u32) -> Duration {
-    every
-        .saturating_mul(2u32.saturating_pow(failures.min(8)))
-        .min(MAX_REST)
+    crate::retry::backoff(every, MAX_REST, failures)
 }
 
 /// One conversation a round reports, and whether its newest page is
