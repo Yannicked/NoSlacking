@@ -1612,7 +1612,7 @@ last), the meeting took them (`sendonly`) but then neither answered our
 sent its acceptance twice. Without them, both worked. Until a recording
 shows what else the web client does, we offer the one camera line. It
 follows whoever speaks with a camera on, by the data channel's `dsh`
-(the speakers' audio source ids, newest first), matched to the roster's
+(the speakers' audio source ids, the newest last), matched to the roster's
 `main-audio` `sourceId`.
 
 **Several cameras, recorded (`teams.live.com10.har` and its data channel
@@ -1639,9 +1639,14 @@ for one camera on each.
 
 **Who speaks.** The meeting mixes everyone's sound into one stream, with
 no audio level header, so loudness alone says that *someone* speaks. The
-data channel's `dsh` says who spoke last (newest first, by audio source
-id). The bar and the tiles mark that person as speaking while the mixed
-sound is loud, as Teams' own speaking ring roughly does.
+data channel's `dsh` says who spoke (a history, the newest last, by audio
+source id), but it came **once**, right after the `ack`, and never again
+in a meeting of two minutes with people talking: a snapshot on joining.
+The audio line's SDP offers `dsh` as an RTCP application message too
+(`a=rtcp-fb:* x-message app send:dsh,x-gain recv:dsh,x-gain`), and the
+call registers a `csrcInfo` callback for the media controller; both are
+now logged, to find the live signal. The bar and the tiles mark the last
+speaker known as speaking while the mixed sound is loud.
 
 ### H.10 Sharing a screen in a meeting (recorded: `teams.live.com11.har` and its data channel log)
 

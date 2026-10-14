@@ -145,7 +145,7 @@ pub enum Heard {
     Ready,
     /// A source request of ours was answered.
     SourceAnswered { sequence: u64, ok: bool },
-    /// Who spoke last, by their audio's source id, newest first.
+    /// Who spoke, by their audio's source id: a history, the newest last.
     Speakers(Vec<i64>),
 }
 

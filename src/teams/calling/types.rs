@@ -525,9 +525,12 @@ impl RosterParticipant {
 
     /// Whether the client would not show them: a hidden participant (a
     /// recording or transcription bot, say) is in the roster but not in
-    /// the room.
+    /// the room. The details may say so; a bot's device says so in its
+    /// metadata (recorded: `endpointMetadata.__platform.ui.hidden` on the
+    /// call recorder and on the transcription bot).
     pub fn is_hidden(&self) -> bool {
         self.details.as_ref().is_some_and(|d| d.hidden)
+            || self.endpoints.values().any(RosterEndpoint::is_hidden)
     }
 
     /// Whether the participant is muted: an endpoint of theirs says so.
@@ -625,9 +628,22 @@ pub struct RosterEndpoint {
     /// in, `Call` for one never kept waiting (recorded).
     #[serde(deserialize_with = "nullable")]
     pub modality_joined: String,
+    /// Whatever else the roster says of the device, kept so a participant
+    /// without a name can be logged in full and the name found.
+    #[serde(flatten)]
+    pub rest: BTreeMap<String, serde_json::Value>,
 }
 
 impl RosterEndpoint {
+    /// Whether the client hides this device (a bot's, recorded).
+    pub fn is_hidden(&self) -> bool {
+        self.rest
+            .get("endpointMetadata")
+            .and_then(|m| m.pointer("/__platform/ui/hidden"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+
     /// Whether this device waits in the lobby: it is there, it has never
     /// been in the call, and it is not in it now. One let in and gone
     /// again can still show its lobby media.
@@ -1041,6 +1057,9 @@ pub enum Push {
     /// A renegotiation of ours was refused (`rejection`,
     /// `mediaNegotiationFailure`), by its event name.
     Refused(String),
+    /// The media controller says which contributing sources (CSRCs) are
+    /// whose; not yet understood, kept whole to be logged.
+    CsrcInfo(serde_json::Value),
     /// A callback a call does not act on (`progress`,
     /// `admitParticipantSuccess`, …), by its event name.
     Other(String),
@@ -1071,6 +1090,7 @@ impl Push {
             "end" => Self::CallEnd(CallEndPush::deserialize(body)?.call_end),
             "conversationEnd" => Self::ConversationEnd(ConversationEnd::deserialize(body)?),
             "rejection" | "mediaNegotiationFailure" => Self::Refused(event.to_owned()),
+            "csrcInfo" => Self::CsrcInfo(body.clone()),
             other => Self::Other(other.to_owned()),
         })
     }
