@@ -6,6 +6,12 @@ use crate::failure::Failure;
 use crate::teams::auth::{Account, RESOURCE_GRAPH, RESOURCE_MT_PERSONAL};
 use crate::teams::types::UserDetails;
 
+/// Where a personal account looks up people with personal accounts, as
+/// the Teams web client asks (recorded).
+pub const SHORT_PROFILES: &str = "fetchShortProfile?isMailAddress=false&enableGuest=true&skypeTeamsInfo=true&canBeSmtpAddress=false&includeIBBarredUsers=false&includeDisabledAccounts=false&ggEnabled=true";
+/// Where a personal account looks up work people met in its chats.
+pub const FEDERATED: &str = "fetchFederated?edEnabled=false&includeDisabledAccounts=true";
+
 /// What `fetchShortProfile` answers.
 #[derive(serde::Deserialize)]
 struct ShortProfiles {
@@ -375,16 +381,7 @@ impl TeamsClient {
             .cloned()
             .collect();
         let mut found = Vec::new();
-        for (path, mris) in [
-            (
-                "fetchShortProfile?isMailAddress=false&enableGuest=true&skypeTeamsInfo=true&canBeSmtpAddress=false&includeIBBarredUsers=false&includeDisabledAccounts=false&ggEnabled=true",
-                personal,
-            ),
-            (
-                "fetchFederated?edEnabled=false&includeDisabledAccounts=true",
-                work,
-            ),
-        ] {
+        for (path, mris) in [(SHORT_PROFILES, personal), (FEDERATED, work)] {
             let url = format!("{base}/beta/users/{path}");
             for batch in mris.chunks(100) {
                 let resp = self

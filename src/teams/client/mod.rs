@@ -19,7 +19,7 @@ mod presence;
 pub use channels::Post;
 pub use chat::{Author, HistoryPage, MadeMeeting};
 pub use media::is_media_url;
-pub use people::user_mri;
+pub use people::{FEDERATED, SHORT_PROFILES, user_mri};
 
 /// Now, in epoch milliseconds, as Teams stamps reactions and edits.
 fn now_millis() -> u64 {

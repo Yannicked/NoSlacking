@@ -646,14 +646,8 @@ async fn names(
     let (work, personal): (Vec<&String>, Vec<&String>) =
         members.iter().partition(|m| m.starts_with("8:orgid:"));
     for (path, mris) in [
-        (
-            "fetchShortProfile?isMailAddress=false&enableGuest=true&skypeTeamsInfo=true&canBeSmtpAddress=false&includeIBBarredUsers=false&includeDisabledAccounts=false&ggEnabled=true",
-            personal,
-        ),
-        (
-            "fetchFederated?edEnabled=false&includeDisabledAccounts=true",
-            work,
-        ),
+        (crate::teams::client::SHORT_PROFILES, personal),
+        (crate::teams::client::FEDERATED, work),
     ] {
         if mris.is_empty() {
             continue;
