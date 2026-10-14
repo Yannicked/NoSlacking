@@ -86,23 +86,10 @@ pub(super) fn kind_from_id(channel: &str) -> ConversationKind {
     }
 }
 
-/// A message's text as plain words, with people and channels by name.
+/// A message's text as plain words, with people and channels by name; a
+/// file's or an attachment's name when it has none.
 pub(super) fn plain_text(workspace: &WorkspaceState, message: &Message) -> String {
-    let text = crate::mrkdwn::plain(&message.text, |inline| match inline {
-        crate::mrkdwn::Inline::User { id, .. } => Some(format!("@{}", workspace.user_label(id))),
-        crate::mrkdwn::Inline::Channel { id, label } => Some(format!(
-            "#{}",
-            workspace
-                .conversation(id)
-                .map(|c| c.name.clone())
-                .or_else(|| label.clone())
-                .unwrap_or_else(|| id.clone())
-        )),
-        crate::mrkdwn::Inline::Group { id, label } => {
-            Some(workspace.group_label(id, label.as_deref()))
-        }
-        _ => None,
-    });
+    let text = crate::ui::plain_text(workspace, message);
     if !text.trim().is_empty() {
         return text;
     }
