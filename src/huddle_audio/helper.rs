@@ -34,13 +34,15 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use egui::{Color32, ColorImage};
 #[cfg(feature = "huddle-video")]
 use noslacking_video_ipc::FailKind;
 use noslacking_video_ipc::{self as ipc, Codec, Reply, Request};
+
+use crate::sync::lock_whole;
 
 /// A picture from the helper as egui's opaque pixels, mirrored left to
 /// right for a self-view (as a mirror shows you). H.264 from WebRTC
@@ -321,7 +323,7 @@ impl Helper {
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        lock_whole(&self.state)
     }
 
     /// Whether the helper has been given up on for good.
@@ -1133,9 +1135,7 @@ mod tests {
         let seen = Arc::clone(&asked);
         let (helper, launches) = helper(Pretend::new(move |request| {
             if let Request::OpenDecoder { hardware, .. } = request {
-                seen.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(*hardware);
+                lock_whole(&seen).push(*hardware);
             }
             working(request)
         }));
@@ -1156,10 +1156,7 @@ mod tests {
         drop(decoder);
         // The GPU, or not, as asked.
         drop(helper.open_decoder(Codec::H264, 64, 48, false));
-        assert_eq!(
-            *asked.lock().unwrap_or_else(PoisonError::into_inner),
-            [true, false]
-        );
+        assert_eq!(*lock_whole(&asked), [true, false]);
         assert_eq!(launches.load(Ordering::Relaxed), 1, "started once");
     }
 

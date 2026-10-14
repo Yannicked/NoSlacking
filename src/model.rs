@@ -329,15 +329,12 @@ struct Interned {
 
 fn interned_texts() -> std::sync::MutexGuard<'static, Interned> {
     static TEXTS: std::sync::OnceLock<std::sync::Mutex<Interned>> = std::sync::OnceLock::new();
-    TEXTS
-        .get_or_init(|| {
-            std::sync::Mutex::new(Interned {
-                texts: Vec::new(),
-                places: std::collections::HashMap::new(),
-            })
+    crate::sync::lock_whole(TEXTS.get_or_init(|| {
+        std::sync::Mutex::new(Interned {
+            texts: Vec::new(),
+            places: std::collections::HashMap::new(),
         })
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }))
 }
 
 /// How many texts each interning table keeps at most. Real workspaces
