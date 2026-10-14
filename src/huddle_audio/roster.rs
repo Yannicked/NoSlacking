@@ -53,6 +53,24 @@ pub struct Roster {
     pub count: Option<u32>,
 }
 
+/// What is being made of the call besides the call itself, as a Teams
+/// meeting's recording and transcription bots say: the bar tells it, as
+/// the Teams client does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Recording {
+    /// The meeting is being recorded.
+    pub recording: bool,
+    /// A transcript is being written.
+    pub transcript: bool,
+}
+
+impl Recording {
+    /// Whether anything is being made.
+    pub fn is_on(self) -> bool {
+        self.recording || self.transcript
+    }
+}
+
 impl Roster {
     /// How many others are here, by audio stream.
     pub fn others(&self) -> usize {

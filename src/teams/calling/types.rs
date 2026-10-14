@@ -493,6 +493,24 @@ fn media_streams(call: Option<&serde_json::Value>) -> impl Iterator<Item = Media
         .filter_map(|s| MediaStream::deserialize(s).ok())
 }
 
+/// What a meeting's bots do to it (recorded: the call recorder's device
+/// says `recording` and `realTimeTranscript` are active).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Processing {
+    pub recording: bool,
+    pub transcript: bool,
+}
+
+impl Processing {
+    /// Both together.
+    pub fn or(self, other: Self) -> Self {
+        Self {
+            recording: self.recording || other.recording,
+            transcript: self.transcript || other.transcript,
+        }
+    }
+}
+
 /// One participant in a [`RosterUpdate`].
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -531,6 +549,17 @@ impl RosterParticipant {
     pub fn is_hidden(&self) -> bool {
         self.details.as_ref().is_some_and(|d| d.hidden)
             || self.endpoints.values().any(RosterEndpoint::is_hidden)
+    }
+
+    /// What this participant's devices do to the meeting (a bot's).
+    pub fn processing(&self) -> Processing {
+        Processing {
+            recording: self.endpoints.values().any(|e| e.processing("recording")),
+            transcript: self
+                .endpoints
+                .values()
+                .any(|e| e.processing("realTimeTranscript")),
+        }
     }
 
     /// Whether the participant is muted: an endpoint of theirs says so.
@@ -635,6 +664,18 @@ pub struct RosterEndpoint {
 }
 
 impl RosterEndpoint {
+    /// Whether this device does `mode` to the meeting now: a bot's
+    /// `endpointMetadata.processingModes` names `recording`,
+    /// `realTimeTranscript`, `closedCaptions`, `copilot`, … each with a
+    /// `state` (recorded: `Active`, `Inactive`).
+    pub fn processing(&self, mode: &str) -> bool {
+        self.rest
+            .get("endpointMetadata")
+            .and_then(|m| m.pointer(&format!("/processingModes/{mode}/state")))
+            .and_then(serde_json::Value::as_str)
+            == Some("Active")
+    }
+
     /// Whether the client hides this device (a bot's, recorded).
     pub fn is_hidden(&self) -> bool {
         self.rest

@@ -22,7 +22,7 @@ use crate::people;
 pub use crate::huddle_audio::cameras::{Camera, MAX_TILES, Wish};
 #[cfg(feature = "huddle-video")]
 pub use crate::huddle_audio::gallery::Gallery;
-pub use crate::huddle_audio::roster::{Person, Roster};
+pub use crate::huddle_audio::roster::{Person, Recording, Roster};
 #[cfg(feature = "huddle-video")]
 pub use crate::huddle_audio::screen::Screen;
 #[cfg(feature = "huddle-video")]
@@ -65,6 +65,9 @@ pub enum Listen {
     /// Who is in the huddle and speaking now. Sent when it changes, at
     /// most a few times a second.
     Roster(Roster),
+    /// A meeting is being recorded or transcribed (or no longer), when
+    /// that changes.
+    Recording(Recording),
     /// Who shares their screen now, when that changes.
     #[cfg(feature = "huddle-video")]
     Shares(Vec<Share>),
@@ -122,6 +125,8 @@ pub struct Listening {
     pub meeting: bool,
     /// The meeting's join link, once known.
     pub invite: Option<crate::meetings::MeetingLink>,
+    /// Whether the meeting is being recorded or transcribed.
+    pub recording: Recording,
     /// Those in the lobby you pressed Admit for, and when: the bar shows
     /// them being let in until they leave the lobby, or for
     /// [`ADMIT_WAIT`] at most.
@@ -176,6 +181,7 @@ impl Listening {
             answered: false,
             meeting: false,
             invite: None,
+            recording: Recording::default(),
             admitting: Vec::new(),
             #[cfg(feature = "huddle-video")]
             shares: Vec::new(),
@@ -631,6 +637,7 @@ pub fn heard(app: &mut App, team: &str, channel: &str, state: Listen) {
             }
         }
         Listen::Invite(link) => listening.invite = Some(link),
+        Listen::Recording(recording) => listening.recording = recording,
         Listen::Live => {
             if !matches!(listening.phase, Phase::Live { .. }) {
                 listening.phase = Phase::Live { since: now };

@@ -1550,6 +1550,10 @@ pub fn meeting() -> crate::huddles::Listening {
         invite: Some(crate::meetings::MeetingLink(
             "https://teams.microsoft.com/l/meetup-join/demo".into(),
         )),
+        recording: crate::huddles::Recording {
+            recording: true,
+            transcript: true,
+        },
         ..listening
     }
 }

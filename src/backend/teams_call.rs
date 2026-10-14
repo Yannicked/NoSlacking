@@ -28,7 +28,7 @@ use crate::failure::{Failure, HuddleTrouble};
 use crate::huddle_audio::media::Uplink;
 use crate::huddle_audio::microphone::Wiring;
 use crate::huddle_audio::processing::RenderTap;
-use crate::huddle_audio::roster::{Person, Roster};
+use crate::huddle_audio::roster::{Person, Recording, Roster};
 use crate::huddle_audio::speaker::Speaker;
 use crate::huddle_audio::uplink::Outgoing;
 use crate::huddles::{Left, Listen};
@@ -884,6 +884,8 @@ struct Shown<'a, T: Fn(Listen)> {
     watched: Vec<Option<String>>,
     /// Who in a meeting spoke last, by MRI.
     speaker: Option<String>,
+    /// What a meeting's bots make of it, as last told.
+    recording: Recording,
     /// The camera lines whose pictures show now.
     cameras_on: std::collections::BTreeSet<usize>,
     tell: &'a T,
@@ -1001,6 +1003,16 @@ impl<T: Fn(Listen)> Shown<'_, T> {
                 self.speaker = Some(mri);
                 (self.tell)(Listen::Roster(self.roster()));
             }
+            CallEvent::Recording(doing) => {
+                let recording = Recording {
+                    recording: doing.recording,
+                    transcript: doing.transcript,
+                };
+                if recording != self.recording {
+                    self.recording = recording;
+                    (self.tell)(Listen::Recording(recording));
+                }
+            }
             CallEvent::Ended { result, .. } => self.ended = Some(result),
         }
     }
@@ -1021,6 +1033,7 @@ async fn follow(
         people: None,
         watched: Vec::new(),
         speaker: None,
+        recording: Recording::default(),
         cameras_on: std::collections::BTreeSet::new(),
         tell,
         ended: None,

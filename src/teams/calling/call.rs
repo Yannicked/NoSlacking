@@ -19,7 +19,7 @@ use super::codes::{self, Ending};
 use super::media::{self, Audio, MediaConfig, MediaEvent, MediaSession, Relay};
 use super::types::{
     CpconvAnswer, IncomingInvitation, IncomingNotification, MediaContent, MediaNegotiation,
-    Participant, Push, RosterUpdate, VideoLimit,
+    Participant, Processing, Push, RosterUpdate, VideoLimit,
 };
 use super::{LocalMedia, RemoteMedia, sdp};
 use crate::failure::Failure;
@@ -121,6 +121,8 @@ pub enum CallEvent {
     /// Whose camera the meeting is asked to send us on each camera line
     /// (by MRI), or no one's.
     Watching(Vec<Option<String>>),
+    /// What the meeting's bots make of it now: a recording, a transcript.
+    Recording(Processing),
     /// Who in the meeting spoke last (by MRI), as its data channel says:
     /// the meeting mixes everyone's sound, so this is who the bar marks
     /// as speaking while it is loud.
@@ -160,6 +162,8 @@ pub struct Attendee {
 struct People {
     /// By MRI: the roster version last taken, and the attendee.
     by_mri: BTreeMap<String, (u64, Attendee)>,
+    /// The bots the client hides, by MRI, and what each does.
+    bots: BTreeMap<String, Processing>,
 }
 
 impl People {
@@ -178,9 +182,18 @@ impl People {
             {
                 continue;
             }
-            // Gone, or never shown (a bot the client hides): out.
-            if !them.is_active() || them.is_hidden() {
+            // Gone: out.
+            if !them.is_active() {
                 changed |= self.by_mri.remove(mri).is_some();
+                changed |= self.bots.remove(mri).is_some();
+                continue;
+            }
+            // A bot the client hides is not in the room; what it does to
+            // the meeting is told.
+            if them.is_hidden() {
+                changed |= self.by_mri.remove(mri).is_some();
+                let doing = them.processing();
+                changed |= self.bots.insert(mri.clone(), doing) != Some(doing);
                 continue;
             }
             // Someone the roster does not name shows as their id; what
@@ -230,6 +243,13 @@ impl People {
     /// Everyone, by MRI.
     fn list(&self) -> Vec<Attendee> {
         self.by_mri.values().map(|(_, a)| a.clone()).collect()
+    }
+
+    /// What the meeting's bots make of it, all together.
+    fn processing(&self) -> Processing {
+        self.bots
+            .values()
+            .fold(Processing::default(), |all, &one| all.or(one))
     }
 }
 
@@ -783,6 +803,7 @@ impl Call {
                 people.iter().filter(|p| p.camera.is_some()).count()
             );
             tell(CallEvent::People(people));
+            tell(CallEvent::Recording(meeting.people.processing()));
         }
         self.conversation = Some(CpconvAnswer {
             conversation_controller: preheated.conversation_controller,
@@ -1355,6 +1376,7 @@ impl Call {
                         people.iter().filter(|p| p.camera.is_some()).count()
                     );
                     tell(CallEvent::People(people));
+                    tell(CallEvent::Recording(meeting.people.processing()));
                     self.ask_for_video(session, tell);
                 }
             }
@@ -2211,8 +2233,53 @@ mod tests {
             .participants
             .insert("28:transcriber".into(), transcriber);
         let mut people = People::default();
-        assert!(!people.take(&update, "8:live:organizer"));
+        // Noted (what they do is told), but not in the room.
+        assert!(people.take(&update, "8:live:organizer"));
         assert!(people.list().is_empty());
+        assert!(!people.take(&update, "8:live:organizer"));
+    }
+
+    #[test]
+    fn a_recorders_doings_are_told_while_it_is_in() {
+        let mut update: RosterUpdate =
+            serde_json::from_str(include_str!("fixtures/roster_lobby.json")).expect("reads");
+        let mut recorder = update
+            .participants
+            .remove("8:live:waiting")
+            .expect("in the fixture");
+        recorder.details.as_mut().expect("details").display_name = None;
+        for endpoint in recorder.endpoints.values_mut() {
+            endpoint.rest.insert(
+                "endpointMetadata".into(),
+                serde_json::json!({
+                    "__platform": {"ui": {"hidden": true}},
+                    "processingModes": {
+                        "recording": {"state": "Active"},
+                        "realTimeTranscript": {"state": "Inactive"},
+                    }
+                }),
+            );
+        }
+        update.participants.insert("28:recorder".into(), recorder);
+        let mut people = People::default();
+        assert!(people.take(&update, "8:live:organizer"));
+        assert!(people.list().is_empty(), "not in the room");
+        assert_eq!(
+            people.processing(),
+            Processing {
+                recording: true,
+                transcript: false
+            }
+        );
+        // The same again changes nothing; the recorder leaving does.
+        assert!(!people.take(&update, "8:live:organizer"));
+        let mut left = update;
+        if let Some(bot) = left.participants.get_mut("28:recorder") {
+            bot.version += 1;
+            bot.state = "inactive".into();
+        }
+        assert!(people.take(&left, "8:live:organizer"));
+        assert_eq!(people.processing(), Processing::default());
     }
 
     #[test]

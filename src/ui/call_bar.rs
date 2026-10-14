@@ -122,6 +122,8 @@ struct Bar {
     waiting: Vec<Waiting>,
     /// The meeting's join link, to copy.
     invite: Option<String>,
+    /// The meeting is being recorded or transcribed.
+    recording: huddles::Recording,
     #[cfg(feature = "huddle-video")]
     shares: Vec<ShareRow>,
     /// How many others have a camera on.
@@ -230,6 +232,7 @@ fn gather(
             .as_ref()
             .filter(|_| listening.in_huddle())
             .map(|link| link.0.clone()),
+        recording: listening.recording,
         #[cfg(feature = "huddle-video")]
         shares: listening
             .shares
@@ -324,6 +327,9 @@ fn bar(
                 ui.horizontal(|ui| faces(ui, palette, &bar.faces));
             }
             if !failed {
+                if bar.recording.is_on() {
+                    recording_row(ui, palette, bar.recording);
+                }
                 for waiting in &bar.waiting {
                     waiting_row(ui, palette, waiting, actions);
                 }
@@ -503,6 +509,31 @@ fn waiting_row(ui: &mut egui::Ui, palette: &Palette, waiting: &Waiting, actions:
                 });
             });
         });
+    });
+}
+
+/// The meeting is being recorded or transcribed: said, as the Teams
+/// client says it, so no one is taken by surprise.
+fn recording_row(ui: &mut egui::Ui, palette: &Palette, recording: huddles::Recording) {
+    let text = match (recording.recording, recording.transcript) {
+        (true, true) => t("This meeting is being recorded and transcribed"),
+        (true, false) => t("This meeting is being recorded"),
+        _ => t("This meeting is being transcribed"),
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        // A red dot, as recording lights go.
+        let (dot, _) = ui.allocate_exact_size(egui::Vec2::splat(14.0), egui::Sense::hover());
+        ui.painter()
+            .circle_filled(dot.center(), 4.5, Color32::from_rgb(0xe0, 0x3e, 0x3e));
+        ui.add(
+            egui::Label::new(
+                RichText::new(text)
+                    .font(theme::regular(12.0))
+                    .color(palette.text),
+            )
+            .wrap(),
+        );
     });
 }
 
