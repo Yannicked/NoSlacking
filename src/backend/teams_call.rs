@@ -411,8 +411,10 @@ fn roster(callee: &str, far: FarEnd) -> Roster {
 
 /// Who is in a meeting with you: the others as `people` says (by the ids
 /// the interface knows people by, their names for any it does not), and
-/// you, speaking as `me_speaking` says.
-fn meeting_roster(people: &[Attendee], me_speaking: bool) -> Roster {
+/// you. The meeting mixes everyone's sound, so whoever it says spoke
+/// last (`speaker`, by MRI) is speaking while that sound is loud
+/// (`far.speaking`); you as `far.me_speaking` says.
+fn meeting_roster(people: &[Attendee], speaker: Option<&str>, far: FarEnd) -> Roster {
     let mut everyone: Vec<Person> = people
         .iter()
         .map(|attendee| Person {
@@ -422,7 +424,8 @@ fn meeting_roster(people: &[Attendee], me_speaking: bool) -> Roster {
             ),
             me: false,
             muted: attendee.muted,
-            speaking: false,
+            speaking: far.speaking
+                && speaker.is_some_and(|s| s.eq_ignore_ascii_case(&attendee.mri)),
             name: attendee.name.clone(),
             waiting: attendee.waiting,
         })
@@ -431,7 +434,7 @@ fn meeting_roster(people: &[Attendee], me_speaking: bool) -> Roster {
         user: None,
         me: true,
         muted: false,
-        speaking: me_speaking,
+        speaking: far.me_speaking,
         name: None,
         waiting: false,
     });
@@ -879,6 +882,8 @@ struct Shown<'a, T: Fn(Listen)> {
     people: Option<Vec<Attendee>>,
     /// Whose camera a meeting sends us on each camera line, by MRI.
     watched: Vec<Option<String>>,
+    /// Who in a meeting spoke last, by MRI.
+    speaker: Option<String>,
     /// The camera lines whose pictures show now.
     cameras_on: std::collections::BTreeSet<usize>,
     tell: &'a T,
@@ -955,7 +960,7 @@ impl<T: Fn(Listen)> Shown<'_, T> {
     /// Who is in the call, as the bar shows it.
     fn roster(&self) -> Roster {
         match &self.people {
-            Some(people) => meeting_roster(people, self.far.me_speaking),
+            Some(people) => meeting_roster(people, self.speaker.as_deref(), self.far),
             None => roster(self.callee, self.far),
         }
     }
@@ -992,6 +997,10 @@ impl<T: Fn(Listen)> Shown<'_, T> {
                 self.people = Some(people);
                 (self.tell)(Listen::Roster(self.roster()));
             }
+            CallEvent::Speaker(mri) => {
+                self.speaker = Some(mri);
+                (self.tell)(Listen::Roster(self.roster()));
+            }
             CallEvent::Ended { result, .. } => self.ended = Some(result),
         }
     }
@@ -1011,6 +1020,7 @@ async fn follow(
         callee,
         people: None,
         watched: Vec::new(),
+        speaker: None,
         cameras_on: std::collections::BTreeSet::new(),
         tell,
         ended: None,
@@ -1110,7 +1120,7 @@ async fn run_meeting(
         }
     };
     tell(Listen::Invite(crate::meetings::MeetingLink(found.url())));
-    tell(Listen::Roster(meeting_roster(&[], false)));
+    tell(Listen::Roster(meeting_roster(&[], None, FarEnd::default())));
     let (devices, audio) = match Devices::open(&place, wanted, &sink, &tell).await {
         Ok(opened) => opened,
         Err(failure) => {
@@ -1243,6 +1253,37 @@ mod tests {
         assert_eq!(roster.people[0].user.as_deref(), Some("8:live:ana"));
         assert!(roster.people[0].muted);
         assert!(roster.people[1].me && roster.people[1].speaking);
+    }
+
+    #[test]
+    fn a_meetings_last_speaker_speaks_while_its_sound_is_loud() {
+        let attendee = |mri: &str| Attendee {
+            mri: mri.to_owned(),
+            name: Some(mri.to_uppercase()),
+            waiting: false,
+            muted: false,
+            camera: None,
+            audio: None,
+            share: None,
+        };
+        let people = [attendee("8:orgid:ana"), attendee("8:orgid:bo")];
+        let loud = FarEnd {
+            muted: false,
+            speaking: true,
+            me_speaking: false,
+        };
+        let roster = meeting_roster(&people, Some("8:orgid:BO"), loud);
+        let speaking: Vec<bool> = roster.people.iter().map(|p| p.speaking).collect();
+        assert_eq!(speaking, [false, true, false]);
+        assert_eq!(roster.people[1].user.as_deref(), Some("bo"));
+        assert_eq!(roster.people[1].name.as_deref(), Some("8:ORGID:BO"));
+        // Quiet: no one, whoever spoke last.
+        let quiet = FarEnd::default();
+        let roster = meeting_roster(&people, Some("8:orgid:bo"), quiet);
+        assert!(roster.people.iter().all(|p| !p.speaking));
+        // No one named yet: no one.
+        let roster = meeting_roster(&people, None, loud);
+        assert!(roster.people.iter().all(|p| !p.speaking));
     }
 
     #[test]

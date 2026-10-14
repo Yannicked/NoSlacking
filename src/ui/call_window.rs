@@ -87,6 +87,9 @@ pub struct TileView {
     pub muted: bool,
     /// Their camera is paused: their face instead.
     pub paused: bool,
+    /// Whether a camera sends to this tile at all. Without one (their
+    /// camera is off) their face stands in, and no picture is awaited.
+    pub camera: bool,
     /// The newest picture, uploaded, and the camera's own size.
     pub picture: Option<(egui::TextureId, [usize; 2])>,
 }
@@ -102,7 +105,8 @@ pub struct CallView {
     pub current: Option<String>,
     /// Its newest picture, uploaded, and the share's own size.
     pub picture: Option<(egui::TextureId, [usize; 2])>,
-    /// The camera tiles, in order.
+    /// The tiles, in order: the cameras on first, then everyone else in
+    /// the call, by their face.
     pub tiles: Vec<TileView>,
     /// Cameras on that have no tile, for want of room.
     pub more: usize,
@@ -602,8 +606,8 @@ fn info(ui: &egui::Ui, palette: &Palette, controls: &Controls, room: Rect) {
     );
 }
 
-/// One camera: the picture filling the tile, or the person's face; their
-/// name, muted mark and speaking ring.
+/// One person: their camera's picture filling the tile, or their face;
+/// their name, muted mark and speaking ring.
 fn camera_tile(ui: &mut egui::Ui, palette: &Palette, rect: Rect, tile: &TileView, no_video: bool) {
     let radius = CornerRadius::same(theme::RADIUS + 2);
     ui.painter()
@@ -620,7 +624,7 @@ fn camera_tile(ui: &mut egui::Ui, palette: &Palette, rect: Rect, tile: &TileView
             let face =
                 Rect::from_center_size(rect.center() - Vec2::new(0.0, 8.0), Vec2::splat(side));
             super::paint_avatar(ui, face, tile.avatar.as_deref(), &tile.name, &tile.seed);
-            if !tile.paused && !no_video {
+            if tile.camera && !tile.paused && !no_video {
                 // The first picture is on its way.
                 egui::Spinner::new()
                     .size(14.0)

@@ -121,6 +121,10 @@ pub enum CallEvent {
     /// Whose camera the meeting is asked to send us on each camera line
     /// (by MRI), or no one's.
     Watching(Vec<Option<String>>),
+    /// Who in the meeting spoke last (by MRI), as its data channel says:
+    /// the meeting mixes everyone's sound, so this is who the bar marks
+    /// as speaking while it is loud.
+    Speaker(String),
     /// An incoming call stopped ringing because another device of yours
     /// (or another delivery of the same call here) picked it up: not a
     /// missed call.
@@ -174,9 +178,23 @@ impl People {
             {
                 continue;
             }
-            if !them.is_active() {
+            // Gone, or never shown (a bot the client hides): out.
+            if !them.is_active() || them.is_hidden() {
                 changed |= self.by_mri.remove(mri).is_some();
                 continue;
+            }
+            // Someone the roster does not name shows as their id; what
+            // else it says of them may tell where the name is.
+            if them.name().is_none()
+                && !self.by_mri.contains_key(mri)
+                && let Some(details) = &them.details
+            {
+                log::info!(
+                    "Teams meeting: no name for {mri} ({} participant; role {:?}; details also say {})",
+                    details.participant_type.as_deref().unwrap_or("untyped"),
+                    them.role,
+                    serde_json::Value::Object(details.rest.clone().into_iter().collect()),
+                );
             }
             let attendee = Attendee {
                 mri: mri.clone(),
@@ -1568,7 +1586,10 @@ impl Call {
                             .map(|a| a.mri)
                     });
                     if speaker.is_some() && speaker != meeting.speaker {
-                        meeting.speaker = speaker;
+                        meeting.speaker = speaker.clone();
+                        if let Some(mri) = speaker {
+                            tell(CallEvent::Speaker(mri));
+                        }
                         self.ask_for_video(session, tell);
                     }
                 }
@@ -2079,6 +2100,23 @@ mod tests {
         }
         assert!(people.take(&admitted, "8:live:organizer"));
         assert!(!people.list()[0].waiting);
+    }
+
+    #[test]
+    fn a_hidden_participant_is_not_in_the_room() {
+        let mut update: RosterUpdate =
+            serde_json::from_str(include_str!("fixtures/roster_lobby.json")).expect("reads");
+        let mut bot = update
+            .participants
+            .remove("8:live:waiting")
+            .expect("in the fixture");
+        let details = bot.details.as_mut().expect("details");
+        details.hidden = true;
+        details.display_name = None;
+        update.participants.insert("28:recorder".into(), bot);
+        let mut people = People::default();
+        assert!(!people.take(&update, "8:live:organizer"));
+        assert!(people.list().is_empty());
     }
 
     #[test]

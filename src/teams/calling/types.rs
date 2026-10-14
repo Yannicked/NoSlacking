@@ -42,6 +42,18 @@ pub struct Participant {
     pub participant_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language_id: Option<String>,
+    /// In a roster: `inTenant`, `anonymous`, `federated`, … (recorded:
+    /// `inTenant`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub participant_type: Option<String>,
+    /// In a roster: one the client does not show (a recording or
+    /// transcription bot, say).
+    #[serde(skip_serializing, deserialize_with = "nullable")]
+    pub hidden: bool,
+    /// Whatever else a roster says of them, kept so a participant without
+    /// a name can be logged in full and the name found.
+    #[serde(flatten, skip_serializing)]
+    pub rest: BTreeMap<String, serde_json::Value>,
 }
 
 /// The two sides of a request: us, and whom we call.
@@ -509,6 +521,13 @@ impl RosterParticipant {
             .display_name
             .as_deref()
             .filter(|n| !n.is_empty())
+    }
+
+    /// Whether the client would not show them: a hidden participant (a
+    /// recording or transcription bot, say) is in the roster but not in
+    /// the room.
+    pub fn is_hidden(&self) -> bool {
+        self.details.as_ref().is_some_and(|d| d.hidden)
     }
 
     /// Whether the participant is muted: an endpoint of theirs says so.

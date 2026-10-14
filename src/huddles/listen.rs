@@ -644,6 +644,16 @@ pub fn heard(app: &mut App, team: &str, channel: &str, state: Listen) {
         #[cfg(feature = "huddle-video")]
         Listen::Shares(shares) => {
             listening.shares = shares;
+            // A share starting while the window shows the cameras is what
+            // the room looks at: watched at once.
+            if listening.window
+                && listening.watching.is_none()
+                && let Some(first) = listening.shares.first()
+            {
+                let key = first.key.clone();
+                watch(app, Some(key));
+                return;
+            }
             // The share watched has ended: the window goes on with the
             // cameras, or closes if there are none.
             if listening.watching.is_some() && listening.watched().is_none() {

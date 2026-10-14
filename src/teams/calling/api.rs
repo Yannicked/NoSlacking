@@ -139,6 +139,7 @@ pub fn own_participant(client: &TeamsClient, ids: &CallIds) -> Option<Participan
         endpoint_id: Some(ids.endpoint_id.clone()),
         participant_id: Some(ids.participant_id.clone()),
         language_id: Some("en-us".to_owned()),
+        ..Participant::default()
     })
 }
 
@@ -1263,6 +1264,7 @@ mod tests {
             endpoint_id: Some(ids.endpoint_id.clone()),
             participant_id: Some(ids.participant_id.clone()),
             language_id: Some("en-us".into()),
+            ..Participant::default()
         }
     }
 
