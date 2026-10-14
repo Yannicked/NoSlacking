@@ -2499,10 +2499,16 @@ mod tests {
                 Vec<(String, [usize; 2])>,
             );
             let seen: Arc<Mutex<Seen>> = Arc::default();
-            let (window_gallery, window_cameras, window_seen) =
-                (gallery.clone(), cameras_told.clone(), seen.clone());
+            let (window_screen, window_gallery, window_cameras, window_seen) = (
+                screen.clone(),
+                gallery.clone(),
+                cameras_told.clone(),
+                seen.clone(),
+            );
             // The window opens on the share with small tiles once the
-            // session runs, and closes after a while.
+            // session runs, draws the newest pictures as the real one does
+            // (the decoders send a new one only once the last is taken),
+            // and closes after a while.
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 let _ = wishing.send(Wish {
@@ -2511,11 +2517,16 @@ mod tests {
                     tiles: 4,
                     tile: [150, 90],
                 });
-                tokio::time::sleep(Duration::from_secs(4)).await;
+                let mut drawn = std::collections::BTreeMap::new();
+                let closing = tokio::time::Instant::now() + Duration::from_secs(4);
+                while tokio::time::Instant::now() < closing {
+                    window_screen.take();
+                    drawn.extend(window_gallery.take());
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                }
                 if let Ok(mut seen) = window_seen.lock() {
                     seen.0 = window_cameras.borrow().clone();
-                    seen.1 = window_gallery
-                        .take()
+                    seen.1 = drawn
                         .into_iter()
                         .map(|(key, picture)| (key, picture.source))
                         .collect();
