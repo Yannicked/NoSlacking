@@ -43,6 +43,39 @@ fn holds_jwt(word: &str) -> bool {
     })
 }
 
+/// A string that must never reach the log, such as a token or a sign-in
+/// link: `Debug` prints it as `<redacted>`, so the types holding one can
+/// derive theirs. It (de)serializes as the bare string.
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(REDACTED)
+    }
+}
+
+/// Reads as the string it holds, wherever a `&str` is wanted.
+impl std::ops::Deref for Secret {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for Secret {
+    fn from(secret: String) -> Self {
+        Self(secret)
+    }
+}
+
+impl From<&str> for Secret {
+    fn from(secret: &str) -> Self {
+        Self(secret.to_owned())
+    }
+}
+
 /// `message` with every secret word replaced, or `None` when it has none
 /// (the common case, which then costs no allocation).
 pub fn tokens(message: &str) -> Option<String> {

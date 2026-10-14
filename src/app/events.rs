@@ -436,7 +436,7 @@ impl App {
         if let SignIn::Done(name) = &state {
             self.toast(tf("Signed in to {name}.", &[("name", name)]), Tone::Info);
             self.page = Page::Main;
-            self.setup.user_token.clear();
+            self.setup.user_token = Default::default();
         }
         self.sign_in = Some(state);
     }

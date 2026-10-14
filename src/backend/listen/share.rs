@@ -27,7 +27,7 @@
 //! repeat; pressing Share again starts a fresh helper (it is started
 //! again a few times, as for decoding).
 
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot, watch};
@@ -41,6 +41,7 @@ use crate::huddle_audio::share::{Source, may_share, problem_failure};
 use crate::huddle_audio::share_send;
 use crate::huddle_audio::video::Share;
 use crate::huddle_share::{ShareNews, ShareRequest};
+use crate::sync::lock_whole;
 use noslacking_video_ipc::ShareChoice;
 
 /// How long the share's session gets to leave (LEAVE, then LEAVE_ACK)
@@ -199,15 +200,12 @@ pub(in crate::backend) fn begin(begin: Begin) -> Step {
             Err(trouble) => return lost(&helper, trouble),
         },
     };
-    let restore = RESTORE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone();
+    let restore = lock_whole(&RESTORE).clone();
     let bitrate = Limits::SHARE.bitrate(START_BITRATE);
     match helper.start_share(choice, helper::gpu(), bitrate, &restore) {
         Ok((share, token)) => {
             if !token.is_empty() {
-                *RESTORE.lock().unwrap_or_else(PoisonError::into_inner) = token;
+                *lock_whole(&RESTORE) = token;
             }
             Step::Started(Ok(share))
         }

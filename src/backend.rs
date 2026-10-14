@@ -40,11 +40,15 @@ use crate::failure::{Failure, Problem};
 use crate::images::ImageLoader;
 use crate::model::{Bot, Conversation, Message, SidebarSection, Ts, User, UserGroup, Workspace};
 use crate::paths::AppDirs;
+use crate::redact::Secret;
 use crate::settings::{Redirect, WorkspaceMeta};
 use crate::sidebar::SidebarCall;
 use crate::sync::lock_whole;
 
-/// What the interface asks the worker to do.
+/// What the interface asks the worker to do. Its secrets (a pasted token,
+/// a sign-in link or redirect, whose code finishes a sign-in) are
+/// [`Secret`]s, so it never prints them.
+#[derive(Debug)]
 pub enum Command {
     /// Lists the cameras, microphones and speakers there are, or says
     /// which to use in huddles (see [`crate::devices`]).
@@ -59,19 +63,19 @@ pub enum Command {
     },
     CancelSignIn,
     /// A redirect URL handed over by another launch.
-    Callback(String),
+    Callback(Secret),
     /// Signs in with a user token copied from the app's settings page.
-    PasteToken(String),
+    PasteToken(Secret),
     /// Signs in with the `slack://` link Slack's browser sign-in hands over
     /// (see [`crate::slack::magic`]).
-    SignInLink(String),
+    SignInLink(Secret),
     /// Opens Slack's sign-in page in the browser and, for a while, accepts
     /// the `slack://` link it hands back through the desktop.
     StartBrowserSignIn,
     /// Starts Microsoft Teams Device Code sign-in, to the tenant if given,
     /// or to a personal account.
     StartTeamsSignIn {
-        tenant: Option<String>,
+        tenant: Option<Secret>,
         personal: bool,
     },
     SignOut(String),
@@ -309,321 +313,6 @@ pub enum Command {
         team: String,
         command: crate::views::Command,
     },
-}
-
-/// Prints every field except the secrets: a pasted token, the session
-/// cookie, and the sign-in redirect (its code finishes a sign-in).
-impl std::fmt::Debug for Command {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use crate::redact::REDACTED;
-        match self {
-            Self::Devices(command) => f.debug_tuple("Devices").field(command).finish(),
-            Self::SaveApp(app) => f.debug_tuple("SaveApp").field(app).finish(),
-            Self::StartSignIn {
-                redirect,
-                port,
-                request,
-            } => f
-                .debug_struct("StartSignIn")
-                .field("redirect", redirect)
-                .field("port", port)
-                .field("request", request)
-                .finish(),
-            Self::CancelSignIn => f.write_str("CancelSignIn"),
-            Self::Callback(_) => f.debug_tuple("Callback").field(&REDACTED).finish(),
-            Self::PasteToken(_) => f.debug_tuple("PasteToken").field(&REDACTED).finish(),
-            Self::SignInLink(_) => f.debug_tuple("SignInLink").field(&REDACTED).finish(),
-            Self::StartBrowserSignIn => f.write_str("StartBrowserSignIn"),
-            Self::StartTeamsSignIn { personal, .. } => f
-                .debug_struct("StartTeamsSignIn")
-                .field("personal", personal)
-                .finish_non_exhaustive(),
-            Self::SignOut(team) => f.debug_tuple("SignOut").field(team).finish(),
-            Self::Focus { team, channel } => f
-                .debug_struct("Focus")
-                .field("team", team)
-                .field("channel", channel)
-                .finish(),
-            Self::LoadHistory { team, channel } => f
-                .debug_struct("LoadHistory")
-                .field("team", team)
-                .field("channel", channel)
-                .finish(),
-            Self::LoadOlder {
-                team,
-                channel,
-                cursor,
-            } => f
-                .debug_struct("LoadOlder")
-                .field("team", team)
-                .field("channel", channel)
-                .field("cursor", cursor)
-                .finish(),
-            Self::LoadThread { team, channel, ts } => f
-                .debug_struct("LoadThread")
-                .field("team", team)
-                .field("channel", channel)
-                .field("ts", ts)
-                .finish(),
-            Self::LoadAround { team, channel, ts } => f
-                .debug_struct("LoadAround")
-                .field("team", team)
-                .field("channel", channel)
-                .field("ts", ts)
-                .finish(),
-            Self::Search {
-                query,
-                page,
-                request,
-            } => f
-                .debug_struct("Search")
-                .field("query", query)
-                .field("page", page)
-                .field("request", request)
-                .finish(),
-            Self::LoadNewer {
-                team,
-                channel,
-                after,
-            } => f
-                .debug_struct("LoadNewer")
-                .field("team", team)
-                .field("channel", channel)
-                .field("after", after)
-                .finish(),
-            Self::FetchQuote {
-                team,
-                channel,
-                ts,
-                thread,
-            } => f
-                .debug_struct("FetchQuote")
-                .field("team", team)
-                .field("channel", channel)
-                .field("ts", ts)
-                .field("thread", thread)
-                .finish(),
-            Self::Send {
-                team,
-                channel,
-                text,
-                thread,
-                broadcast,
-                local,
-                client_msg_id,
-            } => f
-                .debug_struct("Send")
-                .field("team", team)
-                .field("channel", channel)
-                .field("text", text)
-                .field("thread", thread)
-                .field("broadcast", broadcast)
-                .field("local", local)
-                .field("client_msg_id", client_msg_id)
-                .finish(),
-            Self::Edit {
-                team,
-                channel,
-                ts,
-                text,
-                before,
-            } => f
-                .debug_struct("Edit")
-                .field("team", team)
-                .field("channel", channel)
-                .field("ts", ts)
-                .field("text", text)
-                .field("before", &before.is_some())
-                .finish(),
-            Self::Delete {
-                team,
-                channel,
-                ts,
-                removed,
-            } => f
-                .debug_struct("Delete")
-                .field("team", team)
-                .field("channel", channel)
-                .field("ts", ts)
-                .field("removed", &removed.is_some())
-                .finish(),
-            Self::React {
-                team,
-                channel,
-                ts,
-                name,
-                add,
-            } => f
-                .debug_struct("React")
-                .field("team", team)
-                .field("channel", channel)
-                .field("ts", ts)
-                .field("name", name)
-                .field("add", add)
-                .finish(),
-            Self::Upload {
-                id,
-                team,
-                channel,
-                thread,
-                path,
-                comment,
-            } => f
-                .debug_struct("Upload")
-                .field("id", id)
-                .field("team", team)
-                .field("channel", channel)
-                .field("thread", thread)
-                .field("path", path)
-                .field("comment", comment)
-                .finish(),
-            Self::Slash {
-                id,
-                team,
-                channel,
-                command,
-                text,
-            } => f
-                .debug_struct("Slash")
-                .field("id", id)
-                .field("team", team)
-                .field("channel", channel)
-                .field("command", command)
-                .field("text", text)
-                .finish(),
-            Self::PressButton { team, press } => f
-                .debug_struct("PressButton")
-                .field("team", team)
-                .field("press", press)
-                .finish(),
-            Self::CancelUpload { id } => f.debug_struct("CancelUpload").field("id", id).finish(),
-            Self::Download { team, url, name } => f
-                .debug_struct("Download")
-                .field("team", team)
-                .field("url", url)
-                .field("name", name)
-                .finish(),
-            Self::OpenFile { team, url, name } => f
-                .debug_struct("OpenFile")
-                .field("team", team)
-                .field("url", url)
-                .field("name", name)
-                .finish(),
-            Self::FetchAudio {
-                team,
-                id,
-                url,
-                name,
-            } => f
-                .debug_struct("FetchAudio")
-                .field("team", team)
-                .field("id", id)
-                .field("url", url)
-                .field("name", name)
-                .finish(),
-            Self::ViewFile {
-                id,
-                team,
-                url,
-                kind,
-                size,
-            } => f
-                .debug_struct("ViewFile")
-                .field("id", id)
-                .field("team", team)
-                .field("url", url)
-                .field("kind", kind)
-                .field("size", size)
-                .finish(),
-            Self::Mark { team, channel, ts } => f
-                .debug_struct("Mark")
-                .field("team", team)
-                .field("channel", channel)
-                .field("ts", ts)
-                .finish(),
-            Self::FetchUsers { team, ids } => f
-                .debug_struct("FetchUsers")
-                .field("team", team)
-                .field("ids", ids)
-                .finish(),
-            Self::Sidebar { team, calls } => f
-                .debug_struct("Sidebar")
-                .field("team", team)
-                .field("calls", calls)
-                .finish(),
-            Self::FetchBots { team, ids } => f
-                .debug_struct("FetchBots")
-                .field("team", team)
-                .field("ids", ids)
-                .finish(),
-            Self::FetchConversation { team, channel } => f
-                .debug_struct("FetchConversation")
-                .field("team", team)
-                .field("channel", channel)
-                .finish(),
-            Self::CloseConversation { team, channel } => f
-                .debug_struct("CloseConversation")
-                .field("team", team)
-                .field("channel", channel)
-                .finish(),
-            Self::DeleteFile { team, file, name } => f
-                .debug_struct("DeleteFile")
-                .field("team", team)
-                .field("file", file)
-                .field("name", name)
-                .finish(),
-            Self::AddEmoji {
-                team,
-                name,
-                image,
-                file_name,
-                mime,
-            } => f
-                .debug_struct("AddEmoji")
-                .field("team", team)
-                .field("name", name)
-                .field("image", &image.len())
-                .field("file_name", file_name)
-                .field("mime", mime)
-                .finish(),
-            Self::FetchEmoji { team } => f.debug_struct("FetchEmoji").field("team", team).finish(),
-            Self::Reconnect => f.write_str("Reconnect"),
-            Self::SetProxy(proxy) => f.debug_tuple("SetProxy").field(&proxy.mode).finish(),
-            Self::Snooze { team, minutes } => f
-                .debug_struct("Snooze")
-                .field("team", team)
-                .field("minutes", minutes)
-                .finish(),
-            Self::FetchDnd { team } => f.debug_struct("FetchDnd").field("team", team).finish(),
-            Self::Mute {
-                team,
-                channel,
-                muted,
-                all,
-            } => f
-                .debug_struct("Mute")
-                .field("team", team)
-                .field("channel", channel)
-                .field("muted", muted)
-                .field("all", all)
-                .finish(),
-            Self::Convos { team, command } => f
-                .debug_struct("Convos")
-                .field("team", team)
-                .field("command", command)
-                .finish(),
-            Self::People { team, command } => f
-                .debug_struct("People")
-                .field("team", team)
-                .field("command", command)
-                .finish(),
-            Self::Views { team, command } => f
-                .debug_struct("Views")
-                .field("team", team)
-                .field("command", command)
-                .finish(),
-        }
-    }
 }
 
 /// A change to a message that the interface shows before Slack confirms
@@ -1138,7 +827,7 @@ mod tests {
     #[test]
     fn commands_never_print_secrets() {
         let printed = format!(
-            "{:?} {:?} {:?} {:?}",
+            "{:?} {:?} {:?} {:?} {:?}",
             Command::PasteToken("xoxp-secret".into()),
             Command::SignInLink("slack://login/xoxd-secret".into()),
             Command::Callback("noslacking://oauth/callback?code=c0de&state=s".into()),
@@ -1147,8 +836,19 @@ mod tests {
                 client_secret: "hush".into(),
                 app_token: "xapp-secret".into(),
             }),
+            Command::StartTeamsSignIn {
+                tenant: Some("contoso-tenant".into()),
+                personal: false,
+            },
         );
-        for secret in ["xoxp-secret", "xoxd-secret", "c0de", "hush", "xapp-secret"] {
+        for secret in [
+            "xoxp-secret",
+            "xoxd-secret",
+            "c0de",
+            "hush",
+            "xapp-secret",
+            "contoso-tenant",
+        ] {
             assert!(!printed.contains(secret), "{printed}");
         }
         assert_eq!(

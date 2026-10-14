@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::model::{self, ConversationKind, Delivery, Id, Ts};
+use crate::redact::Secret;
 
 /// A field's value, with an explicit `null` read as its default. Slack
 /// sends `null` where it would usually leave a field out, and
@@ -1622,49 +1623,22 @@ pub struct UploadUrl {
 }
 
 /// `apps.connections.open`: the socket to open.
-#[derive(Default, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ConnectionsOpen {
     /// The `wss://` URL, whose ticket lets anyone open the socket.
-    pub url: String,
-}
-
-/// Leaves out the URL, which carries the socket's ticket.
-impl std::fmt::Debug for ConnectionsOpen {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ConnectionsOpen")
-            .field("url", &crate::redact::REDACTED)
-            .finish()
-    }
+    pub url: Secret,
 }
 
 /// The signed-in person in an `oauth.v2.access` answer, with their token.
-#[derive(Default, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct AuthedUser {
     pub id: String,
     pub scope: String,
-    pub access_token: Option<String>,
-    pub refresh_token: Option<String>,
+    pub access_token: Option<Secret>,
+    pub refresh_token: Option<Secret>,
     pub expires_in: Option<i64>,
-}
-
-/// Shows whether there are tokens, never the tokens.
-impl std::fmt::Debug for AuthedUser {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AuthedUser")
-            .field("id", &self.id)
-            .field("scope", &self.scope)
-            .field("access_token", &redacted(&self.access_token))
-            .field("refresh_token", &redacted(&self.refresh_token))
-            .field("expires_in", &self.expires_in)
-            .finish()
-    }
-}
-
-/// A secret as Debug shows it: whether there is one, not what it is.
-fn redacted(secret: &Option<String>) -> Option<&'static str> {
-    secret.as_ref().map(|_| crate::redact::REDACTED)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1675,30 +1649,16 @@ pub struct OauthTeam {
 }
 
 /// `oauth.v2.access`, for both the code exchange and a refresh.
-#[derive(Default, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct OauthAccess {
     pub authed_user: AuthedUser,
     pub team: OauthTeam,
     /// A refresh of a user token answers at the top level.
-    pub access_token: Option<String>,
-    pub refresh_token: Option<String>,
+    pub access_token: Option<Secret>,
+    pub refresh_token: Option<Secret>,
     pub expires_in: Option<i64>,
     pub token_type: Option<String>,
-}
-
-/// Shows whether there are tokens, never the tokens.
-impl std::fmt::Debug for OauthAccess {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OauthAccess")
-            .field("authed_user", &self.authed_user)
-            .field("team", &self.team)
-            .field("access_token", &redacted(&self.access_token))
-            .field("refresh_token", &redacted(&self.refresh_token))
-            .field("expires_in", &self.expires_in)
-            .field("token_type", &self.token_type)
-            .finish()
-    }
 }
 
 /// A Socket Mode frame.

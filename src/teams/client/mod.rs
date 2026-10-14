@@ -19,7 +19,7 @@ mod presence;
 pub use channels::Post;
 pub use chat::{Author, HistoryPage, MadeMeeting};
 pub use media::is_media_url;
-pub use people::user_mri;
+pub use people::{FEDERATED, SHORT_PROFILES, user_mri};
 
 /// Now, in epoch milliseconds, as Teams stamps reactions and edits.
 fn now_millis() -> u64 {
@@ -297,7 +297,7 @@ impl TeamsClient {
                 |http, mut creds| async move {
                     let minted = crate::teams::auth::redeem(&http, &creds, &audience).await?;
                     if let Some(rotated) = minted.refresh_token {
-                        creds.refresh_token = Some(rotated);
+                        creds.refresh_token = Some(rotated.0);
                     }
                     creds.audiences.insert(
                         audience,

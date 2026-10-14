@@ -187,9 +187,7 @@ pub struct Check {
 /// a row: [`CHECK_EVERY`], doubling with each failure up to
 /// `CHECK_AT_MOST`, so a refusing Slack is never asked in a loop.
 pub fn check_wait(failures: u32) -> Duration {
-    CHECK_EVERY
-        .saturating_mul(1 << failures.min(8))
-        .min(CHECK_AT_MOST)
+    crate::retry::backoff(CHECK_EVERY, CHECK_AT_MOST, failures)
 }
 
 /// When a huddle last checked as `last` is next due: at once if never.

@@ -2008,6 +2008,119 @@ mod tests {
         assert_eq!(received[..], sent[..received.len()]);
     }
 
+    /// The pretend media server's answer to `offer`, on its connection
+    /// (`chime`), made on the first offer: a re-SUBSCRIBE renegotiates
+    /// the same connection.
+    fn answer_offer(chime: &mut Option<Rtc>, media_server: SocketAddr, offer: &str) -> String {
+        let offer = SdpOffer::from_sdp_string(offer).expect("parses");
+        let rtc = chime.get_or_insert_with(|| {
+            let mut rtc = RtcConfig::new()
+                .set_crypto_provider(Arc::new(dtls::provider()))
+                .build(Instant::now());
+            rtc.add_local_candidate(Candidate::host(media_server, "udp").expect("a candidate"));
+            rtc
+        });
+        let answer = rtc.sdp_api().accept_offer(offer).expect("accepted");
+        answer.to_sdp_string()
+    }
+
+    /// The pretend TURN server's answer to `packet`: what is sent to the
+    /// media server goes into its connection (`chime`), and every request
+    /// succeeds, an allocation with the `relayed` address.
+    fn turn_answer(
+        packet: &[u8],
+        chime: &mut Option<Rtc>,
+        media_server: SocketAddr,
+        relayed: SocketAddr,
+    ) -> Option<Vec<u8>> {
+        use turn::{Class, Message, Method, attr, read_xor_address, xor_address};
+        let message = Message::decode(packet).expect("STUN");
+        match (message.method(), message.class) {
+            (Some(Method::Send), Class::Indication) => {
+                let peer = message
+                    .get(attr::XOR_PEER_ADDRESS)
+                    .and_then(|v| read_xor_address(v, &message.transaction));
+                if let (Some(rtc), Some(data), Some(peer)) = (chime, message.get(attr::DATA), peer)
+                    && peer == media_server
+                    && let Ok(receive) = Receive::new(Protocol::Udp, relayed, media_server, data)
+                {
+                    let _ = rtc.handle_input(Input::Receive(Instant::now(), receive));
+                }
+                None
+            }
+            (_, Class::Request) => {
+                let extra = if message.method() == Some(Method::Allocate) {
+                    vec![(
+                        attr::XOR_RELAYED_ADDRESS,
+                        xor_address(relayed, &message.transaction),
+                    )]
+                } else {
+                    vec![]
+                };
+                let answer = Message {
+                    method: message.method,
+                    class: Class::Success,
+                    transaction: message.transaction,
+                    attributes: extra,
+                };
+                Some(answer.encode(None))
+            }
+            _ => None,
+        }
+    }
+
+    /// The pretend signaling server's one socket, checked to ask for
+    /// `protocols` and Chime's control protocol 3.
+    async fn accept_signaling(
+        listener: tokio::net::TcpListener,
+        protocols: &'static str,
+    ) -> Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>> {
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+        let (tcp, _) = listener.accept().await.ok()?;
+        #[allow(clippy::result_large_err, reason = "tungstenite's callback type")]
+        let check = move |request: &Request, mut response: Response| {
+            let asked = request
+                .headers()
+                .get("Sec-WebSocket-Protocol")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            assert_eq!(asked, protocols);
+            assert!(
+                request
+                    .uri()
+                    .query()
+                    .unwrap_or_default()
+                    .contains("X-Chime-Control-Protocol-Version=3")
+            );
+            response.headers_mut().insert(
+                "Sec-WebSocket-Protocol",
+                tokio_tungstenite::tungstenite::http::HeaderValue::from_static("_aws_wt_session"),
+            );
+            Ok(response)
+        };
+        Some(
+            tokio_tungstenite::accept_hdr_async(tcp, check)
+                .await
+                .expect("a socket"),
+        )
+    }
+
+    /// The pretend signaling server's JOIN_ACK, naming its TURN server on
+    /// `turn_port`.
+    fn join_ack(turn_port: u16) -> chime::Frame {
+        let mut ack = chime::frame(FrameType::JoinAck, 1);
+        ack.joinack = Some(chime::proto::SdkJoinAckFrame {
+            turn_credentials: Some(chime::proto::SdkTurnCredentials {
+                username: Some("u".into()),
+                password: Some("p".into()),
+                ttl: Some(300),
+                uris: vec![format!("turn:127.0.0.1:{turn_port}?transport=udp")],
+            }),
+            ..Default::default()
+        });
+        ack
+    }
+
     /// A pretend Chime on loopback: a signaling WebSocket, a TURN server
     /// on UDP and a `str0m` media server sending Opus, all driven by
     /// [`listen`] itself. We talk too, the probe's tone through the real
@@ -2033,7 +2146,7 @@ mod tests {
         use std::sync::Mutex;
         use str0m::media::KeyframeRequestKind;
         use tokio_tungstenite::tungstenite::Message as Ws;
-        use turn::{Class, Message, Method, attr, read_xor_address, xor_address};
+        use turn::{Class, Message, Method, attr, xor_address};
 
         // What the pretend Chime hears from us: Opus with its RTP time and
         // audio level, and the AUDIO_CONTROL frames.
@@ -2213,49 +2326,13 @@ mod tests {
                 tokio::select! {
                     offer = offer_inbox.recv() => {
                         let Some((offer, reply)) = offer else { return };
-                        let offer = str0m::change::SdpOffer::from_sdp_string(&offer).expect("parses");
-                        // A re-SUBSCRIBE renegotiates the same connection.
-                        let rtc = chime.get_or_insert_with(|| {
-                            let mut rtc = RtcConfig::new()
-                                .set_crypto_provider(Arc::new(dtls::provider()))
-                                .build(Instant::now());
-                            rtc.add_local_candidate(Candidate::host(media_server, "udp").expect("a candidate"));
-                            rtc
-                        });
-                        let answer = rtc.sdp_api().accept_offer(offer).expect("accepted");
-                        let _ = reply.send(answer.to_sdp_string());
+                        let _ = reply.send(answer_offer(&mut chime, media_server, &offer));
                     }
                     got = turn_socket.recv_from(&mut buf) => {
                         let Ok((n, from)) = got else { return };
                         client = Some(from);
-                        let message = Message::decode(&buf[..n]).expect("STUN");
-                        match (message.method(), message.class) {
-                            (Some(Method::Send), Class::Indication) => {
-                                let peer = message.get(attr::XOR_PEER_ADDRESS)
-                                    .and_then(|v| read_xor_address(v, &message.transaction));
-                                if let (Some(rtc), Some(data), Some(peer)) = (&mut chime, message.get(attr::DATA), peer)
-                                    && peer == media_server
-                                    && let Ok(receive) = Receive::new(Protocol::Udp, relayed, media_server, data)
-                                {
-                                    let _ = rtc.handle_input(Input::Receive(Instant::now(), receive));
-                                }
-                            }
-                            (_, Class::Request) => {
-                                let extra = if message.method() == Some(Method::Allocate) {
-                                    vec![(attr::XOR_RELAYED_ADDRESS, xor_address(relayed, &message.transaction))]
-                                } else {
-                                    vec![]
-                                };
-                                let answer = Message {
-                                    method: message.method,
-                                    class: Class::Success,
-                                    transaction: message.transaction,
-                                    attributes: extra,
-                                }
-                                .encode(None);
-                                let _ = turn_socket.send_to(&answer, from).await;
-                            }
-                            _ => {}
+                        if let Some(answer) = turn_answer(&buf[..n], &mut chime, media_server, relayed) {
+                            let _ = turn_socket.send_to(&answer, from).await;
                         }
                     }
                     () = tokio::time::sleep_until(wake.into()) => {}
@@ -2269,46 +2346,17 @@ mod tests {
             .expect("bound");
         let signaling_port = listener.local_addr().expect("an address").port();
         tokio::spawn(async move {
-            let Ok((tcp, _)) = listener.accept().await else {
+            let Some(mut ws) = accept_signaling(listener, "_aws_wt_session, the-token").await
+            else {
                 return;
             };
-            #[allow(clippy::result_large_err, reason = "tungstenite's callback type")]
-            let check = |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                         mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-                let protocols = request
-                    .headers()
-                    .get("Sec-WebSocket-Protocol")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or_default()
-                    .to_owned();
-                assert_eq!(protocols, "_aws_wt_session, the-token");
-                assert!(request.uri().query().unwrap_or_default().contains("X-Chime-Control-Protocol-Version=3"));
-                response.headers_mut().insert(
-                    "Sec-WebSocket-Protocol",
-                    tokio_tungstenite::tungstenite::http::HeaderValue::from_static("_aws_wt_session"),
-                );
-                Ok(response)
-            };
-            let mut ws = tokio_tungstenite::accept_hdr_async(tcp, check)
-                .await
-                .expect("a socket");
             let reply = |frame: chime::Frame| Ws::Binary(chime::encode(&frame).into());
             while let Some(Ok(message)) = ws.next().await {
                 let Ws::Binary(bytes) = message else { continue };
                 let frame = chime::decode(&bytes).expect("a frame");
                 match FrameType::try_from(frame.r#type) {
                     Ok(FrameType::Join) => {
-                        let mut ack = chime::frame(FrameType::JoinAck, 1);
-                        ack.joinack = Some(chime::proto::SdkJoinAckFrame {
-                            turn_credentials: Some(chime::proto::SdkTurnCredentials {
-                                username: Some("u".into()),
-                                password: Some("p".into()),
-                                ttl: Some(300),
-                                uris: vec![format!("turn:127.0.0.1:{turn_port}?transport=udp")],
-                            }),
-                            ..Default::default()
-                        });
-                        let _ = ws.send(reply(ack)).await;
+                        let _ = ws.send(reply(join_ack(turn_port))).await;
                         // A screen share, two cameras (C3's in two
                         // layers), and our own camera, which is never
                         // received.
@@ -2451,10 +2499,16 @@ mod tests {
                 Vec<(String, [usize; 2])>,
             );
             let seen: Arc<Mutex<Seen>> = Arc::default();
-            let (window_gallery, window_cameras, window_seen) =
-                (gallery.clone(), cameras_told.clone(), seen.clone());
+            let (window_screen, window_gallery, window_cameras, window_seen) = (
+                screen.clone(),
+                gallery.clone(),
+                cameras_told.clone(),
+                seen.clone(),
+            );
             // The window opens on the share with small tiles once the
-            // session runs, and closes after a while.
+            // session runs, draws the newest pictures as the real one does
+            // (the decoders send a new one only once the last is taken),
+            // and closes after a while.
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 let _ = wishing.send(Wish {
@@ -2463,11 +2517,16 @@ mod tests {
                     tiles: 4,
                     tile: [150, 90],
                 });
-                tokio::time::sleep(Duration::from_secs(4)).await;
+                let mut drawn = std::collections::BTreeMap::new();
+                let closing = tokio::time::Instant::now() + Duration::from_secs(4);
+                while tokio::time::Instant::now() < closing {
+                    window_screen.take();
+                    drawn.extend(window_gallery.take());
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                }
                 if let Ok(mut seen) = window_seen.lock() {
                     seen.0 = window_cameras.borrow().clone();
-                    seen.1 = window_gallery
-                        .take()
+                    seen.1 = drawn
                         .into_iter()
                         .map(|(key, picture)| (key, picture.source))
                         .collect();
@@ -2730,7 +2789,7 @@ mod tests {
         use std::sync::Mutex;
         use str0m::media::KeyframeRequestKind;
         use tokio_tungstenite::tungstenite::Message as Ws;
-        use turn::{Class, Message, Method, attr, read_xor_address, xor_address};
+        use turn::{Class, Message, Method, attr, xor_address};
 
         // Each SUBSCRIBE: whether DUPLEX, the receive ids, the video send
         // stream's (width, height, max kbps).
@@ -2801,48 +2860,13 @@ mod tests {
                 tokio::select! {
                     offer = offer_inbox.recv() => {
                         let Some((offer, reply)) = offer else { return };
-                        let offer = str0m::change::SdpOffer::from_sdp_string(&offer).expect("parses");
-                        let rtc = chime.get_or_insert_with(|| {
-                            let mut rtc = RtcConfig::new()
-                                .set_crypto_provider(Arc::new(dtls::provider()))
-                                .build(Instant::now());
-                            rtc.add_local_candidate(Candidate::host(media_server, "udp").expect("a candidate"));
-                            rtc
-                        });
-                        let answer = rtc.sdp_api().accept_offer(offer).expect("accepted");
-                        let _ = reply.send(answer.to_sdp_string());
+                        let _ = reply.send(answer_offer(&mut chime, media_server, &offer));
                     }
                     got = turn_socket.recv_from(&mut buf) => {
                         let Ok((n, from)) = got else { return };
                         client = Some(from);
-                        let message = Message::decode(&buf[..n]).expect("STUN");
-                        match (message.method(), message.class) {
-                            (Some(Method::Send), Class::Indication) => {
-                                let peer = message.get(attr::XOR_PEER_ADDRESS)
-                                    .and_then(|v| read_xor_address(v, &message.transaction));
-                                if let (Some(rtc), Some(data), Some(peer)) = (&mut chime, message.get(attr::DATA), peer)
-                                    && peer == media_server
-                                    && let Ok(receive) = Receive::new(Protocol::Udp, relayed, media_server, data)
-                                {
-                                    let _ = rtc.handle_input(Input::Receive(Instant::now(), receive));
-                                }
-                            }
-                            (_, Class::Request) => {
-                                let extra = if message.method() == Some(Method::Allocate) {
-                                    vec![(attr::XOR_RELAYED_ADDRESS, xor_address(relayed, &message.transaction))]
-                                } else {
-                                    vec![]
-                                };
-                                let answer = Message {
-                                    method: message.method,
-                                    class: Class::Success,
-                                    transaction: message.transaction,
-                                    attributes: extra,
-                                }
-                                .encode(None);
-                                let _ = turn_socket.send_to(&answer, from).await;
-                            }
-                            _ => {}
+                        if let Some(answer) = turn_answer(&buf[..n], &mut chime, media_server, relayed) {
+                            let _ = turn_socket.send_to(&answer, from).await;
                         }
                     }
                     () = tokio::time::sleep_until(wake.into()) => {}
@@ -2856,45 +2880,18 @@ mod tests {
             .expect("bound");
         let signaling_port = listener.local_addr().expect("an address").port();
         tokio::spawn(async move {
-            let Ok((tcp, _)) = listener.accept().await else {
+            let Some(mut ws) =
+                accept_signaling(listener, "_aws_wt_session, the-token#content").await
+            else {
                 return;
             };
-            #[allow(clippy::result_large_err, reason = "tungstenite's callback type")]
-            let check = |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                         mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-                let protocols = request
-                    .headers()
-                    .get("Sec-WebSocket-Protocol")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or_default()
-                    .to_owned();
-                assert_eq!(protocols, "_aws_wt_session, the-token#content");
-                response.headers_mut().insert(
-                    "Sec-WebSocket-Protocol",
-                    tokio_tungstenite::tungstenite::http::HeaderValue::from_static("_aws_wt_session"),
-                );
-                Ok(response)
-            };
-            let mut ws = tokio_tungstenite::accept_hdr_async(tcp, check)
-                .await
-                .expect("a socket");
             let reply = |frame: chime::Frame| Ws::Binary(chime::encode(&frame).into());
             while let Some(Ok(message)) = ws.next().await {
                 let Ws::Binary(bytes) = message else { continue };
                 let frame = chime::decode(&bytes).expect("a frame");
                 match FrameType::try_from(frame.r#type) {
                     Ok(FrameType::Join) => {
-                        let mut ack = chime::frame(FrameType::JoinAck, 1);
-                        ack.joinack = Some(chime::proto::SdkJoinAckFrame {
-                            turn_credentials: Some(chime::proto::SdkTurnCredentials {
-                                username: Some("u".into()),
-                                password: Some("p".into()),
-                                ttl: Some(300),
-                                uris: vec![format!("turn:127.0.0.1:{turn_port}?transport=udp")],
-                            }),
-                            ..Default::default()
-                        });
-                        let _ = ws.send(reply(ack)).await;
+                        let _ = ws.send(reply(join_ack(turn_port))).await;
                         // Others' camera and share, and our own camera:
                         // none of it is for the share's session.
                         let source =

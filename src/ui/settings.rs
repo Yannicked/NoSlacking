@@ -4,7 +4,6 @@
 use egui::{CornerRadius, Margin, RichText, Stroke};
 
 use crate::app::App;
-use crate::credentials::AppCredentials;
 use crate::devices::Kind;
 use crate::i18n::{Locale, t, tf};
 use crate::model::Action;
@@ -431,10 +430,10 @@ fn slack_app(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 (t("Client ID"), &mut app.setup.client_id, false),
                 (
                     t("Client secret (optional)"),
-                    &mut app.setup.client_secret,
+                    &mut app.setup.client_secret.0,
                     true,
                 ),
-                (t("App-level token"), &mut app.setup.app_token, true),
+                (t("App-level token"), &mut app.setup.app_token.0, true),
             ] {
                 let label = ui.label(
                     RichText::new(label)
@@ -449,11 +448,7 @@ fn slack_app(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 )
                 .labelled_by(label.id);
             }
-            let form = AppCredentials {
-                client_id: app.setup.client_id.trim().to_owned(),
-                client_secret: app.setup.client_secret.trim().to_owned(),
-                app_token: app.setup.app_token.trim().to_owned(),
-            };
+            let form = app.setup.app();
             let changed = app.app_credentials.as_ref() != Some(&form);
             // As on the sign-in page: an app without a client id cannot sign
             // anyone in, so it is not worth saving. The secret may stay empty.

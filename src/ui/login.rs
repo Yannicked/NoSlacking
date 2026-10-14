@@ -350,7 +350,7 @@ fn link_fallback(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             ui,
             palette,
             &t("Sign-in link"),
-            &mut app.setup.session_link,
+            &mut app.setup.session_link.0,
             "slack://…",
             true,
         );
@@ -446,13 +446,9 @@ fn app_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             ui.separator();
             step(ui, palette, 2, &t("Paste the app's credentials"), saved);
             field(ui, palette, &t("Client ID"), &mut app.setup.client_id, "1234567890.1234567890", false);
-            field(ui, palette, &t("Client secret (optional)"), &mut app.setup.client_secret, &t("Not needed: sign-in uses PKCE"), true);
-            field(ui, palette, &t("App-level token"), &mut app.setup.app_token, "xapp-1-…", true);
-            let form = AppCredentials {
-                client_id: app.setup.client_id.trim().to_owned(),
-                client_secret: app.setup.client_secret.trim().to_owned(),
-                app_token: app.setup.app_token.trim().to_owned(),
-            };
+            field(ui, palette, &t("Client secret (optional)"), &mut app.setup.client_secret.0, &t("Not needed: sign-in uses PKCE"), true);
+            field(ui, palette, &t("App-level token"), &mut app.setup.app_token.0, "xapp-1-…", true);
+            let form = app.setup.app();
             let changed = app.app_credentials.as_ref() != Some(&form);
             ui.add_enabled_ui(changed && form.can_sign_in(), |ui| {
                 if theme::primary_button(ui, palette, &t("Save")).clicked() {
@@ -501,7 +497,7 @@ fn app_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 );
                 ui.horizontal(|ui| {
                     ui.add(
-                        egui::TextEdit::singleline(&mut app.setup.user_token)
+                        egui::TextEdit::singleline(&mut app.setup.user_token.0)
                             .password(true)
                             .hint_text("xoxp-…")
                             .desired_width(ui.available_width() - 90.0)

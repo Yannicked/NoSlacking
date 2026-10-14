@@ -1018,16 +1018,16 @@ pub fn token_from(access: types::OauthAccess) -> Option<Token> {
     let now = now();
     if let Some(token) = access.authed_user.access_token {
         return Some(Token {
-            access: token,
-            refresh: access.authed_user.refresh_token,
+            access: token.0,
+            refresh: access.authed_user.refresh_token.map(|t| t.0),
             expires_at: access.authed_user.expires_in.map(|s| now + s),
             cookie: None,
             workspace_url: None,
         });
     }
     access.access_token.map(|token| Token {
-        access: token,
-        refresh: access.refresh_token,
+        access: token.0,
+        refresh: access.refresh_token.map(|t| t.0),
         expires_at: access.expires_in.map(|s| now + s),
         cookie: None,
         workspace_url: None,

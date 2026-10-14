@@ -673,8 +673,8 @@ mod tests {
     fn app() -> AppCredentials {
         AppCredentials {
             client_id: "123.456".into(),
-            client_secret: String::new(),
-            app_token: String::new(),
+            client_secret: Default::default(),
+            app_token: Default::default(),
         }
     }
 

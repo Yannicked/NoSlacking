@@ -17,6 +17,7 @@ use crate::i18n::{self, t, tf};
 use crate::model::{Action, Conversation, ConversationKind, Timeline, Ts, Workspace};
 use crate::mrkdwn;
 use crate::paths::AppDirs;
+use crate::redact::Secret;
 use crate::settings::{Appearance, Settings};
 use crate::theme::{self, Catalog, Palette};
 
@@ -204,16 +205,16 @@ pub struct SectionDialog {
     pub name: String,
 }
 
-/// The fields of the sign-in page.
-#[derive(Clone, Default)]
+/// The fields of the sign-in page. The secrets typed into it never print.
+#[derive(Clone, Debug, Default)]
 pub struct SetupForm {
     pub client_id: String,
-    pub client_secret: String,
-    pub app_token: String,
-    pub user_token: String,
+    pub client_secret: Secret,
+    pub app_token: Secret,
+    pub user_token: Secret,
     pub show_manual: bool,
     /// Browser sign-in: the `slack://` link Slack's page hands over.
-    pub session_link: String,
+    pub session_link: Secret,
     /// Whether the "use your own Slack app" section is expanded.
     pub show_app: bool,
     /// Microsoft Teams tenant domain or ID (optional).
@@ -222,16 +223,14 @@ pub struct SetupForm {
     pub teams_personal: bool,
 }
 
-/// The form holds secrets as they are typed; only the plain fields print.
-impl std::fmt::Debug for SetupForm {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SetupForm")
-            .field("client_id", &self.client_id)
-            .field("show_manual", &self.show_manual)
-            .field("show_app", &self.show_app)
-            .field("teams_tenant", &self.teams_tenant)
-            .field("teams_personal", &self.teams_personal)
-            .finish_non_exhaustive()
+impl SetupForm {
+    /// The Slack app as typed, to compare with the saved one and save.
+    pub fn app(&self) -> AppCredentials {
+        AppCredentials {
+            client_id: self.client_id.trim().to_owned(),
+            client_secret: self.client_secret.trim().into(),
+            app_token: self.app_token.trim().into(),
+        }
     }
 }
 
@@ -1473,11 +1472,10 @@ impl App {
                 self.sign_in = None;
                 // The link is a one-time secret: read it once, then forget it.
                 let link = std::mem::take(&mut self.setup.session_link);
-                self.backend
-                    .send(Command::SignInLink(link.trim().to_owned()));
+                self.backend.send(Command::SignInLink(link.trim().into()));
             }
             Action::PasteToken => {
-                let token = self.setup.user_token.trim().to_owned();
+                let token = self.setup.user_token.trim().into();
                 self.backend.send(Command::PasteToken(token));
             }
             Action::SaveApp => self.save_app(),
@@ -1498,8 +1496,10 @@ impl App {
             }
             Action::StartTeamsSignIn { tenant, personal } => {
                 self.sign_in = None;
-                self.backend
-                    .send(Command::StartTeamsSignIn { tenant, personal });
+                self.backend.send(Command::StartTeamsSignIn {
+                    tenant: tenant.map(Into::into),
+                    personal,
+                });
             }
             Action::CancelSignIn => {
                 self.backend.send(Command::CancelSignIn);
@@ -1978,11 +1978,7 @@ impl App {
     }
 
     fn save_app(&mut self) {
-        let form = AppCredentials {
-            client_id: self.setup.client_id.trim().to_owned(),
-            client_secret: self.setup.client_secret.trim().to_owned(),
-            app_token: self.setup.app_token.trim().to_owned(),
-        };
+        let form = self.setup.app();
         if form.can_sign_in() {
             // Another app may well be made from the current manifest.
             let other = self

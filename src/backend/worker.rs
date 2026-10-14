@@ -753,12 +753,12 @@ impl Worker {
                 request,
             } => self.start_sign_in(redirect, port, request),
             Command::CancelSignIn => self.cancel_sign_in(),
-            Command::Callback(url) => self.callback(url),
-            Command::PasteToken(token) => self.paste_token(token),
-            Command::SignInLink(link) => self.sign_in_link(&link),
+            Command::Callback(url) => self.callback(url.0),
+            Command::PasteToken(token) => self.paste_token(token.0),
+            Command::SignInLink(link) => self.sign_in_link(&link.0),
             Command::StartBrowserSignIn => self.start_browser_sign_in(),
             Command::StartTeamsSignIn { tenant, personal } => {
-                self.start_teams_sign_in(tenant, personal);
+                self.start_teams_sign_in(tenant.map(|t| t.0), personal);
             }
             Command::SignOut(team) => self.sign_out(&team),
             Command::Focus { team, channel } => {

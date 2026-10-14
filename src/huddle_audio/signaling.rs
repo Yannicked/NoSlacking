@@ -29,6 +29,7 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 
 use super::chime::{self, AudioStatus, Frame, FrameType, proto};
 use super::join::JoinToken;
+use crate::redact::Secret;
 
 /// The close code Chime gives when the meeting has ended (the JS SDK's
 /// `JoinAndReceiveIndexTask`).
@@ -36,27 +37,16 @@ pub const MEETING_ENDED_CLOSE: u16 = 4410;
 
 /// A TURN server's credentials from JOIN_ACK. The password is shown
 /// nowhere; the username, which names the attendee, neither.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TurnCredentials {
     /// The TURN username.
-    pub username: String,
+    pub username: Secret,
     /// The TURN password.
-    pub password: String,
+    pub password: Secret,
     /// How long they last, in seconds.
     pub ttl: Option<u32>,
     /// `turn:host:port?transport=udp`, `turns:host:443?transport=tcp`, …
     pub uris: Vec<String>,
-}
-
-impl std::fmt::Debug for TurnCredentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TurnCredentials")
-            .field("username", &crate::redact::REDACTED)
-            .field("password", &crate::redact::REDACTED)
-            .field("ttl", &self.ttl)
-            .field("uris", &self.uris)
-            .finish()
-    }
 }
 
 /// Where the session is.
@@ -358,8 +348,8 @@ impl Handshake {
                     Some(turn) => {
                         self.phase = Phase::Indexing;
                         steps.push(Step::Turn(TurnCredentials {
-                            username: turn.username.clone().unwrap_or_default(),
-                            password: turn.password.clone().unwrap_or_default(),
+                            username: turn.username.clone().unwrap_or_default().into(),
+                            password: turn.password.clone().unwrap_or_default().into(),
                             ttl: turn.ttl,
                             uris: turn.uris.clone(),
                         }));
