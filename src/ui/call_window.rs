@@ -270,10 +270,15 @@ pub fn capacity(area: Vec2) -> usize {
 pub struct Layout {
     /// The share's area, if one is shown.
     pub share: Option<Rect>,
-    /// Each tile.
+    /// Each tile, as many as there is room for.
     pub tiles: Vec<Rect>,
     /// How many tiles there is room for.
     pub room: usize,
+    /// The tiles' part of the stage.
+    pub area: Rect,
+    /// The tiles are in a row under the share (a tall stage): more of
+    /// them than fit scroll sideways.
+    pub sideways: bool,
 }
 
 /// Lays out the stage for a share (or none) and `tiles` tiles: without a
@@ -328,7 +333,33 @@ pub fn layout(stage: Rect, share: bool, tiles: usize) -> Layout {
         share,
         tiles: rects,
         room,
+        area,
+        sideways: area.top() > stage.top(),
     }
+}
+
+/// Where every one of `count` tiles goes when only `room` of them fit
+/// `area`: all at the size the room's grid gives them, in that grid's
+/// columns (or one row, `sideways`), from the top left; and the size of
+/// the whole, for scrolling to the rest.
+pub fn overflow(count: usize, room: usize, area: Vec2, sideways: bool) -> (Vec<Rect>, Vec2) {
+    let (columns, _, size) = grid(room.max(1), area);
+    let columns = if sideways { count.max(1) } else { columns };
+    let rows = count.max(1).div_ceil(columns);
+    let rects = (0..count)
+        .map(|i| {
+            let (column, row) = (i % columns, i / columns);
+            Rect::from_min_size(
+                egui::pos2(column as f32 * (size.x + GAP), row as f32 * (size.y + GAP)),
+                size,
+            )
+        })
+        .collect();
+    let whole = Vec2::new(
+        columns as f32 * size.x + (columns - 1) as f32 * GAP,
+        rows as f32 * size.y + (rows - 1) as f32 * GAP,
+    );
+    (rects, whole)
 }
 
 /// A tile's size in pixels as the session hears it: rounded up to
@@ -403,8 +434,13 @@ pub fn show(
             if let Some(share) = layout.share {
                 shown.share = share_stage(ui, view, share, pixels);
             }
-            for (rect, tile) in layout.tiles.iter().zip(&view.tiles) {
-                camera_tile(ui, palette, *rect, tile, view.no_video);
+            if view.tiles.len() > layout.room {
+                // More than fit: all of them, scrolled to.
+                scrolled_tiles(ui, palette, view, &layout);
+            } else {
+                for (rect, tile) in layout.tiles.iter().zip(&view.tiles) {
+                    camera_tile(ui, palette, *rect, tile, view.no_video);
+                }
             }
             if layout.share.is_none() && view.tiles.is_empty() {
                 note(ui, area, &t("No one has their camera on"));
@@ -419,6 +455,40 @@ pub fn show(
             }
         });
     shown
+}
+
+/// Every tile when more than fit the tiles' part of the stage: at the
+/// size the room's grid gives them, the rest scrolled to (down, or
+/// sideways under a share).
+fn scrolled_tiles(ui: &mut egui::Ui, palette: &Palette, view: &CallView, layout: &Layout) {
+    let (rects, whole) = overflow(
+        view.tiles.len(),
+        layout.room,
+        layout.area.size(),
+        layout.sideways,
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(layout.area), |ui| {
+        let scroll = if layout.sideways {
+            egui::ScrollArea::horizontal()
+        } else {
+            egui::ScrollArea::vertical()
+        };
+        scroll
+            .id_salt("call-window-tiles")
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                let (origin, _) = ui.allocate_exact_size(whole, Sense::hover());
+                for (rect, tile) in rects.iter().zip(&view.tiles) {
+                    camera_tile(
+                        ui,
+                        palette,
+                        rect.translate(origin.min.to_vec2()),
+                        tile,
+                        view.no_video,
+                    );
+                }
+            });
+    });
 }
 
 /// The share in its part of the stage; gives the size it is shown at.
@@ -878,6 +948,27 @@ mod tests {
         assert_eq!(capacity(Vec2::new(320.0, 240.0)), 1);
         assert_eq!(capacity(Vec2::new(10.0, 10.0)), 1, "always the speaker");
         assert_eq!(capacity(Vec2::new(5000.0, 3000.0)), huddles::MAX_TILES);
+    }
+
+    #[test]
+    fn more_tiles_than_fit_keep_the_grids_columns_and_scroll_down() {
+        let area = Vec2::new(640.0, 360.0);
+        let room = capacity(area);
+        let (columns, _, size) = grid(room, area);
+        let (rects, whole) = overflow(14, room, area, false);
+        assert_eq!(rects.len(), 14);
+        assert!(rects.iter().all(|r| r.size() == size));
+        assert_eq!(
+            rects[columns].min.x, 0.0,
+            "the second row starts at the left"
+        );
+        assert!(rects[columns].min.y > rects[0].max.y);
+        assert!(whole.y > area.y, "there is something to scroll to");
+        assert!(whole.x <= area.x);
+        // Under a share: one row, scrolled sideways.
+        let (row, whole) = overflow(5, 2, Vec2::new(700.0, 200.0), true);
+        assert!(row.iter().all(|r| r.min.y == 0.0));
+        assert!(whole.x > 700.0);
     }
 
     #[test]
