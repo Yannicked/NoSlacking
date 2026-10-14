@@ -184,8 +184,10 @@ impl People {
                 continue;
             }
             // Someone the roster does not name shows as their id; what
-            // else it says of them may tell where the name is.
-            if them.name().is_none()
+            // else it says of them may tell where the name is (with
+            // `--verbose`: it may name them).
+            if log::log_enabled!(log::Level::Debug)
+                && them.name().is_none()
                 && !self.by_mri.contains_key(mri)
                 && let Some(details) = &them.details
             {
@@ -194,7 +196,7 @@ impl People {
                     .values()
                     .map(|e| serde_json::Value::Object(e.rest.clone().into_iter().collect()))
                     .collect();
-                log::info!(
+                log::debug!(
                     "Teams meeting: no name for {mri} ({} participant; role {:?}; details also say {}; its devices {})",
                     details.participant_type.as_deref().unwrap_or("untyped"),
                     them.role,
@@ -1370,9 +1372,11 @@ impl Call {
                 }
             }
             Push::CsrcInfo(body) => {
-                let text = body.to_string();
-                let cut = text.char_indices().nth(2000).map_or(text.len(), |(i, _)| i);
-                log::info!("Teams meeting: csrcInfo: {}", &text[..cut]);
+                if log::log_enabled!(log::Level::Debug) {
+                    let text = body.to_string();
+                    let cut = text.char_indices().nth(2000).map_or(text.len(), |(i, _)| i);
+                    log::debug!("Teams meeting: csrcInfo: {}", &text[..cut]);
+                }
             }
             Push::Other(name) => log::debug!("Teams call: push {name} not acted on"),
         }
@@ -1614,7 +1618,7 @@ impl Call {
                 .find(|a| a.audio == Some(source))
                 .map(|a| a.mri)
         });
-        log::info!(
+        log::debug!(
             "Teams meeting: spoke, by audio source ({way}): {history:?}; marking {}",
             speaker.as_deref().unwrap_or("no one")
         );
@@ -1642,13 +1646,15 @@ impl Call {
             return;
         };
         meeting.feedback += 1;
-        if meeting.feedback <= 5 || meeting.feedback % 100 == 0 {
+        if log::log_enabled!(log::Level::Debug)
+            && (meeting.feedback <= 5 || meeting.feedback % 100 == 0)
+        {
             let head: Vec<String> = payload
                 .iter()
                 .take(32)
                 .map(|b| format!("{b:02x}"))
                 .collect();
-            log::info!(
+            log::debug!(
                 "Teams meeting: RTCP application message {} from {sender} about {media}, {} bytes: {} / {:?}",
                 meeting.feedback,
                 payload.len(),
@@ -1719,7 +1725,7 @@ impl Call {
                 return;
             };
             session.send_data(request);
-            log::info!(
+            log::debug!(
                 "Teams meeting: asked for {} on camera line {line}",
                 if want.is_some() {
                     "a camera"
@@ -1752,7 +1758,7 @@ impl Call {
         {
             meeting.share_size = share_format.max_fs;
             session.send_data(request);
-            log::info!(
+            log::debug!(
                 "Teams meeting: asked for {}",
                 if sharing.is_some() {
                     "a screen share"
