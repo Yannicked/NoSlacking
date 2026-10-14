@@ -617,8 +617,7 @@ errors, demo screenshots in CI) is being done first, so it is not listed.
       date, the text goes alone, and if Slack refuses the blocks the call
       is made again without them. The sending copy and an edit show the
       same rich text, and editing starts from a message's rich text.
-      `SEND_RICH_TEXT` switches it all off. Not yet tried against a real
-      workspace.*
+      Not yet tried against a real workspace.*
 - [x] **Remind me about a message.** *The message menu's "Remind me":
       in 20 minutes, 1 or 3 hours, tomorrow at 9:00, next Monday at 9:00,
       or a time of your own. `reminders.add` has no message parameter, so

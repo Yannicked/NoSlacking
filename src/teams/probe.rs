@@ -1,8 +1,8 @@
 //! `noslacking --teams-probe`: tries signing in to a personal Microsoft
 //! account (Teams free) step by step, for a spike against a real account.
 //!
-//! Nothing here is used by the app yet. Microsoft documents none of this,
-//! and the clients that do it disagree (see
+//! The app's own sign-in settled on what this found. Microsoft documents
+//! none of this, and the clients that do it disagree (see
 //! `docs/research/microsoft-teams.md` §6.1), so the probe tries each
 //! variant in turn and logs which worked:
 //!

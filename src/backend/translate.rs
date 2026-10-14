@@ -7,10 +7,12 @@ use super::Event;
 use crate::model::{Message, Ts};
 use crate::slack::types;
 
-/// What one Socket Mode event means here. Short-lived, so its size does
-/// not matter.
+/// What one Socket Mode event means here.
 #[derive(Debug)]
-#[allow(clippy::large_enum_variant)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "short-lived, so its size does not matter"
+)]
 pub(super) enum Translated {
     Event(Event),
     /// Fetch this conversation's details again.

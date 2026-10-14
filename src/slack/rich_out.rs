@@ -17,20 +17,12 @@ use serde_json::{Map, Value, json};
 use super::rich;
 use crate::mrkdwn::{self, Block, Inline, Style};
 
-/// Whether messages go out with a `rich_text` block beside their text.
-/// The one switch: should Slack refuse the blocks, make this `false` and
-/// every message goes as mrkdwn `text` alone again, sent, edited and
-/// scheduled.
-const SEND_RICH_TEXT: bool = true;
-
 /// The deepest list Slack's apps indent, and the reader shows.
 const MAX_INDENT: usize = 8;
 
 /// Why a message goes without a `rich_text` block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Skip {
-    /// Sending rich text is switched off (`SEND_RICH_TEXT`).
-    Off,
     /// Nothing but white space: there is nothing to lay out.
     Empty,
     /// The text holds markup the blocks have no element for, such as a
@@ -42,11 +34,11 @@ pub enum Skip {
 
 /// The `blocks` parameter for a message whose mrkdwn is `wire`: a JSON
 /// array holding its `rich_text` block. `None` sends `text` alone; why is
-/// logged when it is not simply an empty or switched-off case.
+/// logged when it is not simply an empty one.
 pub fn blocks_param(wire: &str) -> Option<String> {
     let block = match rich_text(wire) {
         Ok(block) => block,
-        Err(Skip::Off | Skip::Empty) => return None,
+        Err(Skip::Empty) => return None,
         Err(reason) => {
             // The reason only: the text is the person's message.
             log::warn!("Sending a message as text alone: {reason:?}");
@@ -73,9 +65,6 @@ pub fn layout(wire: &str) -> Option<Vec<Block>> {
 
 /// The `rich_text` block for a message whose mrkdwn is `wire`.
 pub fn rich_text(wire: &str) -> Result<Value, Skip> {
-    if !SEND_RICH_TEXT {
-        return Err(Skip::Off);
-    }
     if mrkdwn::has_commands(wire) {
         return Err(Skip::Commands);
     }
