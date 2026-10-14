@@ -525,9 +525,12 @@ impl RosterParticipant {
 
     /// Whether the client would not show them: a hidden participant (a
     /// recording or transcription bot, say) is in the roster but not in
-    /// the room.
+    /// the room. The details may say so; a bot's device says so in its
+    /// metadata (recorded: `endpointMetadata.__platform.ui.hidden` on the
+    /// call recorder and on the transcription bot).
     pub fn is_hidden(&self) -> bool {
         self.details.as_ref().is_some_and(|d| d.hidden)
+            || self.endpoints.values().any(RosterEndpoint::is_hidden)
     }
 
     /// Whether the participant is muted: an endpoint of theirs says so.
@@ -632,6 +635,15 @@ pub struct RosterEndpoint {
 }
 
 impl RosterEndpoint {
+    /// Whether the client hides this device (a bot's, recorded).
+    pub fn is_hidden(&self) -> bool {
+        self.rest
+            .get("endpointMetadata")
+            .and_then(|m| m.pointer("/__platform/ui/hidden"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+
     /// Whether this device waits in the lobby: it is there, it has never
     /// been in the call, and it is not in it now. One let in and gone
     /// again can still show its lobby media.

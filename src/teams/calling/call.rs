@@ -2124,7 +2124,21 @@ mod tests {
         let details = bot.details.as_mut().expect("details");
         details.hidden = true;
         details.display_name = None;
-        update.participants.insert("28:recorder".into(), bot);
+        update
+            .participants
+            .insert("28:recorder".into(), bot.clone());
+        // The recorder says so on its device instead (recorded).
+        let mut transcriber = bot;
+        transcriber.details.as_mut().expect("details").hidden = false;
+        for endpoint in transcriber.endpoints.values_mut() {
+            endpoint.rest.insert(
+                "endpointMetadata".into(),
+                serde_json::json!({"__platform": {"ui": {"hidden": true}}}),
+            );
+        }
+        update
+            .participants
+            .insert("28:transcriber".into(), transcriber);
         let mut people = People::default();
         assert!(!people.take(&update, "8:live:organizer"));
         assert!(people.list().is_empty());
