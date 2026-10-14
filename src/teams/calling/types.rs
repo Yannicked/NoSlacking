@@ -625,6 +625,10 @@ pub struct RosterEndpoint {
     /// in, `Call` for one never kept waiting (recorded).
     #[serde(deserialize_with = "nullable")]
     pub modality_joined: String,
+    /// Whatever else the roster says of the device, kept so a participant
+    /// without a name can be logged in full and the name found.
+    #[serde(flatten)]
+    pub rest: BTreeMap<String, serde_json::Value>,
 }
 
 impl RosterEndpoint {

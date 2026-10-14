@@ -189,11 +189,17 @@ impl People {
                 && !self.by_mri.contains_key(mri)
                 && let Some(details) = &them.details
             {
+                let devices: Vec<serde_json::Value> = them
+                    .endpoints
+                    .values()
+                    .map(|e| serde_json::Value::Object(e.rest.clone().into_iter().collect()))
+                    .collect();
                 log::info!(
-                    "Teams meeting: no name for {mri} ({} participant; role {:?}; details also say {})",
+                    "Teams meeting: no name for {mri} ({} participant; role {:?}; details also say {}; its devices {})",
                     details.participant_type.as_deref().unwrap_or("untyped"),
                     them.role,
                     serde_json::Value::Object(details.rest.clone().into_iter().collect()),
+                    serde_json::Value::Array(devices),
                 );
             }
             let attendee = Attendee {
@@ -1576,8 +1582,9 @@ impl Call {
                     let Some(meeting) = &mut self.meeting else {
                         return;
                     };
-                    // The newest first; ourselves (not in the list) aside.
-                    let speaker = history.iter().find_map(|&source| {
+                    // The newest last (seen: the first marked whoever spoke
+                    // long ago); ourselves (not in the list) aside.
+                    let speaker = history.iter().rev().find_map(|&source| {
                         meeting
                             .people
                             .list()
@@ -1585,6 +1592,10 @@ impl Call {
                             .find(|a| a.audio == Some(source))
                             .map(|a| a.mri)
                     });
+                    log::info!(
+                        "Teams meeting: spoke, by audio source: {history:?}; marking {}",
+                        speaker.as_deref().unwrap_or("no one")
+                    );
                     if speaker.is_some() && speaker != meeting.speaker {
                         meeting.speaker = speaker.clone();
                         if let Some(mri) = speaker {
