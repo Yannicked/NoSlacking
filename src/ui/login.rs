@@ -450,8 +450,8 @@ fn app_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             field(ui, palette, &t("App-level token"), &mut app.setup.app_token, "xapp-1-…", true);
             let form = AppCredentials {
                 client_id: app.setup.client_id.trim().to_owned(),
-                client_secret: app.setup.client_secret.trim().to_owned(),
-                app_token: app.setup.app_token.trim().to_owned(),
+                client_secret: app.setup.client_secret.trim().into(),
+                app_token: app.setup.app_token.trim().into(),
             };
             let changed = app.app_credentials.as_ref() != Some(&form);
             ui.add_enabled_ui(changed && form.can_sign_in(), |ui| {

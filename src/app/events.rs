@@ -425,8 +425,8 @@ impl App {
     fn app_loaded(&mut self, app: Option<AppCredentials>) {
         if let Some(app) = &app {
             self.setup.client_id = app.client_id.clone();
-            self.setup.client_secret = app.client_secret.clone();
-            self.setup.app_token = app.app_token.clone();
+            self.setup.client_secret = app.client_secret.0.clone();
+            self.setup.app_token = app.app_token.0.clone();
         }
         self.app_credentials = app;
         self.app_loaded = true;

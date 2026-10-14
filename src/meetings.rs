@@ -15,7 +15,7 @@
 //! path the page was given (recorded: `/_#/meet/{code}?p={token}&anon=true`).
 //! [`web_form`] reads that back into the link it came from.
 
-use crate::redact::REDACTED;
+use crate::redact::{REDACTED, Secret};
 
 /// Where a meeting typed by ID is, for a personal (Teams free) account:
 /// the only kind recorded.
@@ -23,24 +23,14 @@ const PERSONAL_HOST: &str = "teams.live.com";
 
 /// A meeting to join. Its code and passcode let anyone in, so `Debug`
 /// shows neither.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Meeting {
     /// The link's host: `teams.live.com`, or a work account's.
     host: String,
     /// The meeting ID, digits only.
-    code: String,
+    code: Secret,
     /// The link's token or the typed passcode.
-    passcode: String,
-}
-
-impl std::fmt::Debug for Meeting {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Meeting")
-            .field("host", &self.host)
-            .field("code", &REDACTED)
-            .field("passcode", &REDACTED)
-            .finish()
-    }
+    passcode: Secret,
 }
 
 /// Why what was typed is not a meeting to join.
@@ -79,8 +69,8 @@ impl Meeting {
         }
         Ok(Self {
             host: PERSONAL_HOST.to_owned(),
-            code,
-            passcode: passcode.to_owned(),
+            code: code.into(),
+            passcode: passcode.into(),
         })
     }
 
@@ -106,8 +96,8 @@ impl Meeting {
             .filter(|p| !p.is_empty())?;
         Some(Self {
             host,
-            code,
-            passcode,
+            code: code.into(),
+            passcode: passcode.into(),
         })
     }
 
@@ -124,7 +114,7 @@ impl Meeting {
     /// The link the meeting service is given, as the web client builds
     /// it for an ID too.
     pub fn url(&self) -> String {
-        let base = format!("https://{}/meet/{}", self.host, self.code);
+        let base = format!("https://{}/meet/{}", self.host, &*self.code);
         match reqwest::Url::parse(&base) {
             Ok(mut url) => {
                 url.query_pairs_mut().append_pair("p", &self.passcode);
@@ -240,8 +230,8 @@ mod tests {
             "",
         )
         .expect("a link");
-        assert_eq!(meeting.code, "9312345678901");
-        assert_eq!(meeting.passcode, "AbCdEf123");
+        assert_eq!(&*meeting.code, "9312345678901");
+        assert_eq!(&*meeting.passcode, "AbCdEf123");
         assert_eq!(
             meeting.url(),
             "https://teams.live.com/meet/9312345678901?p=AbCdEf123"
@@ -255,7 +245,7 @@ mod tests {
     #[test]
     fn an_id_is_joined_with_the_link_it_would_have_had() {
         let meeting = Meeting::parse("931 234 567 890 1", "a1B2c3").expect("an id");
-        assert_eq!(meeting.code, "9312345678901");
+        assert_eq!(&*meeting.code, "9312345678901");
         assert_eq!(
             meeting.url(),
             "https://teams.live.com/meet/9312345678901?p=a1B2c3"
@@ -303,8 +293,8 @@ mod tests {
             Some("https://teams.microsoft.com/meet/9312345678901?p=AbCdEf123&anon=true")
         );
         let meeting = Meeting::parse(launched, "").expect("a meeting");
-        assert_eq!(meeting.code, "9312345678901");
-        assert_eq!(meeting.passcode, "AbCdEf123");
+        assert_eq!(&*meeting.code, "9312345678901");
+        assert_eq!(&*meeting.passcode, "AbCdEf123");
         assert_eq!(
             meeting.url(),
             "https://teams.microsoft.com/meet/9312345678901?p=AbCdEf123"

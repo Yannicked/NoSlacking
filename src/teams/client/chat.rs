@@ -4,6 +4,7 @@
 
 use super::{PERSONAL_ORIGIN, TeamsClient, now_millis, refused, user_mri, why_unauthorized};
 use crate::failure::Failure;
+use crate::redact::Secret;
 use crate::teams::auth::{Account, RESOURCE_GROUPS_PERSONAL, RESOURCE_MT_PERSONAL};
 use crate::teams::types::{
     Conversation, ConversationsResponse, Message, MessagesResponse, PostedMessage,
@@ -70,22 +71,13 @@ const PERSONAL_MEET_NOW_URL: &str =
 
 /// A meeting just made: where it is joined (and others invited), and its
 /// chat.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MadeMeeting {
     /// `https://teams.live.com/meet/{code}?p={token}`: lets anyone ask
     /// to join, so `Debug` does not show it.
-    pub join: String,
+    pub join: Secret,
     /// `19:meeting_…@thread.v2`.
     pub thread_id: String,
-}
-
-impl std::fmt::Debug for MadeMeeting {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MadeMeeting")
-            .field("join", &crate::redact::REDACTED)
-            .field("thread_id", &self.thread_id)
-            .finish()
-    }
 }
 
 /// Reads what making a meeting answered: `{value: {links: {join},
@@ -98,7 +90,10 @@ fn made_meeting(answer: &serde_json::Value) -> Option<MadeMeeting> {
         .and_then(|t| t.as_str())
         .unwrap_or_default()
         .to_owned();
-    Some(MadeMeeting { join, thread_id })
+    Some(MadeMeeting {
+        join: join.into(),
+        thread_id,
+    })
 }
 
 /// Where a personal account's chats are started.
@@ -712,7 +707,7 @@ mod tests {
         });
         let made = made_meeting(&answer).expect("a meeting");
         assert_eq!(
-            made.join,
+            &*made.join,
             "https://teams.live.com/meet/9312345678901?p=Fake"
         );
         assert_eq!(made.thread_id, "19:meeting_ZmFrZQ@thread.v2");

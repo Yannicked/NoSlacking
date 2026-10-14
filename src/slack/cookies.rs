@@ -12,35 +12,23 @@ use reqwest::Url;
 use reqwest::header::{COOKIE, HeaderValue, LOCATION, SET_COOKIE};
 
 use super::client::SlackError;
+use crate::redact::Secret;
 
 /// How many redirects one fetch follows, as many as reqwest's own default.
 pub const MAX_HOPS: usize = 10;
 
 /// One cookie as a `Set-Cookie` header sets it.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SetCookie {
     /// The cookie's name (`d`).
     pub name: String,
     /// Its value, without surrounding quotes.
-    pub value: String,
+    pub value: Secret,
     /// The `Domain` attribute, lowercased and without a leading dot.
     pub domain: Option<String>,
     /// The header removes the cookie rather than sets it: an empty value, a
     /// `Max-Age` of zero or less, or an `Expires` long in the past.
     pub expired: bool,
-}
-
-/// The value is a secret (the `d` cookie is the whole account); only the
-/// name prints.
-impl std::fmt::Debug for SetCookie {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SetCookie")
-            .field("name", &self.name)
-            .field("value", &crate::redact::REDACTED)
-            .field("domain", &self.domain)
-            .field("expired", &self.expired)
-            .finish()
-    }
 }
 
 /// Reads one `Set-Cookie` header. Attributes other than `Domain`,
@@ -60,7 +48,7 @@ pub fn parse_set_cookie(header: &str) -> Option<SetCookie> {
         .unwrap_or(value);
     let mut cookie = SetCookie {
         name: name.to_owned(),
-        value: value.to_owned(),
+        value: value.into(),
         domain: None,
         expired: value.is_empty(),
     };
@@ -190,7 +178,7 @@ impl Cookies {
             };
             let entry = Entry {
                 name: cookie.name,
-                value: cookie.value,
+                value: cookie.value.0,
                 domain,
                 host_only,
             };
@@ -333,12 +321,12 @@ mod tests {
         )
         .expect("a cookie");
         assert_eq!(d.name, "d");
-        assert_eq!(d.value, "xoxd-abc%2F");
+        assert_eq!(&*d.value, "xoxd-abc%2F");
         assert_eq!(d.domain.as_deref(), Some("slack.com"));
         assert!(!d.expired);
 
         let quoted = parse_set_cookie("lc=\"1700000000\"; Path=/").expect("a cookie");
-        assert_eq!(quoted.value, "1700000000");
+        assert_eq!(&*quoted.value, "1700000000");
         assert_eq!(quoted.domain, None);
 
         assert!(

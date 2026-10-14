@@ -297,7 +297,7 @@ impl TeamsClient {
                 |http, mut creds| async move {
                     let minted = crate::teams::auth::redeem(&http, &creds, &audience).await?;
                     if let Some(rotated) = minted.refresh_token {
-                        creds.refresh_token = Some(rotated);
+                        creds.refresh_token = Some(rotated.0);
                     }
                     creds.audiences.insert(
                         audience,

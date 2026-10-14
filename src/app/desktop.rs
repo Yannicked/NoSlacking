@@ -444,7 +444,8 @@ impl App {
                 if crate::meetings::is_meeting_link(&link) {
                     self.open_meeting_link(&link);
                 } else {
-                    self.backend.send(crate::backend::Command::Callback(link));
+                    self.backend
+                        .send(crate::backend::Command::Callback(link.into()));
                 }
             }
             self.desktop.raise = true;

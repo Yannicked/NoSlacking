@@ -67,6 +67,7 @@ use crate::huddle_audio::relay::{RelayEvent, RelayPool, Udp};
 use crate::huddle_audio::speaker::Feed;
 use crate::huddle_audio::turn::{Server, Transport};
 use crate::huddle_audio::uplink::{Outbound, Outgoing, Stamp};
+use crate::redact::Secret;
 
 /// How long one TURN server, over one transport, may take to give a
 /// relay before the next is tried.
@@ -114,7 +115,7 @@ pub struct RelayServer {
 
 /// Microsoft's TURN relay for a call: its servers and the credentials
 /// from `trap/tokens`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Relay {
     /// The servers, in the order to try them.
     pub servers: Vec<RelayServer>,
@@ -122,10 +123,10 @@ pub struct Relay {
     /// the realm the server's 401 names, which should be this one; it is
     /// kept for the log.
     pub realm: String,
-    /// The TURN username. Secret.
-    pub username: String,
-    /// The TURN password. Secret.
-    pub password: String,
+    /// The TURN username.
+    pub username: Secret,
+    /// The TURN password.
+    pub password: Secret,
 }
 
 impl Relay {
@@ -154,20 +155,9 @@ impl Relay {
             } else {
                 credentials.realm
             },
-            username: credentials.username,
-            password: credentials.password,
+            username: credentials.username.into(),
+            password: credentials.password.into(),
         }
-    }
-}
-
-impl std::fmt::Debug for Relay {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Relay")
-            .field("servers", &self.servers)
-            .field("realm", &self.realm)
-            .field("username", &crate::redact::REDACTED)
-            .field("password", &crate::redact::REDACTED)
-            .finish()
     }
 }
 
@@ -2441,7 +2431,7 @@ mod tests {
             relay.realm, servers.realm,
             "the configuration's, when unsaid"
         );
-        assert_eq!(relay.username, "u");
+        assert_eq!(&*relay.username, "u");
     }
 
     #[test]

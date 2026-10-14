@@ -20,30 +20,20 @@ use std::sync::mpsc;
 use tokio::sync::oneshot;
 
 use crate::paths::APP_ID;
+use crate::redact::Secret;
 use crate::slack::Token;
 
 /// The Slack app the user registered (see `slack-app-manifest.json`).
-#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AppCredentials {
     pub client_id: String,
     /// Optional and never sent: the manifest turns PKCE on, and Slack wants
     /// no secret from a PKCE app. Kept so a secret saved by an older build,
     /// or typed in by habit, still round-trips through the keyring.
     #[serde(default)]
-    pub client_secret: String,
+    pub client_secret: Secret,
     /// The app-level token (`xapp-`) with `connections:write`, for Socket Mode.
-    pub app_token: String,
-}
-
-/// Shows only the client id; the secret and app token never print.
-impl std::fmt::Debug for AppCredentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AppCredentials")
-            .field("client_id", &self.client_id)
-            .field("client_secret", &crate::redact::REDACTED)
-            .field("app_token", &crate::redact::REDACTED)
-            .finish()
-    }
+    pub app_token: Secret,
 }
 
 impl AppCredentials {

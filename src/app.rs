@@ -1473,12 +1473,11 @@ impl App {
                 self.sign_in = None;
                 // The link is a one-time secret: read it once, then forget it.
                 let link = std::mem::take(&mut self.setup.session_link);
-                self.backend
-                    .send(Command::SignInLink(link.trim().to_owned()));
+                self.backend.send(Command::SignInLink(link.trim().into()));
             }
             Action::PasteToken => {
                 let token = self.setup.user_token.trim().to_owned();
-                self.backend.send(Command::PasteToken(token));
+                self.backend.send(Command::PasteToken(token.into()));
             }
             Action::SaveApp => self.save_app(),
             Action::StartSignIn => self.start_sign_in(),
@@ -1498,8 +1497,10 @@ impl App {
             }
             Action::StartTeamsSignIn { tenant, personal } => {
                 self.sign_in = None;
-                self.backend
-                    .send(Command::StartTeamsSignIn { tenant, personal });
+                self.backend.send(Command::StartTeamsSignIn {
+                    tenant: tenant.map(Into::into),
+                    personal,
+                });
             }
             Action::CancelSignIn => {
                 self.backend.send(Command::CancelSignIn);
@@ -1980,8 +1981,8 @@ impl App {
     fn save_app(&mut self) {
         let form = AppCredentials {
             client_id: self.setup.client_id.trim().to_owned(),
-            client_secret: self.setup.client_secret.trim().to_owned(),
-            app_token: self.setup.app_token.trim().to_owned(),
+            client_secret: self.setup.client_secret.trim().into(),
+            app_token: self.setup.app_token.trim().into(),
         };
         if form.can_sign_in() {
             // Another app may well be made from the current manifest.

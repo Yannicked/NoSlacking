@@ -118,7 +118,7 @@ async fn open_url(http: &reqwest::Client, app_token: &str) -> Result<String, End
     }
     let bytes = response.bytes().await.map_err(network)?;
     let open: types::ConnectionsOpen = client::decode(&bytes).map_err(Ended::Failed)?;
-    Ok(open.url)
+    Ok(open.url.0)
 }
 
 /// How long to wait before the next connection, after one that ended as

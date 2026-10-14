@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::failure::Failure;
+use crate::redact::Secret;
 
 /// The first-party Microsoft Teams desktop/mobile application ID for work and school accounts.
 pub const TEAMS_CLIENT_ID: &str = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
@@ -46,21 +47,12 @@ pub const RESOURCE_PRESENCE: &str = "https://presence.teams.microsoft.com";
 pub const RESOURCE_GRAPH: &str = "https://graph.microsoft.com";
 
 /// An access token for one audience other than the chat service's.
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudienceToken {
-    pub token: String,
+    pub token: Secret,
     /// Unix timestamp (seconds) when it expires.
     #[serde(default)]
     pub expires_at: Option<u64>,
-}
-
-impl std::fmt::Debug for AudienceToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AudienceToken")
-            .field("token", &crate::redact::REDACTED)
-            .field("expires_at", &self.expires_at)
-            .finish()
-    }
 }
 
 /// Teams token authorization service for work accounts.
@@ -193,7 +185,7 @@ impl TeamsCredentials {
     pub fn fresh_token_for(&self, audience: &str, now_secs: u64) -> Option<&str> {
         let held = self.audiences.get(audience)?;
         let fresh = held.expires_at.is_some_and(|exp| now_secs + 300 < exp);
-        Some(held.token.as_str()).filter(|token| fresh && !token.is_empty())
+        Some(&*held.token).filter(|token| fresh && !token.is_empty())
     }
 
     /// The base chat service URL from `region_gtms`, falling back to default.
@@ -221,7 +213,7 @@ pub struct DeviceCodeResponse {
     #[serde(rename = "user_code")]
     pub user_code: String,
     #[serde(rename = "device_code")]
-    pub device_code: String,
+    pub device_code: Secret,
     #[serde(rename = "verification_uri")]
     pub verification_uri: String,
     #[serde(default)]
@@ -239,15 +231,15 @@ fn default_interval() -> u64 {
 /// Response from Azure AD token endpoint.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenResponse {
-    pub access_token: String,
+    pub access_token: Secret,
     #[serde(default)]
-    pub refresh_token: Option<String>,
+    pub refresh_token: Option<Secret>,
     #[serde(default)]
     pub token_type: Option<String>,
     #[serde(default)]
     pub expires_in: Option<u64>,
     #[serde(default)]
-    pub id_token: Option<String>,
+    pub id_token: Option<Secret>,
 }
 
 /// Response from Teams `authsvc` token exchange.
@@ -269,36 +261,25 @@ impl AuthzResponse {
             .as_ref()
             .and_then(|t| t.skype_token.clone())
             .or_else(|| self.consumer.as_ref().and_then(|t| t.skype_token.clone()))
+            .map(|t| t.0)
             .filter(|t| !t.is_empty())
     }
 }
 
 /// The skype token as the personal service nests it.
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsumerToken {
     #[serde(default, rename = "skypetoken")]
-    pub skype_token: Option<String>,
+    pub skype_token: Option<Secret>,
     #[serde(default, rename = "expiresIn")]
     pub expires_in: Option<u64>,
-}
-
-impl std::fmt::Debug for ConsumerToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ConsumerToken")
-            .field(
-                "skype_token",
-                &self.skype_token.as_ref().map(|_| crate::redact::REDACTED),
-            )
-            .field("expires_in", &self.expires_in)
-            .finish()
-    }
 }
 
 /// Tokens nested in `authsvc` response.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthzTokens {
     #[serde(rename = "skypeToken")]
-    pub skype_token: Option<String>,
+    pub skype_token: Option<Secret>,
     #[serde(rename = "expiresIn")]
     pub expires_in: Option<u64>,
 }
@@ -603,9 +584,10 @@ pub async fn refresh_credentials(
     log::info!("Teams credentials successfully refreshed");
 
     Ok(TeamsCredentials {
-        access_token: token_resp.access_token,
+        access_token: token_resp.access_token.0,
         refresh_token: token_resp
             .refresh_token
+            .map(|t| t.0)
             .or_else(|| creds.refresh_token.clone()),
         skype_token: authz.skype_token(),
         expires_at: token_resp.expires_in.map(|s| now + s),
@@ -631,7 +613,7 @@ mod tests {
 
         let resp: DeviceCodeResponse = serde_json::from_str(json).expect("valid response");
         assert_eq!(resp.user_code, "ABCD-EFGH");
-        assert_eq!(resp.device_code, "dev-code-12345");
+        assert_eq!(&*resp.device_code, "dev-code-12345");
         assert_eq!(resp.verification_uri, "https://microsoft.com/devicelogin");
         assert_eq!(resp.expires_in, 900);
         assert_eq!(resp.interval, 5);
@@ -648,9 +630,10 @@ mod tests {
         }"#;
 
         let resp: TokenResponse = serde_json::from_str(json).expect("valid response");
-        assert_eq!(resp.access_token, "secret-access-token");
+        assert_eq!(&*resp.access_token, "secret-access-token");
         assert_eq!(resp.refresh_token.as_deref(), Some("secret-refresh-token"));
         assert_eq!(resp.expires_in, Some(3600));
+        assert!(!format!("{resp:?}").contains("secret"), "{resp:?}");
     }
 
     #[test]
@@ -668,6 +651,7 @@ mod tests {
 
         let resp: AuthzResponse = serde_json::from_str(json).expect("valid authz");
         let tokens = resp.tokens.expect("tokens");
+        assert!(!format!("{tokens:?}").contains("secret"), "{tokens:?}");
         assert_eq!(tokens.skype_token.as_deref(), Some("secret-skype-token"));
         assert_eq!(tokens.expires_in, Some(86400));
         let gtms = resp.region_gtms.expect("regionGtms");

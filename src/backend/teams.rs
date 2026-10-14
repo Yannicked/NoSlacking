@@ -1078,8 +1078,8 @@ pub async fn sign_in(
             .or_else(|| claim("tid"))
             .or_else(|| Some(account.default_tenant().to_owned())),
         region_gtms: authz.region_gtms,
-        access_token: token.access_token,
-        refresh_token: token.refresh_token,
+        access_token: token.access_token.0,
+        refresh_token: token.refresh_token.map(|t| t.0),
         account,
         ..TeamsCredentials::default()
     };
