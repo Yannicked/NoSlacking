@@ -233,6 +233,52 @@ impl People {
     }
 }
 
+/// What every call starts from.
+struct Begun {
+    /// The live connection's address, which the call's callbacks name.
+    surl: String,
+    /// Our endpoint id.
+    endpoint: String,
+    /// The call's ids, made from the endpoint id.
+    ids: CallIds,
+    /// Us, as the call names us.
+    me: Participant,
+}
+
+/// Starts a call with the ids `ids` makes of our endpoint id; fails
+/// while the live connection is down or who you are is not known.
+fn begin(client: &TeamsClient, ids: impl FnOnce(&str) -> CallIds) -> Result<Begun, Failure> {
+    let surl = client
+        .calls()
+        .surl()
+        .ok_or_else(|| Failure::CallFailed("the live connection is not up".into()))?;
+    let endpoint = client
+        .endpoint_id()
+        .unwrap_or_else(crate::model::new_client_msg_id);
+    let ids = ids(&endpoint);
+    let me = own_participant(client, &ids)
+        .ok_or_else(|| Failure::CallFailed("who you are is not known".into()))?;
+    Ok(Begun {
+        surl,
+        endpoint,
+        ids,
+        me,
+    })
+}
+
+/// Tells how a call ended, with what its media counted.
+fn finish(
+    what: &str,
+    result: Result<(), Failure>,
+    counts: media::Counts,
+    tell: &impl Fn(CallEvent),
+) {
+    if let Err(error) = &result {
+        log::warn!("{what} ended with a failure: {error:?}");
+    }
+    tell(CallEvent::Ended { result, counts });
+}
+
 /// The relay for a call, if Teams hands out credentials for it.
 async fn relay_for(client: &TeamsClient) -> Option<Relay> {
     // The relay is how a far end behind another network reaches us; a
@@ -259,10 +305,7 @@ pub async fn meeting(
 ) {
     let mut counts = media::Counts::default();
     let result = run_meeting(&client, &meeting, audio, control, &tell, &mut counts).await;
-    if let Err(error) = &result {
-        log::warn!("Teams meeting ended with a failure: {error:?}");
-    }
-    tell(CallEvent::Ended { result, counts });
+    finish("Teams meeting", result, counts, &tell);
 }
 
 async fn run_meeting(
@@ -273,46 +316,21 @@ async fn run_meeting(
     tell: &(impl Fn(CallEvent) + Send),
     counts: &mut media::Counts,
 ) -> Result<(), Failure> {
-    let surl = client
-        .calls()
-        .surl()
-        .ok_or_else(|| Failure::CallFailed("the live connection is not up".into()))?;
-    let endpoint = client
-        .endpoint_id()
-        .unwrap_or_else(crate::model::new_client_msg_id);
-    let ids = CallIds::new(&endpoint);
-    let me = own_participant(client, &ids)
-        .ok_or_else(|| Failure::CallFailed("who you are is not known".into()))?;
+    let Begun {
+        surl,
+        endpoint,
+        ids,
+        me,
+    } = begin(client, CallIds::new)?;
     let mut inbox = client.calls().register(&ids.call_agent_id);
     let agent = ids.call_agent_id.clone();
     let mut call = Call::with(CallApi::new(client.clone(), ids, me.clone(), &surl).meeting());
     call.meeting = Some(InMeeting {
         me: me.id,
-        lobby: false,
-        people: People::default(),
-        camera_on: false,
         // The join's descriptions are the first.
         request: 1,
-        changes: 0,
-        update_descriptions: None,
-        camera_capabilities: None,
-        channel: super::channel::Channel::default(),
-        camera_lines: Vec::new(),
-        view: View::default(),
-        sizes: Vec::new(),
-        share_size: 0,
-        watching: Vec::new(),
-        speaker: None,
-        watching_share: None,
-        syns: 0,
-        heard: 0,
-        feedback: 0,
-        sharing: false,
-        endpoint: endpoint.clone(),
-        own_camera: None,
-        own_share: None,
-        limits: (None, None),
-        chat: None,
+        endpoint,
+        ..InMeeting::default()
     });
     call.relay = relay_for(client).await;
     let ended = call
@@ -338,10 +356,7 @@ pub async fn outgoing(
     let callee = crate::teams::client::user_mri(&callee);
     let mut counts = media::Counts::default();
     let result = run(&client, &callee, audio, control, &tell, &mut counts).await;
-    if let Err(error) = &result {
-        log::warn!("Teams call ended with a failure: {error:?}");
-    }
-    tell(CallEvent::Ended { result, counts });
+    finish("Teams call", result, counts, &tell);
 }
 
 async fn run(
@@ -352,17 +367,7 @@ async fn run(
     tell: &(impl Fn(CallEvent) + Send),
     counts: &mut media::Counts,
 ) -> Result<(), Failure> {
-    let surl = client
-        .calls()
-        .surl()
-        .ok_or_else(|| Failure::CallFailed("the live connection is not up".into()))?;
-    let endpoint = client
-        .endpoint_id()
-        .unwrap_or_else(crate::model::new_client_msg_id);
-    let ids = CallIds::new(&endpoint);
-    let me = own_participant(client, &ids)
-        .ok_or_else(|| Failure::CallFailed("who you are is not known".into()))?;
-
+    let Begun { surl, ids, me, .. } = begin(client, CallIds::new)?;
     let relay = relay_for(client).await;
     let (mut session, mut local) = MediaSession::start(MediaConfig::offer(relay.clone()), audio)
         .await
@@ -468,10 +473,7 @@ pub async fn incoming(
 ) {
     let mut counts = media::Counts::default();
     let result = run_incoming(&client, call, answer, control, &tell, &mut counts).await;
-    if let Err(error) = &result {
-        log::warn!("Teams call ended with a failure: {error:?}");
-    }
-    tell(CallEvent::Ended { result, counts });
+    finish("Teams call", result, counts, &tell);
 }
 
 async fn run_incoming(
@@ -482,16 +484,9 @@ async fn run_incoming(
     tell: &(impl Fn(CallEvent) + Send),
     counts: &mut media::Counts,
 ) -> Result<(), Failure> {
-    let surl = client
-        .calls()
-        .surl()
-        .ok_or_else(|| Failure::CallFailed("the live connection is not up".into()))?;
-    let endpoint = client
-        .endpoint_id()
-        .unwrap_or_else(crate::model::new_client_msg_id);
-    let ids = CallIds::incoming(&endpoint, &call.call_id, &call.participant_id);
-    let me = own_participant(client, &ids)
-        .ok_or_else(|| Failure::CallFailed("who you are is not known".into()))?;
+    let Begun { surl, ids, me, .. } = begin(client, |endpoint| {
+        CallIds::incoming(endpoint, &call.call_id, &call.participant_id)
+    })?;
     let mut inbox = client.calls().register(&ids.call_agent_id);
     let agent = ids.call_agent_id.clone();
     let mut this = Call::with(CallApi::new(client.clone(), ids, me, &surl).incoming());
@@ -539,7 +534,7 @@ struct Call {
 }
 
 /// What a call that is a meeting keeps.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct InMeeting {
     /// Our MRI, which the roster lists too.
     me: String,
