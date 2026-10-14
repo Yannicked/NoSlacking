@@ -1637,6 +1637,17 @@ We now write our extra camera lines as its lines 5–9 are (we send
 nothing on them), list them as receiving in `mediaDescriptions`, and ask
 for one camera on each.
 
+**Bots, and recording.** A meeting's recorder and transcriber are in the
+roster as participants under `28:` (an application's id), with no name
+(`displayNameSource: "unknown"`) and `endpointMetadata.__platform.ui.hidden`
+on their device, which is how the client keeps them out of the room
+(recorded: `GraphCommunicationsClient-CallRecorderBot` and
+`GraphCommunicationsClient-Rtaf`). The recorder's device also says what it
+does, in `endpointMetadata.processingModes`: `recording`,
+`realTimeTranscript`, `closedCaptions`, `copilot`, … each with a `state`
+of `Active` or `Inactive`. The bar says the meeting is being recorded or
+transcribed from these, as the Teams client does.
+
 **Who speaks.** The meeting mixes everyone's sound into one stream, with
 no audio level header, so loudness alone says that *someone* speaks. The
 data channel's `dsh` says who spoke (a history, the newest last, by audio
