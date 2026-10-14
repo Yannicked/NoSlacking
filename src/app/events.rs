@@ -425,8 +425,8 @@ impl App {
     fn app_loaded(&mut self, app: Option<AppCredentials>) {
         if let Some(app) = &app {
             self.setup.client_id = app.client_id.clone();
-            self.setup.client_secret = app.client_secret.0.clone();
-            self.setup.app_token = app.app_token.0.clone();
+            self.setup.client_secret = app.client_secret.clone();
+            self.setup.app_token = app.app_token.clone();
         }
         self.app_credentials = app;
         self.app_loaded = true;
@@ -436,7 +436,7 @@ impl App {
         if let SignIn::Done(name) = &state {
             self.toast(tf("Signed in to {name}.", &[("name", name)]), Tone::Info);
             self.page = Page::Main;
-            self.setup.user_token.clear();
+            self.setup.user_token = Default::default();
         }
         self.sign_in = Some(state);
     }
