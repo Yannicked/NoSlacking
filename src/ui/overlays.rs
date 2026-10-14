@@ -308,14 +308,16 @@ pub(super) fn matching(
     found
 }
 
-/// One conversation in a list to pick from: its kind's icon and its
-/// title, bold when unread, lit when `selected`.
-pub(super) fn conversation_row(
+/// A row of a list to pick from: `icon`, then `text` in `font`, lit when
+/// `selected` or hovered.
+fn pick_row(
     ui: &mut egui::Ui,
     palette: &theme::Palette,
-    found: &crate::convos::Candidate,
+    icon: Icon,
+    text: &str,
+    font: egui::FontId,
     selected: bool,
-) -> egui::Response {
+) -> (egui::Rect, egui::Response) {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::click());
     if selected || response.hovered() {
@@ -329,12 +331,6 @@ pub(super) fn conversation_row(
             },
         );
     }
-    let icon = match found.kind {
-        ConversationKind::Channel => Icon::Hash,
-        ConversationKind::Private => Icon::Lock,
-        ConversationKind::Direct => Icon::User,
-        ConversationKind::Group => Icon::Users,
-    };
     icon.image(palette.secondary, 15.0).paint_at(
         ui,
         egui::Rect::from_center_size(
@@ -345,14 +341,33 @@ pub(super) fn conversation_row(
     ui.painter().text(
         egui::pos2(rect.left() + 36.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
-        &found.title,
-        if found.unread {
-            theme::bold(14.5)
-        } else {
-            theme::regular(14.5)
-        },
+        text,
+        font,
         palette.text,
     );
+    (rect, response)
+}
+
+/// One conversation in a list to pick from: its kind's icon and its
+/// title, bold when unread, lit when `selected`.
+pub(super) fn conversation_row(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    found: &crate::convos::Candidate,
+    selected: bool,
+) -> egui::Response {
+    let icon = match found.kind {
+        ConversationKind::Channel => Icon::Hash,
+        ConversationKind::Private => Icon::Lock,
+        ConversationKind::Direct => Icon::User,
+        ConversationKind::Group => Icon::Users,
+    };
+    let font = if found.unread {
+        theme::bold(14.5)
+    } else {
+        theme::regular(14.5)
+    };
+    let (_, response) = pick_row(ui, palette, icon, &found.title, font, selected);
     theme::describe_selected(
         &response,
         egui::WidgetType::SelectableLabel,
@@ -371,32 +386,13 @@ fn command_row(
     keys: Option<&str>,
     selected: bool,
 ) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::click());
-    if selected || response.hovered() {
-        ui.painter().rect_filled(
-            rect,
-            CornerRadius::same(theme::RADIUS_SMALL),
-            if selected {
-                palette.accent.gamma_multiply(0.25)
-            } else {
-                palette.surface_hover
-            },
-        );
-    }
-    Icon::ChevronRight.image(palette.secondary, 15.0).paint_at(
+    let (rect, response) = pick_row(
         ui,
-        egui::Rect::from_center_size(
-            egui::pos2(rect.left() + 18.0, rect.center().y),
-            Vec2::splat(15.0),
-        ),
-    );
-    ui.painter().text(
-        egui::pos2(rect.left() + 36.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
+        palette,
+        Icon::ChevronRight,
         label,
         theme::regular(14.5),
-        palette.text,
+        selected,
     );
     if let Some(keys) = keys {
         let galley =
