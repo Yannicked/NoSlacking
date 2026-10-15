@@ -164,9 +164,19 @@ impl Jitter {
         }
         let at = self.unwrap(timestamp);
         self.counts.pushed += 1;
-        if self.next.is_some_and(|next| at < next) {
-            self.counts.late += 1;
-            return;
+        if let Some(next) = self.next.filter(|next| at < *next) {
+            // Run dry, the buffer conceals ahead of frames that are only
+            // slow; one of those plays from its own time, a little later
+            // than due, rather than being thrown away for every frame
+            // after it to arrive just as late and be concealed too.
+            let concealed = u64::from(self.dry) * self.frame;
+            if self.frames.is_empty() && at >= next.saturating_sub(concealed) {
+                self.next = Some(at);
+                self.dry = 0;
+            } else {
+                self.counts.late += 1;
+                return;
+            }
         }
         self.frames.insert(at, payload);
         // Too much held: drop the oldest until back at the target.
@@ -308,6 +318,24 @@ mod tests {
         jitter.push(20 * FRAME, frame(4));
         assert_eq!(played(jitter.pull()), Some(4));
         assert!(jitter.take_resumed());
+    }
+
+    #[test]
+    fn a_slow_frame_concealed_past_still_plays_and_so_do_those_after() {
+        let mut jitter = Jitter::new(20, 300);
+        jitter.push(0, frame(1));
+        assert_eq!(played(jitter.pull()), Some(1));
+        // Frame 2 is slow: its turn is concealed, then it and the rest come.
+        assert_eq!(jitter.pull(), Pull::Lost);
+        assert_eq!(jitter.pull(), Pull::Lost);
+        jitter.push(FRAME, frame(2));
+        assert_eq!(played(jitter.pull()), Some(2));
+        jitter.push(2 * FRAME, frame(3));
+        assert_eq!(played(jitter.pull()), Some(3));
+        assert_eq!(jitter.counts().late, 0);
+        // One older than what was concealed is late still.
+        jitter.push(0, frame(9));
+        assert_eq!(jitter.counts().late, 1);
     }
 
     #[test]
