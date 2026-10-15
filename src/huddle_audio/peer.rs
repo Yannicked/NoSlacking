@@ -97,12 +97,29 @@ pub fn opus_pt(rtc: &mut Rtc, mid: Mid) -> Option<Pt> {
         .map(|p| p.pt())
 }
 
-/// The send bandwidth estimate, in bit/s, from transport-cc feedback or
-/// REMB; `None` for anything else.
-pub fn estimate_bps(estimate: &str0m::bwe::BweKind) -> Option<u64> {
+/// The send bandwidth estimate, in bit/s, and where it came from:
+/// transport-cc feedback, which speaks for the whole link, or a REMB for
+/// an m-line that `video` says carries our video. A REMB speaks for its
+/// own m-line only: one for the audio (about its 40 kbit/s) or a 0 for a
+/// line we do not send on, taken as the link's, would starve the camera
+/// (seen in a Teams meeting: 43 kbit/s, then 0, on a clean link). `None`
+/// for any other.
+pub fn estimate_bps(
+    estimate: &str0m::bwe::BweKind,
+    video: impl Fn(Mid) -> bool,
+) -> Option<(u64, &'static str)> {
     match estimate {
-        str0m::bwe::BweKind::Twcc { estimate, .. } => Some(estimate.as_u64()),
-        str0m::bwe::BweKind::Remb { estimate, .. } => Some(estimate.as_u64()),
+        str0m::bwe::BweKind::Twcc { estimate, .. } => Some((estimate.as_u64(), "transport-cc")),
+        str0m::bwe::BweKind::Remb { estimate, mid } if video(*mid) && estimate.as_u64() > 0 => {
+            Some((estimate.as_u64(), "REMB"))
+        }
+        str0m::bwe::BweKind::Remb { estimate, mid } => {
+            log::debug!(
+                "media: a REMB of {} kbit/s for {mid} not taken",
+                estimate.as_u64() / 1000
+            );
+            None
+        }
         _ => None,
     }
 }
@@ -110,10 +127,13 @@ pub fn estimate_bps(estimate: &str0m::bwe::BweKind) -> Option<u64> {
 /// Takes a new estimate of `bps` over `last`, logging it when it moved
 /// by more than a fifth: it moves a little all the time. Says whether it
 /// was logged.
-pub fn note_estimate(last: &mut Option<u64>, bps: u64) -> bool {
+pub fn note_estimate(last: &mut Option<u64>, bps: u64, from: &str) -> bool {
     let moved = last.is_none_or(|was| was.abs_diff(bps) > was / 5);
     if moved {
-        log::info!("media: send bandwidth estimate {} kbit/s", bps / 1000);
+        log::info!(
+            "media: send bandwidth estimate {} kbit/s ({from})",
+            bps / 1000
+        );
     }
     *last = Some(bps);
     moved
@@ -446,13 +466,41 @@ mod tests {
     }
 
     #[test]
+    fn only_our_video_lines_rembs_count_and_never_a_zero() {
+        use str0m::bwe::{Bitrate, BweKind};
+        let (audio, camera) = (Mid::from("0"), Mid::from("1"));
+        let video = |mid: Mid| mid == camera;
+        let remb = |kbps: u64, mid: Mid| BweKind::Remb {
+            estimate: Bitrate::kbps(kbps),
+            mid,
+        };
+        assert_eq!(
+            estimate_bps(&remb(900, camera), video),
+            Some((900_000, "REMB"))
+        );
+        assert_eq!(estimate_bps(&remb(43, audio), video), None, "the audio's");
+        assert_eq!(estimate_bps(&remb(0, camera), video), None, "a zero");
+        let twcc = BweKind::Twcc {
+            estimate: Bitrate::kbps(1200),
+            can_probe: true,
+        };
+        assert_eq!(
+            estimate_bps(&twcc, |_| false),
+            Some((1_200_000, "transport-cc"))
+        );
+    }
+
+    #[test]
     fn an_estimate_is_logged_only_when_it_moved_a_fifth() {
         let mut last = None;
-        assert!(note_estimate(&mut last, 1_000_000), "the first");
-        assert!(!note_estimate(&mut last, 1_100_000), "a tenth more");
+        assert!(note_estimate(&mut last, 1_000_000, "REMB"), "the first");
+        assert!(!note_estimate(&mut last, 1_100_000, "REMB"), "a tenth more");
         assert_eq!(last, Some(1_100_000), "taken, logged or not");
-        assert!(note_estimate(&mut last, 800_000), "over a fifth less");
-        assert!(!note_estimate(&mut last, 800_000));
+        assert!(
+            note_estimate(&mut last, 800_000, "REMB"),
+            "over a fifth less"
+        );
+        assert!(!note_estimate(&mut last, 800_000, "REMB"));
     }
 
     #[test]

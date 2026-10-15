@@ -1984,10 +1984,22 @@ impl Session {
     /// share two thirds when the camera goes too, each sender within its
     /// own limits and a meeting's ceiling.
     fn bitrate_estimate(&mut self, estimate: &str0m::bwe::BweKind) {
-        let Some(bps) = estimate_bps(estimate) else {
+        // Only our own video lines' REMBs speak for what we send.
+        #[cfg(feature = "huddle-camera")]
+        let video: Vec<Mid> = self
+            .video
+            .iter()
+            .chain(self.share.iter())
+            .chain(self.more.iter())
+            .filter(|line| line.sending().is_some())
+            .map(|line| line.mid())
+            .collect();
+        #[cfg(not(feature = "huddle-camera"))]
+        let video: Vec<Mid> = Vec::new();
+        let Some((bps, from)) = estimate_bps(estimate, |mid| video.contains(&mid)) else {
             return;
         };
-        note_estimate(&mut self.estimate, bps);
+        note_estimate(&mut self.estimate, bps, from);
         #[cfg(feature = "huddle-camera")]
         {
             let senders = self.senders();
