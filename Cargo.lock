@@ -3726,7 +3726,7 @@ dependencies = [
 
 [[package]]
 name = "noslacking"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "apple-native-keyring-store",
  "arboard",
@@ -3800,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "noslacking-video"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ashpd",
  "cros-codecs",
@@ -3828,7 +3828,7 @@ dependencies = [
 
 [[package]]
 name = "noslacking-video-ipc"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "notify"
