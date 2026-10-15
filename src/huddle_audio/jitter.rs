@@ -4,9 +4,12 @@
 //! It holds back a little (60 ms by default) before it starts, so packets
 //! that come late or out of order still play in their place. A frame that
 //! never came is played as a loss, which the decoder conceals; when the
-//! buffer runs dry it waits to fill again, playing silence; when it grows
-//! too long (the device's clock slower than the sender's, or a burst after
-//! a stall) the oldest frames go, so the delay stays short.
+//! buffer runs dry it conceals a little more ([`DRY_CONCEALED`]), which
+//! bridges a short stall and otherwise fades the sound out, then waits to
+//! fill again, playing silence; when it grows too long (the device's clock
+//! slower than the sender's, or a burst after a stall) the oldest frames
+//! go, so the delay stays short, with one concealed frame across the cut.
+//! Each of those would otherwise be a step in the sound: a pop.
 
 use std::collections::BTreeMap;
 
@@ -14,6 +17,9 @@ use std::collections::BTreeMap;
 pub const CLOCK: u32 = 48_000;
 /// A 20 ms frame, Opus's usual one in WebRTC.
 pub const FRAME: u32 = CLOCK / 50;
+/// How many frames are concealed when the buffer runs dry before it goes
+/// silent: 60 ms, enough to bridge a short stall.
+pub const DRY_CONCEALED: u32 = 3;
 
 /// How many 48 kHz samples one Opus packet holds, from its TOC byte and
 /// frame count (RFC 6716 §3.1). `None` for an empty or broken packet.
@@ -78,6 +84,12 @@ pub struct Jitter {
     limit: u64,
     /// The length of the last frame, for concealing a lost one.
     frame: u64,
+    /// Frames concealed since the buffer ran dry.
+    dry: u32,
+    /// Frames were cut while playing: one is concealed across the cut.
+    bridge: bool,
+    /// The next frame follows silence (see [`Jitter::take_resumed`]).
+    resumed: bool,
     counts: Counts,
 }
 
@@ -99,6 +111,9 @@ impl Jitter {
             target: u64::from(target_ms) * per_ms,
             limit: u64::from(limit_ms.max(target_ms)) * per_ms,
             frame: u64::from(FRAME),
+            dry: 0,
+            bridge: false,
+            resumed: true,
             counts: Counts::default(),
         }
     }
@@ -106,6 +121,12 @@ impl Jitter {
     /// What happened to the frames so far.
     pub fn counts(&self) -> Counts {
         self.counts
+    }
+
+    /// Whether the frame just pulled is the first after silence, so the
+    /// speaker fades it in; asking clears it.
+    pub fn take_resumed(&mut self) -> bool {
+        std::mem::take(&mut self.resumed)
     }
 
     /// How much is held, in samples, from the first frame held to the end
@@ -156,6 +177,7 @@ impl Jitter {
             }
             if self.next.is_some() {
                 self.next = self.frames.first_key_value().map(|(at, _)| *at);
+                self.bridge = true;
             }
         }
     }
@@ -171,9 +193,21 @@ impl Jitter {
             };
             return self.play(at, payload);
         };
+        if std::mem::take(&mut self.bridge) {
+            self.counts.concealed += 1;
+            return Pull::Lost;
+        }
         let Some((&first, _)) = self.frames.first_key_value() else {
-            // Dry: wait to fill up again.
+            if self.dry < DRY_CONCEALED {
+                self.dry += 1;
+                self.next = Some(next + self.frame);
+                self.counts.concealed += 1;
+                return Pull::Lost;
+            }
+            // Dry for good: wait to fill up again.
             self.next = None;
+            self.dry = 0;
+            self.resumed = true;
             self.counts.underruns += 1;
             return Pull::Silence;
         };
@@ -198,6 +232,7 @@ impl Jitter {
     fn play(&mut self, at: u64, payload: Vec<u8>) -> Pull {
         let samples = u64::from(opus_samples(&payload).unwrap_or(FRAME));
         self.frame = samples;
+        self.dry = 0;
         self.next = Some(at + samples);
         self.counts.played += 1;
         Pull::Frame(payload)
@@ -246,8 +281,48 @@ mod tests {
         assert_eq!(played(jitter.pull()), Some(1));
         assert_eq!(played(jitter.pull()), Some(2));
         assert_eq!(played(jitter.pull()), Some(3));
+        // Dry: concealed a while, then silence.
+        for _ in 0..DRY_CONCEALED {
+            assert_eq!(jitter.pull(), Pull::Lost);
+        }
         assert_eq!(jitter.pull(), Pull::Silence);
         assert_eq!(jitter.counts().underruns, 1);
+    }
+
+    #[test]
+    fn a_short_stall_is_bridged_and_the_sound_after_silence_fades_in() {
+        let mut jitter = Jitter::new(20, 300);
+        jitter.push(0, frame(1));
+        assert_eq!(played(jitter.pull()), Some(1));
+        assert!(jitter.take_resumed(), "the first frame follows silence");
+        // 20 ms with nothing, then the rest comes after all.
+        assert_eq!(jitter.pull(), Pull::Lost);
+        jitter.push(2 * FRAME, frame(3));
+        assert_eq!(played(jitter.pull()), Some(3));
+        assert!(!jitter.take_resumed(), "bridged, never silent");
+        assert_eq!(jitter.counts().underruns, 0);
+        // Silent, then sound again: that frame fades in.
+        for _ in 0..=DRY_CONCEALED {
+            jitter.pull();
+        }
+        jitter.push(20 * FRAME, frame(4));
+        assert_eq!(played(jitter.pull()), Some(4));
+        assert!(jitter.take_resumed());
+    }
+
+    #[test]
+    fn a_cut_while_playing_is_bridged_by_one_concealed_frame() {
+        let mut jitter = Jitter::new(40, 200);
+        jitter.push(0, frame(0));
+        jitter.push(FRAME, frame(1));
+        assert_eq!(played(jitter.pull()), Some(0));
+        // A burst: past the limit, so the oldest go.
+        for n in 2..14u8 {
+            jitter.push(u32::from(n) * FRAME, frame(n));
+        }
+        assert!(jitter.counts().trimmed > 0);
+        assert_eq!(jitter.pull(), Pull::Lost, "across the cut");
+        assert!(played(jitter.pull()).is_some_and(|n| n > 1));
     }
 
     #[test]

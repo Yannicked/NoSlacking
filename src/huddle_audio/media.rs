@@ -1449,10 +1449,12 @@ impl Session<'_> {
         let Some(camera) = &mut self.camera else {
             return;
         };
-        let Some(bps) = peer::estimate_bps(estimate) else {
+        // Chime's video lines are whichever is not the audio.
+        let audio = self.audio;
+        let Some((bps, from)) = peer::estimate_bps(estimate, |mid| Some(mid) != audio) else {
             return;
         };
-        peer::note_estimate(&mut camera.estimate, bps);
+        peer::note_estimate(&mut camera.estimate, bps, from);
         let left = bps.saturating_sub(peer::AUDIO_BPS);
         camera
             .control

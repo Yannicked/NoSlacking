@@ -214,7 +214,12 @@ impl Decoded {
 
     /// Decodes what comes next into `self.samples`.
     fn decode(&mut self) {
-        let pull = self.shared.jitter().pull();
+        let (pull, resumed) = {
+            let mut jitter = self.shared.jitter();
+            let pull = jitter.pull();
+            let resumed = matches!(pull, Pull::Frame(_)) && jitter.take_resumed();
+            (pull, resumed)
+        };
         let room = self.decoder.room() * usize::from(CHANNELS);
         self.samples.resize(room, 0.0);
         self.at = 0;
@@ -249,6 +254,9 @@ impl Decoded {
         match decoded {
             Some(per_channel) if per_channel > 0 => {
                 self.samples.truncate(per_channel * usize::from(CHANNELS));
+                if resumed {
+                    fade_in(&mut self.samples, usize::from(CHANNELS));
+                }
             }
             // A frame that does not decode, or concealment with nothing
             // before it: its length in silence keeps the time.
@@ -262,6 +270,22 @@ impl Decoded {
                 self.samples
                     .resize(length as usize * usize::from(CHANNELS), 0.0);
             }
+        }
+    }
+}
+
+/// How long sound coming back after silence takes to fade in: 5 ms.
+const FADE_IN: usize = (CLOCK / 200) as usize;
+
+/// Fades the start of `samples` (interleaved, `channels` wide) in from
+/// silence over [`FADE_IN`], so sound coming back does not start with a
+/// step: a pop.
+fn fade_in(samples: &mut [f32], channels: usize) {
+    let frames = (samples.len() / channels.max(1)).min(FADE_IN);
+    for (i, frame) in samples.chunks_mut(channels.max(1)).take(frames).enumerate() {
+        let gain = (i + 1) as f32 / frames as f32;
+        for sample in frame {
+            *sample *= gain;
         }
     }
 }
@@ -591,9 +615,11 @@ mod tests {
         feed.push(2 * FRAME, &[0xF8, 3]);
         feed.push(3 * FRAME, &[0xF8, 4]);
         let samples: Vec<f32> = decoded.by_ref().take(4 * 960 * 2).collect();
-        // The poisoned frame is 20 ms of silence; the rest play.
+        // The poisoned frame is 20 ms of silence; the rest play, the
+        // first fading in from the silence before it.
         assert_eq!(samples.len(), 4 * 960 * 2);
-        assert!(samples[..960 * 2].iter().all(|s| *s == 0.25));
+        assert!(samples[0] > 0.0 && samples[0] < 0.25, "{}", samples[0]);
+        assert!(samples[FADE_IN * 2..960 * 2].iter().all(|s| *s == 0.25));
         assert!(samples[960 * 2..2 * 960 * 2].iter().all(|s| *s == 0.0));
         assert!(samples[2 * 960 * 2..].iter().all(|s| *s == 0.25));
         let played = feed.played();

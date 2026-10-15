@@ -992,6 +992,47 @@ fn new_rtc(opus_pt: u8, video: &[(u8, Option<u8>)], controlling: bool, now: Inst
     rtc
 }
 
+/// Since the last stats line: the most the far end's audio came behind
+/// what its RTP timing says, and the longest our loop was busy at once.
+/// Audio that comes late together with a busy loop is ours to fix; late
+/// with an idle loop, the network's (Wi-Fi power saving, say).
+#[derive(Debug, Default)]
+struct Bursts {
+    /// The last audio frame: when it came, and its RTP timestamp.
+    last: Option<(Instant, u32)>,
+    late: Duration,
+    busy: Duration,
+}
+
+impl Bursts {
+    /// An audio frame stamped `timestamp` came at `now`.
+    fn audio(&mut self, now: Instant, timestamp: u32) {
+        if let Some((at, was)) = self.last.replace((now, timestamp)) {
+            let samples = u64::from(timestamp.wrapping_sub(was));
+            // A step back or past a second is a reorder or a restart.
+            if samples <= u64::from(crate::huddle_audio::jitter::CLOCK) {
+                let timed = Duration::from_micros(samples * 1000 / 48);
+                self.late = self
+                    .late
+                    .max(now.saturating_duration_since(at).saturating_sub(timed));
+            }
+        }
+    }
+
+    /// The loop was busy from `begun` until now.
+    fn busy(&mut self, begun: Instant) {
+        self.busy = self.busy.max(begun.elapsed());
+    }
+
+    /// What was seen since the last time, starting over.
+    fn take(&mut self) -> (Duration, Duration) {
+        let seen = (self.late, self.busy);
+        self.late = Duration::ZERO;
+        self.busy = Duration::ZERO;
+        seen
+    }
+}
+
 /// What each of `shares` screen shares and `cameras` cameras of ours may
 /// send, in bit/s, of a send bandwidth estimate of `bps`: what is left
 /// after the audio, two thirds of it to the shares when cameras go too
@@ -1202,6 +1243,8 @@ struct Session {
     more: Vec<super::video::CallVideo>,
     /// The last send bandwidth estimate, in bit/s, once there is one.
     estimate: Option<u64>,
+    /// Whether the far end's audio comes in bursts, and whether we are.
+    bursts: Bursts,
     /// Since when we have sent video, and whether its rates were fixed
     /// for want of an estimate.
     #[cfg(feature = "huddle-camera")]
@@ -1385,6 +1428,7 @@ impl Session {
             channel: None,
             more,
             estimate: None,
+            bursts: Bursts::default(),
             #[cfg(feature = "huddle-camera")]
             video_since: None,
             #[cfg(feature = "huddle-camera")]
@@ -1662,11 +1706,13 @@ impl Session {
                         data.data.len()
                     );
                 }
+                // RTP's 32-bit timestamp; the jitter buffer unwraps it.
+                let timestamp = data.time.numer() as u32;
+                self.bursts.audio(Instant::now(), timestamp);
                 if self.receive
                     && let Some(feed) = &self.feed
                 {
-                    // RTP's 32-bit timestamp; the jitter buffer unwraps it.
-                    feed.push(data.time.numer() as u32, &data.data);
+                    feed.push(timestamp, &data.data);
                 }
                 self.check_flowing();
             }
@@ -1880,7 +1926,7 @@ impl Session {
         }
     }
 
-    fn stats(&self) {
+    fn stats(&mut self) {
         let counts = self.counters.snapshot();
         let played = self
             .feed
@@ -1901,6 +1947,12 @@ impl Session {
             if self.muted() { "muted" } else { "unmuted" }
         );
         log::info!("media: paths: {}", self.driver.paths.line());
+        let (late, busy) = self.bursts.take();
+        log::info!(
+            "media: audio in at most {} ms behind its timing; busiest {} ms",
+            late.as_millis(),
+            busy.as_millis()
+        );
     }
 
     /// The next moment something is due.
@@ -1984,10 +2036,22 @@ impl Session {
     /// share two thirds when the camera goes too, each sender within its
     /// own limits and a meeting's ceiling.
     fn bitrate_estimate(&mut self, estimate: &str0m::bwe::BweKind) {
-        let Some(bps) = estimate_bps(estimate) else {
+        // Only our own video lines' REMBs speak for what we send.
+        #[cfg(feature = "huddle-camera")]
+        let video: Vec<Mid> = self
+            .video
+            .iter()
+            .chain(self.share.iter())
+            .chain(self.more.iter())
+            .filter(|line| line.sending().is_some())
+            .map(|line| line.mid())
+            .collect();
+        #[cfg(not(feature = "huddle-camera"))]
+        let video: Vec<Mid> = Vec::new();
+        let Some((bps, from)) = estimate_bps(estimate, |mid| video.contains(&mid)) else {
             return;
         };
-        note_estimate(&mut self.estimate, bps);
+        note_estimate(&mut self.estimate, bps, from);
         #[cfg(feature = "huddle-camera")]
         {
             let senders = self.senders();
@@ -2092,14 +2156,20 @@ async fn run(mut session: Session, mut commands: mpsc::UnboundedReceiver<Command
     session.relay_events().await;
     let mut buf = vec![0u8; DATAGRAM];
     while session.over.is_none() {
+        let begun = Instant::now();
         session.drive_rtc().await;
+        session.bursts.busy(begun);
         if session.over.is_some() {
             break;
         }
         let deadline = session.deadline();
         tokio::select! {
             received = session.socket.recv_from(&mut buf) => match received {
-                Ok((n, from)) => session.datagram(from, &buf[..n]).await,
+                Ok((n, from)) => {
+                    let begun = Instant::now();
+                    session.datagram(from, &buf[..n]).await;
+                    session.bursts.busy(begun);
+                }
                 // Windows reports an ICMP "port unreachable" from an
                 // earlier send this way; the socket itself is fine.
                 Err(error) => log::debug!("connect: socket: {error}"),
