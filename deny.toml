@@ -24,6 +24,13 @@ ignore = [
     # build time; nothing of it runs in the app or the helper. Drop once
     # nokhwa moves off it.
     { id = "RUSTSEC-2024-0436", reason = "build-time macro of nokhwa, no runtime code; no maintained nokhwa without it" },
+    # zbus_names, zvariant and zvariant_derive were folded into zbus 6 and
+    # retired as crates; nothing here names them. They come with zbus 5
+    # through accesskit, ashpd, ksni, notify-rust and the fastframe crates,
+    # none of which is on zbus 6 yet. Drop once they are.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: part of zbus 5, which accesskit, ashpd, ksni, notify-rust and fastframe still use" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: part of zbus 5, which accesskit, ashpd, ksni, notify-rust and fastframe still use" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: part of zbus 5, which accesskit, ashpd, ksni, notify-rust and fastframe still use" },
 ]
 
 [licenses]

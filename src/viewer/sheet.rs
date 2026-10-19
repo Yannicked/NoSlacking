@@ -62,7 +62,12 @@ fn check(bytes: &[u8]) -> Result<Book, Failure> {
         return Err(Failure::ViewTooLarge);
     }
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(unreadable)?;
-    let names: Vec<String> = zip.file_names().map(str::to_ascii_lowercase).collect();
+    // A name that doesn't decode is none of the parts looked for.
+    let names: Vec<String> = zip
+        .file_names()
+        .flatten()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
     let has = |name: &str| names.iter().any(|n| n == name);
     let book = if has("xl/workbook.xml") {
         Book::Excel
@@ -85,13 +90,17 @@ fn check(bytes: &[u8]) -> Result<Book, Failure> {
     if declared > MAX_UNPACKED {
         return Err(Failure::Bomb);
     }
-    // Then what they really unpack to: never more than they claim.
+    // Then what they really unpack to: never more than they claim. The
+    // claimed bytes are read first, so a part that is merely damaged stays
+    // unreadable; past them, one byte more is a lie, and zip refusing to
+    // read on is its own check of the same lie.
     for index in 0..zip.len() {
         let part = zip.by_index(index).map_err(unreadable)?;
         let claimed = part.size();
-        let unpacked =
-            std::io::copy(&mut part.take(claimed + 1), &mut std::io::sink()).map_err(unreadable)?;
-        if unpacked > claimed {
+        let mut part = part.take(claimed);
+        std::io::copy(&mut part, &mut std::io::sink()).map_err(unreadable)?;
+        let mut more = [0u8; 1];
+        if !matches!(part.into_inner().read(&mut more), Ok(0)) {
             return Err(Failure::Bomb);
         }
     }
@@ -124,12 +133,12 @@ fn shared_strings(part: impl Read) -> Result<u64, Failure> {
     let mut buf = Vec::new();
     loop {
         match xml.read_event_into(&mut buf) {
-            Ok(Event::Start(tag) | Event::Empty(tag)) if tag.local_name().as_ref() == b"sst" => {
+            Ok(Event::Start(tag) | Event::Empty(tag)) if tag.local_name().as_ref() == "sst" => {
                 let count = tag
                     .attributes()
                     .flatten()
-                    .find(|a| a.key.as_ref() == b"uniqueCount")
-                    .and_then(|a| std::str::from_utf8(&a.value).ok()?.trim().parse().ok());
+                    .find(|a| a.key.as_ref() == "uniqueCount")
+                    .and_then(|a| a.value.trim().parse().ok());
                 return Ok(count.unwrap_or(0));
             }
             Ok(Event::Eof) | Err(_) => return Err(unreadable("no shared string table")),
@@ -156,9 +165,9 @@ fn ods_cells(content: impl std::io::BufRead) -> Result<u64, Failure> {
             Event::Start(tag) | Event::Empty(tag) => {
                 let closed = matches!(event, Event::Empty(_));
                 match tag.name().as_ref() {
-                    b"table:table" => table = OdsTable::default(),
-                    b"table:table-row" => {
-                        let repeats = repeat(tag, b"table:number-rows-repeated")?.min(ODS_ROWS);
+                    "table:table" => table = OdsTable::default(),
+                    "table:table-row" => {
+                        let repeats = repeat(tag, "table:number-rows-repeated")?.min(ODS_ROWS);
                         let started = OdsRow {
                             repeats,
                             ..OdsRow::default()
@@ -169,8 +178,8 @@ fn ods_cells(content: impl std::io::BufRead) -> Result<u64, Failure> {
                             row = Some(started);
                         }
                     }
-                    b"table:table-cell" | b"table:covered-table-cell" => {
-                        let repeats = repeat(tag, b"table:number-columns-repeated")?;
+                    "table:table-cell" | "table:covered-table-cell" => {
+                        let repeats = repeat(tag, "table:number-columns-repeated")?;
                         let filled = !closed || may_hold_a_value(tag)?;
                         if let Some(row) = row.as_mut() {
                             row.cell(repeats, filled);
@@ -180,12 +189,12 @@ fn ods_cells(content: impl std::io::BufRead) -> Result<u64, Failure> {
                 }
             }
             Event::End(tag) => match tag.name().as_ref() {
-                b"table:table-row" => {
+                "table:table-row" => {
                     if let Some(row) = row.take() {
                         table.end_row(row);
                     }
                 }
-                b"table:table" => {
+                "table:table" => {
                     total = total.saturating_add(table.cells());
                     table = OdsTable::default();
                 }
@@ -204,13 +213,15 @@ fn ods_cells(content: impl std::io::BufRead) -> Result<u64, Failure> {
 
 /// A repeat count attribute, 1 when absent; an unreadable one is refused,
 /// as calamine refuses it.
-fn repeat(tag: &BytesStart<'_>, name: &[u8]) -> Result<u64, Failure> {
+fn repeat(tag: &BytesStart<'_>, name: &str) -> Result<u64, Failure> {
     for attribute in tag.attributes() {
         let attribute = attribute.map_err(unreadable)?;
         if attribute.key.as_ref() == name {
-            return std::str::from_utf8(&attribute.value)
+            return attribute
+                .value
+                .trim()
+                .parse()
                 .ok()
-                .and_then(|v| v.trim().parse().ok())
                 .ok_or_else(|| unreadable("bad repeat count"));
         }
     }
@@ -224,10 +235,10 @@ fn may_hold_a_value(tag: &BytesStart<'_>) -> Result<bool, Failure> {
     for attribute in tag.attributes() {
         let attribute = attribute.map_err(unreadable)?;
         let key = attribute.key.as_ref();
-        if key == b"office:value" && !plain_number(&attribute.value) {
+        if key == "office:value" && !plain_number(attribute.value.as_bytes()) {
             return Err(unreadable("bad number"));
         }
-        value |= key.starts_with(b"office:") || key == b"table:formula";
+        value |= key.starts_with("office:") || key == "table:formula";
     }
     Ok(value)
 }
@@ -687,7 +698,7 @@ mod tests {
             let mut part = zip.by_index(index).expect("part");
             let mut data = Vec::new();
             part.read_to_end(&mut data).expect("read");
-            let part_name = part.name().to_owned();
+            let part_name = part.name().expect("name").into_owned();
             if part_name == name {
                 data = contents.to_vec();
             }
@@ -753,7 +764,7 @@ mod tests {
             let mut part = zip.by_index(index).expect("part");
             let mut data = Vec::new();
             part.read_to_end(&mut data).expect("read");
-            parts.push((part.name().to_owned(), data));
+            parts.push((part.name().expect("name").into_owned(), data));
         }
         parts.push(("xl/sharedStrings.xml".into(), sst.to_vec()));
         let parts: Vec<(&str, &[u8])> = parts
