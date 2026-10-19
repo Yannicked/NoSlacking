@@ -176,10 +176,10 @@ bytemuck = { version = "1.25", optional = true }
 # zip and quick-xml are calamine's own, at its versions and features, named
 # here because the viewer measures a workbook's parts before calamine reads
 # them; they add no crate.
-calamine = { version = "0.36", default-features = false }
+calamine = { version = "0.37", default-features = false }
 csv = { version = "1.4", default-features = false }
-zip = { version = "8.6", default-features = false, features = ["deflate"] }
-quick-xml = { version = "0.41", default-features = false }
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
+quick-xml = { version = "0.42", default-features = false }
 
 # Microsoft Teams sends some live events gzip-compressed (`teams`); already
 # in the build as zip's.

@@ -27,7 +27,11 @@ pub(super) fn read(bytes: &[u8]) -> Result<(Archive, Vec<Note>), Failure> {
     for index in 0..count {
         // Raw: the entry's header is read, its contents never are.
         let read = zip.by_index_raw(index).map(|file| Entry {
-            path: file.name().to_owned(),
+            // A name that doesn't decode is shown as near as it can be.
+            path: file.name().map_or_else(
+                |_| String::from_utf8_lossy(file.name_raw()).into_owned(),
+                |name| name.into_owned(),
+            ),
             size: file.size(),
             packed: file.compressed_size(),
             modified: file.last_modified().map(|at| {
@@ -45,7 +49,11 @@ pub(super) fn read(bytes: &[u8]) -> Result<(Archive, Vec<Note>), Failure> {
         });
         // A damaged entry is still listed by name.
         let entry = read.unwrap_or_else(|_| Entry {
-            path: zip.name_for_index(index).unwrap_or_default().to_owned(),
+            path: zip
+                .name_for_index(index)
+                .and_then(Result::ok)
+                .map(|name| name.into_owned())
+                .unwrap_or_default(),
             ..Entry::default()
         });
         archive.unpacked = archive.unpacked.saturating_add(entry.size);
