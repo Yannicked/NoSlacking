@@ -42,6 +42,11 @@ pub enum SdpError {
 const ABS_SEND_TIME: &str = r"http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time";
 const TRANSPORT_CC: &str =
     r"http:\\www.ietf.org\id\draft-holmer-rmcat-transport-wide-cc-extensions-01";
+/// The header extensions our offer gives a video line, at str0m's own
+/// numbers, as the web client gives every video line: transport-cc is
+/// what the media server stamps the video it sends us with, and our
+/// feedback on it is how it learns what our link can take.
+const VIDEO_EXTENSIONS: [(u8, &str); 2] = [(2, ABS_SEND_TIME), (3, TRANSPORT_CC)];
 
 /// One m-line as written, before it means anything.
 struct RawLine<'a> {
@@ -193,6 +198,11 @@ pub fn read(sdp: &str) -> Result<RemoteMedia, SdpError> {
         .iter()
         .find(|l| l.media == "video" && l.port != 0 && l.attr("label") == Some(SHARE_LABEL))
         .and_then(h264_of);
+    let transport_cc = raw
+        .iter()
+        .flat_map(|l| &l.attrs)
+        .filter(|(n, _)| *n == "extmap")
+        .find_map(|(_, v)| transport_cc_of(v));
 
     let session_direction = direction_in(&session);
     let lines = raw
@@ -230,7 +240,19 @@ pub fn read(sdp: &str) -> Result<RemoteMedia, SdpError> {
         share_video,
         lines,
         video_streams,
+        transport_cc,
     })
+}
+
+/// The id of an `a=extmap` value (`5 http:\\…` or `5/sendrecv …`) if it
+/// names transport-cc, in Microsoft's backslashes or the usual slashes.
+fn transport_cc_of(value: &str) -> Option<u8> {
+    let (id, uri) = value.split_once(char::is_whitespace)?;
+    let slashed = |uri: &str| uri.trim().replace('\\', "/");
+    if slashed(uri) != slashed(TRANSPORT_CC) {
+        return None;
+    }
+    id.split('/').next()?.parse().ok()
 }
 
 /// The first H.264 at packetization mode 1 a video line lists, and its
@@ -505,7 +527,14 @@ pub fn offer(local: &LocalMedia) -> String {
                 direction: local.video_direction,
                 share: false,
             };
-            video_line(&mut out, local, &line, setup_text(local.setup), false);
+            video_line(
+                &mut out,
+                local,
+                &line,
+                &VIDEO_EXTENSIONS,
+                setup_text(local.setup),
+                false,
+            );
             continue;
         }
         // The share line carries our screen while we share; a meeting's
@@ -529,7 +558,14 @@ pub fn offer(local: &LocalMedia) -> String {
                 },
                 share: true,
             };
-            video_line(&mut out, local, &line, setup_text(local.setup), false);
+            video_line(
+                &mut out,
+                local,
+                &line,
+                &VIDEO_EXTENSIONS,
+                setup_text(local.setup),
+                false,
+            );
             continue;
         }
         push(&mut out, &format!("m=video {port} RTP/SAVP {h264} {rtx}"));
@@ -567,7 +603,14 @@ pub fn offer(local: &LocalMedia) -> String {
             rtx: local.video_rtx,
         };
         let line = more_camera(camera, codec);
-        video_line(&mut out, local, &line, setup_text(local.setup), false);
+        video_line(
+            &mut out,
+            local,
+            &line,
+            &VIDEO_EXTENSIONS,
+            setup_text(local.setup),
+            false,
+        );
     }
     if let Some(ssrc) = local.data_ssrc {
         data_line(&mut out, local, "3", ssrc, setup_text(local.setup), false);
@@ -601,9 +644,9 @@ fn more_camera(camera: &MoreCamera, codec: VideoCodec) -> VideoLine<'_> {
 /// while `local.data_ssrc` is set, which is kept as the web client keeps
 /// it. The bundle groups the lines we keep.
 ///
-/// No header extensions are answered: an answer must use the offerer's
-/// extension ids, which [`RemoteMedia`] does not carry, and audio works
-/// without them.
+/// Of the header extensions only transport-cc is answered, on the video
+/// lines, at the offer's number: the media server's estimate of what
+/// our link can take rests on our feedback on it. Audio works without.
 pub fn answer(local: &LocalMedia, remote: &RemoteMedia) -> String {
     lines_for(local, remote, Role::Answer)
 }
@@ -652,6 +695,11 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
     // The share line's H.264: its own, or, re-enabling a line that was
     // dropped, the camera's (one codec, one number in a bundle).
     let share_codec = remote.share_video.or(remote.video);
+    let extensions: Vec<(u8, &str)> = remote
+        .transport_cc
+        .map(|id| (id, TRANSPORT_CC))
+        .into_iter()
+        .collect();
     let sends = |d: Direction| matches!(d, Direction::SendRecv | Direction::SendOnly);
     // What we want of the share line, and what it comes to.
     let share_direction = |theirs: Direction| match role {
@@ -759,7 +807,7 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
                         direction: share_direction(line.direction),
                         share: true,
                     };
-                    video_line(&mut out, local, &line_spec, setup, first);
+                    video_line(&mut out, local, &line_spec, &extensions, setup, first);
                 }
             }
             (LineKind::Video, _, _) if local.receive_cameras.iter().any(|c| c.mid == line.mid) => {
@@ -771,7 +819,7 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
                     };
                     let mut line_spec = more_camera(camera, codec);
                     line_spec.direction = direction(Direction::SendRecv);
-                    video_line(&mut out, local, &line_spec, setup, first);
+                    video_line(&mut out, local, &line_spec, &extensions, setup, first);
                 }
             }
             (LineKind::Video, _, _) => {
@@ -789,7 +837,7 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
                         direction: direction(local.video_direction),
                         share: false,
                     };
-                    video_line(&mut out, local, &line_spec, setup, first);
+                    video_line(&mut out, local, &line_spec, &extensions, setup, first);
                 }
             }
             // `accepted` keeps nothing else.
@@ -893,6 +941,7 @@ fn video_line(
     out: &mut String,
     local: &LocalMedia,
     line: &VideoLine<'_>,
+    extensions: &[(u8, &str)],
     setup: &str,
     candidates: bool,
 ) {
@@ -935,6 +984,9 @@ fn video_line(
         push(out, "a=rtcp-fb:* nack");
     }
     push(out, "a=rtcp-fb:* nack pli");
+    for (id, uri) in extensions {
+        push(out, &format!("a=extmap:{id} {uri}"));
+    }
     // Our resends' stream, paired with the line's, as the web client
     // writes it.
     if let (true, Some(_), Some(rtx_ssrc)) = (sending, rtx, rtx_ssrc) {
@@ -1892,6 +1944,46 @@ mod tests {
                 ("6", Direction::SendRecv)
             ]
         );
+    }
+
+    #[test]
+    fn video_lines_carry_transport_cc_at_the_number_agreed() {
+        // Our offer: at str0m's 3 on every video line, as the web client.
+        let local = LocalMedia {
+            video_ssrc: Some(77),
+            receive_cameras: vec![more("4", 401)],
+            ..local()
+        };
+        let sdp = offer(&local);
+        let stamped = sdp
+            .split("m=")
+            .filter(|l| l.starts_with("video") && l.contains("a=sendrecv"))
+            .filter(|l| l.contains(&format!("a=extmap:3 {TRANSPORT_CC}\r\n")))
+            .count();
+        assert_eq!(stamped, 2, "{sdp}");
+        assert_eq!(read(&sdp).expect("reads").transport_cc, Some(3));
+        assert_eq!(read(MEETING_LOBBY).expect("reads").transport_cc, Some(3));
+        // The media server's own offer numbers it 5: the answer keeps 5.
+        let remote = read(MEETING_RETARGET).expect("reads");
+        assert_eq!(remote.transport_cc, Some(5));
+        let ours = LocalMedia {
+            opus_pt: 102,
+            receive_cameras: vec![more("5", 501)],
+            ..local
+        };
+        let answered = answer(&ours, &remote);
+        assert!(
+            answered.contains(&format!("a=extmap:5 {TRANSPORT_CC}\r\n")),
+            "{answered}"
+        );
+        assert!(!answered.contains("a=extmap:3"), "{answered}");
+        assert_eq!(
+            transport_cc_of(
+                "7/sendrecv http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+            ),
+            Some(7)
+        );
+        assert_eq!(transport_cc_of(&format!("2 {ABS_SEND_TIME}")), None);
     }
 
     #[test]

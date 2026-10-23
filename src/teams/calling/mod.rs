@@ -147,6 +147,9 @@ pub struct RemoteMedia {
     /// mid (`a=x-source-streamid`): where a source request asks for
     /// someone's video to come.
     pub video_streams: Vec<(String, u32)>,
+    /// The id the far end gives transport-cc (`a=extmap`), if it names
+    /// it: an answer to its offer must use its number.
+    pub transport_cc: Option<u8>,
 }
 
 impl RemoteMedia {
