@@ -2753,12 +2753,12 @@ mod tests {
                 .iter()
                 .all(|(time, _, _)| time % 960 == heard[0].0 % 960)
         );
-        let mut decoder = opus_decoder::OpusDecoder::new(48_000, 1).expect("a decoder");
+        let mut decoder = opus_rs::OpusDecoder::new(48_000, 1).expect("a decoder");
         let mut loud = 0;
         for (_, level, payload) in &heard {
-            let mut pcm = vec![0.0; decoder.max_frame_size_per_channel()];
+            let mut pcm = vec![0.0; 5760];
             let n = decoder
-                .decode_float(payload, &mut pcm, false)
+                .decode(payload, 5760, &mut pcm)
                 .expect("our Opus decodes");
             assert_eq!(n, 960);
             if super::super::uplink::level(&pcm[..n]) < 30 {
