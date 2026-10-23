@@ -23,9 +23,9 @@
 /// The channel's label.
 pub const LABEL: &str = "main-channel";
 
-/// The header's first bytes.
+/// The header's first bytes, with one recipient (see [`decode`]).
 const MAGIC: [u8; 3] = [0x10, 0x0f, 0x92];
-/// The header's length.
+/// The header's length, with one recipient.
 const HEADER: usize = 16;
 /// The meeting's media server's id.
 pub const SERVER: i32 = -4;
@@ -116,9 +116,18 @@ pub fn encode(seq: u16, from: i32, to: i32, messages: &[serde_json::Value]) -> V
     out
 }
 
-/// Reads one message; `None` for one not in this shape.
+/// Reads one message; `None` for one not in this shape. The header's
+/// second byte is its length less one, and the byte after the sender
+/// counts the recipients, four bytes each: the server sends some news
+/// (the speaker history, recorded) to several at once, in a longer
+/// header. `to` is the first.
 pub fn decode(bytes: &[u8]) -> Option<Frame> {
-    if bytes.len() < HEADER || bytes[..3] != MAGIC {
+    let header = usize::from(*bytes.get(1)?) + 1;
+    let recipients = usize::from(*bytes.get(10)?);
+    if bytes[0] != MAGIC[0] || bytes[2] != MAGIC[2] || recipients == 0 {
+        return None;
+    }
+    if header != 11 + 4 * recipients + 1 || bytes.len() < header {
         return None;
     }
     let id = |at: usize| -> Option<i32> {
@@ -126,7 +135,7 @@ pub fn decode(bytes: &[u8]) -> Option<Frame> {
     };
     let seq = u16::from_be_bytes([bytes[3], bytes[4]]);
     let (from, to) = (id(6)?, id(11)?);
-    let messages = match serde_json::from_slice(&bytes[HEADER..]).ok()? {
+    let messages = match serde_json::from_slice(&bytes[header..]).ok()? {
         serde_json::Value::Array(messages) => messages,
         one => vec![one],
     };
@@ -145,7 +154,8 @@ pub enum Heard {
     Ready,
     /// A source request of ours was answered.
     SourceAnswered { sequence: u64, ok: bool },
-    /// Who spoke, by their audio's source id: a history, the newest last.
+    /// Who spoke, by their audio's source id: a history, the newest first
+    /// (recorded: whoever starts talking moves to the front).
     Speakers(Vec<i64>),
 }
 
@@ -179,7 +189,14 @@ impl Channel {
     /// Takes in what the server sent.
     pub fn heard(&mut self, bytes: &[u8]) -> Vec<Heard> {
         let Some(frame) = decode(bytes) else {
-            log::debug!("meeting channel: a message in an unknown shape");
+            if log::log_enabled!(log::Level::Debug) {
+                let start: String = bytes.iter().take(48).map(|b| format!("{b:02x}")).collect();
+                log::debug!(
+                    "meeting channel: a message in an unknown shape, {} bytes: {start}…; as text: {}",
+                    bytes.len(),
+                    String::from_utf8_lossy(&bytes[..bytes.len().min(300)])
+                );
+            }
             return Vec::new();
         };
         let mut heard = Vec::new();
@@ -346,6 +363,30 @@ mod tests {
         );
         assert!(channel.heard(&estimate).is_empty());
         assert!(channel.heard(b"not a frame").is_empty());
+    }
+
+    #[test]
+    fn news_for_several_recipients_reads() {
+        // The server's speaker history to three of us at once: a 24-byte
+        // header naming three recipients (recorded shape).
+        let mut bytes = vec![
+            0x10, 0x17, 0x92, 0x2c, 0x1b, 0x00, 0xff, 0xff, 0xff, 0xfc, 0x03,
+        ];
+        bytes.extend_from_slice(&[
+            0x00, 0x98, 0x9b, 0x8e, 0x00, 0x98, 0x9e, 0xda, 0x00, 0x98, 0x9f, 0xab, 0x01,
+        ]);
+        bytes.extend_from_slice(br#"[{"history":[4035,10001704,3183],"type":"dsh"}]"#);
+        let frame = decode(&bytes).expect("reads");
+        assert_eq!(frame.from, SERVER);
+        assert_eq!(frame.to, 0x0098_9b8e);
+        let mut channel = Channel::default();
+        assert_eq!(
+            channel.heard(&bytes),
+            [Heard::Speakers(vec![4035, 10_001_704, 3183])]
+        );
+        // A length that does not match the recipients is not read.
+        bytes[1] = 0x0f;
+        assert!(decode(&bytes).is_none());
     }
 
     #[test]

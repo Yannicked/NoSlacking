@@ -413,7 +413,9 @@ fn roster(callee: &str, far: FarEnd) -> Roster {
 /// the interface knows people by, their names for any it does not), and
 /// you. The meeting mixes everyone's sound, so whoever it says spoke
 /// last (`speaker`, by MRI) is speaking while that sound is loud
-/// (`far.speaking`); you as `far.me_speaking` says.
+/// (`far.speaking`), unless muted since: the speaker is often only the
+/// one from before we joined, and a muted one cannot be the sound; you
+/// as `far.me_speaking` says.
 fn meeting_roster(people: &[Attendee], speaker: Option<&str>, far: FarEnd) -> Roster {
     let mut everyone: Vec<Person> = people
         .iter()
@@ -425,6 +427,7 @@ fn meeting_roster(people: &[Attendee], speaker: Option<&str>, far: FarEnd) -> Ro
             me: false,
             muted: attendee.muted,
             speaking: far.speaking
+                && !attendee.muted
                 && speaker.is_some_and(|s| s.eq_ignore_ascii_case(&attendee.mri)),
             name: attendee.name.clone(),
             waiting: attendee.waiting,
@@ -998,7 +1001,7 @@ impl<T: Fn(Listen)> Shown<'_, T> {
                 (self.tell)(Listen::Roster(self.roster()));
             }
             CallEvent::Speaker(mri) => {
-                self.speaker = Some(mri);
+                self.speaker = mri;
                 (self.tell)(Listen::Roster(self.roster()));
             }
             CallEvent::Ended { result, .. } => self.ended = Some(result),
@@ -1283,6 +1286,16 @@ mod tests {
         assert!(roster.people.iter().all(|p| !p.speaking));
         // No one named yet: no one.
         let roster = meeting_roster(&people, None, loud);
+        assert!(roster.people.iter().all(|p| !p.speaking));
+        // The last one named has muted since: someone else is the sound.
+        let people = [
+            attendee("8:orgid:ana"),
+            Attendee {
+                muted: true,
+                ..attendee("8:orgid:bo")
+            },
+        ];
+        let roster = meeting_roster(&people, Some("8:orgid:bo"), loud);
         assert!(roster.people.iter().all(|p| !p.speaking));
     }
 
