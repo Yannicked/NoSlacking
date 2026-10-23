@@ -145,14 +145,23 @@ struct Wanted {
 
 /// A call's controls: for the caller to keep, and for the call's task
 /// (hang-up and mute for the call, and what its devices should do).
+/// A call starts unmuted; a meeting (`muted`) muted, as a huddle does,
+/// so joining one is never heard before you choose to speak.
 fn controls(
     chosen: &crate::devices::Chosen,
+    muted: bool,
 ) -> (Running, mpsc::UnboundedReceiver<Control>, Wanted) {
     let (control, controls) = mpsc::unbounded_channel();
     let (devices, chosen) = watch::channel(chosen.clone());
-    let (muted, microphone) = watch::channel(true);
-    // Unmuted from the start: the microphone task opens it on this.
-    let _ = muted.send(false);
+    let (mute, microphone) = watch::channel(true);
+    if muted {
+        // The call mutes its sound and tells the meeting as soon as it
+        // takes its controls, as when you mute.
+        let _ = control.send(Control::Mute(true));
+    } else {
+        // Unmuted from the start: the microphone task opens it on this.
+        let _ = mute.send(false);
+    }
     // The camera starts off.
     #[cfg(feature = "huddle-camera")]
     let (camera_sender, camera) = watch::channel(false);
@@ -165,7 +174,7 @@ fn controls(
         devices,
         call_id: None,
         control,
-        muted,
+        muted: mute,
         #[cfg(feature = "huddle-camera")]
         camera: camera_sender,
         #[cfg(feature = "huddle-share")]
@@ -194,7 +203,7 @@ impl Caller {
         sink: Sink,
     ) {
         self.stop();
-        let (mut running, controls, wanted) = controls(&self.chosen);
+        let (mut running, controls, wanted) = controls(&self.chosen, false);
         running.team.clone_from(&team);
         tokio::spawn(run(
             client,
@@ -226,7 +235,7 @@ impl Caller {
         if let Some(old) = self.ringing.take() {
             let _ = old.decide.send(Decision::Decline);
         }
-        let (mut running, controls, wanted) = controls(&self.chosen);
+        let (mut running, controls, wanted) = controls(&self.chosen, false);
         running.team.clone_from(&team);
         let (decide, decisions) = oneshot::channel();
         let call_id = call.call_id.clone();
@@ -242,7 +251,7 @@ impl Caller {
     /// ending the last call first.
     pub fn join_meeting(&mut self, client: TeamsClient, team: String, join: Join, sink: Sink) {
         self.stop();
-        let (mut running, controls, wanted) = controls(&self.chosen);
+        let (mut running, controls, wanted) = controls(&self.chosen, true);
         running.team.clone_from(&team);
         tokio::spawn(run_meeting(client, team, join, controls, wanted, sink));
         self.running = Some(running);

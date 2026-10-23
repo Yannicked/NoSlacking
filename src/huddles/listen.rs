@@ -211,10 +211,10 @@ impl Listening {
         }
     }
 
-    /// Joining a Teams meeting in `team`: unmuted, as a call is.
+    /// Joining a Teams meeting in `team`: muted, as a huddle is (the
+    /// worker starts it so too).
     pub fn meeting(team: &str) -> Self {
         Self {
-            mic: crate::huddle_mic::Mic::Opening,
             meeting: true,
             ..Self::new(team, crate::meetings::MEETING_CHANNEL)
         }
