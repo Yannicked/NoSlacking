@@ -1547,6 +1547,24 @@ impl App {
                 .or_default()
                 .loading = true;
         }
+        let latest = self
+            .workspace_mut(&team)
+            .and_then(|w| w.threads.get(&(channel.clone(), ts)))
+            .and_then(|t| t.messages.last().map(|m| m.ts))
+            .or_else(|| {
+                self.views
+                    .team(&team)
+                    .and_then(|v| v.threads.value.as_ref())
+                    .and_then(|threads| {
+                        threads
+                            .iter()
+                            .find(|t| t.channel == channel && t.parent.ts == ts)
+                            .map(|t| *t.latest())
+                    })
+            });
+        if let Some(latest) = latest {
+            crate::views::mark_thread_read_at(self, &team, &channel, ts, latest);
+        }
         self.backend.send(Command::LoadThread { team, channel, ts });
     }
 
