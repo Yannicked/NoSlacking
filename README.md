@@ -18,6 +18,39 @@ One small window for all your workspaces. No Electron, no browser engine.
 
 </div>
 
+## Quick start
+
+Get up and running in three easy steps:
+
+### 1. Download & Install
+
+Download the latest version for your platform from the [Releases page](https://github.com/Yannicked/NoSlacking/releases):
+
+| Operating system | Package | How to install / run |
+|---|---|---|
+| **Debian, Ubuntu** | `.deb` | Double-click or `sudo apt install ./noslacking_*.deb` |
+| **Fedora, openSUSE** | `.rpm` | Double-click or `sudo dnf install ./noslacking_*.rpm` |
+| **Any Linux** | `.flatpak` | Run `flatpak install --user <file>.flatpak` |
+| **Any Linux (tarball)** | `.tar.gz` | Extract and run `./noslacking` |
+| **macOS** | `.zip` | Extract and move `NoSlacking.app` into `/Applications` |
+| **Windows** | `.zip` | Extract and run `noslacking.exe` |
+
+### 2. Sign in
+
+Open NoSlacking and pick your service:
+
+- **Slack (recommended)**: Click **Sign in with browser**. Log in to Slack in your browser as usual. The browser will pass your session straight back to NoSlacking.
+  *(If your browser doesn't automatically pass the link back, copy the `slack://...` link shown on the page and paste it into NoSlacking).*
+- **Microsoft Teams**: Click **Sign in with Microsoft Teams**, copy the one-time code shown, click **Open Microsoft Login**, paste the code, and sign in on Microsoft's page.
+
+### 3. Jump right in
+
+- **Jump anywhere**: Press <kbd>Ctrl</kbd>+<kbd>K</kbd> (or <kbd>Cmd</kbd>+<kbd>K</kbd> on macOS) to open the quick switcher. Type the name of any channel, direct message, or workspace to switch instantly.
+- **Shortcuts cheat sheet**: Press <kbd>Ctrl</kbd>+<kbd>/</kbd> (or <kbd>Cmd</kbd>+<kbd>/</kbd>) at any time to see every keyboard shortcut.
+- **Add another workspace**: Click the **+** button at the top of the workspace rail on the left.
+
+---
+
 ## Why NoSlacking
 
 - **Native and light.** Written in Rust on [egui](https://github.com/emilk/egui),
@@ -36,6 +69,8 @@ One small window for all your workspaces. No Electron, no browser engine.
   system's keyring, never in a file or the log.
 - **Yours to tweak.** Dark and light themes, your own palettes, a compact
   layout, and scripting hooks that run your programs on new messages.
+
+---
 
 ## Features
 
@@ -93,7 +128,7 @@ One small window for all your workspaces. No Electron, no browser engine.
   scheduled messages, your status and Do Not Disturb, custom emoji, and
   browsing or creating channels. Closing a chat hides it here only.
 - Add a Teams account (work, school or personal) from the sign-in screen;
-  see [Signing in](#microsoft-teams) and
+  see [Signing in details](#microsoft-teams-details) and
   [Use at your own risk](#use-at-your-own-risk) before using it at work.
 
 **Writing**
@@ -120,33 +155,20 @@ One small window for all your workspaces. No Electron, no browser engine.
 - Keyboard navigation, screen reader labels, and an English and Dutch
   interface.
 
-## Installing
+---
 
-Every [release](https://github.com/Yannicked/NoSlacking/releases) has:
-
-| System | Download |
-|---|---|
-| Debian, Ubuntu | `.deb` |
-| Fedora, openSUSE | `.rpm` |
-| Any Linux | `.flatpak` (install with `flatpak install --user <file>`) or `.tar.gz` |
-| macOS | `.zip` with the app |
-| Windows | `.zip` with the program |
-
-Then start NoSlacking and sign in.
-
-## Signing in
+## Signing in details
 
 ### Slack
 
-- **Sign in with your browser.** NoSlacking opens Slack's sign-in page in
+- **Sign in with your browser (default).** NoSlacking opens Slack's sign-in page in
   your browser. Sign in as usual (password, emailed code or SSO); when Slack
-  hands the sign-in back, the browser passes it to NoSlacking, which
-  registers itself for `slack://` links when you start this sign-in, and
-  only for it: once the link has come, you cancel, 15 minutes pass or you
-  quit, it gives them back to whatever had them before, such as the Slack
-  app. If your browser does not pass it on, paste the `slack://` link from
-  the page instead. Nothing needs to be registered with Slack.
-- **Your own Slack app (advanced).** Tucked away at the bottom of the
+  hands the sign-in back, the browser passes it to NoSlacking. NoSlacking
+  temporarily registers itself for `slack://` links during this sign-in:
+  once the link arrives, you cancel, 15 minutes pass or you quit, it restores
+  whatever handled them before. If your browser does not pass it on, paste the
+  `slack://` link from the page into NoSlacking.
+- **Your own Slack app (advanced).** Found at the bottom of the
   sign-in screen: create a free Slack app from the bundled manifest, paste
   its credentials, and sign in. This is the route Slack documents and
   supports, with live Socket Mode updates; a workspace admin may need to
@@ -168,7 +190,7 @@ cookies are stored only in your operating system's keyring (Secret Service on
 Linux, the Keychain on macOS, the Credential Manager on Windows), never in a
 file, and never written to the log.
 
-### Microsoft Teams
+### Microsoft Teams details
 
 On the sign-in screen (or **+** in the workspace rail), under **Sign in to
 Microsoft Teams**:
@@ -190,9 +212,30 @@ A personal account has chats but no teams or channels. Live messages come
 over Teams' own push connection, and the tokens are kept in the keyring,
 as Slack's are.
 
+---
+
+## Keyboard shortcuts
+
+NoSlacking is designed to be fully controllable with the keyboard. Here are the most essential shortcuts:
+
+| Action | Linux / Windows | macOS |
+|---|---|---|
+| **Jump to conversation / workspace** | <kbd>Ctrl</kbd>+<kbd>K</kbd> | <kbd>Cmd</kbd>+<kbd>K</kbd> |
+| **All keyboard shortcuts** | <kbd>Ctrl</kbd>+<kbd>/</kbd> | <kbd>Cmd</kbd>+<kbd>/</kbd> |
+| **New direct message** | <kbd>Ctrl</kbd>+<kbd>N</kbd> | <kbd>Cmd</kbd>+<kbd>N</kbd> |
+| **Search workspace** | <kbd>Ctrl</kbd>+<kbd>F</kbd> | <kbd>Cmd</kbd>+<kbd>F</kbd> |
+| **Open Settings** | <kbd>Ctrl</kbd>+<kbd>,</kbd> | <kbd>Cmd</kbd>+<kbd>,</kbd> |
+| **Close thread / overlay / window** | <kbd>Esc</kbd> | <kbd>Esc</kbd> |
+| **Select messages** | <kbd>Up</kbd> / <kbd>Down</kbd> (when composer is empty) | <kbd>Up</kbd> / <kbd>Down</kbd> |
+| **Reply in thread (selected message)** | <kbd>T</kbd> | <kbd>T</kbd> |
+| **Add reaction (selected message)** | <kbd>R</kbd> | <kbd>R</kbd> |
+| **Edit last message** | <kbd>Up</kbd> in empty composer | <kbd>Up</kbd> in empty composer |
+
+---
+
 ## Building from source
 
-```
+```sh
 cargo build --release
 cargo run --release
 ```
@@ -205,9 +248,11 @@ a small helper program, `noslacking-video`, that ships beside the app:
 works in software on macOS and Windows. To try the interface without a
 Slack account, run the demo:
 
-```
+```sh
 cargo run --features demo
 ```
+
+---
 
 ## Scripting hooks
 
@@ -269,11 +314,15 @@ per message.
 
 </details>
 
+---
+
 ## Files
 
 NoSlacking keeps settings and themes in your config directory, logs and read
 state in your state directory, and the image cache in your cache directory.
-Open them from **Settings → Files**.
+Open them anytime from **Settings → Files**.
+
+---
 
 ## Use at your own risk
 
@@ -310,6 +359,8 @@ Before you use it, know that:
 Use NoSlacking only with your own accounts, and use your own Slack app (the
 documented route) where your workspace requires it.
 
+---
+
 ## Thanks
 
 NoSlacking is built on [egui](https://github.com/emilk/egui) and the
@@ -324,6 +375,8 @@ NoSlacking owes its approach to two other unofficial clients:
   by catching Slack's hand-off.
 - [wee-slack](https://github.com/wee-slack/wee-slack), which has reused the
   browser session for years.
+
+---
 
 ## License
 
