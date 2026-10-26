@@ -2724,12 +2724,6 @@ msgstr "Hier meedoen aan de huddle: {names}"
 msgid "{name} is sharing their screen"
 msgstr "{name} deelt het scherm"
 
-msgid "Watch"
-msgstr "Bekijken"
-
-msgid "Stop watching"
-msgstr "Niet meer bekijken"
-
 msgid "The screen share ended"
 msgstr "Het delen van het scherm is gestopt"
 
@@ -2801,8 +2795,11 @@ msgstr[1] "{count} camera's aan"
 msgid "Video"
 msgstr "Video"
 
-msgid "Close video"
-msgstr "Video sluiten"
+msgid "Pop out"
+msgstr "Loskoppelen"
+
+msgid "Close call window"
+msgstr "Oproepvenster sluiten"
 
 msgid "Huddle video"
 msgstr "Video in de huddle"
