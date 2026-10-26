@@ -69,11 +69,9 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# The shared fastframe crates and the egui and winit forks they build on,
-# and opus-rs with FEC and concealment until a release has them (see
-# [patch.crates-io] in Cargo.toml). Nothing else may come from git.
+# The shared fastframe crates and the egui and winit forks they build on.
+# Nothing else may come from git.
 allow-git = [
-    "https://github.com/Yannicked/opus-rs",
     "https://github.com/crmne/fastframe",
     "https://github.com/crmne/egui",
     "https://github.com/crmne/winit",
