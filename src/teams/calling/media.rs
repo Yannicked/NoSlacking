@@ -47,6 +47,7 @@ use str0m::crypto::Fingerprint;
 use str0m::format::{Codec, FormatParams};
 use str0m::media::{Frequency, MediaKind, Mid, Pt};
 use str0m::net::Protocol;
+use str0m::rtp::Extension;
 use str0m::{
     Candidate as IceCandidate, CandidateKind as IceKind, Event as RtcEvent, IceConnectionState,
     IceCreds, Rtc, RtcConfig,
@@ -951,6 +952,11 @@ fn new_rtc(opus_pt: u8, video: &[(u8, Option<u8>)], controlling: bool, now: Inst
     if !video.is_empty() {
         config = config.enable_bwe(Some(str0m::bwe::Bitrate::kbps(BWE_START_KBPS)));
     }
+    // A meeting's media server, offering after the lobby, numbers
+    // transport-cc 5 where we number it 3 (recorded); str0m's map is set
+    // here, before its SDP comes, so the packets it sends us are read at
+    // either. Ours still go out at 3, the first.
+    config = config.set_extension(5, Extension::TransportSequenceNumber);
     config.codec_config().add_config(
         Pt::from(opus_pt),
         None,
@@ -989,6 +995,11 @@ fn new_rtc(opus_pt: u8, video: &[(u8, Option<u8>)], controlling: bool, now: Inst
     }
     let mut rtc = config.build(now);
     rtc.direct_api().set_ice_controlling(controlling);
+    // What arrives is reported back (transport-cc feedback), as the
+    // offer's `rtcp-fb:* transport-cc` promises: without it the media
+    // server cannot tell what our link takes and sends us video slowly.
+    // str0m's direct API leaves it off.
+    rtc.direct_api().enable_twcc_feedback();
     rtc
 }
 
@@ -2301,6 +2312,7 @@ mod tests {
                 },
             ],
             video_streams: Vec::new(),
+            transport_cc: None,
         }
     }
 
@@ -2590,6 +2602,7 @@ mod tests {
                 share_video: None,
                 lines: vec![audio_line(Direction::SendRecv)],
                 video_streams: Vec::new(),
+                transport_cc: None,
             }
         }
 

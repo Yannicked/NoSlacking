@@ -1415,6 +1415,9 @@ msgstr "Vernieuwen"
 msgid "Replied to your thread in {place}"
 msgstr "Gereageerd op je thread in {place}"
 
+msgid "Reacted to your message in {place}"
+msgstr "Gereageerd op je bericht in {place}"
+
 msgid "a conversation"
 msgstr "een gesprek"
 
@@ -1437,6 +1440,11 @@ msgstr[1] "{count} gesprekken met ongelezen berichten"
 
 msgid "Mark all as read"
 msgstr "Alles als gelezen markeren"
+
+msgid "{count} unread notification"
+msgid_plural "{count} unread notifications"
+msgstr[0] "{count} ongelezen melding"
+msgstr[1] "{count} ongelezen meldingen"
 
 msgid "Could not load the messages: {error}"
 msgstr "De berichten konden niet worden geladen: {error}"
@@ -2716,12 +2724,6 @@ msgstr "Hier meedoen aan de huddle: {names}"
 msgid "{name} is sharing their screen"
 msgstr "{name} deelt het scherm"
 
-msgid "Watch"
-msgstr "Bekijken"
-
-msgid "Stop watching"
-msgstr "Niet meer bekijken"
-
 msgid "The screen share ended"
 msgstr "Het delen van het scherm is gestopt"
 
@@ -2793,8 +2795,11 @@ msgstr[1] "{count} camera's aan"
 msgid "Video"
 msgstr "Video"
 
-msgid "Close video"
-msgstr "Video sluiten"
+msgid "Pop out"
+msgstr "Loskoppelen"
+
+msgid "Close call window"
+msgstr "Oproepvenster sluiten"
 
 msgid "Huddle video"
 msgstr "Video in de huddle"

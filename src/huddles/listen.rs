@@ -5,10 +5,10 @@
 //! and on quit; when the huddle ends Chime closes it and the bar says so.
 //!
 //! With `huddle-video` the bar also says who shares their screen and
-//! offers Watch, which opens the call window on that share (see
-//! `ui::call_window`), and how many have a camera on, with Video, which
-//! opens it on their tiles. Only what the window shows is received;
-//! closing it or leaving stops all of it.
+//! how many have a camera on, and offers Pop out, which opens the call
+//! window on the cameras and the first share (see `ui::call_window`).
+//! Only what the window shows is received; closing it or leaving stops
+//! all of it.
 
 use std::time::{Duration, Instant};
 
@@ -211,10 +211,10 @@ impl Listening {
         }
     }
 
-    /// Joining a Teams meeting in `team`: unmuted, as a call is.
+    /// Joining a Teams meeting in `team`: muted, as a huddle is (the
+    /// worker starts it so too).
     pub fn meeting(team: &str) -> Self {
         Self {
-            mic: crate::huddle_mic::Mic::Opening,
             meeting: true,
             ..Self::new(team, crate::meetings::MEETING_CHANNEL)
         }

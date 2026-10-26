@@ -127,8 +127,6 @@ str0m = { version = "0.24.1", default-features = false, features = ["openssl"] }
 # The certificate Chime's media server shows, read for the log only
 # (str0m-openssl's own OpenSSL, so no crate is added).
 openssl = "0.10.78"
-# Opus in pure Rust, without unsafe code or a C library to find.
-opus-decoder = "0.1.1"
 # The TURN client's long-term credential: HMAC-SHA1 (sha1 is above) keyed
 # with MD5.
 hmac = "0.13"
@@ -141,14 +139,16 @@ rustls-native-certs = "0.8"
 tracing = { version = "0.1.44", default-features = false, features = ["log", "std"] }
 
 # Talking in a huddle: the microphone through cpal (rodio's), WebRTC's
-# audio processing and an Opus encoder, all pure Rust.
-# opus-rs: libopus 1.6 ported (BSD-3-Clause, no dependencies); its unsafe
-# is SIMD and unchecked indexing. sonora: WebRTC's AEC3, noise
+# audio processing and Opus, all pure Rust.
+# opus-rs: libopus 1.6 ported (BSD-3-Clause, no dependencies), encoding
+# what we send and decoding what we hear (0.1.39 plays a mono packet in a
+# stereo decoder; 0.1.40 decodes in-band FEC and conceals loss like
+# libopus); its unsafe is SIMD and unchecked indexing. sonora: WebRTC's AEC3, noise
 # suppression, AGC2 and high-pass filter, M145, ported (BSD-3-Clause);
 # its unsafe is SIMD behind runtime CPU detection. sonora-agc2's RNN
 # voice detector decides what DTX leaves out; sonora-common-audio's sinc
 # resampler brings a 44.1 kHz microphone to 48. Both come with sonora.
-opus-rs = "0.1.34"
+opus-rs = "0.1.40"
 sonora = "0.2.0"
 sonora-agc2 = "0.2.0"
 sonora-common-audio = "0.2.0"
@@ -369,11 +369,6 @@ opt-level = 2
 debug = false
 
 [patch.crates-io]
-# opus-decoder 0.1.1 with two fixes (vendor/opus-decoder/VENDORED.md): a
-# hybrid packet naming more redundancy bytes than it holds panicked (in
-# release too, which aborts the app), and frames with 16 short blocks
-# overflowed a shift in debug builds. Drop once upstream has both.
-opus-decoder = { path = "vendor/opus-decoder" }
 # crmne/egui apps-0.36.2, shared with ZapFast and Spotifast: egui 0.36.2 with
 # bidi shaping, egui's busy-loop fix and Wayland frame pacing. Every egui
 # crate comes from the same revision so they share one emath and epaint.

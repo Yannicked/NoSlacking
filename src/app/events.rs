@@ -313,6 +313,14 @@ impl App {
                     let arrived = workspace.thread_arrived(&channel, ts, messages);
                     self.fetch_arrived(&team, arrived);
                 }
+                if self.thread.as_ref() == Some(&(channel.clone(), ts))
+                    && let Some(latest) = self
+                        .workspace_mut(&team)
+                        .and_then(|w| w.threads.get(&(channel.clone(), ts)))
+                        .and_then(|t| t.messages.last().map(|m| m.ts))
+                {
+                    crate::views::mark_thread_read_at(self, &team, &channel, ts, latest);
+                }
             }
             Event::Message {
                 team,
@@ -343,6 +351,7 @@ impl App {
                 if let Some(workspace) = self.workspace_mut(&team) {
                     workspace.reaction_changed(&channel, &ts, &name, &user, added);
                 }
+                crate::views::reaction_arrived(self, &team, &channel, &ts, &user, added);
             }
             Event::Sent {
                 team,

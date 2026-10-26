@@ -9,17 +9,15 @@
 //! loss. `opus-rs` has no DTX of its own; [`super::uplink::Dtx`] leaves
 //! quiet frames out instead.
 //!
-//! In-band FEC is off, where a browser has it on: with it, `opus-rs`
-//! 0.1.34's VOIP packets at 48 kHz decode wrong whenever the sound is
-//! voiced (a tone, a vowel), up to five times the energy put in, the same
-//! in `opus-decoder` and in `opus-rs`'s own decoder, so the encoder's
-//! low-bitrate copies are at fault. Noise came through; speech would not.
-//! `encoded_speech_decodes_back_with_both_decoders` would catch it coming
-//! back. Losses are concealed by the far end's decoder instead.
+//! In-band FEC is on, as a browser has it: each packet carries a
+//! low-bitrate copy of the one before, which the far end's decoder (libopus
+//! in Chime and Teams) plays when that one is lost. `opus-rs` before 0.1.36
+//! got the copies wrong, so voiced sound decoded at up to five times the
+//! energy put in; `encoded_speech_decodes_back` would catch that coming
+//! back.
 //!
-//! Playing stays with `opus-decoder` ([`super::speaker`]): `opus-rs`'s
-//! decoder conceals a lost frame, but it cannot decode the FEC copy a
-//! packet carries of the one before, which `opus-decoder` can.
+//! `opus-rs` decodes what we hear too ([`super::speaker`]), and plays the
+//! far end's FEC copies the same way.
 
 use super::jitter::CLOCK;
 use super::uplink::TWENTY_MS;
@@ -51,14 +49,14 @@ impl std::fmt::Debug for OpusRs {
 }
 
 impl OpusRs {
-    /// The speech encoder: mono, VOIP, [`BITRATE`], no FEC (see above).
+    /// The speech encoder: mono, VOIP, [`BITRATE`], in-band FEC (see above).
     pub fn speech() -> Result<Self, String> {
         let rate = i32::try_from(CLOCK).map_err(|e| e.to_string())?;
         let mut inner = opus_rs::OpusEncoder::new(rate, 1, opus_rs::Application::Voip)
             .map_err(|e| format!("no Opus encoder: {e}"))?;
         inner.bitrate_bps = BITRATE;
         inner.use_cbr = false;
-        inner.use_inband_fec = false;
+        inner.use_inband_fec = true;
         inner.packet_loss_perc = EXPECTED_LOSS;
         Ok(Self {
             inner,
@@ -117,6 +115,25 @@ mod tests {
     }
 
     #[test]
+    fn packets_carry_a_copy_of_the_one_before() {
+        let (_, with) = encoded(440.0);
+        let mut encoder = OpusRs::speech().expect("an encoder");
+        encoder.inner.use_inband_fec = false;
+        let mut tone = Tone::new(440.0, 0.3);
+        let mut without = 0;
+        for _ in 0..50 {
+            let mut frame = vec![0.0; TWENTY_MS];
+            tone.fill(&mut frame);
+            without += encoder.encode(&frame).expect("encoded").len();
+        }
+        let with: usize = with.iter().map(Vec::len).sum();
+        assert!(
+            with > without + 50 * 3,
+            "{with} bytes with FEC, {without} without"
+        );
+    }
+
+    #[test]
     fn packets_are_twenty_ms_and_near_the_bitrate() {
         let (_, packets) = encoded(440.0);
         assert!(packets.iter().all(|p| opus_samples(p) == Some(960)));
@@ -132,32 +149,23 @@ mod tests {
         );
     }
 
-    /// What `opus-rs` encodes, the decoder that plays huddles
-    /// (`opus-decoder`) and `opus-rs`'s own both decode to the tone.
+    /// What `opus-rs` encodes decodes back to the tone.
     #[test]
-    fn encoded_speech_decodes_back_with_both_decoders() {
+    fn encoded_speech_decodes_back() {
         let (pcm, packets) = encoded(440.0);
-
-        let mut ours = opus_decoder::OpusDecoder::new(CLOCK, 1).expect("a decoder");
-        let mut theirs = opus_rs::OpusDecoder::new(48_000, 1).expect("a decoder");
-        let mut by_ours = Vec::new();
-        let mut by_theirs = Vec::new();
+        let mut decoder = opus_rs::OpusDecoder::new(48_000, 1).expect("a decoder");
+        let mut decoded = Vec::new();
         for packet in &packets {
-            let mut out = vec![0.0; ours.max_frame_size_per_channel()];
-            let n = ours.decode_float(packet, &mut out, false).expect("decoded");
-            by_ours.extend_from_slice(&out[..n]);
             let mut out = vec![0.0; TWENTY_MS];
-            let n = theirs.decode(packet, TWENTY_MS, &mut out).expect("decoded");
-            by_theirs.extend_from_slice(&out[..n]);
+            let n = decoder
+                .decode(packet, TWENTY_MS, &mut out)
+                .expect("decoded");
+            decoded.extend_from_slice(&out[..n]);
         }
-        assert_eq!(by_ours.len(), pcm.len());
-        assert_eq!(by_theirs.len(), pcm.len());
+        assert_eq!(decoded.len(), pcm.len());
         // Past the first 100 ms, where the encoder settles; the codec
         // delays by a few milliseconds.
         let settled = &pcm[4800..pcm.len() - 960];
-        assert!(residual(settled, &by_ours[4800..], 960) < 0.1);
-        assert!(residual(settled, &by_theirs[4800..], 960) < 0.1);
-        // Both decoders agree with each other too.
-        assert!(residual(&by_ours[4800..40_000], &by_theirs[4800..], 64) < 0.05);
+        assert!(residual(settled, &decoded[4800..], 960) < 0.1);
     }
 }
