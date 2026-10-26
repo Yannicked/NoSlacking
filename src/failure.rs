@@ -381,6 +381,7 @@ impl Failure {
                     t("Two people are already sharing their screen, the most a huddle takes")
                 }
                 HuddleTrouble::ShareRefused => t("the huddle's server did not take your share"),
+                HuddleTrouble::ShareNotTaken => t("the call did not take your share"),
                 HuddleTrouble::ShareLost => t("the share's connection was lost"),
                 HuddleTrouble::NoVideoHelper => t(
                     "screen sharing needs NoSlacking's video helper (noslacking-video), which is missing or keeps failing",
@@ -446,6 +447,9 @@ pub enum HuddleTrouble {
     /// The huddle's server did not take the share (its join or its
     /// connection failed).
     ShareRefused,
+    /// A Teams call's far end did not take the share line our offer
+    /// added: nothing reaches them.
+    ShareNotTaken,
     /// The share's own connection to the huddle broke.
     ShareLost,
     /// The video helper, which captures and encodes a shared screen, is
@@ -730,6 +734,7 @@ mod tests {
             Failure::Huddle(HuddleTrouble::ShareCapture),
             Failure::Huddle(HuddleTrouble::ShareLimit),
             Failure::Huddle(HuddleTrouble::ShareRefused),
+            Failure::Huddle(HuddleTrouble::ShareNotTaken),
             Failure::Huddle(HuddleTrouble::ShareLost),
             Failure::Huddle(HuddleTrouble::NoVideoHelper),
             Failure::Huddle(HuddleTrouble::VideoHelperLost),

@@ -472,9 +472,10 @@ struct Devices {
     passing: tokio::task::JoinHandle<()>,
     #[cfg(feature = "huddle-camera")]
     camera: CameraTask,
-    /// The screen share's task, and what ends it.
+    /// The screen share's task, what ends it, and where the call's
+    /// refusal of it goes.
     #[cfg(feature = "huddle-share")]
-    share: (tokio::task::JoinHandle<()>, oneshot::Sender<()>),
+    share: ShareTask,
     /// How loud the far end plays.
     meter: crate::huddle_audio::speaker::Feed,
     /// Whether you spoke since last asked.
@@ -490,6 +491,26 @@ struct CameraTask {
     /// Held open: a call is never refused video, as a huddle can be, and
     /// the task stops when this closes.
     _refusals: mpsc::Sender<()>,
+}
+
+/// What the share's task sends over: the encoded frames, bitrate and
+/// keyframe control from the call, the active-share flag, and renegotiation
+/// controls to the call.
+#[cfg(feature = "huddle-share")]
+struct ShareWiring {
+    frames: mpsc::Sender<crate::huddle_audio::camera_send::VideoFrame>,
+    control: crate::huddle_audio::camera_send::SendControl,
+    on: watch::Sender<bool>,
+    call: mpsc::UnboundedSender<Control>,
+}
+
+/// The screen share's task, what ends it, and where the call's refusal
+/// of it goes.
+#[cfg(feature = "huddle-share")]
+struct ShareTask {
+    task: tokio::task::JoinHandle<()>,
+    close: oneshot::Sender<()>,
+    refuse: mpsc::UnboundedSender<()>,
 }
 
 impl Devices {
@@ -631,7 +652,7 @@ impl Devices {
         // The share first: its capture ends with it.
         #[cfg(feature = "huddle-share")]
         {
-            let (task, close) = self.share;
+            let ShareTask { task, close, .. } = self.share;
             let _ = close.send(());
             let _ = task.await;
         }
@@ -723,10 +744,7 @@ fn share_task(
     requests: mpsc::UnboundedReceiver<crate::huddle_share::ShareRequest>,
     call: mpsc::UnboundedSender<Control>,
     sink: &Sink,
-) -> (
-    (tokio::task::JoinHandle<()>, oneshot::Sender<()>),
-    crate::teams::calling::video::CameraFeed,
-) {
+) -> (ShareTask, crate::teams::calling::video::CameraFeed) {
     use crate::huddle_audio::camera_send::{Limits, QUEUE, SendControl};
 
     let (frames, frames_in) = mpsc::channel(QUEUE);
@@ -743,38 +761,50 @@ fn share_task(
         });
     };
     let (close, done) = oneshot::channel();
-    let task = tokio::spawn(share(
-        requests,
-        done,
+    let (refuse, refusals) = mpsc::unbounded_channel();
+    let wiring = ShareWiring {
         frames,
-        control.clone(),
+        control: control.clone(),
         on,
         call,
-        tell,
-    ));
+    };
+    let task = tokio::spawn(share(requests, done, refusals, wiring, tell));
     let feed = crate::teams::calling::video::CameraFeed {
         frames: frames_in,
         on: on_rx,
         control,
     };
-    ((task, close), feed)
+    (
+        ShareTask {
+            task,
+            close,
+            refuse,
+        },
+        feed,
+    )
 }
 
 /// The screen share of a call, from its first request to the call's end
-/// (`done`).
+/// (`done`); stopped as failed when the call says the far end did not
+/// take it (`refusals`).
 #[cfg(feature = "huddle-share")]
 async fn share(
     mut requests: mpsc::UnboundedReceiver<crate::huddle_share::ShareRequest>,
     mut done: oneshot::Receiver<()>,
-    frames: mpsc::Sender<crate::huddle_audio::camera_send::VideoFrame>,
-    control: crate::huddle_audio::camera_send::SendControl,
-    on: watch::Sender<bool>,
-    call: mpsc::UnboundedSender<Control>,
+    mut refusals: mpsc::UnboundedReceiver<()>,
+    wiring: ShareWiring,
     tell: impl Fn(crate::huddle_share::ShareNews),
 ) {
     use super::listen::share::{Begin, Step, begin};
     use crate::huddle_audio::camera_send::{Encoding, Ending};
     use crate::huddle_share::{ShareNews, ShareRequest};
+
+    let ShareWiring {
+        frames,
+        control,
+        on,
+        call,
+    } = wiring;
 
     let mut encoding: Option<Encoding> = None;
     let mut ended: Option<watch::Receiver<Option<Ending>>> = None;
@@ -791,6 +821,17 @@ async fn share(
     loop {
         let request = tokio::select! {
             _ = &mut done => break,
+            Some(()) = refusals.recv() => {
+                if encoding.is_none() {
+                    continue;
+                }
+                let running = stop(&mut encoding, &mut ended);
+                Encoding::stop(running).await;
+                tell(ShareNews::Failed(crate::failure::Failure::Huddle(
+                    crate::failure::HuddleTrouble::ShareNotTaken,
+                )));
+                continue;
+            }
             request = requests.recv() => match request {
                 Some(request) => request,
                 None => break,
@@ -996,6 +1037,8 @@ impl<T: Fn(Listen)> Shown<'_, T> {
             CallEvent::FarEndMuted(muted) => self.change(|far| far.muted = muted),
             CallEvent::FarEndCamera { line, on } => self.far_video(line, on),
             CallEvent::FarEndShare(on) => self.far_share(on),
+            // The share's task hears of it from `follow`.
+            CallEvent::ShareRefused => {}
             // Only an incoming call's ringing says this, and that is over.
             CallEvent::AnsweredElsewhere => {}
             CallEvent::Lobby => (self.tell)(Listen::Lobby),
@@ -1043,7 +1086,13 @@ async fn follow(
     loop {
         tokio::select! {
             () = &mut call => break,
-            Some(event) = events.recv() => shown.heard(event),
+            Some(event) = events.recv() => {
+                #[cfg(feature = "huddle-share")]
+                if event == CallEvent::ShareRefused {
+                    let _ = devices.share.refuse.send(());
+                }
+                shown.heard(event);
+            }
             _ = looks.tick() => {
                 let now = Instant::now();
                 if let Some(speaking) = speech.heard(devices.meter.take_loudness() >= SPEECH_RMS, now) {

@@ -21,7 +21,7 @@ use super::types::{
     CpconvAnswer, IncomingInvitation, IncomingNotification, MediaContent, MediaNegotiation,
     Participant, Push, RosterUpdate, VideoLimit,
 };
-use super::{LocalMedia, RemoteMedia, sdp};
+use super::{Direction, LocalMedia, RemoteMedia, sdp};
 use crate::failure::Failure;
 use crate::meetings::Meeting;
 use crate::teams::client::TeamsClient;
@@ -111,6 +111,9 @@ pub enum CallEvent {
     FarEndCamera { line: usize, on: bool },
     /// The far end's screen share started (`true`) or stopped showing.
     FarEndShare(bool),
+    /// The far end answered our offer to share without the share line:
+    /// nothing we share reaches them, so the share is to stop.
+    ShareRefused,
     /// A meeting keeps you in its lobby until someone lets you in.
     Lobby,
     /// Let in from the lobby: the call is joined, and [`Self::Live`]
@@ -1141,22 +1144,34 @@ impl Call {
         match push {
             Push::MediaAnswer(answer) => {
                 log::info!("Teams call: the far end answered the offer");
-                if let Some(remote) = apply(session, &answer.media_content.blob) {
+                let answered = apply(session, &answer.media_content.blob);
+                let shares = answered.as_ref().is_some_and(takes_share);
+                if let Some(remote) = answered {
                     self.last_remote = Some(remote);
                 }
                 // The answer to a renegotiation of ours: acknowledged, and
                 // the next one sent if the wish changed meanwhile.
                 if let Some(offered) = self.share.offered.take() {
-                    self.share.agreed = offered;
                     if let Some(url) = &answer.links.media_acknowledgement
                         && let Err(error) = self.api.acknowledge_answer(url).await
                     {
                         log::info!("Teams call: answer not acknowledged: {error:?}");
                     }
-                    log::info!(
-                        "Teams call: our screen share is {}",
-                        if offered { "on" } else { "off" }
-                    );
+                    let taken = !offered || shares;
+                    if taken {
+                        self.share.agreed = offered;
+                        log::info!(
+                            "Teams call: our screen share is {}",
+                            if offered { "on" } else { "off" }
+                        );
+                    } else {
+                        // Not asked again: the far end would answer the
+                        // same, and the share's task stops it.
+                        log::warn!("Teams call: the far end's answer has no share line for us");
+                        self.share.agreed = false;
+                        self.share.wanted = false;
+                        tell(CallEvent::ShareRefused);
+                    }
                     self.offer_share(local).await;
                 }
             }
@@ -2054,6 +2069,14 @@ fn apply(session: &MediaSession, blob: &str) -> Option<RemoteMedia> {
     Some(remote)
 }
 
+/// Whether the far end's answer `remote` takes our screen share: its
+/// share line open and receiving.
+fn takes_share(remote: &RemoteMedia) -> bool {
+    remote.share().is_some_and(|line| {
+        line.port != 0 && matches!(line.direction, Direction::RecvOnly | Direction::SendRecv)
+    })
+}
+
 /// Whether a ringing call ended because it was picked up elsewhere:
 /// another device says so in `acceptedElsewhereBy`; a second delivery of
 /// the call to this same connection (it is registered for chat and for
@@ -2322,5 +2345,30 @@ mod tests {
         };
         assert_eq!(unknown.camera().max_fs, 3600);
         assert_eq!(unknown.share().max_fs, 920);
+    }
+
+    #[test]
+    fn takes_share_checks_for_an_open_receiving_share_line() {
+        use super::super::{Line, LineKind};
+        let empty = RemoteMedia::default();
+        assert!(!takes_share(&empty));
+
+        let make_remote = |direction, port| RemoteMedia {
+            lines: vec![Line {
+                mid: "2".into(),
+                kind: LineKind::Video,
+                label: Some("applicationsharing-video".into()),
+                port,
+                direction,
+                ssrc_range: None,
+            }],
+            ..RemoteMedia::default()
+        };
+
+        assert!(takes_share(&make_remote(Direction::RecvOnly, 3478)));
+        assert!(takes_share(&make_remote(Direction::SendRecv, 3478)));
+        assert!(!takes_share(&make_remote(Direction::SendOnly, 3478)));
+        assert!(!takes_share(&make_remote(Direction::Inactive, 3478)));
+        assert!(!takes_share(&make_remote(Direction::RecvOnly, 0)));
     }
 }
