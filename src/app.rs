@@ -692,6 +692,11 @@ impl App {
         self.workspaces.get_mut(index)
     }
 
+    /// The workspace signed in as `team`, if any.
+    pub fn workspace(&self, team: &str) -> Option<&WorkspaceState> {
+        self.workspaces.iter().find(|w| w.info.team_id == team)
+    }
+
     fn workspace_mut(&mut self, team: &str) -> Option<&mut WorkspaceState> {
         self.workspaces.iter_mut().find(|w| w.info.team_id == team)
     }

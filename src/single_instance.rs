@@ -133,6 +133,7 @@ const MAX_SERVING: usize = 16;
 struct Slot(Arc<AtomicUsize>);
 
 impl Slot {
+    #[allow(deprecated)]
     fn take(count: &Arc<AtomicUsize>) -> Option<Self> {
         count
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {

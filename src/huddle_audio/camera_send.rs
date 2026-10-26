@@ -246,6 +246,7 @@ impl SendControl {
     /// The RTP time of a picture taken at `at`: 90 kHz from when these
     /// controls were made, and each a tick later than the last at least,
     /// should two be stamped alike.
+    #[allow(deprecated)]
     pub fn rtp_time(&self, at: Instant) -> u64 {
         let time = rtp_time(self.shared.epoch, at);
         let previous = self

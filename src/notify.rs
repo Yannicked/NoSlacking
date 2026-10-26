@@ -346,6 +346,7 @@ mod platform {
 
     impl Waiting {
         /// A place among the waiting notifications, if one is free.
+        #[allow(deprecated)]
         fn take(count: &Arc<AtomicUsize>) -> Option<Self> {
             count
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {

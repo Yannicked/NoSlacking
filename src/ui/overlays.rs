@@ -599,9 +599,14 @@ fn picker(app: &mut App, ctx: &egui::Context) {
     // What matches the query, kept until the query or the custom emoji
     // change: filtering and sorting about 1,900 emoji on every frame was
     // most of the picker's cost.
-    let found_id = egui::Id::new("emoji-picker-found");
+    let found_id = egui::Id::new(("emoji-picker-found", &workspace.info.team_id));
     let custom_count = workspace.emoji.custom_names().count();
-    let recent = &app.settings.recent_emoji;
+    let empty = Vec::new();
+    let recent = app
+        .settings
+        .recent_emoji
+        .get(&workspace.info.team_id)
+        .unwrap_or(&empty);
     let mut tone = app.settings.skin_tone;
     let found = ctx
         .data(|d| d.get_temp::<std::sync::Arc<Found>>(found_id))
@@ -1301,5 +1306,15 @@ mod tests {
         assert!(matches!(found.groups[0].cells[1], Cell::Standard(_)));
         let searched = Found::new(&w, "taco", &recent);
         assert!(searched.groups.iter().all(|g| g.label != "Recently used"));
+    }
+
+    #[test]
+    fn custom_emoji_from_another_workspace_do_not_show_in_recents() {
+        let w = workspace();
+        let other_recents = ["alien_blob".to_owned(), "+1".to_owned()];
+        let found = Found::new(&w, "", &other_recents);
+        assert_eq!(found.groups[0].label, "Recently used");
+        assert_eq!(found.groups[0].cells.len(), 1);
+        assert!(matches!(found.groups[0].cells[0], Cell::Standard(_)));
     }
 }
