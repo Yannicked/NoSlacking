@@ -608,6 +608,29 @@ fn activity(
         }
         return;
     }
+    let unread_count = data.unread_activity();
+    if unread_count > 0 {
+        egui::Frame::new()
+            .inner_margin(Margin::symmetric(20, 8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(tn(
+                            "{count} unread notification",
+                            "{count} unread notifications",
+                            crate::i18n::count(unread_count),
+                        ))
+                        .font(theme::regular(13.0))
+                        .color(palette.secondary),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::secondary_button(ui, palette, &t("Mark all as read")).clicked() {
+                            actions.push(Action::Views(Views::MarkAllActivityRead));
+                        }
+                    });
+                });
+            });
+    }
     let spec = |a: &&Activity| (key((&a.channel, a.message.ts)), card_guess(&a.message));
     list(ui, "activity", &items, spec, |ui, index| {
         let item = items[index];
@@ -620,10 +643,25 @@ fn activity(
                 message: &item.message,
                 above: Some(&above),
                 unread: item.unread,
-                open: jump(&item.channel, &item.message),
+                open: Action::Views(Views::OpenActivity {
+                    channel: item.channel.clone(),
+                    ts: item.message.ts,
+                    thread: item.message.extra.thread_ts,
+                }),
             },
             actions,
-            |_, _| {},
+            |ui, actions| {
+                if item.unread
+                    && theme::icon_button(ui, palette, Icon::Check, 14.0, &t("Mark as read"))
+                        .clicked()
+                {
+                    actions.push(Action::Views(Views::MarkActivityRead {
+                        channel: item.channel.clone(),
+                        ts: item.message.ts,
+                        thread: item.message.extra.thread_ts,
+                    }));
+                }
+            },
         );
     });
 }

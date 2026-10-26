@@ -84,6 +84,20 @@ pub enum Action {
     MarkAllRead,
     /// Opens a thread of the threads list beside it, and marks it read.
     OpenThread { channel: String, ts: Ts },
+    /// Opens an activity item, marks it read with Slack's API, and jumps to it.
+    OpenActivity {
+        channel: String,
+        ts: Ts,
+        thread: Option<Ts>,
+    },
+    /// Marks an activity item read with Slack's internal API.
+    MarkActivityRead {
+        channel: String,
+        ts: Ts,
+        thread: Option<Ts>,
+    },
+    /// Marks all unread activity items read with Slack's internal API.
+    MarkAllActivityRead,
     /// Saves a message for later, or with `save` false takes it off the
     /// list.
     Save { channel: String, ts: Ts, save: bool },
@@ -474,6 +488,8 @@ pub enum Reason {
     Everyone,
     /// It answers a thread you started or replied in.
     Reply,
+    /// It received a reaction.
+    Reaction,
 }
 
 impl Reason {
@@ -485,6 +501,7 @@ impl Reason {
             Self::Mention => tf("Mentioned you in {place}", &place),
             Self::Everyone => tf("Mentioned everyone in {place}", &place),
             Self::Reply => tf("Replied to your thread in {place}", &place),
+            Self::Reaction => tf("Reacted to your message in {place}", &place),
         }
     }
 }
@@ -635,6 +652,61 @@ impl TeamViews {
             .filter(|t| t.unread > 0)
             .count()
     }
+
+    /// Marks activity items read for `channel` and message `ts` (or thread `thread_ts`).
+    pub fn mark_activity_read(&mut self, channel: &str, ts: &Ts, thread_ts: Option<&Ts>) {
+        let matches = |a: &Activity| {
+            if a.channel != channel {
+                return false;
+            }
+            if a.message.ts == *ts {
+                return true;
+            }
+            if let Some(thread) = thread_ts
+                && a.message.thread_root() == thread
+            {
+                return true;
+            }
+            false
+        };
+        if let Some(activity) = self.activity.value.as_mut() {
+            for item in activity.iter_mut() {
+                if matches(item) {
+                    item.unread = false;
+                }
+            }
+        }
+        for item in &mut self.live {
+            if matches(item) {
+                item.unread = false;
+            }
+        }
+    }
+
+    /// Marks every activity item as read.
+    pub fn mark_all_activity_read(&mut self) {
+        if let Some(activity) = self.activity.value.as_mut() {
+            for item in activity.iter_mut() {
+                item.unread = false;
+            }
+        }
+        for item in &mut self.live {
+            item.unread = false;
+        }
+    }
+
+    /// Marks a thread as read, clearing its unread count and any associated
+    /// activity items.
+    pub fn mark_thread_read(&mut self, channel: &str, thread_ts: &Ts) {
+        if let Some(threads) = self.threads.value.as_mut()
+            && let Some(thread) = threads
+                .iter_mut()
+                .find(|t| t.channel == channel && t.parent.ts == *thread_ts)
+        {
+            thread.unread = 0;
+        }
+        self.mark_activity_read(channel, thread_ts, Some(thread_ts));
+    }
 }
 
 /// `fetched` and `live` together, each message once (the fetched copy
@@ -681,7 +753,7 @@ pub fn live_reason(workspace: &WorkspaceState, channel: &str, message: &Message)
         .as_ref()
         .filter(|_| message.is_reply())?;
     let mine = |m: &Message| m.user.as_deref() == Some(me);
-    let started = workspace.find_message(channel, parent).is_some_and(&mine);
+    let started = workspace.find_message(channel, parent).is_some_and(mine);
     let replied = workspace
         .threads
         .get(&(channel.to_owned(), *parent))
@@ -793,6 +865,47 @@ pub fn arrived(app: &mut App, team: &str, channel: &str, message: &Message) {
         reason,
         channel: channel.to_owned(),
         message: message.clone(),
+        unread: true,
+    });
+    if views.live.len() > LIVE_LIMIT {
+        views.live.remove(0);
+    }
+}
+
+/// Takes in a reaction seen live on `channel` and message `ts`. If it is a
+/// reaction from someone else to your message, it joins the activity list.
+pub fn reaction_arrived(
+    app: &mut App,
+    team: &str,
+    channel: &str,
+    ts: &Ts,
+    user: &str,
+    added: bool,
+) {
+    if !added {
+        return;
+    }
+    let Some(workspace) = app.workspaces.iter().find(|w| w.info.team_id == team) else {
+        return;
+    };
+    let me = workspace.info.user_id.as_str();
+    if user == me {
+        return;
+    }
+    let Some(message) = workspace.find_message(channel, ts).cloned() else {
+        return;
+    };
+    if message.user.as_deref() != Some(me) {
+        return;
+    }
+    let views = app.views.team_mut(team);
+    if views.live.iter().any(|a| a.key() == (channel, ts)) {
+        return;
+    }
+    views.live.push(Activity {
+        reason: Reason::Reaction,
+        channel: channel.to_owned(),
+        message,
         unread: true,
     });
     if views.live.len() > LIVE_LIMIT {
@@ -997,19 +1110,88 @@ pub fn apply(app: &mut App, action: Action) {
                     (unread > 0).then(|| *thread.latest())
                 });
             if let Some(newest) = newest {
-                send(
-                    app,
-                    &team,
-                    Command::ReadThread {
-                        channel: channel.clone(),
-                        thread: ts,
-                        ts: newest,
-                    },
-                );
+                mark_thread_read_at(app, &team, &channel, ts, newest);
             }
             app.actions
                 .push(crate::model::Action::OpenThread { channel, ts });
         }
+        Action::OpenActivity {
+            channel,
+            ts,
+            thread,
+        } => {
+            read_activity_item(app, &team, &channel, ts, thread);
+            let reply = thread.filter(|parent| *parent != ts);
+            app.actions.push(crate::model::Action::JumpTo {
+                channel,
+                ts,
+                thread: reply,
+            });
+        }
+        Action::MarkActivityRead {
+            channel,
+            ts,
+            thread,
+        } => {
+            read_activity_item(app, &team, &channel, ts, thread);
+        }
+        Action::MarkAllActivityRead => {
+            let views = app.views.team_mut(&team);
+            let unread: Vec<(String, Ts, Option<Ts>)> = views
+                .activity()
+                .iter()
+                .filter(|a| a.unread)
+                .map(|a| (a.channel.clone(), a.message.ts, a.message.extra.thread_ts))
+                .collect();
+            for (channel, ts, thread) in unread {
+                if let Some(thread_ts) = thread {
+                    send(
+                        app,
+                        &team,
+                        Command::ReadThread {
+                            channel: channel.clone(),
+                            thread: thread_ts,
+                            ts,
+                        },
+                    );
+                } else {
+                    app.mark_read(&team, &channel);
+                }
+            }
+            let views = app.views.team_mut(&team);
+            views.mark_all_activity_read();
+            if let Some(threads) = views.threads.value.as_mut() {
+                for thread in threads.iter_mut() {
+                    thread.unread = 0;
+                }
+            }
+        }
+    }
+}
+
+/// Marks a thread as read up to `latest`, calling Slack's internal
+/// `subscriptions.thread.mark` API and clearing unread thread & activity counts.
+pub fn mark_thread_read_at(app: &mut App, team: &str, channel: &str, thread: Ts, latest: Ts) {
+    send(
+        app,
+        team,
+        Command::ReadThread {
+            channel: channel.to_owned(),
+            thread,
+            ts: latest,
+        },
+    );
+    app.views.team_mut(team).mark_thread_read(channel, &thread);
+}
+
+fn read_activity_item(app: &mut App, team: &str, channel: &str, ts: Ts, thread: Option<Ts>) {
+    if let Some(thread_ts) = thread {
+        mark_thread_read_at(app, team, channel, thread_ts, ts);
+    } else {
+        app.mark_read(team, channel);
+        app.views
+            .team_mut(team)
+            .mark_activity_read(channel, &ts, None);
     }
 }
 
@@ -1783,5 +1965,48 @@ mod tests {
         fetch.arrived(Err(Failure::RateLimited));
         assert_eq!(fetch.value, Some(vec![1]));
         assert_eq!(fetch.error, Some(Failure::RateLimited));
+    }
+
+    #[test]
+    fn marking_activity_read_clears_unread_status() {
+        let mut views = TeamViews::default();
+        let mut item1 = item("C1", "1.0", "hello");
+        item1.unread = true;
+        let mut item2 = item("C1", "2.0", "world");
+        item2.unread = true;
+        views.activity.arrived(Ok(vec![item1]));
+        views.live.push(item2);
+        assert_eq!(views.unread_activity(), 2);
+
+        views.mark_activity_read("C1", &Ts::new("1.0"), None);
+        assert_eq!(views.unread_activity(), 1);
+
+        views.mark_all_activity_read();
+        assert_eq!(views.unread_activity(), 0);
+    }
+
+    #[test]
+    fn marking_thread_read_clears_activity_and_threads() {
+        let mut views = TeamViews::default();
+        let mut reply = item("C1", "2.0", "reply");
+        reply.message.extra.thread_ts = Some(Ts::new("1.0"));
+        reply.unread = true;
+        views.activity.arrived(Ok(vec![reply]));
+
+        let parent = bare_message(Ts::new("1.0"), Some("U0".into()), "root".into(), None);
+        let thread = Followed {
+            channel: "C1".into(),
+            parent,
+            replies: Vec::new(),
+            unread: 1,
+        };
+        views.threads.arrived(Ok(vec![thread]));
+
+        assert_eq!(views.unread_activity(), 1);
+        assert_eq!(views.unread_threads(), 1);
+
+        views.mark_thread_read("C1", &Ts::new("1.0"));
+        assert_eq!(views.unread_activity(), 0);
+        assert_eq!(views.unread_threads(), 0);
     }
 }

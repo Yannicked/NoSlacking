@@ -1415,6 +1415,9 @@ msgstr "Vernieuwen"
 msgid "Replied to your thread in {place}"
 msgstr "Gereageerd op je thread in {place}"
 
+msgid "Reacted to your message in {place}"
+msgstr "Gereageerd op je bericht in {place}"
+
 msgid "a conversation"
 msgstr "een gesprek"
 
@@ -1437,6 +1440,11 @@ msgstr[1] "{count} gesprekken met ongelezen berichten"
 
 msgid "Mark all as read"
 msgstr "Alles als gelezen markeren"
+
+msgid "{count} unread notification"
+msgid_plural "{count} unread notifications"
+msgstr[0] "{count} ongelezen melding"
+msgstr[1] "{count} ongelezen meldingen"
 
 msgid "Could not load the messages: {error}"
 msgstr "De berichten konden niet worden geladen: {error}"

@@ -795,12 +795,13 @@ struct Reference {
 }
 
 /// Why an item's type puts it in the activity; types the view does not
-/// show (reactions, invitations, list edits) are `None`.
+/// show (invitations, list edits) are `None`.
 fn feed_reason(kind: &str) -> Option<Reason> {
     match kind {
         "at_user" | "at_user_group" => Some(Reason::Mention),
         "at_channel" | "at_everyone" | "at_here" => Some(Reason::Everyone),
         "thread_v2" | "thread_reply" => Some(Reason::Reply),
+        "message_reaction" | "reaction_added" => Some(Reason::Reaction),
         _ => None,
     }
 }
@@ -902,7 +903,8 @@ async fn feed(client: &Client) -> Result<Vec<Activity>, SlackError> {
                 ("limit", FEED_LIMIT.to_string()),
                 (
                     "types",
-                    "thread_v2,at_user,at_user_group,at_channel,at_everyone".to_owned(),
+                    "thread_v2,at_user,at_user_group,at_channel,at_everyone,message_reaction"
+                        .to_owned(),
                 ),
                 ("mode", "chrono_reads_and_unreads".to_owned()),
             ],
@@ -1031,16 +1033,19 @@ mod tests {
         )
         .expect("parses");
         let refs = references(feed);
-        assert_eq!(refs.len(), 3, "{refs:#?}");
+        assert_eq!(refs.len(), 4, "{refs:#?}");
         assert_eq!(refs[0].reason, Reason::Mention);
         assert_eq!(refs[0].user.as_deref(), Some("U2"));
         assert!(refs[0].unread);
         assert_eq!(refs[1].reason, Reason::Everyone);
         assert_eq!(refs[1].thread, Some(Ts::new("3.000100")));
-        assert_eq!(refs[2].reason, Reason::Reply);
-        assert_eq!(refs[2].channel, "C3");
-        assert_eq!(refs[2].ts, Ts::new("2.000100"), "the newest reply");
-        assert_eq!(refs[2].thread, Some(Ts::new("1.000100")));
+        assert_eq!(refs[2].reason, Reason::Reaction);
+        assert_eq!(refs[2].channel, "C1");
+        assert_eq!(refs[2].ts, Ts::new("3.5"));
+        assert_eq!(refs[3].reason, Reason::Reply);
+        assert_eq!(refs[3].channel, "C3");
+        assert_eq!(refs[3].ts, Ts::new("2.000100"), "the newest reply");
+        assert_eq!(refs[3].thread, Some(Ts::new("1.000100")));
     }
 
     #[test]
