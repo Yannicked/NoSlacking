@@ -81,10 +81,8 @@ impl Tray {
             icon,
             template_icon: None,
             // The tray icon is the app's icon, so panels that look icons up
-            // by name may draw the installed one. A left click on macOS
-            // still toggles the window, as it did before.
+            // by name may draw the installed one.
             themed_icon: true,
-            menu_on_click: false,
             menu: vec![
                 MenuItem::action("show", t("Show NoSlacking")),
                 MenuItem::action(UNREAD, unread_label(Unread::default())),

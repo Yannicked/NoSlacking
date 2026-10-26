@@ -360,7 +360,7 @@ impl eframe::App for Window {
             fastframe_shell::window::recover_offscreen(ctx, frame);
         }
         self.app.background_frame(ctx);
-        fastframe_macos::align_traffic_lights(frame, ctx, 52.0);
+        fastframe_titlebar::align_traffic_lights(frame, ctx, 52.0);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
