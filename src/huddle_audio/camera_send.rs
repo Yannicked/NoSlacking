@@ -796,7 +796,10 @@ fn send(
                     counts.dropped += 1;
                     force_next = true;
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => break None,
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    log::info!("video {what}: nothing takes the pictures any more");
+                    break None;
+                }
             }
         }
         if now >= next_report {

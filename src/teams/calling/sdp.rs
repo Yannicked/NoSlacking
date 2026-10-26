@@ -655,7 +655,8 @@ pub fn answer(local: &LocalMedia, remote: &RemoteMedia) -> String {
 /// screen share (§C.6): the lines of the call's `last` description, in
 /// its order and with its mids and payload types, each as we want it.
 /// The share line is `sendonly` while `local.sharing` and rejected
-/// otherwise, as the far end's own renegotiations drop it; the DTLS role
+/// otherwise, as the far end's own renegotiations drop it; a call that
+/// never had one gets one added at the end to share on. The DTLS role
 /// stays the one the call has.
 pub fn reoffer(local: &LocalMedia, last: &RemoteMedia) -> String {
     lines_for(local, last, Role::Offer)
@@ -686,6 +687,15 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
     // back as 5).
     let fresh_share_mid = (role == Role::Offer && remote.share().is_some_and(|l| l.port == 0))
         .then(|| fresh_mid(remote));
+    // A call whose first offer had no share line at all (a 1:1 call's
+    // offer may carry only audio, camera and data): ours to share on is
+    // added at the end, at the camera's H.264.
+    let added_share_mid = (role == Role::Offer
+        && local.sharing
+        && remote.share().is_none()
+        && local.share_ssrc.is_some()
+        && remote.video.is_some())
+    .then(|| fresh_mid(remote));
     let mid_of = |line: &Line| -> String {
         match &fresh_share_mid {
             Some(fresh) if Some(line.mid.as_str()) == share_mid => fresh.clone(),
@@ -748,6 +758,7 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
         .enumerate()
         .filter(|(i, l)| accepted(*i, l))
         .map(|(_, l)| mid_of(l))
+        .chain(added_share_mid.clone())
         .collect();
     let kept: Vec<&str> = kept.iter().map(String::as_str).collect();
 
@@ -844,12 +855,35 @@ fn lines_for(local: &LocalMedia, remote: &RemoteMedia, role: Role) -> String {
             _ => reject(&mut out, line),
         }
     }
+    if let (Some(mid), Some(offered), Some(ssrc)) =
+        (&added_share_mid, remote.video, local.share_ssrc)
+    {
+        let line_spec = VideoLine {
+            mid,
+            label: SHARE_LABEL,
+            codec: VideoCodec {
+                pt: offered.pt,
+                rtx: offered.rtx.filter(|_| local.share_rtx.is_some()),
+            },
+            ssrcs: (ssrc, local.share_rtx_ssrc),
+            direction: Direction::SendOnly,
+            share: true,
+        };
+        video_line(
+            &mut out,
+            local,
+            &line_spec,
+            &extensions,
+            setup,
+            !candidates_written,
+        );
+    }
     out
 }
 
 /// A mid no line of `remote` uses: one past the highest number in any
 /// of them (`5` after `0`, `4`, `3`; `3` after `audio_0`, `video_2`).
-fn fresh_mid(remote: &RemoteMedia) -> String {
+pub(super) fn fresh_mid(remote: &RemoteMedia) -> String {
     let highest = remote
         .lines
         .iter()
@@ -1729,6 +1763,35 @@ mod tests {
         assert!(modalities(&answered).contains(&"ScreenViewer".to_owned()));
         // Receiving only, the line names no stream of ours.
         assert!(!answered.contains("a=x-ssrc-range:88-88"), "{answered}");
+    }
+
+    #[test]
+    fn an_offer_without_a_share_line_gets_one_added_when_sharing() {
+        let remote = read(include_str!("fixtures/incoming_offer_020.sdp")).expect("fixture reads");
+        assert!(remote.share().is_none());
+        assert!(remote.video.is_some());
+
+        let ours = LocalMedia {
+            video_ssrc: Some(77),
+            share_ssrc: Some(88),
+            share_rtx_ssrc: Some(89),
+            sharing: true,
+            ..local()
+        };
+        let reoffered = reoffer(&ours, &remote);
+        let parsed = read(&reoffered).expect("reoffer reads back");
+        let share = parsed.share().expect("share line added");
+        assert_eq!(share.direction, Direction::SendOnly);
+        assert_ne!(share.port, 0);
+        assert!(reoffered.contains("a=ssrc-group:FID 88 89"), "{reoffered}");
+        assert!(modalities(&reoffered).contains(&"ScreenSharer".to_owned()));
+
+        // The BUNDLE line includes the added share mid.
+        let share_mid = &share.mid;
+        assert!(
+            reoffered.contains(&format!("a=group:BUNDLE audio_0 video_1 {share_mid}")),
+            "{reoffered}"
+        );
     }
 
     #[test]

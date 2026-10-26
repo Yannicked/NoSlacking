@@ -572,7 +572,7 @@ fn title_row(
     palette: &Palette,
     bar: &Bar,
     tint: Color32,
-    live: bool,
+    _live: bool,
     settings: bool,
     actions: &mut Vec<Action>,
 ) {
@@ -580,7 +580,7 @@ fn title_row(
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             #[cfg(feature = "huddle-video")]
-            if live {
+            if _live {
                 let tip = if bar.window {
                     t("Close call window")
                 } else {

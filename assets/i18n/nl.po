@@ -2939,6 +2939,9 @@ msgstr "schermopname is niet toegestaan; sta NoSlacking toe in Systeeminstelling
 msgid "the huddle's server did not take your share"
 msgstr "de server van de huddle nam je gedeelde scherm niet aan"
 
+msgid "the call did not take your share"
+msgstr "het gesprek nam je gedeelde scherm niet aan"
+
 msgid "the screen cannot be captured here; screen sharing needs xdg-desktop-portal and PipeWire, or an X11 session"
 msgstr "het scherm kan hier niet worden opgenomen; scherm delen heeft xdg-desktop-portal en PipeWire nodig, of een X11-sessie"
 

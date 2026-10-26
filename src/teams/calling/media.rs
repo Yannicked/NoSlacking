@@ -298,15 +298,25 @@ impl MediaConfig {
                     pt: codec.pt,
                     rtx: codec.rtx,
                 }),
-            share: offer
-                .share()
-                .zip(offer.share_video.or(offer.video))
-                .filter(|_| HAS_VIDEO)
-                .map(|(line, codec)| VideoLine {
-                    mid: line.mid.clone(),
-                    pt: codec.pt,
-                    rtx: codec.rtx,
-                }),
+            // An offer without a share line still gets one of ours, at a
+            // mid of its own and the camera's H.264: a renegotiation adds
+            // it when we share, or the far end's when they do, and both
+            // need the line here to send or show it on.
+            share: match offer.share() {
+                Some(line) => offer
+                    .share_video
+                    .or(offer.video)
+                    .map(|codec| (line.mid.clone(), codec)),
+                None => offer
+                    .video
+                    .map(|codec| (super::sdp::fresh_mid(offer), codec)),
+            }
+            .filter(|_| HAS_VIDEO)
+            .map(|(mid, codec)| VideoLine {
+                mid,
+                pt: codec.pt,
+                rtx: codec.rtx,
+            }),
             data: false,
             cameras: Vec::new(),
         }
@@ -2746,8 +2756,17 @@ mod tests {
                     rtx: Some(99),
                 })
             );
+            assert_eq!(
+                config.share,
+                Some(VideoLine {
+                    mid: "2".into(),
+                    pt: 107,
+                    rtx: Some(99),
+                })
+            );
         } else {
             assert_eq!(config.video, None);
+            assert_eq!(config.share, None);
         }
         assert_eq!(offer_video_pt(111), 108);
         assert_eq!(offer_video_pt(108), 118, "Opus's number is not H.264's too");

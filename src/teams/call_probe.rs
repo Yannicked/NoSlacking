@@ -165,6 +165,9 @@ async fn probe(options: &Options, handle: tokio::runtime::Handle) -> i32 {
                 Some(CallEvent::FarEndShare(on)) => {
                     log::info!("teams call probe: the far end's screen share {}", if on { "shows" } else { "stopped" });
                 }
+                Some(CallEvent::ShareRefused) => {
+                    log::info!("teams call probe: screen share refused by far end");
+                }
                 Some(CallEvent::FarEndCamera { on, .. }) => {
                     log::info!("teams call probe: the far end's camera {}", if on { "shows" } else { "stopped" });
                 }
