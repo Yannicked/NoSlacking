@@ -51,6 +51,7 @@ pub mod bitstream;
 #[cfg(feature = "huddle-camera")]
 pub mod camera_send;
 pub mod cameras;
+pub mod capture;
 pub mod chime;
 #[cfg(feature = "huddle-video")]
 pub mod decode;

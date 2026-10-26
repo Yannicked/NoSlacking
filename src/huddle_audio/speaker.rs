@@ -7,13 +7,12 @@
 //! but a stream that never ends instead of a file. The level is left as
 //! decoded, so the system's volume is the one that counts.
 //!
-//! Decoding is `opus-decoder`: pure Rust, no unsafe code, no C library to
-//! find on Linux, macOS or Windows. It passes the RFC 8251 test vectors
-//! by its own account; it is young, and libopus (the `opus` crate) is the
-//! fallback if it ever decodes wrong. `opus-rs`, which encodes what we
-//! send, decodes too, but not well enough to play with: it has no CELT
-//! loss concealment, refuses a mono packet in a stereo decoder, has no
-//! FEC, and reads the network's bytes with unchecked indexing.
+//! Decoding is `opus-rs`, which also encodes what we send: libopus 1.6
+//! ported to Rust, no C library to find on Linux, macOS or Windows. A lost
+//! frame plays from the copy the next one carries (in-band FEC) when that
+//! one is here, and is concealed otherwise, both as libopus does (our fork
+//! until a release has them; see Cargo.toml). libopus (the `opus` crate)
+//! is the fallback if it ever decodes wrong.
 //!
 //! A panic in the decoder is caught ([`crate::audio::guard`]): that frame
 //! is lost and a fresh decoder takes the next. The session checks
@@ -36,7 +35,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::jitter::{CLOCK, Counts, FRAME, Jitter, Pull, opus_samples};
+use super::jitter::{self, CLOCK, Counts, FRAME, Jitter, Pull, opus_samples};
 use super::processing::RenderTap;
 use crate::audio::guard::{self, Health};
 use crate::sync::lock_or_reset;
@@ -45,7 +44,7 @@ use crate::sync::lock_or_reset;
 /// both.
 const CHANNELS: u16 = 2;
 /// Silence played while the buffer fills, per pull: 10 ms.
-const SILENCE: usize = (CLOCK / 100) as usize * CHANNELS as usize;
+const SILENCE: usize = jitter::SILENCE as usize * CHANNELS as usize;
 /// How long a device may go without asking for sound before it counts as
 /// stopped. It asks every few milliseconds while it plays.
 const STALL: Duration = Duration::from_secs(2);
@@ -63,6 +62,9 @@ struct Shared {
     /// asked: its RMS, as `f32` bits (which order as the values do, for
     /// these never negative).
     loudest: AtomicU32,
+    /// Where what comes and what plays is captured, if asked for (see
+    /// [`super::capture`]).
+    capture: Option<super::capture::Capture>,
 }
 
 impl Shared {
@@ -103,6 +105,9 @@ pub struct Feed {
 impl Feed {
     /// One Opus frame with its RTP timestamp.
     pub fn push(&self, timestamp: u32, payload: &[u8]) {
+        if let Some(capture) = &self.shared.capture {
+            capture.packet(timestamp, payload);
+        }
         self.shared.jitter().push(timestamp, payload.to_vec());
     }
 
@@ -122,8 +127,7 @@ impl Feed {
     }
 }
 
-/// What decodes the huddle's frames: opus-decoder, or a stand-in in
-/// tests.
+/// What decodes the huddle's frames: opus-rs, or a stand-in in tests.
 trait Opus: Send {
     /// The most samples per channel one packet decodes to.
     fn room(&self) -> usize;
@@ -131,15 +135,43 @@ trait Opus: Send {
     /// `out`; how many samples per channel came out, or `None` if it
     /// would not decode.
     fn decode(&mut self, packet: &[u8], out: &mut [f32]) -> Option<usize>;
+    /// Plays a lost frame from the copy `next`, the packet after it,
+    /// carries (in-band FEC), or conceals it where `next` has none.
+    fn recover(&mut self, next: &[u8], out: &mut [f32]) -> Option<usize> {
+        let _ = next;
+        self.decode(&[], out)
+    }
 }
 
-impl Opus for opus_decoder::OpusDecoder {
+/// The most one packet holds: 120 ms.
+const ROOM: usize = CLOCK as usize / 1000 * 120;
+
+/// opus-rs's decoder, and how long the last packet was: a lost frame is
+/// concealed for as long (opus-rs asks; libopus's API does too).
+struct OpusRs {
+    inner: opus_rs::OpusDecoder,
+    last: usize,
+}
+
+impl Opus for OpusRs {
     fn room(&self) -> usize {
-        self.max_frame_size_per_channel()
+        ROOM
     }
 
     fn decode(&mut self, packet: &[u8], out: &mut [f32]) -> Option<usize> {
-        self.decode_float(packet, out, false).ok()
+        let size = if packet.is_empty() { self.last } else { ROOM };
+        let n = self.inner.decode(packet, size, out).ok()?;
+        if !packet.is_empty() {
+            self.last = n;
+        }
+        Some(n)
+    }
+
+    fn recover(&mut self, next: &[u8], out: &mut [f32]) -> Option<usize> {
+        match self.inner.decode_fec(next, self.last, out) {
+            Ok(n) => Some(n),
+            Err(_) => self.decode(&[], out),
+        }
     }
 }
 
@@ -162,9 +194,13 @@ fn rms(samples: &[f32]) -> f32 {
 type MakeOpus = fn() -> Result<Box<dyn Opus>, String>;
 
 fn opus_decoder() -> Result<Box<dyn Opus>, String> {
-    let decoder = opus_decoder::OpusDecoder::new(CLOCK, usize::from(CHANNELS))
+    let rate = i32::try_from(CLOCK).map_err(|e| e.to_string())?;
+    let inner = opus_rs::OpusDecoder::new(rate, usize::from(CHANNELS))
         .map_err(|e| format!("no Opus decoder: {e}"))?;
-    Ok(Box::new(decoder))
+    Ok(Box::new(OpusRs {
+        inner,
+        last: FRAME as usize,
+    }))
 }
 
 /// Decodes and hands out samples as the device asks for them.
@@ -210,6 +246,9 @@ impl Decoded {
         if let Some(tap) = &self.tap {
             tap.push(&self.samples, usize::from(CHANNELS));
         }
+        if let Some(capture) = &self.shared.capture {
+            capture.played(&self.samples);
+        }
     }
 
     /// Decodes what comes next into `self.samples`.
@@ -217,15 +256,19 @@ impl Decoded {
         let (pull, resumed) = {
             let mut jitter = self.shared.jitter();
             let pull = jitter.pull();
+            if let Some(capture) = &self.shared.capture {
+                capture.pull(&pull);
+            }
             let resumed = matches!(pull, Pull::Frame(_)) && jitter.take_resumed();
             (pull, resumed)
         };
         let room = self.decoder.room() * usize::from(CHANNELS);
         self.samples.resize(room, 0.0);
         self.at = 0;
-        let payload: &[u8] = match &pull {
-            Pull::Frame(payload) => payload,
-            Pull::Lost => &[],
+        let (payload, fec): (&[u8], bool) = match &pull {
+            Pull::Frame(payload) => (payload, false),
+            Pull::Lost => (&[], false),
+            Pull::Recover(next) => (next, true),
             Pull::Silence => {
                 self.samples.clear();
                 self.samples.resize(SILENCE, 0.0);
@@ -233,11 +276,13 @@ impl Decoded {
             }
         };
         let (decoder, samples) = (&mut self.decoder, &mut self.samples);
-        let decoded = match self
-            .device
-            .health
-            .catch(|| decoder.decode(payload, samples))
-        {
+        let decoded = match self.device.health.catch(|| {
+            if fec {
+                decoder.recover(payload, samples)
+            } else {
+                decoder.decode(payload, samples)
+            }
+        }) {
             Some(decoded) => decoded,
             None => {
                 // Its state is suspect: a fresh one for the next frame.
@@ -406,7 +451,10 @@ impl Speaker {
         tap: Option<RenderTap>,
         choice: Option<crate::devices::Choice>,
     ) -> Result<(Opened, Feed), String> {
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared {
+            capture: super::capture::Capture::from_env(),
+            ..Shared::default()
+        });
         let opened = Self::start(shared.clone(), tap, choice)?;
         Ok((opened, Feed { shared }))
     }
@@ -504,9 +552,8 @@ mod tests {
     /// Opus's shortest silence: a 20 ms CELT frame with nothing in it.
     const SILENT_FRAME: [u8; 3] = [0xF8, 0xFF, 0xFE];
 
-    /// A 20 ms CELT frame (found by feeding opus-decoder noise) whose
-    /// band has 16 short blocks: the one that overflowed opus-decoder's
-    /// u8 collapse mask on the device's thread in debug builds.
+    /// A 20 ms CELT frame (found by feeding a decoder noise) whose band has
+    /// 16 short blocks: one overflowed opus-decoder's collapse mask.
     const SIXTEEN_BLOCKS: [u8; 55] = [
         0xf8, 0x75, 0xd5, 0x48, 0x6a, 0x8c, 0xcf, 0xb8, 0x7d, 0xb1, 0xd2, 0x3b, 0x43, 0x7d, 0x6b,
         0x6b, 0x17, 0xc1, 0x14, 0xfe, 0x7d, 0xa5, 0xae, 0x93, 0x56, 0x58, 0xc4, 0x69, 0xd1, 0x30,
@@ -518,7 +565,7 @@ mod tests {
     const POISON: [u8; 2] = [0xF8, 0xDE];
 
     /// Decodes every packet to 20 ms of a constant, panicking on
-    /// [`POISON`] as opus-decoder did on [`SIXTEEN_BLOCKS`].
+    /// [`POISON`] as a decoder might on a malformed packet.
     struct Brittle;
 
     impl Opus for Brittle {
@@ -547,12 +594,20 @@ mod tests {
 
     #[test]
     fn a_frame_with_sixteen_short_blocks_decodes() {
-        // Cargo.toml turns opus-decoder's overflow checks off for this;
-        // with them on, this panics in src/celt/vq.rs.
-        let mut decoder = opus_decoder::OpusDecoder::new(CLOCK, 2).expect("a decoder");
-        let mut out = vec![0.0; decoder.max_frame_size_per_channel() * 2];
-        let decoded = decoder.decode_float(&SIXTEEN_BLOCKS, &mut out, false);
-        assert_eq!(decoded.ok(), Some(960));
+        let mut decoder = opus_decoder().expect("a decoder");
+        let mut out = vec![0.0; decoder.room() * usize::from(CHANNELS)];
+        assert_eq!(decoder.decode(&SIXTEEN_BLOCKS, &mut out), Some(960));
+    }
+
+    #[test]
+    fn a_mono_packet_plays_on_both_channels() {
+        // Teams sends mono SILK; the decoder is stereo.
+        const QUIET: [u8; 10] = [0x48, 0x09, 0x9e, 0xee, 0x99, 0xb6, 0xe5, 0x73, 0xb3, 0xad];
+        let mut decoder = opus_decoder().expect("a decoder");
+        let mut out = vec![0.0; decoder.room() * usize::from(CHANNELS)];
+        assert_eq!(decoder.decode(&QUIET, &mut out), Some(960));
+        // A loss conceals as long as the last packet.
+        assert_eq!(decoder.decode(&[], &mut out), Some(960));
     }
 
     #[test]
@@ -631,10 +686,59 @@ mod tests {
     }
 
     #[test]
+    fn concealing_after_silence_stays_silent() {
+        // A SILK wideband packet of random bytes that decodes to near
+        // silence, as Teams' talk spurts end before it sends nothing:
+        // opus-decoder's concealment once played white noise after it.
+        const QUIET: [u8; 10] = [0x48, 0x09, 0x9e, 0xee, 0x99, 0xb6, 0xe5, 0x73, 0xb3, 0xad];
+        let mut decoder = opus_decoder().expect("a decoder");
+        let mut out = vec![0.0; decoder.room() * usize::from(CHANNELS)];
+        let mut loudest = 0.0f32;
+        for _ in 0..3 {
+            let n = decoder.decode(&QUIET, &mut out).expect("decodes");
+            loudest = loudest.max(rms(&out[..n * usize::from(CHANNELS)]));
+        }
+        assert!(loudest < 0.01, "near silence: {loudest}");
+        for lost in 0..3 {
+            let n = decoder.decode(&[], &mut out).expect("conceals");
+            let concealed = rms(&out[..n * usize::from(CHANNELS)]);
+            assert!(
+                concealed <= loudest + 0.001,
+                "lost frame {lost}: {concealed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lost_frame_plays_from_the_copy_in_the_next() {
+        use super::super::encoder::{Encoder, OpusRs};
+        use super::super::uplink::{TWENTY_MS, Tone};
+        let mut encoder = OpusRs::speech().expect("an encoder");
+        let mut tone = Tone::new(440.0, 0.3);
+        let (feed, _, mut decoded) = decoded(None, opus_decoder);
+        for n in 0..20u32 {
+            let mut frame = vec![0.0; TWENTY_MS];
+            tone.fill(&mut frame);
+            let packet = encoder.encode(&frame).expect("encoded");
+            // Frame 12 is lost on the way.
+            if n != 12 {
+                feed.push(n * FRAME, &packet);
+            }
+        }
+        let samples: Vec<f32> = decoded.by_ref().take(20 * 960 * 2).collect();
+        let played = feed.played();
+        assert_eq!((played.jitter.recovered, played.jitter.concealed), (1, 0));
+        // Its 20 ms are sound, no louder than the tone (0.3 peak: 0.21
+        // RMS): a low-bitrate copy, 0.128 RMS here, as libopus decodes it.
+        let at = 12 * 960 * 2;
+        let level = rms(&samples[at..at + 960 * 2]);
+        assert!((0.08..0.22).contains(&level), "{level}");
+    }
+
+    #[test]
     fn a_hybrid_frame_claiming_too_much_redundancy_plays() {
         // Two 76-byte hybrid frames claiming more redundancy than they
-        // hold: opus-decoder 0.1.1 sliced out of range on it; the patched
-        // copy (vendor/opus-decoder) drops the redundancy as libopus does.
+        // hold: opus-decoder 0.1.1 sliced out of range on it.
         const BAD_HYBRID: [u8; 153] = [
             0x69, 0xaf, 0x0e, 0xe6, 0x85, 0x96, 0x57, 0x1b, 0xb5, 0x8c, 0xc1, 0xa2, 0x21, 0x35,
             0xa5, 0x94, 0x3d, 0x0d, 0x19, 0xd1, 0xc8, 0xe7, 0x7c, 0xd0, 0x63, 0x03, 0xbd, 0xc4,

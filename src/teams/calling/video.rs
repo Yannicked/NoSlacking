@@ -610,9 +610,14 @@ impl CallVideo {
         self.pictures_in += 1;
         if self.pictures_in == 1 {
             log::info!(
-                "video: {}: the far end's first picture, {} bytes",
+                "video: {}: the far end's first picture, {} bytes; transport-cc {}",
                 self.name(),
-                data.data.len()
+                data.data.len(),
+                if data.ext_vals.transport_cc.is_some() {
+                    "stamped, so fed back"
+                } else {
+                    "not stamped: the server learns nothing of our link"
+                }
             );
         }
         self.last_picture = Some(now);

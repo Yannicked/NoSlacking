@@ -121,10 +121,10 @@ pub enum CallEvent {
     /// Whose camera the meeting is asked to send us on each camera line
     /// (by MRI), or no one's.
     Watching(Vec<Option<String>>),
-    /// Who in the meeting spoke last (by MRI), as its data channel says:
-    /// the meeting mixes everyone's sound, so this is who the bar marks
-    /// as speaking while it is loud.
-    Speaker(String),
+    /// Who in the meeting spoke last (by MRI), as its data channel says,
+    /// or no one we know: the meeting mixes everyone's sound, so this is
+    /// who the bar marks as speaking while it is loud.
+    Speaker(Option<String>),
     /// An incoming call stopped ringing because another device of yours
     /// (or another delivery of the same call here) picked it up: not a
     /// missed call.
@@ -565,8 +565,12 @@ struct InMeeting {
     /// Whose camera was last asked for on each camera line, by MRI and
     /// source id.
     watching: Vec<Option<(String, i64)>>,
-    /// Who spoke last, by MRI, as the meeting says.
+    /// Who spoke last, by MRI, as the meeting says: whose camera is
+    /// kept in view.
     speaker: Option<String>,
+    /// Who the bar was last told speaks: the newest speaker, or no one
+    /// when the meeting names a source not in the roster.
+    marked: Option<String>,
     /// Whose screen share was last asked for, by MRI and source id; the
     /// outer `None` while none was ever asked for.
     watching_share: Option<Option<(String, i64)>>,
@@ -1598,8 +1602,11 @@ impl Call {
     }
 
     /// Who spoke, as a speaker history (`dsh`) from `way` says: the
-    /// newest last (seen: the first marked whoever spoke long ago);
-    /// ourselves (not in the list) aside.
+    /// newest first (recorded: each new speaker moves to the front, and
+    /// the meeting sends it again whenever one does). Only the newest
+    /// counts: one not in the roster (a phone, say) is marked as no one,
+    /// not as whoever spoke before, who may have muted since. The video
+    /// asked for follows the last speaker known.
     fn spoke(
         &mut self,
         history: &[i64],
@@ -1610,23 +1617,25 @@ impl Call {
         let Some(meeting) = &mut self.meeting else {
             return;
         };
-        let speaker = history.iter().rev().find_map(|&source| {
-            meeting
-                .people
-                .list()
-                .into_iter()
+        let people = meeting.people.list();
+        let speaker = history.first().and_then(|&source| {
+            people
+                .iter()
                 .find(|a| a.audio == Some(source))
-                .map(|a| a.mri)
+                .map(|a| a.mri.clone())
         });
         log::debug!(
-            "Teams meeting: spoke, by audio source ({way}): {history:?}; marking {}",
-            speaker.as_deref().unwrap_or("no one")
+            "Teams meeting: spoke, by audio source ({way}): {history:?}; marking {} ({} of {} in the roster with an audio source)",
+            speaker.as_deref().unwrap_or("no one"),
+            people.iter().filter(|a| a.audio.is_some()).count(),
+            people.len()
         );
+        if speaker != meeting.marked {
+            meeting.marked.clone_from(&speaker);
+            tell(CallEvent::Speaker(speaker.clone()));
+        }
         if speaker.is_some() && speaker != meeting.speaker {
-            meeting.speaker = speaker.clone();
-            if let Some(mri) = speaker {
-                tell(CallEvent::Speaker(mri));
-            }
+            meeting.speaker = speaker;
             self.ask_for_video(session, tell);
         }
     }

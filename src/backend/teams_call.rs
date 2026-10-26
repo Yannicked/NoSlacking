@@ -145,14 +145,23 @@ struct Wanted {
 
 /// A call's controls: for the caller to keep, and for the call's task
 /// (hang-up and mute for the call, and what its devices should do).
+/// A call starts unmuted; a meeting (`muted`) muted, as a huddle does,
+/// so joining one is never heard before you choose to speak.
 fn controls(
     chosen: &crate::devices::Chosen,
+    muted: bool,
 ) -> (Running, mpsc::UnboundedReceiver<Control>, Wanted) {
     let (control, controls) = mpsc::unbounded_channel();
     let (devices, chosen) = watch::channel(chosen.clone());
-    let (muted, microphone) = watch::channel(true);
-    // Unmuted from the start: the microphone task opens it on this.
-    let _ = muted.send(false);
+    let (mute, microphone) = watch::channel(true);
+    if muted {
+        // The call mutes its sound and tells the meeting as soon as it
+        // takes its controls, as when you mute.
+        let _ = control.send(Control::Mute(true));
+    } else {
+        // Unmuted from the start: the microphone task opens it on this.
+        let _ = mute.send(false);
+    }
     // The camera starts off.
     #[cfg(feature = "huddle-camera")]
     let (camera_sender, camera) = watch::channel(false);
@@ -165,7 +174,7 @@ fn controls(
         devices,
         call_id: None,
         control,
-        muted,
+        muted: mute,
         #[cfg(feature = "huddle-camera")]
         camera: camera_sender,
         #[cfg(feature = "huddle-share")]
@@ -194,7 +203,7 @@ impl Caller {
         sink: Sink,
     ) {
         self.stop();
-        let (mut running, controls, wanted) = controls(&self.chosen);
+        let (mut running, controls, wanted) = controls(&self.chosen, false);
         running.team.clone_from(&team);
         tokio::spawn(run(
             client,
@@ -226,7 +235,7 @@ impl Caller {
         if let Some(old) = self.ringing.take() {
             let _ = old.decide.send(Decision::Decline);
         }
-        let (mut running, controls, wanted) = controls(&self.chosen);
+        let (mut running, controls, wanted) = controls(&self.chosen, false);
         running.team.clone_from(&team);
         let (decide, decisions) = oneshot::channel();
         let call_id = call.call_id.clone();
@@ -242,7 +251,7 @@ impl Caller {
     /// ending the last call first.
     pub fn join_meeting(&mut self, client: TeamsClient, team: String, join: Join, sink: Sink) {
         self.stop();
-        let (mut running, controls, wanted) = controls(&self.chosen);
+        let (mut running, controls, wanted) = controls(&self.chosen, true);
         running.team.clone_from(&team);
         tokio::spawn(run_meeting(client, team, join, controls, wanted, sink));
         self.running = Some(running);
@@ -413,7 +422,9 @@ fn roster(callee: &str, far: FarEnd) -> Roster {
 /// the interface knows people by, their names for any it does not), and
 /// you. The meeting mixes everyone's sound, so whoever it says spoke
 /// last (`speaker`, by MRI) is speaking while that sound is loud
-/// (`far.speaking`); you as `far.me_speaking` says.
+/// (`far.speaking`), unless muted since: the speaker is often only the
+/// one from before we joined, and a muted one cannot be the sound; you
+/// as `far.me_speaking` says.
 fn meeting_roster(people: &[Attendee], speaker: Option<&str>, far: FarEnd) -> Roster {
     let mut everyone: Vec<Person> = people
         .iter()
@@ -425,6 +436,7 @@ fn meeting_roster(people: &[Attendee], speaker: Option<&str>, far: FarEnd) -> Ro
             me: false,
             muted: attendee.muted,
             speaking: far.speaking
+                && !attendee.muted
                 && speaker.is_some_and(|s| s.eq_ignore_ascii_case(&attendee.mri)),
             name: attendee.name.clone(),
             waiting: attendee.waiting,
@@ -998,7 +1010,7 @@ impl<T: Fn(Listen)> Shown<'_, T> {
                 (self.tell)(Listen::Roster(self.roster()));
             }
             CallEvent::Speaker(mri) => {
-                self.speaker = Some(mri);
+                self.speaker = mri;
                 (self.tell)(Listen::Roster(self.roster()));
             }
             CallEvent::Ended { result, .. } => self.ended = Some(result),
@@ -1283,6 +1295,16 @@ mod tests {
         assert!(roster.people.iter().all(|p| !p.speaking));
         // No one named yet: no one.
         let roster = meeting_roster(&people, None, loud);
+        assert!(roster.people.iter().all(|p| !p.speaking));
+        // The last one named has muted since: someone else is the sound.
+        let people = [
+            attendee("8:orgid:ana"),
+            Attendee {
+                muted: true,
+                ..attendee("8:orgid:bo")
+            },
+        ];
+        let roster = meeting_roster(&people, Some("8:orgid:bo"), loud);
         assert!(roster.people.iter().all(|p| !p.speaking));
     }
 
