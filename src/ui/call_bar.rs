@@ -8,10 +8,10 @@
 //! microphone really is), and offers Leave (also Ctrl+Shift+H) and the
 //! microphone's mute button while live (see [`super::huddle_mic`]).
 //!
-//! With `huddle-video`, a row for each screen shared in the huddle ("Ana
-//! is sharing their screen") with Watch, which opens the call window on
-//! it (see [`super::call_window`]), and one saying how many have a camera
-//! on ("2 cameras on") with Video, which opens it on their tiles.
+//! With `huddle-video`, a pop-out button beside the title opens the call
+//! window (see [`super::call_window`]), a row for each screen shared in
+//! the huddle ("Ana is sharing their screen"), and one saying how many
+//! have a camera on ("2 cameras on").
 //!
 //! Beside Mute, a small arrow opens a menu of microphones and speakers;
 //! beside Video, one of cameras (see [`super::devices`]): switching
@@ -100,10 +100,7 @@ struct Face {
 /// A screen shared in the huddle, as the bar lists it.
 #[cfg(feature = "huddle-video")]
 struct ShareRow {
-    key: String,
     text: String,
-    /// Shown in the call window now.
-    watched: bool,
 }
 
 /// What the bar shows, gathered before drawing.
@@ -235,15 +232,12 @@ fn gather(
             .shares
             .iter()
             .map(|share| ShareRow {
-                key: share.key.clone(),
                 text: huddles::sharing_text(
                     &share
                         .user
                         .as_deref()
                         .map_or_else(|| t("Someone").into_owned(), |id| workspace.user_label(id)),
                 ),
-                watched: listening.window
-                    && listening.watching.as_deref() == Some(share.key.as_str()),
             })
             .collect(),
         #[cfg(feature = "huddle-video")]
@@ -307,6 +301,7 @@ fn bar(
             .request_repaint_after(std::time::Duration::from_millis(u64::from(1000 - into)));
     }
     let failed = matches!(listening.phase, Phase::Failed { .. });
+    let live = matches!(listening.phase, Phase::Live { .. });
     let tint = if failed { palette.danger } else { ACTIVE };
     egui::Frame::new()
         .fill(palette.surface)
@@ -316,7 +311,7 @@ fn bar(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 4.0;
-            title_row(ui, palette, &bar, tint, settings, actions);
+            title_row(ui, palette, &bar, tint, live, settings, actions);
             status_row(ui, palette, &bar, &listening.phase, tint);
             // The faces have a row of their own, so the buttons leave them
             // room.
@@ -334,10 +329,10 @@ fn bar(
             #[cfg(feature = "huddle-video")]
             if !failed {
                 for share in &bar.shares {
-                    share_row(ui, palette, share, actions);
+                    share_row(ui, palette, share);
                 }
                 if bar.cameras > 0 {
-                    cameras_row(ui, palette, bar.cameras, bar.window, actions);
+                    cameras_row(ui, palette, bar.cameras);
                 }
             }
             #[cfg(feature = "huddle-camera")]
@@ -532,95 +527,74 @@ fn invite_row(ui: &mut egui::Ui, palette: &Palette, link: &str, actions: &mut Ve
     });
 }
 
-/// Someone's screen share: who, and Watch (or, while it is open in the
-/// call window, Stop watching).
+/// Someone's screen share: who is sharing.
 #[cfg(feature = "huddle-video")]
-fn share_row(ui: &mut egui::Ui, palette: &Palette, share: &ShareRow, actions: &mut Vec<Action>) {
+fn share_row(ui: &mut egui::Ui, palette: &Palette, share: &ShareRow) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (label, wanted) = if share.watched {
-                (t("Stop watching"), None)
-            } else {
-                (t("Watch"), Some(share.key.clone()))
-            };
-            let fill = (!share.watched).then_some(ACTIVE_BUTTON);
-            if small_button(ui, palette, &label, fill)
-                .on_hover_text(&share.text)
-                .clicked()
-            {
-                actions.push(Action::Huddle(huddles::Action::Watch(wanted)));
-            }
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.add(Icon::Monitor.image(ACTIVE, 14.0));
-                // On two lines if it must: the sidebar is narrow.
-                ui.vertical(|ui| {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(&share.text)
-                                .font(theme::regular(12.0))
-                                .color(palette.text),
-                        )
-                        .wrap(),
-                    );
-                });
-            });
+        ui.add(Icon::Monitor.image(ACTIVE, 14.0));
+        // On two lines if it must: the sidebar is narrow.
+        ui.vertical(|ui| {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&share.text)
+                        .font(theme::regular(12.0))
+                        .color(palette.text),
+                )
+                .wrap(),
+            );
         });
     });
 }
 
-/// How many have a camera on, and Video, which opens the call window on
-/// their tiles (or, while it is open, Close video).
+/// How many have a camera on.
 #[cfg(feature = "huddle-video")]
-fn cameras_row(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    count: usize,
-    open: bool,
-    actions: &mut Vec<Action>,
-) {
+fn cameras_row(ui: &mut egui::Ui, palette: &Palette, count: usize) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (label, action, fill) = if open {
-                (t("Close video"), huddles::Action::Watch(None), None)
-            } else {
-                (t("Video"), huddles::Action::OpenCall, Some(ACTIVE_BUTTON))
-            };
-            let text = huddles::cameras_text(count);
-            if small_button(ui, palette, &label, fill)
-                .on_hover_text(&text)
-                .clicked()
-            {
-                actions.push(Action::Huddle(action));
-            }
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.add(Icon::Users.image(ACTIVE, 14.0));
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(text)
-                            .font(theme::regular(12.0))
-                            .color(palette.text),
-                    )
-                    .wrap(),
-                );
-            });
-        });
+        let text = huddles::cameras_text(count);
+        ui.add(Icon::Users.image(ACTIVE, 14.0));
+        ui.add(
+            egui::Label::new(
+                RichText::new(text)
+                    .font(theme::regular(12.0))
+                    .color(palette.text),
+            )
+            .wrap(),
+        );
     });
 }
 
-/// The headphones and the huddle's name, which opens its conversation.
+/// The headphones and the huddle's name, which opens its conversation,
+/// and Pop out, which opens the call window.
 fn title_row(
     ui: &mut egui::Ui,
     palette: &Palette,
     bar: &Bar,
     tint: Color32,
+    live: bool,
     settings: bool,
     actions: &mut Vec<Action>,
 ) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            #[cfg(feature = "huddle-video")]
+            if live {
+                let tip = if bar.window {
+                    t("Close call window")
+                } else {
+                    t("Pop out")
+                };
+                let action = if bar.window {
+                    huddles::Action::Watch(None)
+                } else {
+                    huddles::Action::OpenCall
+                };
+                if theme::icon_button(ui, palette, Icon::ExternalLink, 14.0, &tip).clicked() {
+                    actions.push(Action::Huddle(action));
+                }
+            }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add(Icon::Headphones.image(tint, 16.0));
                 let label = egui::Label::new(
