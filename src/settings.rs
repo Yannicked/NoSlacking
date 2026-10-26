@@ -121,9 +121,9 @@ pub struct Settings {
     /// Your skin tone for emoji that have them, as Slack counts: 2 (light)
     /// to 6 (dark), anything else the default yellow.
     pub skin_tone: u8,
-    /// The emoji you used lately, newest first, by name without a tone;
-    /// at most [`crate::emoji::RECENT_MAX`].
-    pub recent_emoji: Vec<String>,
+    /// The emoji you used lately in each workspace, by workspace id, newest
+    /// first, by name without a tone; at most [`crate::emoji::RECENT_MAX`].
+    pub recent_emoji: BTreeMap<String, Vec<String>>,
     /// How tightly messages are laid out.
     pub density: Density,
     /// Whether pictures and link previews show in messages, or wait for
@@ -178,7 +178,7 @@ impl Default for Settings {
             hide_inactive: crate::sidebar::HideInactive::Month,
             desktop: crate::desktop::DesktopSettings::default(),
             skin_tone: 0,
-            recent_emoji: Vec::new(),
+            recent_emoji: BTreeMap::new(),
             density: Density::Comfortable,
             inline_media: true,
             hooks: crate::hooks::Hooks::default(),
@@ -281,7 +281,6 @@ impl Settings {
             hide_inactive,
             desktop,
             skin_tone,
-            recent_emoji,
             density,
             inline_media,
             hooks,
@@ -326,6 +325,34 @@ impl Settings {
                 _ => problems.push("last_conversation: not an object".to_owned()),
             }
         }
+        if let Some(value) = fields.remove("recent_emoji") {
+            match value {
+                serde_json::Value::Object(entries) => {
+                    for (team, items) in entries {
+                        match serde_json::from_value::<Vec<String>>(items) {
+                            Ok(names) => {
+                                settings.recent_emoji.insert(team, names);
+                            }
+                            Err(_) => {
+                                problems.push(format!("recent_emoji: {team} is not an emoji list"));
+                            }
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    if let Ok(names) =
+                        serde_json::from_value::<Vec<String>>(serde_json::Value::Array(items))
+                    {
+                        if let Some(active) = &settings.active_workspace {
+                            settings.recent_emoji.insert(active.clone(), names);
+                        } else if let Some(first) = settings.workspaces.first() {
+                            settings.recent_emoji.insert(first.team_id.clone(), names);
+                        }
+                    }
+                }
+                _ => problems.push("recent_emoji: not an object".to_owned()),
+            }
+        }
         // A palette is only a cache of the themes folder: the window falls
         // back to the built-in look, and the file loses nothing it cannot
         // read again, so a bad one is not worth a backup.
@@ -357,6 +384,7 @@ impl Settings {
     pub fn remove_workspace(&mut self, team: &str) {
         self.workspaces.retain(|w| w.team_id != team);
         self.last_conversation.remove(team);
+        self.recent_emoji.remove(team);
         self.desktop.forget_workspace(team);
         if self.active_workspace.as_deref() == Some(team) {
             self.active_workspace = self.workspaces.first().map(|w| w.team_id.clone());
@@ -827,7 +855,46 @@ mod tests {
             });
         }
         settings.active_workspace = Some("T1".into());
+        settings
+            .recent_emoji
+            .insert("T1".into(), vec!["eyes".into()]);
         settings.remove_workspace("T1");
         assert_eq!(settings.active_workspace.as_deref(), Some("T2"));
+        assert!(!settings.recent_emoji.contains_key("T1"));
+    }
+
+    #[test]
+    fn recent_emoji_are_stored_per_workspace() {
+        let (settings, problems) = Settings::from_json(serde_json::json!({
+            "active_workspace": "T1",
+            "workspaces": [
+                {"team_id": "T1", "name": "Acme", "user_id": "U1"},
+                {"team_id": "T2", "name": "Beta", "user_id": "U2"},
+            ],
+            "recent_emoji": {
+                "T1": ["eyes", "+1"],
+                "T2": ["tada"],
+                "T3": "not-a-list"
+            }
+        }));
+        assert_eq!(
+            settings.recent_emoji.get("T1").map(Vec::as_slice),
+            Some(&["eyes".to_owned(), "+1".to_owned()][..])
+        );
+        assert_eq!(
+            settings.recent_emoji.get("T2").map(Vec::as_slice),
+            Some(&["tada".to_owned()][..])
+        );
+        assert!(problems.iter().any(|p| p.contains("recent_emoji: T3")));
+
+        // Older legacy array format migrates to the active workspace.
+        let (legacy, _) = Settings::from_json(serde_json::json!({
+            "active_workspace": "T1",
+            "recent_emoji": ["rocket", "fire"]
+        }));
+        assert_eq!(
+            legacy.recent_emoji.get("T1").map(Vec::as_slice),
+            Some(&["rocket".to_owned(), "fire".to_owned()][..])
+        );
     }
 }

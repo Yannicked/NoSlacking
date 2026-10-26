@@ -51,15 +51,18 @@ pub fn drafts_id() -> egui::Id {
     egui::Id::new("channels-with-drafts")
 }
 
-/// Where [`show`] leaves [`App::quick_reactions`] for the message
-/// toolbars to read, which are drawn far from the settings.
-pub fn quick_reactions_id() -> egui::Id {
-    egui::Id::new("quick-reactions")
+/// Where [`show`] leaves [`App::quick_reactions`] for each workspace's message
+/// toolbar to read, which are drawn far from the settings.
+pub fn quick_reactions_id(team: &str) -> egui::Id {
+    egui::Id::new(("quick-reactions", team))
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    let quick = std::sync::Arc::new(app.quick_reactions());
-    ui.data_mut(|d| d.insert_temp(quick_reactions_id(), quick));
+    for workspace in &app.workspaces {
+        let team = &workspace.info.team_id;
+        let quick = std::sync::Arc::new(app.quick_reactions(team));
+        ui.data_mut(|d| d.insert_temp(quick_reactions_id(team), quick));
+    }
     // Gathered again only when the drafts or the workspace change.
     let team = app.active_workspace().map(|w| w.info.team_id.as_str());
     let revision = app.drafts.revision();

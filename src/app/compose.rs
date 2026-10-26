@@ -41,7 +41,7 @@ impl App {
                 &to_wire(text.trim_end(), &draft.mentions),
                 self.settings.skin_tone,
             );
-            self.used_emoji(&crate::emoji::used_in(&wire));
+            self.used_emoji(&team, &crate::emoji::used_in(&wire));
             let target = UploadTarget {
                 team,
                 channel,
@@ -107,7 +107,7 @@ impl App {
             self.show_newest(&team, &channel);
         }
         let wire = crate::emoji::tone_shortcodes(&wire, self.settings.skin_tone);
-        self.used_emoji(&crate::emoji::used_in(&wire));
+        self.used_emoji(&team, &crate::emoji::used_in(&wire));
         self.post(team, channel, wire, thread, broadcast);
     }
 
@@ -169,7 +169,7 @@ impl App {
             .map(|c| crate::share::place(workspace, c));
         let comment =
             crate::emoji::tone_shortcodes(&to_wire(comment, &[]), self.settings.skin_tone);
-        self.used_emoji(&crate::emoji::used_in(&comment));
+        self.used_emoji(&team, &crate::emoji::used_in(&comment));
         self.post(team, to, crate::share::text(&comment, &link), None, false);
         let toast = match place {
             Some(place) => tf("Shared to {conversation}", &[("conversation", &place)]),
@@ -206,7 +206,7 @@ impl App {
             .workspace_mut(&team)
             .and_then(|w| w.toggle_my_reaction(channel, ts, name));
         if add == Some(true) {
-            self.used_emoji(&[name.to_owned()]);
+            self.used_emoji(&team, &[name.to_owned()]);
         }
         if let Some(add) = add {
             self.backend.send(Command::React {
@@ -220,31 +220,46 @@ impl App {
     }
 
     /// Puts emoji just sent or reacted with at the front of the picker's
-    /// "Recently used".
-    fn used_emoji(&mut self, names: &[String]) {
+    /// "Recently used" for `team`.
+    fn used_emoji(&mut self, team: &str, names: &[String]) {
         if names.is_empty() {
             return;
         }
-        let before = self.settings.recent_emoji.clone();
-        crate::emoji::remember(&mut self.settings.recent_emoji, names);
-        if self.settings.recent_emoji != before {
+        let recent = self
+            .settings
+            .recent_emoji
+            .entry(team.to_owned())
+            .or_default();
+        let before = recent.clone();
+        crate::emoji::remember(recent, names);
+        if *recent != before {
             self.save_settings();
         }
     }
 
     /// The reactions offered first on a message's toolbar: your five most
-    /// recent emoji at your skin tone, or Slack's usual two before you
-    /// have used any.
-    pub fn quick_reactions(&self) -> Vec<String> {
-        let recent = &self.settings.recent_emoji;
-        if recent.is_empty() {
-            return vec!["white_check_mark".to_owned(), "eyes".to_owned()];
+    /// recent emoji in `team` at your skin tone, or Slack's usual two before
+    /// you have used any.
+    pub fn quick_reactions(&self, team: &str) -> Vec<String> {
+        let recent = self.settings.recent_emoji.get(team);
+        let valid: Vec<String> = recent
+            .map(|r| {
+                r.iter()
+                    .filter(|name| {
+                        self.workspace(team).is_none_or(|w| {
+                            w.emoji.resolve(name) != crate::emoji::Resolved::Unknown
+                        })
+                    })
+                    .take(5)
+                    .map(|name| crate::emoji::toned(name, self.settings.skin_tone))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if valid.is_empty() {
+            vec!["white_check_mark".to_owned(), "eyes".to_owned()]
+        } else {
+            valid
         }
-        recent
-            .iter()
-            .take(5)
-            .map(|name| crate::emoji::toned(name, self.settings.skin_tone))
-            .collect()
     }
 
     pub(super) fn edit(&mut self, channel: String, ts: Ts, text: String) {

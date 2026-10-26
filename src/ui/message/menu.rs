@@ -27,7 +27,7 @@ pub(super) fn toolbar(
     let reply = has(Verb::Reply);
     let edit = has(Verb::Edit);
     let quick: std::sync::Arc<Vec<String>> = if reacts {
-        ui.data(|d| d.get_temp(crate::ui::quick_reactions_id()))
+        ui.data(|d| d.get_temp(crate::ui::quick_reactions_id(&row.workspace.info.team_id)))
             .unwrap_or_default()
     } else {
         Default::default()
