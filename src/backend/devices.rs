@@ -42,119 +42,158 @@ fn listed(kind: Kind) -> (Option<String>, Result<Vec<Device>, Failure>) {
 /// What the system default device of `kind` is called now, if known.
 #[cfg(target_os = "linux")]
 fn default_device_name(kind: Kind) -> Option<String> {
-    let target = match kind {
-        Kind::Microphone => "@DEFAULT_AUDIO_SOURCE@",
-        Kind::Speaker => "@DEFAULT_AUDIO_SINK@",
-        Kind::Camera => return None,
-    };
-    if let Some(name) = pipewire_default(target) {
+    if let Some(name) = pulseaudio_default_description(kind) {
         return Some(name);
     }
-    pulseaudio_default(kind)
+    // Fall back to cpal (ALSA) when PulseAudio / PipeWire is unavailable.
+    cpal_default(kind)
 }
 
 /// What the system default device of `kind` is called now, if known.
 #[cfg(not(target_os = "linux"))]
 fn default_device_name(kind: Kind) -> Option<String> {
+    cpal_default(kind)
+}
+
+/// Queries cpal for the system default device name.
+fn cpal_default(kind: Kind) -> Option<String> {
     use rodio::cpal::traits::{DeviceTrait as _, HostTrait as _};
     let host = rodio::cpal::default_host();
+    let device = match kind {
+        Kind::Microphone => host.default_input_device()?,
+        Kind::Speaker => host.default_output_device()?,
+        Kind::Camera => return None,
+    };
+    device
+        .description()
+        .map(|d| d.name().to_owned())
+        .or_else(|_| device.id().map(|id| id.1))
+        .ok()
+}
+
+/// Connects directly to PulseAudio or `pipewire-pulse` via its UNIX domain socket
+/// to query the user-friendly description of the current default device.
+#[cfg(target_os = "linux")]
+fn pulseaudio_default_description(kind: Kind) -> Option<String> {
+    use pulseaudio::protocol::{self, Command};
+    use std::ffi::CString;
+    use std::io::BufReader;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let socket_path = pulse_socket_path()?;
+    let stream = UnixStream::connect(socket_path).ok()?;
+    let timeout = Some(Duration::from_millis(500));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+    let mut sock = BufReader::new(stream);
+
+    let cookie = pulse_cookie().unwrap_or_default();
+    let auth = protocol::AuthParams {
+        version: protocol::MAX_VERSION,
+        supports_shm: false,
+        supports_memfd: false,
+        cookie,
+    };
+
+    let mut seq = 0u32;
+    protocol::write_command_message(
+        sock.get_mut(),
+        seq,
+        &Command::Auth(auth),
+        protocol::MAX_VERSION,
+    )
+    .ok()?;
+    let (_, auth_reply) =
+        protocol::read_reply_message::<protocol::AuthReply>(&mut sock, protocol::MAX_VERSION)
+            .ok()?;
+    let version = std::cmp::min(protocol::MAX_VERSION, auth_reply.version);
+
+    seq += 1;
+    let mut props = protocol::Props::new();
+    props.set(
+        protocol::Prop::ApplicationName,
+        CString::new("noslacking").ok()?,
+    );
+    protocol::write_command_message(sock.get_mut(), seq, &Command::SetClientName(props), version)
+        .ok()?;
+    let _ =
+        protocol::read_reply_message::<protocol::SetClientNameReply>(&mut sock, version).ok()?;
+
+    seq += 1;
+    protocol::write_command_message(sock.get_mut(), seq, &Command::GetServerInfo, version).ok()?;
+    let (_, server_info) =
+        protocol::read_reply_message::<protocol::ServerInfo>(&mut sock, version).ok()?;
+
     match kind {
-        Kind::Microphone => host.default_input_device().and_then(|d| d.name().ok()),
-        Kind::Speaker => host.default_output_device().and_then(|d| d.name().ok()),
+        Kind::Microphone => {
+            let target_name = server_info.default_source_name?;
+            seq += 1;
+            let cmd = Command::GetSourceInfo(protocol::GetSourceInfo {
+                index: None,
+                name: Some(target_name.clone()),
+            });
+            protocol::write_command_message(sock.get_mut(), seq, &cmd, version).ok()?;
+            let (_, source_info) =
+                protocol::read_reply_message::<protocol::SourceInfo>(&mut sock, version).ok()?;
+            source_info
+                .description
+                .and_then(|c| c.into_string().ok())
+                .or_else(|| target_name.into_string().ok())
+        }
+        Kind::Speaker => {
+            let target_name = server_info.default_sink_name?;
+            seq += 1;
+            let cmd = Command::GetSinkInfo(protocol::GetSinkInfo {
+                index: None,
+                name: Some(target_name.clone()),
+            });
+            protocol::write_command_message(sock.get_mut(), seq, &cmd, version).ok()?;
+            let (_, sink_info) =
+                protocol::read_reply_message::<protocol::SinkInfo>(&mut sock, version).ok()?;
+            sink_info
+                .description
+                .and_then(|c| c.into_string().ok())
+                .or_else(|| target_name.into_string().ok())
+        }
         Kind::Camera => None,
     }
 }
 
-/// Queries PipeWire (`wpctl`) for the default node's description.
+/// Resolves the PulseAudio native protocol UNIX domain socket path.
 #[cfg(target_os = "linux")]
-fn pipewire_default(target: &str) -> Option<String> {
-    let output = std::process::Command::new("wpctl")
-        .args(["inspect", target])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    parse_pipewire_description(&text)
+fn pulse_socket_path() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let candidates = [
+        std::env::var("PULSE_SERVER")
+            .ok()
+            .and_then(|s| s.strip_prefix("unix:").map(PathBuf::from)),
+        std::env::var("PULSE_RUNTIME_PATH")
+            .ok()
+            .map(|s| PathBuf::from(s).join("pulse/native")),
+        std::env::var("XDG_RUNTIME_DIR")
+            .ok()
+            .map(|s| PathBuf::from(s).join("pulse/native")),
+    ];
+    candidates.into_iter().flatten().find(|path| path.exists())
 }
 
-/// Parses the `node.description` line from `wpctl inspect` output.
-#[cfg(any(test, target_os = "linux"))]
-fn parse_pipewire_description(text: &str) -> Option<String> {
-    for line in text.lines() {
-        let trimmed = line
-            .trim()
-            .trim_start_matches(|c: char| c == '*' || c.is_whitespace());
-        if let Some(desc) = trimmed.strip_prefix("node.description = \"")
-            && let Some(name) = desc.strip_suffix('"')
-        {
-            let name = name.trim();
-            if !name.is_empty() {
-                return Some(name.to_owned());
-            }
-        }
-    }
-    None
-}
-
-/// Queries PulseAudio (`pactl`) for the default source/sink description.
+/// Loads the PulseAudio client authentication cookie if available.
 #[cfg(target_os = "linux")]
-fn pulseaudio_default(kind: Kind) -> Option<String> {
-    let (get_cmd, list_cmd) = match kind {
-        Kind::Microphone => ("get-default-source", "sources"),
-        Kind::Speaker => ("get-default-sink", "sinks"),
-        Kind::Camera => return None,
-    };
-    let default_output = std::process::Command::new("pactl")
-        .arg(get_cmd)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !default_output.status.success() {
-        return None;
-    }
-    let default_id = String::from_utf8_lossy(&default_output.stdout)
-        .trim()
-        .to_owned();
-    if default_id.is_empty() {
-        return None;
-    }
-    let list_output = std::process::Command::new("pactl")
-        .args(["list", list_cmd])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !list_output.status.success() {
-        return None;
-    }
-    let list_text = String::from_utf8_lossy(&list_output.stdout);
-    parse_pactl_description(&list_text, &default_id)
-}
-
-/// Parses the human-friendly description of `target_name` from `pactl list` output.
-#[cfg(any(test, target_os = "linux"))]
-fn parse_pactl_description(text: &str, target_name: &str) -> Option<String> {
-    let mut current_name = None;
-    let mut current_desc = None;
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(name) = line.strip_prefix("Name: ") {
-            if current_name.as_deref() == Some(target_name) && current_desc.is_some() {
-                return current_desc;
-            }
-            current_name = Some(name.to_owned());
-            current_desc = None;
-        } else if let Some(desc) = line.strip_prefix("Description: ") {
-            current_desc = Some(desc.to_owned());
-        }
-    }
-    if current_name.as_deref() == Some(target_name) {
-        current_desc
-    } else {
-        None
-    }
+fn pulse_cookie() -> Option<Vec<u8>> {
+    use std::path::PathBuf;
+    let dirs = directories::BaseDirs::new();
+    let candidates = [
+        std::env::var("PULSE_COOKIE").ok().map(PathBuf::from),
+        dirs.as_ref().map(|d| d.config_dir().join("pulse/cookie")),
+        dirs.as_ref()
+            .map(|d| d.home_dir().join(".config/pulse/cookie")),
+        dirs.as_ref().map(|d| d.home_dir().join(".pulse-cookie")),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find_map(|path| std::fs::read(&path).ok().filter(|bytes| !bytes.is_empty()))
 }
 
 /// The cameras the video helper finds; none without it, saying so as
@@ -199,42 +238,20 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn parses_pipewire_description() {
-        let sample = "\
-id 138, type PipeWire:Interface:Node
-  * media.class = \"Audio/Source\"
-  * node.description = \"Jabra Evolve2 65\"
-  * node.name = \"bluez_input.50:C2:ED:B7:4A:23\"
-";
-        assert_eq!(
-            parse_pipewire_description(sample).as_deref(),
-            Some("Jabra Evolve2 65")
-        );
-        assert_eq!(parse_pipewire_description("no description here"), None);
+    fn socket_path_candidate_detection() {
+        // Checks that candidate detection doesn't crash or panic.
+        let _ = pulse_socket_path();
+        let _ = pulse_cookie();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn parses_pactl_description() {
-        let sample = "\
-Source #50
-\tState: RUNNING
-\tName: alsa_input.pci-0000_c1_00.6.HiFi__Mic2__source
-\tDescription: Ryzen HD Audio Controller Stereo Microphone
-Source #190
-\tState: IDLE
-\tName: bluez_input.50:C2:ED:B7:4A:23
-\tDescription: Jabra Evolve2 65
-";
-        assert_eq!(
-            parse_pactl_description(sample, "bluez_input.50:C2:ED:B7:4A:23").as_deref(),
-            Some("Jabra Evolve2 65")
-        );
-        assert_eq!(
-            parse_pactl_description(sample, "alsa_input.pci-0000_c1_00.6.HiFi__Mic2__source")
-                .as_deref(),
-            Some("Ryzen HD Audio Controller Stereo Microphone")
-        );
-        assert_eq!(parse_pactl_description(sample, "non_existent"), None);
+    #[ignore = "touches the live system audio server"]
+    fn query_live_pulseaudio() {
+        let mic = pulseaudio_default_description(Kind::Microphone);
+        let speaker = pulseaudio_default_description(Kind::Speaker);
+        assert!(mic.is_some() || speaker.is_some());
     }
 }
