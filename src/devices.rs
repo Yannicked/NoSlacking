@@ -222,6 +222,8 @@ pub enum Event {
     Listed {
         /// Which kind.
         kind: Kind,
+        /// What the system default device is called now, if known.
+        default_name: Option<String>,
         /// The devices, in the system's order.
         result: Result<Vec<Device>, Failure>,
     },
@@ -255,6 +257,8 @@ pub enum Action {
 pub struct Listing {
     /// The last list, or why there was none; none before the first.
     pub result: Option<Result<Vec<Device>, Failure>>,
+    /// What the system default device is called now, if known.
+    pub default_name: Option<String>,
     /// Asked for and not answered yet.
     pub asking: bool,
 }
@@ -314,27 +318,35 @@ impl State {
     }
 
     /// Takes in a list.
-    pub fn listed(&mut self, kind: Kind, result: Result<Vec<Device>, Failure>) {
+    pub fn listed(
+        &mut self,
+        kind: Kind,
+        default_name: Option<String>,
+        result: Result<Vec<Device>, Failure>,
+    ) {
         *self.listing_mut(kind) = Listing {
             result: Some(result),
+            default_name,
             asking: false,
         };
     }
 }
 
-/// What a picker's default line says for `kind`.
-pub fn default_label(kind: Kind) -> String {
+/// What a picker's default line says for `kind`, naming `default_name` if known.
+pub fn default_label(kind: Kind, default_name: Option<&str>) -> String {
     match kind {
-        Kind::Camera => t("First camera"),
-        Kind::Microphone | Kind::Speaker => t("System default"),
+        Kind::Camera => t("First camera").into_owned(),
+        Kind::Microphone | Kind::Speaker => match default_name {
+            Some(name) => tf("System default: {name}", &[("name", name)]),
+            None => t("System default").into_owned(),
+        },
     }
-    .into_owned()
 }
 
 /// What a picker line says.
-pub fn label(kind: Kind, entry: &Entry) -> String {
+pub fn label(kind: Kind, entry: &Entry, default_name: Option<&str>) -> String {
     match &entry.name {
-        None => default_label(kind),
+        None => default_label(kind, default_name),
         Some(name) if entry.absent => tf("{name} (not connected)", &[("name", name)]),
         Some(name) => name.clone(),
     }
@@ -388,11 +400,15 @@ pub fn apply(app: &mut App, action: Action) {
 /// Takes in the worker's news of devices.
 pub fn handle(app: &mut App, event: Event) {
     match event {
-        Event::Listed { kind, result } => {
+        Event::Listed {
+            kind,
+            default_name,
+            result,
+        } => {
             if let Err(failure) = &result {
                 log::info!("devices: {kind:?} not listed: {failure:?}");
             }
-            app.devices.listed(kind, result);
+            app.devices.listed(kind, default_name, result);
         }
         Event::FellBack { kind, failure } => {
             let error = failure.message();
@@ -536,17 +552,51 @@ mod tests {
         assert!(state.ask(Kind::Speaker));
         assert!(!state.ask(Kind::Speaker), "already asked");
         assert!(state.ask(Kind::Microphone), "another kind");
-        state.listed(Kind::Speaker, Ok(vec![device("a", "Speakers")]));
+        state.listed(Kind::Speaker, None, Ok(vec![device("a", "Speakers")]));
         assert_eq!(state.speakers.devices().map(<[Device]>::len), Some(1));
         assert!(state.ask(Kind::Speaker), "asked again after the answer");
         state.listed(
             Kind::Camera,
+            None,
             Err(Failure::Huddle(
                 crate::failure::HuddleTrouble::CameraNeedsHelper,
             )),
         );
         assert!(state.cameras.failure().is_some());
         assert!(state.cameras.devices().is_none());
+    }
+
+    #[test]
+    fn default_labels_name_the_default_device_when_known() {
+        assert_eq!(default_label(Kind::Camera, None), "First camera");
+        assert_eq!(
+            default_label(Kind::Camera, Some("Logitech")),
+            "First camera"
+        );
+        assert_eq!(default_label(Kind::Microphone, None), "System default");
+        assert_eq!(
+            default_label(Kind::Microphone, Some("Jabra Evolve2 65")),
+            "System default: Jabra Evolve2 65"
+        );
+        assert_eq!(
+            default_label(Kind::Speaker, Some("Jabra Evolve2 65")),
+            "System default: Jabra Evolve2 65"
+        );
+
+        let default_entry = Entry {
+            choice: None,
+            name: None,
+            absent: false,
+            selected: true,
+        };
+        assert_eq!(
+            label(Kind::Microphone, &default_entry, Some("Jabra Evolve2 65")),
+            "System default: Jabra Evolve2 65"
+        );
+        assert_eq!(
+            label(Kind::Microphone, &default_entry, None),
+            "System default"
+        );
     }
 
     #[test]

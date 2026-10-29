@@ -2068,6 +2068,7 @@ pub async fn run(sink: Sink, mut commands: mpsc::UnboundedReceiver<Command>) {
                     tokio::time::sleep(LATENCY).await;
                     sink.send(Event::Devices(crate::devices::Event::Listed {
                         kind,
+                        default_name: None,
                         result: devices(kind),
                     }));
                 });
