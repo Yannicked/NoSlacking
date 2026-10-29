@@ -68,9 +68,10 @@ fn lines(
     actions: &mut Vec<Action>,
 ) -> bool {
     let listing = pickers.lists.listing(kind);
+    let default_name = listing.default_name.as_deref();
     let mut chose = false;
     for entry in devices::entries(kind, pickers.chosen.get(kind), listing.devices()) {
-        let label = devices::label(kind, &entry);
+        let label = devices::label(kind, &entry, default_name);
         // A missing device reads quieter, but not on the selection's
         // fill, where quiet would be unreadable.
         let color = if entry.absent && !entry.selected {
@@ -127,12 +128,13 @@ fn status(ui: &mut egui::Ui, palette: &Palette, listing: &Listing) {
 /// The text a picker's button shows: what is in use.
 fn selected_label(kind: Kind, pickers: Pickers<'_>) -> String {
     let listing = pickers.lists.listing(kind);
+    let default_name = listing.default_name.as_deref();
     devices::entries(kind, pickers.chosen.get(kind), listing.devices())
         .into_iter()
         .find(|e| e.selected)
         .map_or_else(
-            || devices::default_label(kind),
-            |e| devices::label(kind, &e),
+            || devices::default_label(kind, default_name),
+            |e| devices::label(kind, &e, default_name),
         )
 }
 

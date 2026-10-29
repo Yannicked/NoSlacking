@@ -2850,6 +2850,9 @@ msgstr "Waar de huddle klinkt: luidsprekers of koptelefoon."
 msgid "System default"
 msgstr "Standaard van het systeem"
 
+msgid "System default: {name}"
+msgstr "Standaard van het systeem: {name}"
+
 msgid "First camera"
 msgstr "Eerste camera"
 
